@@ -40,7 +40,7 @@
     "open-chat": "open -n /Applications/Claude.app",
     "device:install": "cd src/remote-device && npm install",
     "device:start": "tsx src/remote-device/device.ts --standalone",
-    "device:start:dev": "nodemon --watch src/remote-device --exec tsx src/remote-device/device.ts --standalone",
+    "device:start:dev": "tsx watch src/remote-device/device.ts --standalone",
     "agent": "npm run build && node dist/harness/cli.js",
     "sync-version": "node scripts/sync-version.js",
     "bump": "node scripts/sync-version.js --bump",
@@ -79,7 +79,8 @@
     "count-tokens:json": "npm run build && node scripts/count-tokens.js --json",
     "sbom": "npm sbom --sbom-format cyclonedx",
     "health": "node dist/health/health-check.js",
-    "audit-ui": "node dist/audit/audit-server.js"
+    "audit-ui": "node dist/audit/audit-server.js",
+    "audit:gate": "node scripts/audit-gate.mjs"
   },
   "publishConfig": {
     "access": "public"
@@ -149,7 +150,7 @@
     "esbuild": "^0.27.2",
     "js-tiktoken": "^1.0.21",
     "jsdom": "^30.0.1",
-    "nodemon": "^3.0.2",
+    "semver": "^7.8.5",
     "shx": "^0.3.4",
     "supabase": "^2.117.0",
     "ts-node": "^10.9.2",
@@ -158,6 +159,9 @@
   },
   "overrides": {
     "tmp": "^0.2.6",
-    "uuid": "11.1.1"
+    "uuid": "11.1.1",
+    "md-to-pdf": {
+      "chokidar": "^4.0.3"
+    }
   }
 }

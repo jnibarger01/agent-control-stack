@@ -5,10 +5,11 @@ import { join } from "node:path";
 import { strictCanonicalJsonV1 } from "@agent-control-stack/shared";
 import { ACS_ADMIN_APPROVER, type ManagedAuthorityObservation } from "@agent-control-stack/policy-gate";
 import { describe, expect, it } from "vitest";
-import { buildGateway, type GatewayCredential } from "./server.js";
+import { buildGateway, findIncompatibleHumanApprovalCredentials, type GatewayCredential } from "./server.js";
 
 const testAuth = { token: "op-token", actor: "user", actorId: "user" } as const;
 const WORKER_TOKEN = "bridge-worker-token";
+const APPROVE_ONLY_TOKEN = ["approve", "only", "human", "token"].join("-");
 const AUTH = { authorization: "Bearer " + testAuth.token };
 const BRIDGE_AUTH = { authorization: "Bearer " + WORKER_TOKEN };
 const RUNTIME_ID = "dc-test-runtime";
@@ -22,6 +23,14 @@ const credentials: GatewayCredential[] = [
     actor: "user",
     actorId: "user",
     roles: ["operator"],
+    scopes: ["acs:read", "acs:write", "acs:approve", "acs:execution-mode:admin"]
+  },
+  {
+    id: "approve-only-human",
+    token: APPROVE_ONLY_TOKEN,
+    actor: "user",
+    actorId: "approve-only-human",
+    roles: ["operator"],
     scopes: ["acs:read", "acs:write", "acs:approve"]
   },
   {
@@ -33,6 +42,50 @@ const credentials: GatewayCredential[] = [
     scopes: ["acs:read", "acs:write", "acs:worker"]
   }
 ];
+
+const deniedModeCredentials: GatewayCredential[] = [
+  {
+    id: "write-only",
+    token: "write-only-mode-token",
+    actor: "user",
+    actorId: "write-only",
+    roles: ["operator"],
+    scopes: ["acs:read", "acs:write"]
+  },
+  {
+    id: "service-approve",
+    token: "service-approve-mode-token",
+    actor: "system",
+    actorId: "service",
+    roles: ["service"],
+    scopes: ["acs:read", "acs:write", "acs:approve"]
+  },
+  {
+    id: "agent-operator",
+    token: "agent-operator-mode-token",
+    actor: "agent",
+    actorId: "agent",
+    roles: ["operator"],
+    scopes: ["acs:read", "acs:write", "acs:approve"]
+  },
+  {
+    id: "mixed-worker",
+    token: "mixed-worker-mode-token",
+    actor: "user",
+    actorId: "mixed-worker",
+    roles: ["operator", "worker"],
+    scopes: ["acs:read", "acs:write", "acs:approve"]
+  },
+  {
+    id: "mixed-service",
+    token: "mixed-service-mode-token",
+    actor: "user",
+    actorId: "mixed-service",
+    roles: ["operator", "service"],
+    scopes: ["acs:read", "acs:write", "acs:approve"]
+  }
+];
+credentials.push(...deniedModeCredentials);
 
 const healthyAuthority: ManagedAuthorityObservation = {
   authorityOwner: "managed:pid:42",
@@ -128,6 +181,140 @@ function issue(
 }
 
 describe("canonical execution mode", () => {
+  it("keeps admin behind its own scope and a stated reason, while strict stays available", async () => {
+    const ctx = await gateway();
+    try {
+      const approveOnly = { authorization: `Bearer ${APPROVE_ONLY_TOKEN}` };
+      const noScope = await ctx.app.inject({
+        method: "POST",
+        url: "/execution-mode",
+        headers: approveOnly,
+        payload: { mode: "admin", reason: "approve scope alone must not suffice" }
+      });
+      expect(noScope.statusCode).toBe(403);
+      expect(noScope.json()).toMatchObject({ code: "insufficient_gateway_scope" });
+
+      const noReason = await ctx.app.inject({
+        method: "POST",
+        url: "/execution-mode",
+        headers: AUTH,
+        payload: { mode: "admin", reason: "short" }
+      });
+      expect(noReason.statusCode).toBe(400);
+      expect(noReason.json()).toMatchObject({ code: "admin_mode_reason_required" });
+      const stillStrict = await ctx.app.inject({ method: "GET", url: "/execution-mode", headers: AUTH });
+      expect(stillStrict.json()).toMatchObject({ executionMode: "strict" });
+
+      const enabled = await ctx.app.inject({
+        method: "POST",
+        url: "/execution-mode",
+        headers: AUTH,
+        payload: { mode: "admin", reason: "scoped maintenance window" }
+      });
+      expect(enabled.statusCode).toBe(200);
+      expect(typeof enabled.json().expiresAt).toBe("string");
+
+      const back = await ctx.app.inject({
+        method: "POST",
+        url: "/execution-mode",
+        headers: approveOnly,
+        payload: { mode: "strict", reason: "done" }
+      });
+      expect(back.statusCode).toBe(200);
+      expect(back.json()).toMatchObject({ executionMode: "strict", expiresAt: null });
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("requires authentication and attributes mode changes to configured human identity", async () => {
+    const ctx = await gateway();
+    try {
+      const denied = await ctx.app.inject({ method: "POST", url: "/execution-mode", payload: { mode: "admin" } });
+      expect(denied.statusCode).toBe(401);
+      const spoofed = await ctx.app.inject({
+        method: "POST",
+        url: "/execution-mode",
+        headers: AUTH,
+        payload: { mode: "admin", actorId: "forged-actor", reason: "human activation" }
+      });
+      expect(spoofed.statusCode).toBe(400);
+      const approved = await ctx.app.inject({
+        method: "POST",
+        url: "/execution-mode",
+        headers: AUTH,
+        payload: { mode: "admin", reason: "human activation" }
+      });
+      expect(approved.statusCode).toBe(200);
+      expect(approved.json()).toMatchObject({ executionMode: "admin", updatedBy: "user" });
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("diagnoses mixed-role operator credentials at startup instead of failing silently", async () => {
+    // Every configured credential that claims operator authority but also carries a
+    // service or worker role is named, so operators can migrate before production.
+    expect(findIncompatibleHumanApprovalCredentials(credentials).map((credential) => credential.id)).toEqual([
+      "mixed-worker",
+      "mixed-service"
+    ]);
+    // A pure human operator and non-operator credentials are never flagged.
+    expect(findIncompatibleHumanApprovalCredentials(credentials).map((credential) => credential.id)).not.toContain(
+      "human-operator"
+    );
+    expect(findIncompatibleHumanApprovalCredentials([credentials[0]!])).toEqual([]);
+    expect(findIncompatibleHumanApprovalCredentials([])).toEqual([]);
+    // Service and worker actors with the operator role are not human at all, so they
+    // are governed by request-time checks rather than this human-authority diagnostic.
+    expect(findIncompatibleHumanApprovalCredentials([deniedModeCredentials[1]!, deniedModeCredentials[2]!])).toEqual(
+      []
+    );
+  });
+
+  it("still boots and serves requests when incompatible operator credentials are configured", async () => {
+    const ctx = await gateway();
+    try {
+      const ready = await ctx.app.inject({ method: "GET", url: "/readyz" });
+      expect(ready.statusCode).toBe(200);
+      // And the mixed-role credential remains refused with the documented code.
+      const refused = await ctx.app.inject({
+        method: "POST",
+        url: "/execution-mode",
+        headers: { authorization: "Bearer mixed-worker-mode-token" },
+        payload: { mode: "admin", reason: "spoofed" }
+      });
+      expect(refused.statusCode).toBe(403);
+      expect(refused.json()).toMatchObject({ code: "human_authority_required" });
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([...deniedModeCredentials, credentials.find((credential) => credential.id === "dc-bridge")!])(
+    "rejects authority escalation by $id without changing mode",
+    async (credential) => {
+      const ctx = await gateway();
+      try {
+        const response = await ctx.app.inject({
+          method: "POST",
+          url: "/execution-mode",
+          headers: { authorization: `Bearer ${credential.token}` },
+          payload: { mode: "admin", actor: "user", actorId: "user", reason: "spoofed human authority" }
+        });
+        expect(response.statusCode).toBe(403);
+        const state = await ctx.app.inject({ method: "GET", url: "/execution-mode", headers: AUTH });
+        expect(state.json().executionMode).toBe("strict");
+      } finally {
+        await ctx.app.close();
+        rmSync(ctx.root, { recursive: true, force: true });
+      }
+    }
+  );
+
   it("defaults to strict and reports the same mode on the authority endpoint", async () => {
     const ctx = await gateway();
     try {
@@ -215,7 +402,7 @@ describe("canonical execution mode", () => {
 
       const correlationId = "corr-admin-start";
       const response = await issue(ctx.app, "create_directory", { path: join(ctx.root, "admin-made") }, correlationId);
-      expect(response.statusCode).toBe(200);
+      expect(response.statusCode, response.body).toBe(200);
       expect(response.json().decision).toBe("allow");
       expect(response.json().decision).not.toBe("require_approval");
       expect(response.json().capability.payload.toolName).toBe("create_directory");
@@ -279,7 +466,7 @@ describe("canonical execution mode", () => {
         source: join(ctx.root, "a.txt"),
         destination: join(ctx.root, "b.txt")
       });
-      expect(moved.statusCode).toBe(200);
+      expect(moved.statusCode, moved.body).toBe(200);
       expect(moved.json().decision).toBe("allow");
       expect(moved.json().capability).toBeDefined();
 

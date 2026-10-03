@@ -851,3 +851,94 @@ describe("requireAffectedWorkspaceRoot (workspace revision evidence binding)", (
     );
   });
 });
+
+describe("authoritative nimble worker dispatch", () => {
+  it("claims the Nimble-selected executor and does not dispatch that work again", async () => {
+    const prior = process.env.ACS_NIMBLE_ROUTING_ENABLED;
+    process.env.ACS_NIMBLE_ROUTING_ENABLED = "1";
+    const dir = mkdtempSync(join(tmpdir(), "acs-worker-nimble-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    const actorId = "actor_system_bootstrap";
+    const observedAt = new Date();
+    try {
+      for (const id of ["alpha", "beta"]) {
+        store.createRegistryAgent({
+          id,
+          name: id,
+          kind: "repository_read",
+          acpRole: "IMPLEMENTATION_AGENT",
+          provider: "local",
+          model: `${id}-model`,
+          status: "AVAILABLE",
+          actorId
+        });
+        store.replaceAgentCapabilities(id, [{ name: "fs.read" }], actorId);
+        store.recordAgentHeartbeat(id, { status: "AVAILABLE", actorId, now: observedAt });
+      }
+      const tools = createWorkItemTools(store, createPolicyEngine());
+      const workItem = tools.create_work_item({
+        title: "Nimble read",
+        requester: "user",
+        intent: "read source",
+        target: { cwd: "/repo", services: ["alpha", "beta"] },
+        requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["src/index.ts"] } }],
+        risk: "low"
+      });
+      if (store.get(workItem.id)?.status !== "approved") {
+        store.approveWorkItem(workItem.id, domainTransition);
+      }
+      store.close();
+      let calls = 0;
+      const result = await runWorkerOnce({
+        dbPath,
+        workerId: "beta",
+        routingFetch: async () => {
+          calls += 1;
+          return new Response(
+            JSON.stringify({
+              model: "nimble:latest",
+              answers: {
+                executor: {
+                  type: "choice",
+                  choice: "beta",
+                  confidence: 0.95,
+                  probabilities: { alpha: 0.05, beta: 0.95 }
+                }
+              }
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+      });
+      const check = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(result.executed).toBe(true);
+        expect(result.workItemId).toBe(workItem.id);
+        expect(calls).toBe(1);
+        const evidence = check.getLatestAuthoritativeRoutingEvidence(workItem.id);
+        expect(evidence).toMatchObject({ decision: "route", source: "nimble", selectedActorId: "beta" });
+        expect(check.listRoutingExecutionOutcomes(evidence!.decisionId)).toEqual([
+          expect.objectContaining({ executorId: "beta", success: true, decisionId: evidence!.decisionId })
+        ]);
+        expect(check.get(workItem.id)?.status).toBe("succeeded");
+      } finally {
+        check.close();
+      }
+      const again = await runWorkerOnce({
+        dbPath,
+        workerId: "beta",
+        routingFetch: async () => {
+          calls += 1;
+          throw new Error("completed work must not call Nimble");
+        }
+      });
+      expect(again.executed).toBe(false);
+      expect(calls).toBe(1);
+    } finally {
+      if (prior === undefined) delete process.env.ACS_NIMBLE_ROUTING_ENABLED;
+      else process.env.ACS_NIMBLE_ROUTING_ENABLED = prior;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

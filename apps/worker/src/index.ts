@@ -1,7 +1,13 @@
+import { resumeDispatchedMissions } from "./mission-dispatch.js";
+import { ExecutionAdmissionScheduler } from "@agent-control-stack/execution-admission";
 import {
+  claimNextAuthoritativeWorkItem,
   createPolicyEngine,
   createWorkItemTools,
-  evaluateVerificationRequirement
+  evaluateVerificationRequirement,
+  recordAuthoritativeExecutionOutcome,
+  resolveNimbleRoutingConfig,
+  type AuthoritativeRouteResult
 } from "@agent-control-stack/policy-gate";
 import {
   ExecutionLearningBridge,
@@ -10,6 +16,7 @@ import {
 } from "@agent-control-stack/procedural-learning";
 import { executeSandboxed, type SandboxResult } from "@agent-control-stack/sandbox";
 import { resolve, sep } from "node:path";
+import { resumeConfiguredCodingMissions } from "@agent-control-stack/coding-mission";
 import { ControlStackError, domainHash, stableHash } from "@agent-control-stack/shared";
 import {
   admittedPlanHash,
@@ -78,10 +85,12 @@ export interface WorkerOptions {
   executionBackend?: ExecutionBackend;
   /** Inject a machine executor (tests only). */
   machineExecutor?: MachineExecutor;
-  /** In Nimble-authoritative mode, claim only work persistently assigned to this worker. */
-  requireNimbleAssignment?: boolean;
-  /** Production Nimble claims must be made through the authenticated gateway boundary. */
+  /** Inject the Nimble transport (tests only). */
+  routingFetch?: typeof fetch;
+  /** Claim through the authenticated gateway boundary instead of local DB routing. */
   authenticatedClaim?: AuthenticatedWorkerClaim;
+  /** Replaces the default coding-mission resume. Tests use this to avoid the process environment. */
+  resumeCodingMissions?: (dbPath: string) => Promise<void>;
 }
 
 export interface WorkerResult {
@@ -173,20 +182,19 @@ export function isReadOnlyWorkerWorkItem(workItem: Pick<WorkItem, "requestedActi
 
 export async function runWorkerOnce(options: WorkerOptions = {}): Promise<WorkerResult> {
   const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
+  await resumeDispatchedMissions(dbPath);
+  if (options.resumeCodingMissions) await options.resumeCodingMissions(dbPath);
+  else await resumeConfiguredCodingMissions(dbPath);
   const executionBackend = options.executionBackend ?? resolveExecutionBackend();
-  const nimbleEnabled = process.env.ACS_NIMBLE_ROUTING_ENABLED === "1";
-  const assignedOnly = options.requireNimbleAssignment ?? nimbleEnabled;
-  if (nimbleEnabled && !options.authenticatedClaim) {
-    throw new ControlStackError(
-      "worker_claim_config_invalid",
-      "Nimble worker mode requires an authenticated ACS worker claim client"
-    );
-  }
   const workItems = new SqliteWorkItemStore(dbPath);
   const learning = options.learning ?? new ProceduralLearning(dbPath);
   const ownsLearning = options.learning === undefined;
-  const tools = createWorkItemTools(workItems, createPolicyEngine());
+  const policy = createPolicyEngine();
+  const tools = createWorkItemTools(workItems, policy);
   const workerId = options.workerId ?? process.env.ACS_WORKER_ID ?? "local-worker";
+  const routingConfig = resolveNimbleRoutingConfig(process.env);
+  let releaseAdmission: (() => void) | undefined;
+  let routedDecision: AuthoritativeRouteResult | undefined;
   const execute: WorkerExecute = options.execute ?? (async (item) => executeSandboxed(item));
 
   let cleanupWorkspace:
@@ -221,16 +229,43 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
 
   try {
     workItems.failExpiredLeases();
-    const running = options.authenticatedClaim
-      ? await options.authenticatedClaim()
-      : assignedOnly
-        ? (() => {
-            const candidate = workItems
-              .list({ status: "approved" })
-              .find((item) => workItems.getWorkItemAssignment(item.id)?.selectedWorkerId === workerId);
-            return candidate ? tools.claim_approved_work_item_by_id({ id: candidate.id, workerId }) : undefined;
-          })()
-        : tools.claim_next_approved_work_item({ workerId });
+    let running: ReturnType<typeof tools.claim_next_approved_work_item>;
+    if (options.authenticatedClaim) {
+      running = await options.authenticatedClaim();
+    } else if (routingConfig.enabled) {
+      const scheduler = new ExecutionAdmissionScheduler();
+      const claimed = await claimNextAuthoritativeWorkItem({
+        store: workItems,
+        policy,
+        workerId,
+        config: routingConfig,
+        ...(options.routingFetch ? { fetchImpl: options.routingFetch } : {}),
+        admission: {
+          acquire: (input) => {
+            const now = Date.now();
+            return scheduler.acquire({
+              requestId: input.requestId,
+              lane: input.lane,
+              executorId: input.executorId,
+              actorId: input.actorId,
+              toolName: "authoritative_dispatch",
+              executionClass: "execution",
+              enqueuedAt: now,
+              deadlineAt: now + 1_000,
+              signal: AbortSignal.timeout(1_000)
+            });
+          }
+        }
+      });
+      if (!claimed.claimed) {
+        return { executed: false, reason: claimed.reason };
+      }
+      running = claimed.running;
+      releaseAdmission = claimed.releaseAdmission;
+      routedDecision = claimed.decision;
+    } else {
+      running = tools.claim_next_approved_work_item({ workerId });
+    }
     if (!running) {
       return { executed: false, reason: "no approved work item" };
     }
@@ -291,9 +326,28 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
       };
     }
     const startedAt = new Date().toISOString();
+    const noteRouting = (outcome: {
+      success: boolean;
+      timedOut?: boolean;
+      verificationResult?: string;
+      testsResult?: string;
+    }) => {
+      if (!routedDecision?.executorId || !running?.attemptId) return;
+      recordAuthoritativeExecutionOutcome(workItems, routedDecision, {
+        executorId: routedDecision.executorId,
+        ...(routedDecision.model ? { model: routedDecision.model } : {}),
+        latencyMs: Math.max(0, Date.now() - Date.parse(startedAt)),
+        success: outcome.success,
+        timedOut: outcome.timedOut ?? false,
+        retryCount: 0,
+        idempotencyKey: `o${stableHash({ decisionId: routedDecision.decisionId, attemptId: running.attemptId })}`,
+        ...(outcome.verificationResult ? { verificationResult: outcome.verificationResult } : {}),
+        ...(outcome.testsResult ? { testsResult: outcome.testsResult } : {})
+      });
+    };
 
     if (executionBackend === "desktop_commander") {
-      return await runDesktopCommanderExecution({
+      const desktopResult = await runDesktopCommanderExecution({
         workItems,
         tools,
         running,
@@ -301,6 +355,12 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         startedAt,
         machineExecutor: machineExecutor!
       });
+      noteRouting({
+        success: desktopResult.executed === true && desktopResult.validationPassed !== false,
+        timedOut: desktopResult.reason?.includes("timeout") ?? false,
+        verificationResult: desktopResult.reason
+      });
+      return desktopResult;
     }
 
     if (!isReadOnlyWorkerWorkItem(running)) {
@@ -329,6 +389,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
           reason: "worker_read_only_scope"
         }
       });
+      noteRouting({ success: false, verificationResult: "worker_read_only_scope" });
       return {
         executed: false,
         workItemId: running.id,
@@ -337,13 +398,9 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     }
 
     const bridge = new ExecutionLearningBridge(learning);
-    const executionWorkItem = workItems.get(running.id);
-    if (!executionWorkItem || executionWorkItem.status !== "running") {
-      throw new ControlStackError("worker_claim_integrity_mismatch", "persisted work item changed before execution");
-    }
-    const prepared = bridge.beforeExecution(executionWorkItem, running.attemptId);
+    const prepared = bridge.beforeExecution(running, running.attemptId);
     const result = await execute({
-      ...executionWorkItem,
+      ...running,
       retrievedSkills: prepared.retrievedSkills,
       ...(workspace ? { workspace } : {})
     });
@@ -361,7 +418,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     const learningRecord = bridge.afterExecution({
       workItemId: running.id,
       attemptId: running.attemptId,
-      repository: executionWorkItem.target?.repo ?? executionWorkItem.target?.cwd,
+      repository: running.target?.repo ?? running.target?.cwd,
       retrievedSkills: prepared.retrievedSkills,
       usedSkillIds: usedSkills,
       engineSucceeded: result.ok,
@@ -400,6 +457,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         artifacts: [],
         simulationMetadata: { executionMode: result.executionMode, simulated: true }
       });
+      noteRouting({ success: true, ...(validation ? { testsResult: "passed" } : {}) });
     } else {
       tools.submit_work_result({
         workItemId: running.id,
@@ -432,6 +490,11 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         artifacts: [],
         simulationMetadata: { executionMode: result.executionMode, simulated: true }
       });
+      noteRouting({
+        success: false,
+        verificationResult: validationFailed ? "validation_failed" : "execution_failed",
+        ...(validation ? { testsResult: "failed" } : {})
+      });
     }
 
     return {
@@ -444,6 +507,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
       validationPassed: validation?.passed
     };
   } finally {
+    releaseAdmission?.();
     try {
       if (cleanupWorkspace) {
         await options.workspaceManager?.teardown(cleanupWorkspace.workItemId, {
@@ -1050,3 +1114,6 @@ function machineExecutorContainmentFromEnv(): { allowedRoots: string[]; deniedRo
 export function workerResultIdempotencyKey(attemptId: string): string {
   return stableHash({ domain: "acs.attempt-result.v1", attemptId });
 }
+
+export * from "./mission-runner.js";
+export * from "./mission-client.js";

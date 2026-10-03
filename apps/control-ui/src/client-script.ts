@@ -1,3 +1,6 @@
+import { MCP_CLIENT_EVENT_NAMES, mcpClientsClientSource } from "./mcp-clients.js";
+import { AGENT_DISPATCH_EVENT_NAMES, agentDispatchClientSource } from "./agent-dispatch.js";
+import { codingMissionPanelSource } from "./coding-mission-panel.js";
 import { operationsClientSource } from "./operations-client.js";
 import { CONFIRM_COPY } from "./approval-actions.js";
 import { auditTimelineClientSource } from "./audit-timeline.js";
@@ -28,6 +31,9 @@ let leaseWarningRoot = null;
 // clock backwards by the delay.
 const SERVER_CLOCK_MAX_RTT_MS = 10000;
 const sseEventNames = [
+${MCP_CLIENT_EVENT_NAMES.map((name) => `  '${name}',`).join("\n")}
+  'connector.requested',
+${AGENT_DISPATCH_EVENT_NAMES.map((name) => `  '${name}',`).join("\n")}
   'work_item.created',
   'work_item.pending_policy',
   'work_item.needs_approval',
@@ -118,6 +124,7 @@ function connectSse() {
       if (selectedAgentId) loadAgentDetail(selectedAgentId);
       if (selectedExecutorId) loadExecutorDetail(selectedExecutorId);
       if (selectedConnectorId) loadConnectorDetail(selectedConnectorId);
+      loadMcpClients();
       announce('Live stream reconnected');
       if (selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
     }
@@ -155,6 +162,8 @@ function appendAuditEvent(event) {
   if (data.name === 'work_item.needs_approval') notifyApprovalNeeded(data);
   const eventName = String(data.name || event.type || '');
   onLiveAuditEvent(eventName, data);
+  onMcpClientAuditEvent(eventName);
+  onDispatchAuditEvent(eventName);
   if (eventName.startsWith('agent.') || eventName.startsWith('acp.')) {
     refreshAgentRoster();
     if (selectedAgentId) loadAgentDetail(selectedAgentId);
@@ -249,7 +258,7 @@ function bindWorkItems() {
   document.addEventListener('click', function (event) {
     const button = event.target && event.target.closest ? event.target.closest('[data-work-item]') : null;
     if (!button) return;
-    selectWorkItem(button.dataset.workItem);
+    selectWorkItem(button.dataset.workItem, { keepFocus: true });
   });
 }
 
@@ -1185,21 +1194,65 @@ function applyConfirmedExecutionMode(mode, problem) {
   if (admin) { admin.hidden = mode !== 'admin'; admin.textContent = mode === 'admin' ? ${JSON.stringify(ADMIN_MODE_BANNER_TEXT)} : ''; }
   if (issue) { issue.hidden = !problem; issue.textContent = problem ? 'ACS execution mode ' + problem + ' -- fail closed' : ''; }
 }
+function requestAdminModeConfirm() {
+  return new Promise(function (resolve) {
+    const existing = document.getElementById('admin-mode-confirm-dialog');
+    if (existing) existing.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'admin-mode-confirm-dialog';
+    overlay.className = 'approval-confirm-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-labelledby', 'admin-mode-confirm-title');
+    overlay.innerHTML = '<div class="approval-confirm-card">' +
+      '<h3 id="admin-mode-confirm-title">Enable Admin mode?</h3>' +
+      '<p>Human approval is disabled for approval-gated work until Admin mode expires or you switch back to Strict. Policy denials still apply and privileged_exec stays human-only.</p>' +
+      '<label for="admin-mode-reason">Reason (required, at least 8 characters)</label>' +
+      '<input id="admin-mode-reason" type="text" maxlength="512" autocomplete="off">' +
+      '<p id="admin-mode-reason-error" class="field-error" role="alert"></p>' +
+      '<div class="approval-confirm-actions">' +
+      '<button type="button" id="admin-mode-cancel">Keep Strict</button>' +
+      '<button type="button" id="admin-mode-ok">Enable Admin</button></div></div>';
+    document.body.appendChild(overlay);
+    const reasonInput = overlay.querySelector('#admin-mode-reason');
+    const errorLine = overlay.querySelector('#admin-mode-reason-error');
+    function finish(reason) {
+      document.removeEventListener('keydown', onKey);
+      overlay.remove();
+      resolve(reason);
+    }
+    function onKey(event) { if (event.key === 'Escape') { event.preventDefault(); finish(null); } }
+    document.addEventListener('keydown', onKey);
+    overlay.querySelector('#admin-mode-cancel').addEventListener('click', function () { finish(null); });
+    overlay.querySelector('#admin-mode-ok').addEventListener('click', function () {
+      const reason = reasonInput.value.trim();
+      if (reason.length < 8) { errorLine.textContent = 'Enter a reason of at least 8 characters.'; reasonInput.focus(); return; }
+      finish(reason);
+    });
+    reasonInput.focus();
+  });
+}
 document.addEventListener('change', async function (event) {
   const input = event.target;
   if (!input.matches('input[name="executionMode"]') || !input.checked || executionModeInFlight) return;
   const output = document.querySelector('#execution-mode-result');
   const nextMode = input.value;
+  let modeReason = 'operator set ' + nextMode + ' from mission control';
+  if (nextMode === 'admin') {
+    const adminReason = await requestAdminModeConfirm();
+    if (adminReason === null) { applyConfirmedExecutionMode(confirmedExecutionMode); if (output) output.textContent = 'Admin mode not enabled'; return; }
+    modeReason = adminReason;
+  }
   executionModeInFlight = true;
   document.querySelectorAll('input[name="executionMode"]').forEach(function (radio) { radio.disabled = true; });
   if (output) output.textContent = 'Saving mode…';
   try {
     const res = await fetch('/execution-mode', { method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ mode: nextMode, reason: 'operator set ' + nextMode + ' from mission control' }) });
+      body: JSON.stringify({ mode: nextMode, reason: modeReason }) });
     const body = await res.json().catch(function () { return {}; });
     if (!res.ok || (body.executionMode !== 'strict' && body.executionMode !== 'admin')) throw new Error(body.error || body.code || 'Mode change rejected (' + res.status + ')');
     applyConfirmedExecutionMode(body.executionMode);
-    if (output) output.textContent = 'mode ' + body.executionMode;
+    if (output) output.textContent = body.executionMode === 'admin' && body.expiresAt ? 'admin until ' + new Date(body.expiresAt).toLocaleTimeString() : 'mode ' + body.executionMode;
     scheduleDashboardRefresh(0);
   } catch (error) {
     applyConfirmedExecutionMode(confirmedExecutionMode);
@@ -1263,6 +1316,8 @@ document.addEventListener('click', async (event) => {
 
 
 ${composerClientSource()}
+${mcpClientsClientSource()}
+${agentDispatchClientSource()}
 
 const viewAliases = {
   overview: 'overview',
@@ -1278,7 +1333,8 @@ const viewAliases = {
   audit: 'audit',
   policy: 'policy',
   system: 'system',
-  dispatch: 'overview'
+  dispatch: 'dispatch',
+  'create-task': 'overview'
 };
 function showView(name) {
   const view = viewAliases[name] || 'overview';
@@ -1287,6 +1343,7 @@ function showView(name) {
   document.querySelectorAll('nav a[data-nav]').forEach((link) => {
     link.classList.toggle('active', link.dataset.nav === view);
   });
+  if (view === 'dispatch') onDispatchViewShown();
   if (view === 'executors') refreshExecutorRoster();
   if (view === 'connectors') refreshConnectorRoster();
   syncSystemProbes();
@@ -1336,5 +1393,6 @@ document.querySelector('aside nav')?.addEventListener('click', (event) => {
   history.pushState(null, '', href);
 });
 showView((location.hash || '#overview').replace('#', ''));
-openWorkItemFromLocation();`;
+openWorkItemFromLocation();
+${codingMissionPanelSource()}`;
 }

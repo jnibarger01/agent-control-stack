@@ -1,4 +1,6 @@
-import { PAGE_META } from "./render/operations.js";
+// Page metadata only: importing it from the server renderer would pull the whole
+// renderer, redaction helpers and work-item projections into the client bundle.
+import { PAGE_META } from "./render/page-meta.js";
 
 /** Interaction layer reuses the dashboard's authenticated fetch/actions and refresh scheduler. */
 export function operationsClientSource(): string {
@@ -17,10 +19,7 @@ function closeAuditDrawer() {
   document.querySelector('aside').inert = false;
   Array.from(document.getElementById('main-content').children).forEach(function (child) { child.inert = false; });
   document.body.style.overflow = '';
-  const replacement = auditReturnFocus?.dataset.inspectAudit
-    ? document.querySelector('[data-inspect-audit="' + cssAttr(auditReturnFocus.dataset.inspectAudit) + '"]') : null;
-  const target = auditReturnFocus?.isConnected ? auditReturnFocus : replacement || document.getElementById('audit-search') || document.getElementById('main-content');
-  target?.focus({ preventScroll: true });
+  if (auditReturnFocus?.isConnected) auditReturnFocus.focus({ preventScroll: true });
 }
 document.getElementById('audit-drawer-close')?.addEventListener('click', closeAuditDrawer);
 document.addEventListener('click', function (event) {
@@ -40,7 +39,7 @@ document.addEventListener('click', function (event) {
 });
 document.addEventListener('keydown', function (event) {
   const drawer = document.getElementById('audit-drawer');
-  if (event.defaultPrevented || drawer.hidden || (document.getElementById('shortcut-help') && !document.getElementById('shortcut-help').hidden) || document.getElementById('approval-confirm-dialog')) return;
+  if (drawer.hidden) return;
   if (event.key === 'Escape') { event.preventDefault(); closeAuditDrawer(); }
   if (event.key === 'Tab') {
     const fields = Array.from(drawer.querySelectorAll('button:not([disabled]), a[href], summary, [tabindex="0"]')).filter(function (e) { return !e.hidden; });
@@ -58,7 +57,7 @@ function openWorkDrawer() {
   Array.from(document.getElementById('main-content').children).forEach(function (child) { if (child !== drawer) child.inert = true; });
   document.body.style.overflow = 'hidden';
 }
-function closeWorkDrawer() {
+function closeWorkDrawer(options) {
   const drawer = document.getElementById('work-drawer');
   if (!drawer || drawer.hidden) return;
   drawer.hidden = true;
@@ -66,19 +65,24 @@ function closeWorkDrawer() {
   Array.from(document.getElementById('main-content').children).forEach(function (child) { child.inert = false; });
   document.body.style.overflow = '';
   selectedWorkItemId = null;
-  document.querySelectorAll('[data-work-item]').forEach(function (row) {
-    row.classList.remove('selected'); row.removeAttribute('aria-current');
+  // Clear the row highlight too. Leaving a row marked selected after the drawer is
+  // closed presented stale state that no longer matched the URL or the selection.
+  document.querySelectorAll('[data-work-item].selected').forEach(function (row) {
+    row.classList.remove('selected');
+    row.removeAttribute('aria-current');
   });
   workDetailGeneration += 1;
   stopLeaseExpiryWarningRefresh();
-  writeSelectedItemToLocation(null);
+  // A location-driven close must not rewrite the URL: location is the source of
+  // truth during history navigation, and writing back would fight the browser.
+  if (!(options && options.fromLocation)) writeSelectedItemToLocation(null);
   if (drawerReturnFocus && drawerReturnFocus.isConnected) drawerReturnFocus.focus({ preventScroll: true });
   else document.getElementById('main-content').focus({ preventScroll: true });
 }
 document.getElementById('work-drawer-close')?.addEventListener('click', closeWorkDrawer);
 document.addEventListener('keydown', function (event) {
   const drawer = document.getElementById('work-drawer');
-  if (event.defaultPrevented || !drawer || drawer.hidden || (document.getElementById('shortcut-help') && !document.getElementById('shortcut-help').hidden) || document.getElementById('approval-confirm-dialog')) return;
+  if (!drawer || drawer.hidden || document.getElementById('approval-confirm-dialog')) return;
   if (event.key === 'Escape') { event.preventDefault(); closeWorkDrawer(); }
   if (event.key === 'Tab') {
     const fields = Array.from(drawer.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], summary, [tabindex="0"]')).filter(function (e) { return !e.hidden; });
@@ -94,6 +98,26 @@ function syncPageHeading(view) {
   document.querySelectorAll('nav a[data-nav]').forEach(function (link) {
     if (link.dataset.nav === view) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
   });
+}
+/**
+ * Command palette results visibility.
+ *
+ * Closing used to be a side effect of the delegated click handler, so results stayed
+ * open for any click that did not match one of its targets. Visibility is now owned
+ * by one helper, and every path that should close the palette goes through it.
+ */
+function closeCommandResults(options) {
+  const results = document.getElementById('command-results');
+  if (!results || results.hidden) return false;
+  results.hidden = true;
+  // Only pull focus back when it was inside the panel we just closed.
+  if (options && options.restoreFocus && results.contains(document.activeElement)) {
+    document.getElementById('command-search')?.focus({ preventScroll: true });
+  }
+  return true;
+}
+function isCommandSurface(node) {
+  return !!(node && node.closest && node.closest('#command-results, #command-search'));
 }
 function applyOperationFilters() {
   const text = executionSearch.toLowerCase();
@@ -146,7 +170,7 @@ document.addEventListener('click', function (event) {
     selectedAgentId = node.dataset.inspectAgent; void loadAgentDetail(selectedAgentId);
   } else if (node.hasAttribute('data-create-task')) {
     showView('overview'); history.pushState(null, '', '#overview');
-    const composer = document.getElementById('dispatch');
+    const composer = document.getElementById('create-task');
     composer.open = true;
     composer.scrollIntoView?.({ block: 'start' }); composer.querySelector('input')?.focus();
   } else if (node.hasAttribute('data-refresh-dashboard')) {
@@ -154,7 +178,13 @@ document.addEventListener('click', function (event) {
   } else if (node.dataset.searchView) {
     showView(node.dataset.searchView); history.pushState(null, '', '#' + node.dataset.searchView);
   }
-  document.getElementById('command-results').hidden = true;
+  closeCommandResults();
+});
+// Any click outside the palette input and its results closes the palette,
+// including navigation and card clicks that match none of the delegated targets.
+document.addEventListener('click', function (event) {
+  if (isCommandSurface(event.target)) return;
+  closeCommandResults();
 });
 function searchCommands() {
   const query = document.getElementById('command-search').value.trim().toLowerCase();
@@ -180,10 +210,11 @@ function searchCommands() {
 document.getElementById('command-search')?.addEventListener('input', searchCommands);
 document.addEventListener('keydown', function (event) {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); document.getElementById('command-search').focus(); }
-  if (event.key === 'Escape') document.getElementById('command-results').hidden = true;
+  if (event.key === 'Escape') closeCommandResults({ restoreFocus: true });
 });
-window.addEventListener('hashchange', function () { showView(location.hash.slice(1)); });
-window.addEventListener('popstate', function () { showView(location.hash.slice(1)); if (!workItemIdFromLocation()) closeWorkDrawer(); });
+// View and drawer state on Back/Forward is derived from location in one place.
+// See syncViewStateFromLocation() in operator-workflow.ts; duplicating a partial
+// version here is what allowed the URL and drawer to disagree.
 window.addEventListener('pagehide', function () { if (sseSource) sseSource.close(); });
 applyOperationFilters();
 `;

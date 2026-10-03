@@ -20,6 +20,25 @@ interface SqliteLike {
   };
 }
 
+/**
+ * Non-canonical fixture-only migrations.
+ *
+ * `storage/migrations/` also contains files whose numeric prefix duplicates a
+ * canonical migration:
+ *
+ *   - 037_execution_results_idempotency_unique.sql
+ *   - 038_admission_permits.sql
+ *
+ * These are deliberately NOT registered in `migrationFiles` and must not be added
+ * to the canonical migration order merely because of their filename prefix. They
+ * exist only so migration recovery tests can reconstruct an earlier lineage in
+ * which this SQL shipped under versions 37 and 38 instead of the canonical
+ * 038_execution_results_idempotency_unique.sql and 039_admission_permits.sql.
+ *
+ * Do not renumber or edit them: a deployed database records their checksum, so
+ * changing their bytes would invalidate the recovery identity of every database
+ * already running that lineage. Document them here rather than in the files.
+ */
 const migrationFiles = [
   { version: 1, name: "audit_log", filename: "001_audit_log.sql" },
   { version: 2, name: "agent_registry", filename: "002_agent_registry.sql" },
@@ -83,7 +102,11 @@ const migrationFiles = [
     name: "execution_results_idempotency_unique",
     filename: "038_execution_results_idempotency_unique.sql"
   },
-  { version: 39, name: "jace_commander_admin_approvals", filename: "039_jace_commander_admin_approvals.sql" },
+  {
+    version: 39,
+    name: "jace_commander_admin_approvals",
+    filename: "039_jace_commander_admin_approvals.sql"
+  },
   {
     version: 40,
     name: "admission_permits",
@@ -96,12 +119,17 @@ const migrationFiles = [
   },
   { version: 42, name: "change_sets", filename: "042_change_sets.sql" },
   { version: 43, name: "work_item_assignments", filename: "043_work_item_assignments.sql" },
-  { version: 44, name: "migration_lineage_reconciliation", filename: "044_migration_lineage_reconciliation.sql" },
+  {
+    version: 44,
+    name: "migration_lineage_reconciliation",
+    filename: "044_migration_lineage_reconciliation.sql"
+  },
   { version: 45, name: "change_set_approvals", filename: "045_change_set_approvals.sql" },
   { version: 46, name: "change_set_operation_permits", filename: "046_change_set_operation_permits.sql" },
   { version: 47, name: "autonomous_authority", filename: "047_autonomous_authority.sql" },
   { version: 48, name: "operation_permit_grant_authority", filename: "048_operation_permit_grant_authority.sql" },
-  { version: 49, name: "nimble_routing_decision_details", filename: "049_nimble_routing_decision_details.sql" }
+  { version: 49, name: "coding_missions", filename: "049_coding_missions.sql" },
+  { version: 50, name: "authoritative_routing", filename: "050_authoritative_routing.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
@@ -109,6 +137,66 @@ export function controlPlaneMigrations(): ControlPlaneMigration[] {
     const sql = readFileSync(new URL(migration.filename, migrationsDir), "utf8");
     return { ...migration, sql, checksum: createHash("sha256").update(sql).digest("hex") };
   });
+}
+
+/**
+ * Hash a migration SQL file using the same function as `controlPlaneMigrations`.
+ *
+ * Recovery metadata must have exactly one source of truth. Pinning literal
+ * checksums in recovery code created a second table that had to be edited every
+ * time a canonical migration file changed, which could brick recovery. Callers
+ * pass a filename and always receive the checksum of the SQL that ships in the
+ * repository, so drift detection still compares a recorded checksum against the
+ * authoritative file.
+ */
+/**
+ * Checksums of migration SQL that a previous release deployed but which the
+ * repository no longer ships verbatim: the files were either deleted outright or
+ * later edited under the same version number. Recovery compares recorded rows
+ * against these values because the content they describe cannot be recomputed from
+ * any file in `storage/migrations/`.
+ *
+ * This block is the only place a historical checksum may be pinned. Checksums for
+ * SQL that still ships are always derived from the file itself, so editing a
+ * migration never requires updating a second table.
+ */
+const LEGACY_MIGRATION_CHECKSUM_V7_WORKSPACE_ALLOCATIONS =
+  "c7b213f900a6f8b06c4155665f60ee7d3127fd60f75a2583ed6088c86f3f7cf4";
+
+const LEGACY_SUPERSEDED_MIGRATION_CHECKSUMS = {
+  "017_desktop_commander_execution_mode.sql": "aedd1140975cd1a9197df06f1dbd9906b8b3ab143b4025bcc2e4ba0e758f5d43",
+  "018_advisory_evidence_and_verification.sql": "456755abba99bae8a282b1f0544b4f0e798f57a27d4e717ec4b28ba79d4a9f7d",
+  "019_scheduler_firing_callback_pending.sql": "51bc791cc466b83d6e80dccd10ab077dd37118899d860e2e53cf6d187fec9124",
+  "020_attempt_lease_approvals.sql": "dc9481337e06d8c6a118883d6e8f656be6e8c0321b44a952936d81e18a552f7c",
+  "021_work_item_metadata.sql": "65b2abe0bd8b6bd15723b656fa0ddd62359adf02d65d0239742a950f1c37da9e",
+  "022_device_auth.sql": "a6527d63c1a6c3549c6c2a69b6b255be0dea751b70c3a4227f67e1deab1883e3",
+  "023_desktop_commander_runtime_capabilities.sql": "5aae973d05b6bca6e0f6157eaa739a570c8e6dd19116f89a8e7fbfc82470059a",
+  "020_desktop_commander_execution_mode.sql": "23c5d1ce662f032aa88df3ccf6a810fe0c08ef4ead22787365401befd39109fe",
+  "021_advisory_evidence_and_verification.sql": "0a530ca728bda97f7aedfa1ff89e2ae9a70cc0313d5208a5e7ca1089d7fc80a2",
+  /**
+   * The 37/38 recovery lineage shipped from these fixture files. Their recorded
+   * checksums are part of the identity of databases that were actually deployed, so
+   * recovery accepts them in addition to the checksum derived from the file. Without
+   * this, any later edit to either fixture file would change the derived value and
+   * brick every database already recorded against it.
+   */
+  "037_execution_results_idempotency_unique.sql": "956ee37aed0a4466fb5a128123398e3ecb8cad3a202224205cbaa83ef7ed8545",
+  "038_admission_permits.sql": "11dbde427fe5d3b3fad1fc1fb1d735bc29b18eb59a3b04cb9c1ee82b6e3e2de5",
+  /**
+   * Release 464d54b recorded the lineage marker at version 43. Its SQL differs from the shipped
+   * 044 file only in the version number inside the first comment line, so the effect is identical.
+   */
+  "043_migration_lineage_reconciliation.sql": "17d881e7033b4cbd33e1f2b55aefe4e1ae91a0314e8b4b8724a7d46a1fce3c2c"
+} as const;
+
+/** Historical checksum for an already-released migration that the repository no longer ships verbatim. */
+function legacyMigrationChecksum(key: keyof typeof LEGACY_SUPERSEDED_MIGRATION_CHECKSUMS): string {
+  return LEGACY_SUPERSEDED_MIGRATION_CHECKSUMS[key];
+}
+
+function migrationFileChecksum(filename: string): string {
+  const sql = readFileSync(new URL(filename, migrationsDir), "utf8");
+  return createHash("sha256").update(sql).digest("hex");
 }
 
 export function controlPlaneMigrationSql(): string {
@@ -130,10 +218,11 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
   if (!hasColumn(db, "schema_migrations", "checksum")) {
     db.exec(`ALTER TABLE schema_migrations ADD COLUMN checksum TEXT NOT NULL DEFAULT ''`);
   }
+  if (initializePristineDatabase(db)) return;
   repairExactAlternateSeventeenToTwentyOneLayout(db);
   repairExactPreLeaseRenewalTwentyToTwentyThreeLayout(db);
   repairExactRecoveryThirtySevenThirtyEightLayout(db);
-  repairExactProductionThirtyNineToFortySevenLayout(db);
+  repairExactDeployedThirtyNineFortySevenLayout(db);
   for (const migration of controlPlaneMigrations()) {
     // The "already applied?" question is answered fresh inside this
     // migration's own transaction, after BEGIN IMMEDIATE's write lock is
@@ -155,8 +244,7 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
         // migration (version 7) from before its schema was extended; accept that one
         // known legacy checksum instead of treating it as drift.
         const legacyWorkspaceMigration =
-          migration.version === 7 &&
-          existing.checksum === "c7b213f900a6f8b06c4155665f60ee7d3127fd60f75a2583ed6088c86f3f7cf4";
+          migration.version === 7 && existing.checksum === LEGACY_MIGRATION_CHECKSUM_V7_WORKSPACE_ALLOCATIONS;
         if (existing.checksum && existing.checksum !== migration.checksum && !legacyWorkspaceMigration) {
           throw new Error(`migration checksum mismatch for version ${migration.version}`);
         }
@@ -187,6 +275,116 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
   }
 }
 
+/**
+ * Release 464d54b recorded admission permits at version 39 through operation-permit grant authority at 47.
+ * Main later reserved 39 for JC admin approvals and moved those migrations to 40-48. A database written by
+ * that release is recognised only by this exact layout (a contiguous prefix of it, each row matching the
+ * shipped SQL under its new number) and renumbered in one transaction; applied_at is preserved, and the
+ * missing 39 and later migrations then run through the ordinary loop. Anything else fails closed.
+ */
+const DEPLOYED_THIRTY_NINE_LAYOUT = [
+  [39, 40, "admission_permits"],
+  [40, 41, "admission_permit_execution_class"],
+  [41, 42, "change_sets"],
+  [42, 43, "work_item_assignments"],
+  [43, 44, "migration_lineage_reconciliation"],
+  [44, 45, "change_set_approvals"],
+  [45, 46, "change_set_operation_permits"],
+  [46, 47, "autonomous_authority"],
+  [47, 48, "operation_permit_grant_authority"]
+] as const;
+
+function repairExactDeployedThirtyNineFortySevenLayout(db: SqliteLike): void {
+  const isDeployedLayout = () => queryMigrationRow(db, 39)?.filename === "039_admission_permits.sql";
+  if (!isDeployedLayout()) return;
+  const canonical = new Map(controlPlaneMigrations().map((migration) => [migration.version, migration]));
+  const fail: (detail: string) => never = (detail) => {
+    throw new Error(`deployed migration layout ${detail}`);
+  };
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    if (!isDeployedLayout()) {
+      db.exec("COMMIT");
+      return;
+    }
+    const matched: Array<{ from: number; to: ControlPlaneMigration }> = [];
+    for (const [from, toVersion, name] of DEPLOYED_THIRTY_NINE_LAYOUT) {
+      const row = queryMigrationRow(db, from);
+      const target = canonical.get(toVersion);
+      if (!row) break;
+      const filename = `${String(from).padStart(3, "0")}_${name}.sql`;
+      const released = (LEGACY_SUPERSEDED_MIGRATION_CHECKSUMS as Record<string, string>)[filename];
+      if (
+        !target ||
+        target.name !== name ||
+        row.name !== name ||
+        row.filename !== filename ||
+        (row.checksum !== target.checksum && row.checksum !== released)
+      ) {
+        fail("metadata mismatch");
+      }
+      matched.push({ from, to: target });
+    }
+    const last = matched[matched.length - 1]?.from ?? 38;
+    if (db.prepare("SELECT version FROM schema_migrations WHERE version > ?").all(last).length > 0) {
+      fail("has a gap or unexpected later metadata");
+    }
+    if (!hasTable(db, "admission_permits")) fail("schema validation failed");
+    if (last >= 41 && !(hasTable(db, "change_set_revisions") && hasTable(db, "change_set_heads"))) {
+      fail("schema validation failed");
+    }
+    // Highest first so each UPDATE lands on a free primary key.
+    for (const { from, to } of [...matched].reverse()) {
+      db.prepare(`UPDATE schema_migrations SET version = ?, filename = ?, checksum = ? WHERE version = ?`).run(
+        to.version,
+        to.filename,
+        to.checksum,
+        from
+      );
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      /* SQLite may already have rolled back. */
+    }
+    throw error;
+  }
+}
+
+/** Initialize only an empty database atomically; upgrades retain per-migration recovery. */
+function initializePristineDatabase(db: SqliteLike): boolean {
+  // Recheck under the writer lock: another startup may have initialized the same file.
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const metadata = db.prepare("SELECT version FROM schema_migrations LIMIT 1").all();
+    const objects = db
+      .prepare("SELECT name FROM sqlite_master WHERE name <> 'schema_migrations' AND name NOT GLOB 'sqlite_*' LIMIT 1")
+      .all();
+    if (metadata.length > 0 || objects.length > 0) {
+      db.exec("ROLLBACK");
+      return false;
+    }
+    for (const migration of controlPlaneMigrations()) {
+      db.exec(migrationSqlForCurrentSchema(db, migration));
+      db.prepare(
+        `INSERT INTO schema_migrations (version, name, filename, checksum, applied_at)
+           VALUES (?, ?, ?, ?, ?)`
+      ).run(migration.version, migration.name, migration.filename, migration.checksum, new Date().toISOString());
+    }
+    db.exec("COMMIT");
+    return true;
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      /* SQLite may already have rolled back. */
+    }
+    throw error;
+  }
+}
+
 /** Reconcile the known recovery and isolated 37-39 layouts without losing schema history. */
 function repairExactRecoveryThirtySevenThirtyEightLayout(db: SqliteLike): void {
   if (queryMigrationRow(db, 37)?.filename !== "037_execution_results_idempotency_unique.sql") return;
@@ -198,55 +396,57 @@ function repairExactRecoveryThirtySevenThirtyEightLayout(db: SqliteLike): void {
       db.exec("COMMIT");
       return;
     }
-    const historical = [
+    // Expected metadata is derived from the migration files themselves. These two
+    // filenames are the historical lineage entries recorded by an earlier release;
+    // their checksums are computed from those same SQL files so editing a migration
+    // never requires editing a second hardcoded checksum table here.
+    const historical = (
       [
-        37,
-        "execution_results_idempotency_unique",
-        "037_execution_results_idempotency_unique.sql",
-        "956ee37aed0a4466fb5a128123398e3ecb8cad3a202224205cbaa83ef7ed8545"
-      ],
-      [
-        38,
-        "admission_permits",
-        "038_admission_permits.sql",
-        "11dbde427fe5d3b3fad1fc1fb1d735bc29b18eb59a3b04cb9c1ee82b6e3e2de5"
-      ]
-    ] as const;
-    for (const [version, name, filename, checksum] of historical) {
+        [37, "execution_results_idempotency_unique", "037_execution_results_idempotency_unique.sql"],
+        [38, "admission_permits", "038_admission_permits.sql"]
+      ] as const
+    ).map(([version, name, filename]) => ({ version, name, filename, checksum: migrationFileChecksum(filename) }));
+    for (const { version, name, filename, checksum } of historical) {
       const row = queryMigrationRow(db, version);
-      if (!row || row.name !== name || row.filename !== filename || row.checksum !== checksum) {
+      // Accept the checksum derived from the shipped file, or the released checksum
+      // this lineage actually deployed. Both name the same immutable SQL, so neither
+      // acceptance weakens drift detection: any other value still fails closed.
+      const released = legacyMigrationChecksum(`${filename}`);
+      const accepted = row && (row.checksum === checksum || row.checksum === released);
+      if (!row || row.name !== name || row.filename !== filename || !accepted) {
         throw new Error("recovery migration layout metadata mismatch");
       }
     }
     const isolatedDuplicate = queryMigrationRow(db, 39);
+    // Historical v39 records a second admission-permit base migration. It maps
+    // to the canonical v44 lineage marker; canonical v39 admin approvals still
+    // run through the normal migration loop.
+    const canonicalDuplicate = canonical.get(40);
     if (
       isolatedDuplicate &&
       (isolatedDuplicate.name !== "admission_permits_reconciled" ||
         isolatedDuplicate.filename !== "039_admission_permits.sql" ||
-        isolatedDuplicate.checksum !== historical[1][3])
+        !canonicalDuplicate ||
+        isolatedDuplicate.checksum !== canonicalDuplicate.checksum)
     ) {
       throw new Error("recovery migration layout metadata mismatch");
     }
-    for (const [version, canonicalVersion] of [
-      [40, 41],
-      [41, 42],
-      [42, 43]
-    ] as const) {
-      const row = queryMigrationRow(db, version);
+    const historicalLater = [
+      [40, 41, "admission_permit_execution_class", "040_admission_permit_execution_class.sql"],
+      [41, 42, "change_sets", "041_change_sets.sql"],
+      [42, 43, "work_item_assignments", "042_work_item_assignments.sql"]
+    ] as const;
+    for (const [historicalVersion, canonicalVersion, name, filename] of historicalLater) {
+      const row = queryMigrationRow(db, historicalVersion);
       if (row) {
         const expected = canonical.get(canonicalVersion);
-        if (
-          !expected ||
-          row.name !== expected.name ||
-          row.filename !== `${String(version).padStart(3, "0")}_${expected.filename.slice(4)}` ||
-          row.checksum !== expected.checksum
-        ) {
+        if (!expected || row.name !== name || row.filename !== filename || row.checksum !== expected.checksum) {
           throw new Error("recovery migration layout metadata mismatch");
         }
         const schemaPresent =
-          version === 40
+          historicalVersion === 40
             ? hasColumn(db, "admission_permits", "execution_class")
-            : version === 41
+            : historicalVersion === 41
               ? hasTable(db, "change_set_revisions") && hasTable(db, "change_set_heads")
               : [
                   "work_item_id",
@@ -257,7 +457,9 @@ function repairExactRecoveryThirtySevenThirtyEightLayout(db: SqliteLike): void {
                   "assigned_at"
                 ].every((column) => hasColumn(db, "work_item_assignments", column));
         if (!schemaPresent) throw new Error("recovery migration layout schema validation failed");
-      } else if (db.prepare("SELECT version FROM schema_migrations WHERE version > ?").all(version).length > 0) {
+      } else if (
+        db.prepare("SELECT version FROM schema_migrations WHERE version > ?").all(historicalVersion).length > 0
+      ) {
         throw new Error("recovery migration layout has a gap in later metadata");
       }
     }
@@ -297,7 +499,7 @@ function repairExactRecoveryThirtySevenThirtyEightLayout(db: SqliteLike): void {
       const row = queryMigrationRow(db, version);
       const migration = canonical.get(version);
       const knownLegacyWorkspace =
-        version === 7 && row?.checksum === "c7b213f900a6f8b06c4155665f60ee7d3127fd60f75a2583ed6088c86f3f7cf4";
+        version === 7 && row?.checksum === LEGACY_MIGRATION_CHECKSUM_V7_WORKSPACE_ALLOCATIONS;
       if (
         !row ||
         !migration ||
@@ -308,7 +510,7 @@ function repairExactRecoveryThirtySevenThirtyEightLayout(db: SqliteLike): void {
         throw new Error("recovery migration layout predecessor metadata mismatch");
       }
     }
-    db.prepare("UPDATE schema_migrations SET version = version + 100 WHERE version BETWEEN 37 AND 42").run();
+    db.prepare("UPDATE schema_migrations SET version = version + 100 WHERE version IN (37, 38, 39, 40, 41, 42)").run();
     for (const [oldVersion, newVersion] of [
       [37, 38],
       [38, 40],
@@ -341,196 +543,41 @@ function repairExactRecoveryThirtySevenThirtyEightLayout(db: SqliteLike): void {
   }
 }
 
-/** Reconciles only the exact deployed v37-v47 ledger with main's later v39 JC approval migration. */
-function repairExactProductionThirtyNineToFortySevenLayout(db: SqliteLike): void {
-  if (queryMigrationRow(db, 39)?.filename !== "039_admission_permits.sql") return;
-  const canonical = new Map(controlPlaneMigrations().map((migration) => [migration.version, migration]));
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    if (queryMigrationRow(db, 39)?.filename !== "039_admission_permits.sql") {
-      db.exec("COMMIT");
-      return;
-    }
-    for (const version of [37, 38] as const) {
-      const row = queryMigrationRow(db, version);
-      const expected = canonical.get(version);
-      if (
-        !row ||
-        !expected ||
-        row.name !== expected.name ||
-        row.filename !== expected.filename ||
-        row.checksum !== expected.checksum
-      ) {
-        throw new Error("production migration lineage predecessor mismatch");
-      }
-    }
-    const previous = [
-      [
-        39,
-        "admission_permits",
-        "039_admission_permits.sql",
-        40,
-        "11dbde427fe5d3b3fad1fc1fb1d735bc29b18eb59a3b04cb9c1ee82b6e3e2de5"
-      ],
-      [
-        40,
-        "admission_permit_execution_class",
-        "040_admission_permit_execution_class.sql",
-        41,
-        "17ec50b1dfcc92b34ecfd7875ac8193f89d0b71e607cc18bad34c3998b4f88ed"
-      ],
-      [
-        41,
-        "change_sets",
-        "041_change_sets.sql",
-        42,
-        "8eb803fffe827c9d89c53af28000fa6eebafba272f6645af29ad20a8b6ce1bba"
-      ],
-      [
-        42,
-        "work_item_assignments",
-        "042_work_item_assignments.sql",
-        43,
-        "880096512404a496ae718f734b7eda223bbf638e1976a4ddb0f4d8465f9320fd"
-      ],
-      [
-        43,
-        "migration_lineage_reconciliation",
-        "043_migration_lineage_reconciliation.sql",
-        44,
-        "17d881e7033b4cbd33e1f2b55aefe4e1ae91a0314e8b4b8724a7d46a1fce3c2c"
-      ],
-      [
-        44,
-        "change_set_approvals",
-        "044_change_set_approvals.sql",
-        45,
-        "45ebcd8f20e4b4adbbd60b66dc3e439c75cd86a7de3c33acadeed6fcbd1b8895"
-      ],
-      [
-        45,
-        "change_set_operation_permits",
-        "045_change_set_operation_permits.sql",
-        46,
-        "045abe6497d38f2d868a950efc9e6fffac57d0f8dd0a1b22ff38cb583853f3a9"
-      ],
-      [
-        46,
-        "autonomous_authority",
-        "046_autonomous_authority.sql",
-        47,
-        "babdbc51897b6f79a1a9770b9e3f7a8cfa020e4ab6c5279fd1c88130e19ea344"
-      ],
-      [
-        47,
-        "operation_permit_grant_authority",
-        "047_operation_permit_grant_authority.sql",
-        48,
-        "61b3235e649c6736ad44f16743e8cda669ddf7ee7ba344a63990f174f2c4a9aa"
-      ]
-    ] as const;
-    const rows = db
-      .prepare(
-        "SELECT version, name, filename, checksum FROM schema_migrations WHERE version BETWEEN 39 AND 47 ORDER BY version"
-      )
-      .all() as Array<{ version: number; name: string; filename: string; checksum: string }>;
-    if (
-      rows.length !== previous.length ||
-      !rows.every((row, index) => {
-        const [version, name, filename, canonicalVersion, checksum] = previous[index]!;
-        const target = canonical.get(canonicalVersion);
-        return (
-          target !== undefined &&
-          row.version === version &&
-          row.name === name &&
-          row.filename === filename &&
-          row.checksum === checksum &&
-          target.checksum === checksum
-        );
-      }) ||
-      db.prepare("SELECT version FROM schema_migrations WHERE version > 47").all().length > 0
-    ) {
-      throw new Error("production migration lineage metadata mismatch");
-    }
-    const requiredTables = [
-      "admission_permits",
-      "change_set_revisions",
-      "change_set_heads",
-      "work_item_assignments",
-      "change_set_approvals",
-      "change_set_approval_revocations",
-      "change_set_operation_permits",
-      "autonomous_authority_grants",
-      "autonomous_authority_revocations",
-      "change_set_grant_authorizations"
-    ];
-    if (
-      !hasColumn(db, "admission_permits", "execution_class") ||
-      !requiredTables.every((table) => hasTable(db, table)) ||
-      ![
-        "work_item_id",
-        "selected_worker_id",
-        "selected_agent_id",
-        "routing_decision_id",
-        "assigned_by_actor_id",
-        "assigned_at"
-      ].every((column) => hasColumn(db, "work_item_assignments", column))
-    ) {
-      throw new Error("production migration lineage schema validation failed");
-    }
-    db.prepare("UPDATE schema_migrations SET version = version + 100 WHERE version BETWEEN 39 AND 47").run();
-    for (const [oldVersion, , , canonicalVersion] of previous) {
-      const target = canonical.get(canonicalVersion);
-      if (!target) throw new Error(`canonical production migration ${canonicalVersion} missing`);
-      db.prepare(
-        "UPDATE schema_migrations SET version = ?, name = ?, filename = ?, checksum = ? WHERE version = ?"
-      ).run(canonicalVersion, target.name, target.filename, target.checksum, oldVersion + 100);
-    }
-    db.exec("COMMIT");
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {
-      /* SQLite may have already rolled back. */
-    }
-    throw error;
-  }
-}
-
 /** Repairs only the fully verified deployed alternate 17-21 metadata layout. */
 function repairExactAlternateSeventeenToTwentyOneLayout(db: SqliteLike): void {
-  const alternate = [
+  // These checksums are pinned deliberately: the SQL files these versions shipped
+  // with were deleted when the migrations were superseded under the same version
+  // numbers, so their content cannot be derived from the repository. They describe
+  // already-deployed databases only.
+  const alternate = (
     [
-      17,
-      "desktop_commander_execution_mode",
-      "017_desktop_commander_execution_mode.sql",
-      "aedd1140975cd1a9197df06f1dbd9906b8b3ab143b4025bcc2e4ba0e758f5d43"
-    ],
-    [
-      18,
-      "advisory_evidence_and_verification",
-      "018_advisory_evidence_and_verification.sql",
-      "456755abba99bae8a282b1f0544b4f0e798f57a27d4e717ec4b28ba79d4a9f7d"
-    ],
-    [
-      19,
-      "scheduler_firing_callback_pending",
-      "019_scheduler_firing_callback_pending.sql",
-      "51bc791cc466b83d6e80dccd10ab077dd37118899d860e2e53cf6d187fec9124"
-    ],
-    [
-      20,
-      "attempt_lease_approvals",
-      "020_attempt_lease_approvals.sql",
-      "dc9481337e06d8c6a118883d6e8f656be6e8c0321b44a952936d81e18a552f7c"
-    ],
-    [
-      21,
-      "work_item_metadata",
-      "021_work_item_metadata.sql",
-      "65b2abe0bd8b6bd15723b656fa0ddd62359adf02d65d0239742a950f1c37da9e"
-    ]
-  ] as const;
+      [
+        17,
+        "desktop_commander_execution_mode",
+        "017_desktop_commander_execution_mode.sql",
+        legacyMigrationChecksum("017_desktop_commander_execution_mode.sql")
+      ],
+      [
+        18,
+        "advisory_evidence_and_verification",
+        "018_advisory_evidence_and_verification.sql",
+        legacyMigrationChecksum("018_advisory_evidence_and_verification.sql")
+      ],
+      [
+        19,
+        "scheduler_firing_callback_pending",
+        "019_scheduler_firing_callback_pending.sql",
+        legacyMigrationChecksum("019_scheduler_firing_callback_pending.sql")
+      ],
+      [
+        20,
+        "attempt_lease_approvals",
+        "020_attempt_lease_approvals.sql",
+        legacyMigrationChecksum("020_attempt_lease_approvals.sql")
+      ],
+      [21, "work_item_metadata", "021_work_item_metadata.sql", legacyMigrationChecksum("021_work_item_metadata.sql")]
+    ] as const
+  ).map(([version, name, filename, checksum]) => ({ version, name, filename, checksum }));
   const rows = db
     .prepare(
       "SELECT version, name, filename, checksum FROM schema_migrations WHERE version BETWEEN 17 AND 21 ORDER BY version"
@@ -541,10 +588,10 @@ function repairExactAlternateSeventeenToTwentyOneLayout(db: SqliteLike): void {
     !rows.every((row, index) => {
       const expected = alternate[index];
       return (
-        row.version === expected[0] &&
-        row.name === expected[1] &&
-        row.filename === expected[2] &&
-        row.checksum === expected[3]
+        row.version === expected.version &&
+        row.name === expected.name &&
+        row.filename === expected.filename &&
+        row.checksum === expected.checksum
       );
     })
   )
@@ -593,27 +640,31 @@ function repairExactAlternateSeventeenToTwentyOneLayout(db: SqliteLike): void {
 
 /** Repairs the exact pre-lease-renewal 20-23 layout deployed by this branch. */
 function repairExactPreLeaseRenewalTwentyToTwentyThreeLayout(db: SqliteLike): void {
-  const deployed = [
+  // Pinned for the same reason as the 17-21 layout: these superseded SQL files no
+  // longer exist in the repository.
+  const deployed = (
     [
-      20,
-      "desktop_commander_execution_mode",
-      "020_desktop_commander_execution_mode.sql",
-      "23c5d1ce662f032aa88df3ccf6a810fe0c08ef4ead22787365401befd39109fe"
-    ],
-    [
-      21,
-      "advisory_evidence_and_verification",
-      "021_advisory_evidence_and_verification.sql",
-      "0a530ca728bda97f7aedfa1ff89e2ae9a70cc0313d5208a5e7ca1089d7fc80a2"
-    ],
-    [22, "device_auth", "022_device_auth.sql", "a6527d63c1a6c3549c6c2a69b6b255be0dea751b70c3a4227f67e1deab1883e3"],
-    [
-      23,
-      "desktop_commander_runtime_capabilities",
-      "023_desktop_commander_runtime_capabilities.sql",
-      "5aae973d05b6bca6e0f6157eaa739a570c8e6dd19116f89a8e7fbfc82470059a"
-    ]
-  ] as const;
+      [
+        20,
+        "desktop_commander_execution_mode",
+        "020_desktop_commander_execution_mode.sql",
+        legacyMigrationChecksum("020_desktop_commander_execution_mode.sql")
+      ],
+      [
+        21,
+        "advisory_evidence_and_verification",
+        "021_advisory_evidence_and_verification.sql",
+        legacyMigrationChecksum("021_advisory_evidence_and_verification.sql")
+      ],
+      [22, "device_auth", "022_device_auth.sql", legacyMigrationChecksum("022_device_auth.sql")],
+      [
+        23,
+        "desktop_commander_runtime_capabilities",
+        "023_desktop_commander_runtime_capabilities.sql",
+        legacyMigrationChecksum("023_desktop_commander_runtime_capabilities.sql")
+      ]
+    ] as const
+  ).map(([version, name, filename, checksum]) => ({ version, name, filename, checksum }));
   const rows = db
     .prepare(
       "SELECT version, name, filename, checksum FROM schema_migrations WHERE version BETWEEN 20 AND 23 ORDER BY version"
@@ -624,10 +675,10 @@ function repairExactPreLeaseRenewalTwentyToTwentyThreeLayout(db: SqliteLike): vo
     !rows.every((row, index) => {
       const expected = deployed[index];
       return (
-        row.version === expected[0] &&
-        row.name === expected[1] &&
-        row.filename === expected[2] &&
-        row.checksum === expected[3]
+        row.version === expected.version &&
+        row.name === expected.name &&
+        row.filename === expected.filename &&
+        row.checksum === expected.checksum
       );
     })
   )
@@ -695,14 +746,14 @@ function migrationSqlForCurrentSchema(db: SqliteLike, migration: ControlPlaneMig
   if (migration.version === 12 && hasColumn(db, "workspace_allocations", "attempt_id")) {
     return "SELECT 1;";
   }
-  if (migration.version === 40 && hasColumn(db, "admission_permits", "execution_class")) {
+  if (migration.version === 41 && hasColumn(db, "admission_permits", "execution_class")) {
     return "SELECT 1;";
   }
-  if (migration.version === 41 && hasTable(db, "change_set_revisions") && hasTable(db, "change_set_heads")) {
+  if (migration.version === 42 && hasTable(db, "change_set_revisions") && hasTable(db, "change_set_heads")) {
     return "SELECT 1;";
   }
   if (
-    migration.version === 42 &&
+    migration.version === 43 &&
     [
       "work_item_id",
       "selected_worker_id",

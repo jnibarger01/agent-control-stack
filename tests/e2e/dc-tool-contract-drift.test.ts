@@ -177,7 +177,7 @@ describe("DC tool contract: every layer agrees with the canonical manifest", () 
   it("MCP gateway holds no independent copy of the tool list", () => {
     // The gateway is transport: it must not decide per tool. A tool-name
     // literal in its runtime sources would be a second, unchecked contract.
-    const sources = ["managed.js", "bridge.js", "server.js", "recycle-policy.js"].map((file) =>
+    const sources = ["managed.js", "bridge.js", "server.js", "recycle-policy.js", "client-attribution.js"].map((file) =>
       readFileSync(new URL(`apps/dc-mcp-gateway/${file}`, REPO), "utf8")
     );
     for (const name of manifestNames) {

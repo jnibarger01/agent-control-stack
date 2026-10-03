@@ -40,73 +40,9 @@ export function validateProductionConfig(env: NodeJS.ProcessEnv = process.env): 
   validateBindHostAuth(env, issues);
   validateDbPathWritable(env, issues);
   validateForbiddenLocalDevOpts(env, issues);
-  validateNimbleRouting(env, issues);
 
   if (issues.length > 0) {
     throw new ProductionConfigError(issues);
-  }
-}
-
-function validateNimbleRouting(env: NodeJS.ProcessEnv, issues: ProductionConfigIssue[]): void {
-  if (env.ACS_NIMBLE_ROUTING_ENABLED !== "1") return;
-  const bindingsRaw = env.ACS_AGENT_WORKER_BINDINGS?.trim();
-  if (!bindingsRaw) {
-    issues.push({ key: "ACS_AGENT_WORKER_BINDINGS", message: "required when Nimble routing is enabled" });
-    return;
-  }
-  let bindings: unknown;
-  try {
-    bindings = JSON.parse(bindingsRaw);
-  } catch {
-    issues.push({ key: "ACS_AGENT_WORKER_BINDINGS", message: "must be valid JSON when Nimble routing is enabled" });
-    return;
-  }
-  if (!bindings || typeof bindings !== "object" || Array.isArray(bindings) || Object.keys(bindings).length === 0) {
-    issues.push({ key: "ACS_AGENT_WORKER_BINDINGS", message: "must be a non-empty agent-to-worker object" });
-    return;
-  }
-  const entries = Object.entries(bindings);
-  const validIdentifier = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
-  if (
-    entries.some(
-      ([agentId, workerId]) =>
-        !validIdentifier.test(agentId) || typeof workerId !== "string" || !validIdentifier.test(workerId)
-    )
-  ) {
-    issues.push({ key: "ACS_AGENT_WORKER_BINDINGS", message: "contains an invalid agent or worker ID" });
-    return;
-  }
-  let credentials: unknown;
-  try {
-    credentials = JSON.parse(env.ACS_GATEWAY_CREDENTIALS_JSON ?? "[]");
-  } catch {
-    return;
-  }
-  const workerIds = new Set(
-    Array.isArray(credentials)
-      ? credentials.flatMap((credential) =>
-          credential &&
-          typeof credential === "object" &&
-          !Array.isArray(credential) &&
-          ((credential as Record<string, unknown>).status === undefined ||
-            (credential as Record<string, unknown>).status === "active") &&
-          (typeof (credential as Record<string, unknown>).expiresAt !== "string" ||
-            Date.parse((credential as Record<string, unknown>).expiresAt as string) > Date.now()) &&
-          Array.isArray((credential as Record<string, unknown>).roles) &&
-          ((credential as Record<string, unknown>).roles as unknown[]).includes("worker") &&
-          Array.isArray((credential as Record<string, unknown>).scopes) &&
-          ((credential as Record<string, unknown>).scopes as unknown[]).includes("acs:worker") &&
-          typeof (credential as Record<string, unknown>).actorId === "string"
-            ? [(credential as Record<string, unknown>).actorId as string]
-            : []
-        )
-      : []
-  );
-  if (entries.some(([, workerId]) => !workerIds.has(workerId as string))) {
-    issues.push({
-      key: "ACS_GATEWAY_CREDENTIALS_JSON",
-      message: "must contain an active worker credential for every Nimble binding"
-    });
   }
 }
 

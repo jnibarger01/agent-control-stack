@@ -15,7 +15,6 @@ pass.
 - A TLS-terminating reverse proxy for any non-loopback exposure.
 - A persistent volume with enough free space for SQLite WAL growth and backups.
 - `ACS_GATEWAY_CREDENTIALS_JSON` containing credential-bound operator/service/worker identities and either a complete OAuth issuer/audience/JWKS configuration or trusted signed-tunnel configuration.
-- When enabling production-authoritative agent routing, `ACS_NIMBLE_ROUTING_ENABLED=1`, a non-empty `ACS_AGENT_WORKER_BINDINGS` JSON map, and a matching active `worker` credential with `acs:worker` scope for each binding. See [Nimble routing](../protocol/nimble-routing.md).
 - `ACS_MCP_ALLOWED_ORIGINS` containing the explicit browser origins permitted to call MCP; non-browser clients without an `Origin` header remain supported.
 - Optional `ACS_MCP_TOOL_ALLOWLIST_JSON` mapping each MCP identity to allowed tool names. When set, unknown identities are default-denied in production.
 - `ACS_MAX_PENDING_WORK_ITEMS` set to an operationally safe queue ceiling.

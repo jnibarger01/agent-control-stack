@@ -24,7 +24,7 @@ const deviceIdSchema = z.object({ device_id: z.string().uuid() }).strict();
 const callSchema = z.object({
   device_id: z.string().uuid(),
   tool_name: z.string().min(1).max(128),
-  arguments: z.record(z.unknown()).optional(),
+  arguments: z.record(z.string(), z.unknown()).optional(),
   idempotency_key: z.string().min(1).max(128).optional(),
   timeout_ms: z.number().int().min(1).max(MCP_MAX_WAIT_MS).optional(),
 }).strict();

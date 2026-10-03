@@ -142,40 +142,6 @@ describe("production config fail-fast validator", () => {
     }
   });
 
-  it("requires valid Nimble worker bindings and authenticated worker credentials when authoritative routing is enabled", () => {
-    const dir = mkdtempSync(join(tmpdir(), "acs-nimble-prod-config-"));
-    try {
-      const base = {
-        NODE_ENV: "production",
-        ACS_DB_PATH: join(dir, "control.db"),
-        ACS_GATEWAY_CREDENTIALS_JSON: VALID_CREDENTIALS,
-        ACS_NIMBLE_ROUTING_ENABLED: "1"
-      };
-      expect(() => validateProductionConfig(base)).toThrow(ProductionConfigError);
-
-      const workerCredentials = JSON.stringify([
-        ...JSON.parse(VALID_CREDENTIALS),
-        {
-          id: "worker",
-          token: "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww",
-          actor: "agent",
-          actorId: "worker-1",
-          roles: ["worker"],
-          scopes: ["acs:worker"]
-        }
-      ]);
-      expect(() =>
-        validateProductionConfig({
-          ...base,
-          ACS_GATEWAY_CREDENTIALS_JSON: workerCredentials,
-          ACS_AGENT_WORKER_BINDINGS: JSON.stringify({ "codex-cli": "worker-1" })
-        })
-      ).not.toThrow();
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   it("rejects incomplete OAuth and local-dev opt-in in strict mode", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-prod-config-"));
     try {

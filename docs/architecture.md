@@ -15,6 +15,17 @@ lifecycle, result authority, or canonical audit sink. Migration notes from the
 retired OpenClaw Agent Orchestrator are captured in
 [`openclaw-agent-orchestrator-migration.md`](openclaw-agent-orchestrator-migration.md).
 
+## Routing
+
+Eligible approved operations are routed by `decideAuthoritativeRoute` in
+`packages/actor-router`. ACS removes executors that fail capability, health,
+authorization, execution-mode, operator, or capacity checks, then asks the
+configured Nimble model to choose among what remains. A valid choice is the
+dispatch. Timeout, transport failure, a malformed response, an unknown
+executor, or low confidence uses the deterministic score fallback and records
+why. JEV stays advisory telemetry and is not a second router. The historical
+Mission Router inventory is not an execution authority.
+
 ## Layers
 
 - `packages/shared`: IDs, redaction, errors, hash helpers, migrations, and OpenTelemetry-shaped event schemas.
@@ -57,12 +68,3 @@ Work moves through enforced statuses: `draft`, `pending_policy`, `needs_approval
 Policy decisions are recorded as `policy.decided` audit events. Required approvals are stored by `work_item_id` plus exact action hash, so approval is bound to the action that policy evaluated and records who approved it and why.
 
 Workers claim approved rows through the work-item store with a status compare-and-swap and a short opaque lease. The governed worker claim creates one immutable execution attempt against the current admitted plan, starts it at fencing epoch one, and returns its attempt, plan, input, workspace, and lease bindings. Worker startup marks expired running leases as failed before claiming new work, then the local worker path re-checks policy and action-hash approvals before applying the read-only worker scope and entering dry-run sandbox simulation. A result submission for an attempt lease must carry those persisted bindings; the store rejects stale epochs, superseded plans, tampered inputs, and legacy envelopes that omit attempt authority. Privileged transitions that assert an actor identity reject an actor other than the current active lease owner, and the asserted identity is included in the audit event. One SQLite transaction appends the immutable attempt result and compatibility result projection, transitions the attempt and work item, closes both lease projections, and records audit evidence. Retry and clone are append-only lineage operations that create new work-item IDs, plans, attempts, and execution action hashes; policy and approval are evaluated again.
-
-When `ACS_NIMBLE_ROUTING_ENABLED=1`, approved agent work is first assigned by
-the gateway's Nimble semantic router ([protocol](protocol/nimble-routing.md)).
-ACS checks eligibility before model calls and persists the decision, immutable
-agent-to-worker assignment, and Noul score evidence atomically. The assigned
-worker claims by authenticated identity through the same policy, admission,
-approval, attempt, and lease gate above. The legacy unassigned claim-next path
-is closed in this mode. Jev remains advisory and is not part of the routing
-decision.

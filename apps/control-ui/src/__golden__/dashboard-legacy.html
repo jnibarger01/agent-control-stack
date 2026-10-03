@@ -423,6 +423,7 @@ body[data-active-view="queue"] [data-view-panel~="queue"],
 body[data-active-view="execution"] [data-view-panel~="execution"],
 body[data-active-view="approvals"] [data-view-panel~="approvals"],
 body[data-active-view="agents"] [data-view-panel~="agents"],
+body[data-active-view="dispatch"] [data-view-panel~="dispatch"],
 body[data-active-view="executors"] [data-view-panel~="executors"],
 body[data-active-view="connectors"] [data-view-panel~="connectors"],
 body[data-active-view="metrics"] [data-view-panel~="metrics"],
@@ -431,6 +432,7 @@ body[data-active-view="policy"] [data-view-panel~="policy"],
 body[data-active-view="system"] [data-view-panel~="system"] { display: block; }
 /* The view rule above must not flatten the overview card grid. */
 body[data-active-view="overview"] #overview.cards { display: grid; }
+body[data-active-view="dispatch"] #agent-dispatch.dispatch-grid { display: grid; }
 body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
 .approval-item { background: var(--surface); color: var(--ink); border-color: var(--line); }
 .system-probes { padding: 0 18px 16px; }
@@ -593,13 +595,65 @@ button { background-color: var(--control-bg); color: var(--ink); border: 1px sol
 @media (max-width: 767px) { body { display: block; } aside { position: static; height: auto; padding: 10px; } .brand { padding-bottom: 10px; } nav { display: flex; overflow-x: auto; margin-top: 10px; } nav a { flex-shrink: 0; min-height: 44px; } .rail-note { display: none; } main { padding: 12px; } .header-controls { width: 100%; } .global-search { width: 100%; } .metric-grid, .command-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); } .overview-bottom { grid-template-columns: 1fr; } .mission-board { grid-template-columns: 1fr; } .execution-pipeline { overflow-x: auto; grid-template-columns: repeat(7,90px); } .execution-filter, .audit-filters { flex-wrap: wrap; } .execution-filter input, .audit-filters input { width: 100%; } .queue-item { grid-template-columns: 1fr; } .cards { grid-template-columns: repeat(2,minmax(0,1fr)); } .agent-card-grid { grid-template-columns: 1fr; } button, input, select { min-height: 44px; } .system-panel { grid-template-columns: 1fr; } .runs-table { min-width: 760px; } .command-metrics .metric-card { border: 0; } .eyebrow { display: none; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
 
+
+.mcp-table { width: 100%; min-width: 700px; border-collapse: collapse; font-size: 12px; }
+#mcp-clients-panel .table-wrap { overflow-x: auto; }
+.mcp-actions { margin-top: .4rem; display: flex; gap: .35rem; flex-wrap: wrap; }
+.mcp-table th { text-align: left; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.mcp-table td { padding: 8px; border-bottom: 1px solid var(--soft-line); vertical-align: top; overflow-wrap: anywhere; }
+.mcp-table code { font-size: 11px; }
+.mcp-notice { margin: 0 0 .75rem; padding: .6rem .8rem; border: 1px solid var(--warn-line); background: var(--warn-bg); border-radius: 8px; }
+.mcp-live { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 6px; }
+.mcp-idle { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; opacity: .5; }
+.pill.unrecognized { background: var(--warn-bg); border-color: var(--warn-line); color: var(--amber); }
+.pill.labelled { background: var(--ok-bg); border-color: var(--ok-line); color: var(--green); }
+.mcp-alert { display: block; text-decoration: none; }
+.mcp-alert[hidden] { display: none; }
+.mcp-legacy { margin-top: .75rem; }
+.mcp-label-form { display: grid; gap: .6rem; margin: .5rem 0; }
+.mcp-label-form label { display: grid; gap: .25rem; font-size: 12px; }
+.mcp-claims { margin: 0; padding: 0; list-style: none; display: grid; gap: .25rem; }
+
+
+.dispatch-grid { display: grid; gap: 1rem; }
+.dispatch-banner { margin: 0 0 .75rem; padding: .6rem .8rem; border: 1px solid var(--warn-line); background: var(--warn-bg); border-radius: 8px; }
+.cli-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: .75rem; }
+.cli-card { border: 1px solid var(--line); border-radius: 10px; padding: .75rem .85rem; background: var(--surface-2); display: grid; gap: .4rem; align-content: start; }
+.cli-card h3 { margin: 0; font-size: 14px; display: flex; gap: .5rem; align-items: center; justify-content: space-between; }
+.cli-card p { margin: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.cli-card .cli-reason { color: var(--ink); }
+.cli-card .cli-meta { display: flex; flex-wrap: wrap; gap: .35rem; }
+.pill.ready { background: var(--ok-bg); border-color: var(--ok-line); color: var(--green); }
+.pill.blocked, .pill.failed, .pill.timed_out, .pill.interrupted { background: var(--bad-bg); border-color: var(--bad-line); color: var(--red); }
+.pill.off, .pill.missing, .pill.cancelled, .pill.queued { background: var(--pill-bg); }
+.pill.running { background: var(--warn-bg); border-color: var(--warn-line); color: var(--amber); }
+.pill.succeeded { background: var(--ok-bg); border-color: var(--ok-line); color: var(--green); }
+.dispatch-mode { border: 1px solid var(--line); border-radius: 8px; display: flex; gap: 1.25rem; flex-wrap: wrap; padding: .5rem .75rem; }
+.dispatch-mode label { display: flex; align-items: center; gap: .5rem; }
+.dispatch-mode input[type="radio"] { width: auto; min-width: 0; flex: none; margin: 0; }
+.dispatch-mode legend { padding: 0 .35rem; }
+.agent-runs-layout { display: grid; grid-template-columns: minmax(240px, 1fr) minmax(0, 2fr); gap: 1rem; }
+@media (max-width: 900px) { .agent-runs-layout { grid-template-columns: 1fr; } }
+.agent-run-list { display: grid; gap: .4rem; align-content: start; max-height: 520px; overflow: auto; }
+.agent-run-row { display: grid; gap: .15rem; text-align: left; padding: .5rem .65rem; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: inherit; cursor: pointer; font: inherit; }
+.agent-run-row[aria-current="true"] { border-color: var(--accent); }
+.agent-run-row small { color: var(--muted); }
+.agent-run-detail { min-width: 0; display: grid; gap: .6rem; align-content: start; }
+.agent-run-detail dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem .75rem; margin: 0; font-size: 12px; }
+.agent-run-detail dt { color: var(--muted); }
+.agent-run-detail dd { margin: 0; overflow-wrap: anywhere; }
+pre.run-output { margin: 0; max-height: 420px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--control-bg); border: 1px solid var(--control-line); border-radius: 8px; padding: .6rem .75rem; font-size: 12px; }
+.dispatch-confirm dl { display: grid; grid-template-columns: max-content 1fr; gap: .3rem .75rem; margin: .5rem 0; font-size: 13px; }
+.dispatch-confirm dt { color: var(--muted); }
+.dispatch-confirm dd { margin: 0; overflow-wrap: anywhere; }
+
 </style>
   </head>
   <body data-active-view="overview">
     <a class="skip-link" href="#main-content">Skip to main content</a>
     <aside aria-label="Mission control navigation">
       <div class="brand"><svg viewBox="0 0 40 42" width="36" height="38" aria-hidden="true"><path fill="#3da4ff" d="M18 3a3 3 0 0 1 5 0l7 12H11z"/><path fill="#257cff" d="M9 19h12L10 38H0z"/><path fill="#70cfff" d="M24 19h8l8 19H30z"/></svg><div>ACS<span>Mission Control</span></div></div>
-      <nav aria-label="Primary"><a href="#overview" class="active" aria-current="page" data-nav="overview"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 10 9-7 9 7v10H3z"/><path d="M9 20v-7h6v7"/></svg></span>Overview</a><a href="#queue" data-nav="queue"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 12h8M8 17h5"/></svg></span>Work Queue</a><a href="#execution" data-nav="execution"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 4 12 8-12 8z"/></svg></span>Execution</a><a href="#approvals" data-nav="approvals"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 9-9 9-9-9z"/><path d="m8 12 3 3 5-6"/></svg></span>Approvals</a><a href="#agents" data-nav="agents"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="7" r="3"/><circle cx="5" cy="15" r="2"/><circle cx="19" cy="15" r="2"/><path d="M7 21v-2a5 5 0 0 1 10 0v2M3 11l4-3M21 11l-4-3"/></svg></span>Agents</a><a href="#executors" data-nav="executors"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 9 5v10l-9 5-9-5V7z"/><path d="m7 9 5 3 5-3M12 12v6"/></svg></span>Executors</a><a href="#connectors" data-nav="connectors"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="m8 8 8 8M13 6h8M18 3v6M3 18h8M6 15v6"/></svg></span>Connectors</a><a href="#metrics" data-nav="metrics"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 21V3M4 21h17M8 17v-6M13 17V6M18 17v-9"/></svg></span>Metrics</a><a href="#audit" data-nav="audit"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 11h8M8 15h8M8 19h4"/></svg></span>Audit</a><a href="#policy" data-nav="policy"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 4v5c0 5-9 9-9 9s-9-4-9-9V7z"/><path d="m8 12 3 3 5-6"/></svg></span>Policy</a><a href="#system" data-nav="system"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg></span>System</a></nav>
+      <nav aria-label="Primary"><a href="#overview" class="active" aria-current="page" data-nav="overview"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 10 9-7 9 7v10H3z"/><path d="M9 20v-7h6v7"/></svg></span>Overview</a><a href="#queue" data-nav="queue"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 12h8M8 17h5"/></svg></span>Work Queue</a><a href="#execution" data-nav="execution"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 4 12 8-12 8z"/></svg></span>Execution</a><a href="#approvals" data-nav="approvals"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 9-9 9-9-9z"/><path d="m8 12 3 3 5-6"/></svg></span>Approvals</a><a href="#agents" data-nav="agents"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="7" r="3"/><circle cx="5" cy="15" r="2"/><circle cx="19" cy="15" r="2"/><path d="M7 21v-2a5 5 0 0 1 10 0v2M3 11l4-3M21 11l-4-3"/></svg></span>Agents</a><a href="#dispatch" data-nav="dispatch"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12 20 4l-4 16-4-7z"/><path d="m12 13 8-9"/></svg></span>Dispatch</a><a href="#executors" data-nav="executors"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 9 5v10l-9 5-9-5V7z"/><path d="m7 9 5 3 5-3M12 12v6"/></svg></span>Executors</a><a href="#connectors" data-nav="connectors"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="m8 8 8 8M13 6h8M18 3v6M3 18h8M6 15v6"/></svg></span>Connectors</a><a href="#metrics" data-nav="metrics"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 21V3M4 21h17M8 17v-6M13 17V6M18 17v-9"/></svg></span>Metrics</a><a href="#audit" data-nav="audit"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 11h8M8 15h8M8 19h4"/></svg></span>Audit</a><a href="#policy" data-nav="policy"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 4v5c0 5-9 9-9 9s-9-4-9-9V7z"/><path d="m8 12 3 3 5-6"/></svg></span>Policy</a><a href="#system" data-nav="system"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg></span>System</a></nav>
       <p class="rail-note">Local-first control plane. Live state comes from the registry, work-item store, and audit stream. Press <kbd>?</kbd> for keyboard shortcuts.</p>
     </aside>
     <main id="main-content" tabindex="-1">
@@ -619,13 +673,56 @@ button { background-color: var(--control-bg); color: var(--ink); border: 1px sol
       <div id="admin-mode-banner" class="admin-mode-banner" role="alert" hidden></div>
       <div id="execution-mode-problem" class="admin-mode-banner" role="alert" hidden></div>
       <div id="sse-stale-banner" class="stale-banner" hidden role="status" aria-live="assertive">Connection lost. Displayed work items may be stale. Approve, deny, and work-item controls are disabled until the live stream reconnects.</div>
+      <a id="mcp-client-alert" class="admin-mode-banner mcp-alert" href="#connectors" data-nav-alert="connectors" role="status" hidden></a>
       <div id="command-results" class="command-results" hidden role="region" aria-label="Search results"></div>
       <div class="page-actions"><button type="button" data-create-task class="primary-button">＋ Create Task</button><button type="button" data-refresh-dashboard>↻ Refresh</button><span class="muted">Governed by ACS</span></div>
-      <section id="overview-operations" data-view-panel="overview"><section class="command-summary"><div class="panel-head"><div><h2>Command Summary</h2><p>Live view of your agent operations</p></div><span class="eyebrow">ACS · governed execution</span></div><div class="metric-grid command-metrics"><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>2</strong><span>Active Work Items</span><small>Current control-plane work</small></div></div><div class="metric-card amber"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 3"/></svg></span><div><strong>Unknown</strong><span>System Readiness</span><small>Persisted dependency checks</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>0</strong><span>Agents Online</span><small>0 registered / observed</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>—</strong><span>Avg Run Time</span><small>Terminal attempts · last 24h</small></div></div></div></section><div class="operations-layout"><div class="operations-main"><section class="section-card"><div class="panel-head"><h2>Missions · Work Items</h2><a href="#queue" data-dashboard-view="queue">View all →</a></div><div class="mission-board"><section class="board-column green"><h3><i aria-hidden="true"></i>Ready<span>0</span></h3><p class="empty">No work in this stage.</p></section><section class="board-column blue"><h3><i aria-hidden="true"></i>Running<span>0</span></h3><p class="empty">No work in this stage.</p></section><section class="board-column amber"><h3><i aria-hidden="true"></i>Waiting Approval<span>1</span></h3><button class="mission-card" data-inspect-work="wrk_approve"><strong>Approve me</strong><small>wrk_approve</small><p>/repo · 1 actions</p><span><span class="pill high">high</span> </span><footer><span>Unassigned</span><span>needs_approval</span></footer></button></section><section class="board-column red"><h3><i aria-hidden="true"></i>Blocked<span>1</span></h3><button class="mission-card" data-inspect-work="wrk_blocked"><strong>Blocked task</strong><small>wrk_blocked</small><p>/repo · 1 actions</p><span><span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span></span><footer><span>Unassigned</span><span>blocked</span></footer></button></section></div></section><div class="overview-bottom"><section class="section-card"><div class="panel-head"><h2>Recent Activity</h2><a href="#audit" data-dashboard-view="audit">View all →</a></div><p class="empty">No recorded activity in this window.</p></section><section class="section-card"><div class="panel-head"><h2>Systems Overview</h2><a href="#system" data-dashboard-view="system">View all →</a></div><div class="system-check-grid"><p class="empty">Readiness checks unavailable.</p></div></section></div></div><div class="operations-rail"><section class="section-card"><div class="panel-head"><h2>Agent Health</h2><a href="#agents" data-dashboard-view="agents">View all →</a></div><div class="rail-list"><p class="empty">No agents registered.</p></div></section><section class="section-card"><div class="panel-head"><h2>Critical Alerts</h2><a href="#execution" data-dashboard-view="execution">View all →</a></div><div class="rail-list"><div class="failure-row"><span class="failure-icon" aria-hidden="true">!</span><div><strong>Blocked task</strong><small>worker lease expired token=[redacted]</small><span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span></div><button data-inspect-work="wrk_blocked">Inspect</button></div></div></section><section class="section-card"><div class="panel-head"><h2>Approval Requests</h2><a href="#approvals" data-dashboard-view="approvals">View all →</a></div><div class="rail-list"><button class="approval-preview" data-inspect-work="wrk_approve"><strong>Approve me</strong><small>user · high risk · 40m</small><span>Review request →</span></button></div></section></div></div></section>
+      <section id="overview-operations" data-view-panel="overview"><section class="command-summary"><div class="panel-head"><div><h2>Command Summary</h2><p>Live view of your agent operations</p></div><span class="eyebrow">ACS · governed execution</span></div><div class="metric-grid command-metrics"><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>2</strong><span>Active Work Items</span><small>Current control-plane work</small></div></div><div class="metric-card amber"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 3"/></svg></span><div><strong>Unknown</strong><span>System Readiness</span><small>Persisted dependency checks</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>0</strong><span>Agents Online</span><small>0 registered / observed</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>—</strong><span>Avg Run Time</span><small>Terminal attempts · last 24h</small></div></div></div></section><div class="operations-layout"><div class="operations-main"><section class="section-card"><div class="panel-head"><h2>Missions · Work Items</h2><a href="#queue" data-dashboard-view="queue">View all →</a></div><div class="mission-board"><section class="board-column green"><h3><i aria-hidden="true"></i>Ready<span>0</span></h3><p class="empty">No work in this stage.</p></section><section class="board-column blue"><h3><i aria-hidden="true"></i>Running<span>0</span></h3><p class="empty">No work in this stage.</p></section><section class="board-column amber"><h3><i aria-hidden="true"></i>Waiting Approval<span>1</span></h3><button class="mission-card" data-inspect-work="wrk_approve"><strong>Approve me</strong><small>wrk_approve</small><p>/repo · 1 actions</p><span><span class="pill high">high</span> </span><footer><span>Unassigned</span><span>needs_approval</span></footer></button></section><section class="board-column red"><h3><i aria-hidden="true"></i>Blocked<span>1</span></h3><button class="mission-card" data-inspect-work="wrk_blocked"><strong>Blocked task</strong><small>wrk_blocked</small><p>/repo · 1 actions</p><span><span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span></span><footer><span>Unassigned</span><span>blocked</span></footer></button></section></div></section><div class="overview-bottom"><section class="section-card"><div class="panel-head"><h2>Recent Activity</h2><a href="#audit" data-dashboard-view="audit">View all →</a></div><p class="empty">No recorded activity in this window.</p></section></div></div><div class="operations-rail"><section class="section-card"><div class="panel-head"><h2>Agent Health</h2><a href="#agents" data-dashboard-view="agents">View all →</a></div><div class="rail-list"><p class="empty">No agents registered.</p></div></section><section class="section-card"><div class="panel-head"><h2>Critical Alerts</h2><a href="#execution" data-dashboard-view="execution">View all →</a></div><div class="rail-list"><div class="failure-row"><span class="failure-icon" aria-hidden="true">!</span><div><strong>Blocked task</strong><small>worker lease expired token=[redacted]</small><span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span></div><button data-inspect-work="wrk_blocked">Inspect</button></div></div></section><section class="section-card"><div class="panel-head"><h2>Approval Requests</h2><a href="#approvals" data-dashboard-view="approvals">View all →</a></div><div class="rail-list"><button class="approval-preview" data-inspect-work="wrk_approve"><strong>Approve me</strong><small>user · high risk · 40m</small><span>Review request →</span></button></div></section></div></div></section>
       <section id="execution-operations" data-view-panel="execution"><div class="metric-grid"><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>0</strong><span>Active Runs</span><small>Current running work items</small></div></div><div class="metric-card amber"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 3"/></svg></span><div><strong>—</strong><span>Queued Runs</span><small>Admission scheduler queue</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>—</strong><span>Avg Run Time</span><small>Terminal attempts · last 24h</small></div></div><div class="metric-card green"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m7 12 3 3 7-7"/></svg></span><div><strong>—</strong><span>Success Rate</span><small>Succeeded / succeeded + failed · 24h</small></div></div><div class="metric-card red"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 10 18H2z"/><path d="M12 9v5M12 17h.01"/></svg></span><div><strong>—</strong><span>Failed · 24h</span><small>Persisted failed attempts</small></div></div></div><div class="operations-layout"><div class="operations-main"><section class="section-card"><div class="panel-head"><h2>Execution Pipeline</h2></div><div class="execution-pipeline"><a class="pipeline-stage blue" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="draft"><span class="stage-icon" aria-hidden="true">◇</span><strong>Pending</strong><b>0</b></a><a class="pipeline-stage violet" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="pending_policy"><span class="stage-icon" aria-hidden="true">◇</span><strong>Policy Check</strong><b>0</b></a><a class="pipeline-stage amber" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="needs_approval"><span class="stage-icon" aria-hidden="true">◇</span><strong>Waiting Approval</strong><b>1</b></a><a class="pipeline-stage green" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="approved"><span class="stage-icon" aria-hidden="true">✓</span><strong>Approved</strong><b>0</b></a><a class="pipeline-stage blue" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="running,cancelling"><span class="stage-icon" aria-hidden="true">◇</span><strong>Running</strong><b>0</b></a><a class="pipeline-stage green" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="succeeded"><span class="stage-icon" aria-hidden="true">✓</span><strong>Completed</strong><b>0</b></a><a class="pipeline-stage red" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="failed,blocked,unknown,quarantined"><span class="stage-icon" aria-hidden="true">!</span><strong>Failed / Blocked</strong><b>1</b></a></div><p class="panel-note">Current work-item states · completed and failed counts include retained store history. Tool wait is not a persisted ACS stage.</p></section><section class="section-card"><div class="panel-head"><h2>Live Runs</h2></div><div class="execution-filter"><label>Search runs <input type="search" id="execution-search" placeholder="Title, ID, agent, or executor"></label><label>Stage <select id="execution-stage"><option value="">All stages</option><option>Waiting Approval</option><option>Blocked</option></select></label><span id="execution-filter-count" role="status"></span></div><div class="table-wrap"><table class="runs-table"><thead><tr><th>Run / Work Item</th><th>Agent</th><th>Executor / Worker</th><th>Stage</th><th>Elapsed</th><th>Queue Age</th><th>Risk</th><th>Detail</th></tr></thead><tbody><tr data-run-stage="Waiting Approval"><td><strong>wrk_approve</strong><small>Approve me</small></td><td>Unassigned</td><td>Unclaimed</td><td><span class="pill needs_approval">needs_approval</span><small>Waiting Approval</small></td><td>—</td><td>40m</td><td><span class="pill high">high</span></td><td><button data-inspect-work="wrk_approve" aria-label="Inspect Approve me">Inspect</button></td></tr><tr data-run-stage="Blocked"><td><strong>wrk_blocked</strong><small>Blocked task</small><span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span></td><td>Unassigned</td><td>Unclaimed</td><td><span class="pill blocked">blocked</span><small>Blocked</small></td><td>—</td><td>—</td><td><span class="pill low">low</span></td><td><button data-inspect-work="wrk_blocked" aria-label="Inspect Blocked task">Inspect</button></td></tr></tbody></table></div></section><section class="section-card"><div class="panel-head"><h2>Execution Throughput · Last 24 hours</h2></div><p class="empty">Persisted execution telemetry unavailable.</p></section></div><div class="operations-rail"><section class="section-card"><div class="panel-head"><h2>Failures &amp; Retries</h2></div><div class="rail-list"><div class="failure-row"><span class="failure-icon" aria-hidden="true">!</span><div><strong>Blocked task</strong><small>worker lease expired token=[redacted]</small><span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span></div><button data-inspect-work="wrk_blocked">Inspect</button></div></div></section><section class="section-card"><div class="panel-head"><h2>Execution Admission</h2></div><p class="empty">Execution capacity unavailable.</p></section><section class="section-card"><div class="panel-head"><h2>Recent Execution Events</h2><a href="#audit" data-dashboard-view="audit">View all →</a></div><p class="empty">No recorded activity in this window.</p></section></div></div></section>
       <section id="approval-summary" data-view-panel="approvals"><div class="metric-grid approval-metrics"><div class="metric-card amber"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 3"/></svg></span><div><strong>1</strong><span>Pending</span><small>Human decisions required</small></div></div><div class="metric-card red"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 10 18H2z"/><path d="M12 9v5M12 17h.01"/></svg></span><div><strong>1</strong><span>Over SLA</span><small>SLA 30m</small></div></div><div class="metric-card violet"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>1</strong><span>High Risk</span><small>Pending high / critical requests</small></div></div><div class="metric-card amber"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 3"/></svg></span><div><strong>40m</strong><span>Oldest Wait</span><small>Current approval inbox</small></div></div><div class="metric-card green"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m7 12 3 3 7-7"/></svg></span><div><strong>—</strong><span>Approval Grants · 24h</span><small>Recorded action grants</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>—</strong><span>Avg Grant Latency</span><small>Matched requirement → grant · 24h</small></div></div></div></section>
       <section id="metrics-operations" data-view-panel="metrics"><div class="metric-grid"><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>0</strong><span>Active Runs</span><small>Current running work items</small></div></div><div class="metric-card amber"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 3"/></svg></span><div><strong>—</strong><span>Queued Runs</span><small>Admission scheduler queue</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>—</strong><span>Avg Run Time</span><small>Terminal attempts · last 24h</small></div></div><div class="metric-card green"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m7 12 3 3 7-7"/></svg></span><div><strong>—</strong><span>Success Rate</span><small>Succeeded / succeeded + failed · 24h</small></div></div><div class="metric-card red"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 10 18H2z"/><path d="M12 9v5M12 17h.01"/></svg></span><div><strong>—</strong><span>Failed · 24h</span><small>Persisted failed attempts</small></div></div></div><section class="section-card"><div class="panel-head"><h2>Execution Throughput · Last 24 hours</h2></div><p class="empty">Persisted execution telemetry unavailable.</p></section><div class="metric-grid"><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>—</strong><span>Avg Queue Latency</span><small>Started attempts updated in last 24h</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>—</strong><span>Execution Admission</span><small>Global execution slots</small></div></div></div></section>
       <section id="agent-operations" data-view-panel="agents"><div class="overview-bottom"><section class="section-card"><div class="panel-head"><h2>Capability Coverage</h2></div><div class="capability-coverage"><p class="empty">No capabilities registered.</p></div></section><section class="section-card"><div class="panel-head"><h2>Recent Agent Activity</h2></div><p class="empty">No audit events recorded.</p></section></div></section>
+      <section id="agent-dispatch" class="grid dispatch-grid" data-view-panel="dispatch">
+  <article class="panel wide" id="governed-dispatch-panel">
+    <div class="panel-head"><div><h2>Execute an approved mission</h2><p>ACS checks the approved plan, reserves execution capacity, and fences results with worker leases. Jev supplies advice only.</p></div></div>
+    <form id="mission-dispatch-form">
+      <label>Mission identifier<input name="missionId" required autocomplete="off"></label>
+      <label>Approval identifier<input name="approvalId" required autocomplete="off"></label>
+      <button type="submit" class="primary-button">Review mission</button>
+      <output id="mission-dispatch-result" role="status" aria-live="polite"></output>
+    </form>
+    <div id="mission-dispatch-review" hidden></div>
+    <button type="button" id="mission-dispatch-confirm" class="primary-button" hidden>Confirm execution</button>
+    <button type="button" id="mission-dispatch-refresh" class="tool-button">Refresh mission progress</button>
+    <div id="mission-dispatch-progress" role="status" aria-live="polite"></div>
+  </article>
+  <article class="panel wide" id="cli-agents-panel">
+    <div class="panel-head"><div><h2>CLI agents</h2><p>Installed coding agents on this machine. Dispatch is human-confirmed and runs in a fresh git worktree.</p></div>
+      <span class="panel-tools"><button type="button" id="cli-agents-sync" class="tool-button">Add to roster</button><button type="button" id="cli-agents-refresh" class="tool-button">Refresh</button></span></div>
+    <p id="dispatch-banner" class="dispatch-banner" role="status" hidden></p>
+    <div id="cli-agent-grid" class="cli-grid" aria-live="polite"><p class="muted">Loading CLI agents…</p></div>
+  </article>
+  <article class="panel wide" id="dispatch-form-panel">
+    <div class="panel-head"><div><h2>Host-side CLI run</h2><p>This separate path uses the CLI’s own permissions and your saved login. It does not govern each tool through ACS. Nothing runs until you confirm.</p></div></div>
+    <form id="dispatch-form" novalidate>
+      <div class="form-row">
+        <label>Agent<select name="agentId" required></select></label>
+        <label>Repository<input name="repo" list="dispatch-repos" required autocomplete="off" placeholder="/absolute/path/to/repo"><datalist id="dispatch-repos"></datalist></label>
+      </div>
+      <fieldset class="dispatch-mode"><legend>Mode</legend>
+        <label><input type="radio" name="mode" value="edit" checked> Edit in a fresh worktree</label>
+        <label><input type="radio" name="mode" value="read-only"> Read-only (analysis, no edits)</label>
+      </fieldset>
+      <label>What should the agent do?<textarea name="prompt" required rows="5" maxlength="32000" placeholder="Describe the goal and what a good result looks like."></textarea></label>
+      <label>Time limit (minutes)<input name="minutes" type="number" min="1" max="60" value="15"></label>
+      <div class="composer-actions"><button type="submit" id="dispatch-submit" class="primary-button">Review &amp; dispatch</button></div>
+      <output id="dispatch-result" role="status" aria-live="polite"></output>
+    </form>
+  </article>
+  <article class="panel wide" id="agent-runs-panel">
+    <div class="panel-head"><div><h2>Runs</h2><p>Recorded in the audit log. Output is redacted.</p></div><span id="agent-runs-count">loading</span></div>
+    <div class="agent-runs-layout"><div id="agent-run-list" class="agent-run-list" aria-live="polite"><p class="muted">No runs yet.</p></div><div id="agent-run-detail" class="agent-run-detail" tabindex="-1"><p class="muted">Select a run to see its output.</p></div></div>
+  </article>
+</section>
       <section id="overview" class="cards" data-view-panel="overview"><a class="card dashboard-card" href="#agents" data-dashboard-view="agents" aria-label="Open Agents"><span>Agents</span><strong>0 / 0</strong><p>online by heartbeat / registered</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#executors" data-dashboard-view="executors" aria-label="Open Executors"><span>Executors</span><strong>—</strong><p>configured / known execution bridges</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#connectors" data-dashboard-view="connectors" aria-label="Open Connectors"><span>Connectors</span><strong>—</strong><p>active tunnel sessions · Connector state unavailable in this render</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#execution" data-dashboard-view="execution" data-dashboard-statuses="running" aria-label="Open Running Tasks"><span>Running Tasks</span><strong>0</strong><p>Lease-bound work currently running</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="needs_approval,blocked,quarantined" aria-label="Open Needs Operator Attention"><span>Needs Operator Attention</span><strong>2</strong><p>Approvals, blocked, and quarantined work; the same set the queue marks for attention</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#approvals" data-dashboard-view="approvals" aria-label="Open Pending Approvals"><span>Pending Approvals</span><strong>1</strong><p>Policy-gated work waiting on a human</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="failed,blocked" aria-label="Open Failed / Blocked"><span>Failed / Blocked</span><strong>1</strong><p>Failed items plus blocked work</p><small class="card-action">Open →</small></a></section>
       <section class="grid">
         <article id="agents" class="panel wide roster-panel" data-view-panel="agents"><div class="panel-head"><div><h2>Agent Roster</h2><p>Identity, role, activity, and runtime presence</p></div><span id="agent-count">0 observed identities</span></div><div class="agent-layout"><div class="agent-roster"><p class="empty">No registered agents.</p></div><section id="agent-detail" class="detail-panel agent-detail" tabindex="-1" aria-live="polite" aria-label="Agent detail">
@@ -663,6 +760,7 @@ button { background-color: var(--control-bg); color: var(--ink); border: 1px sol
       </section>
       <section class="grid approvals-grid">
         <article id="approvals" class="panel wide" data-view-panel="approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">2 waiting</span></div><div id="approvals-list"><div class="approvals-list" role="list"><article class="approval-item overdue" role="listitem" data-risk="high" data-status="needs_approval" data-work-item-ref="wrk_approve"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span> <small class="wait-badge" data-waiting-since="2026-07-05T00:00:00.000Z" data-sla-ms="1800000">waiting 40m · over SLA</small></span><strong id="approval-title-wrk_approve">Approve me</strong><small>Requester: user · Actions: fs.read</small><button type="button" data-inspect-work="wrk_approve">Review details</button><label class="reason-field" for="reason-wrk_approve"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_approve" data-reason="wrk_approve" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Approve me"><button type="button" data-approve="wrk_approve" data-risk="high" disabled aria-describedby="reason-wrk_approve">Approval hash unavailable</button><button type="button" data-reject="wrk_approve" data-risk="high" aria-describedby="reason-wrk_approve">Reject</button></div><output id="approval-result-wrk_approve" class="approval-result" aria-live="polite"></output></article><article class="approval-item" role="listitem" data-risk="low" data-status="blocked" data-work-item-ref="wrk_blocked"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span><small class="wait-badge" data-waiting-since="2026-07-05T00:30:00.000Z" data-sla-ms="1800000">waiting 10m</small></span><strong id="approval-title-wrk_blocked">Blocked task</strong><small>Actions: fs.read</small><small class="error-line">worker lease expired token=[redacted]</small><button type="button" data-inspect-work="wrk_blocked">Review details</button><label class="reason-field" for="reason-wrk_blocked"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_blocked" data-reason="wrk_blocked" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Blocked task"><button type="button" data-unblock="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Unblock</button><button type="button" data-reject="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Reject</button></div><output id="approval-result-wrk_blocked" class="approval-result" aria-live="polite"></output></article></div></div></article>
+        <article id="coding-missions" class="panel wide" data-view-panel="approvals"><div class="panel-head"><h2>Coding missions</h2><span>change-set approval</span></div><div id="coding-mission-list"><p class="empty">No coding missions are waiting for approval.</p></div></article>
       </section>
       <section class="grid lower">
         <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · counters</span></div><div id="operator-metrics-body"><div class="operator-metrics"><dl>
@@ -677,7 +775,7 @@ button { background-color: var(--control-bg); color: var(--ink); border: 1px sol
         <article id="system" class="panel" data-view-panel="system"><div class="panel-head"><h2>System Status</h2><span>readiness · infrastructure</span></div><div id="system-operations"><div class="system-check-grid"><p class="empty">Readiness checks unavailable.</p></div></div><div class="system-panel"><div id="system-stats"><dl><div><dt>Agent heartbeats online</dt><dd>0 / 0</dd></div><div><dt>Execution backend</dt><dd>unset</dd></div></dl></div><div id="system-probes" class="system-probes"></div></div></article>
       </section>
       <section class="grid lower">
-        <article id="dispatch" class="panel composer" data-view-panel="overview"><div class="panel-head"><h2>Create task</h2><span>authenticated session</span></div><form id="task-form" novalidate data-known-action-kinds="[]">
+        <article id="create-task" class="panel composer" data-view-panel="overview"><div class="panel-head"><h2>Create task</h2><span>authenticated session</span></div><form id="task-form" novalidate data-known-action-kinds="[]">
     <label>Task title<input name="title" required maxlength="120" placeholder="Investigate a failing route" /></label>
     <label>What should the agent do?<textarea name="intent" required rows="4" placeholder="Describe the goal and what a good result looks like."></textarea></label>
     <div class="form-row">
@@ -703,6 +801,13 @@ button { background-color: var(--control-bg); color: var(--ink); border: 1px sol
       <div class="detail-empty"><h3>No connector selected</h3><p>Select a connector to inspect tunnel sessions and granted scopes.</p></div>
     </section>
   </div></div></article>
+        <article id="mcp-clients-panel" class="panel wide" data-view-panel="connectors">
+  <div class="panel-head"><div><h2>MCP clients</h2><p>Who is connecting to Jace Commander (<code>/jc/mcp</code>) and Desktop Commander (<code>/mcp</code>). The client ID is verified by OAuth; names and user agents are self-declared.</p></div>
+    <span class="panel-tools"><span id="mcp-clients-policy" class="pill">loading</span><span id="mcp-clients-count" class="muted"></span></span></div>
+  <p id="mcp-clients-notice" class="mcp-notice" role="status" hidden></p>
+  <div class="table-wrap"><table id="mcp-clients-table" class="mcp-table"><thead><tr><th scope="col">Client</th><th scope="col">Client ID</th><th scope="col">Says it is (unverified)</th><th scope="col">Lane</th><th scope="col">Activity</th><th scope="col">Last seen</th></tr></thead><tbody id="mcp-clients-body"><tr><td colspan="6" class="muted">Loading MCP clients…</td></tr></tbody></table></div>
+  <details id="mcp-legacy" class="mcp-legacy" hidden><summary>Earlier callers without a client ID</summary><p class="muted">These calls were recorded before ACS stored the OAuth client ID, so they cannot be labelled.</p><table class="mcp-table"><thead><tr><th scope="col">Subject</th><th scope="col">Lane</th><th scope="col">Issued</th><th scope="col">Denied</th><th scope="col">Last seen</th></tr></thead><tbody id="mcp-legacy-body"></tbody></table></details>
+</article>
         <article id="policy" class="panel" data-view-panel="policy"><div class="panel-head"><h2>Policy</h2><span>recent decisions</span></div><div id="policy-body" class="policy-body"><p class="empty">No policy decisions in the recent window.</p></div></article>
         <details class="panel" data-view-panel="overview"><summary class="panel-head">Operational controls · authority</summary><p class="empty">Approve, reject, and unblock use authenticated backend routes and append audit events; each approval names the action hash it approves. Cancel, retry, and clone live in work-item detail: cancel and retry require a reason, cancel always asks for confirmation, and retry/clone create a new item that goes back through policy. Bulk approval and bulk cancel are not exposed. Displayed audit attributes and errors are redacted for secret-looking values.</p></details>
       </section>
@@ -725,6 +830,18 @@ let leaseWarningRoot = null;
 // clock backwards by the delay.
 const SERVER_CLOCK_MAX_RTT_MS = 10000;
 const sseEventNames = [
+  'mcp_client.seen',
+  'mcp_client.labelled',
+  'mcp_client.label_cleared',
+  'connector.requested',
+  'agent_run.requested',
+  'agent_run.started',
+  'agent_run.finished',
+  'agent_run.cancel_requested',
+  'agent_run.interrupted',
+  'agent_cli.tested',
+  'mission.dispatch.requested',
+  'mission.dispatch.observed',
   'work_item.created',
   'work_item.pending_policy',
   'work_item.needs_approval',
@@ -815,6 +932,7 @@ function connectSse() {
       if (selectedAgentId) loadAgentDetail(selectedAgentId);
       if (selectedExecutorId) loadExecutorDetail(selectedExecutorId);
       if (selectedConnectorId) loadConnectorDetail(selectedConnectorId);
+      loadMcpClients();
       announce('Live stream reconnected');
       if (selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
     }
@@ -852,6 +970,8 @@ function appendAuditEvent(event) {
   if (data.name === 'work_item.needs_approval') notifyApprovalNeeded(data);
   const eventName = String(data.name || event.type || '');
   onLiveAuditEvent(eventName, data);
+  onMcpClientAuditEvent(eventName);
+  onDispatchAuditEvent(eventName);
   if (eventName.startsWith('agent.') || eventName.startsWith('acp.')) {
     refreshAgentRoster();
     if (selectedAgentId) loadAgentDetail(selectedAgentId);
@@ -907,28 +1027,30 @@ function redactedAttributesJsonClient(value) {
 }
 
 
-const workItemControlStatuses = {"cancel":["draft","pending_policy","needs_approval","approved","running","blocked"],"retry":["succeeded","failed","cancelled","rejected"],"clone":["*"]};
-const workItemControlLabels = {"cancel":"Cancel work item","retry":"Retry as new item","clone":"Clone as new item"};
 const reasonRequiredControls = ["cancel","retry"];
-function workItemControlsFor(status) {
-  return ["cancel","retry","clone"].filter(function (control) {
-    const statuses = workItemControlStatuses[control];
-    return statuses.indexOf('*') !== -1 || statuses.indexOf(status) !== -1;
+const renderControlsTemplate = function renderControlsTemplate(workItem, connected, esc, tables) {
+  const controls = tables.controls.filter((control) => {
+    const statuses = tables.statuses[control];
+    return statuses.includes("*") || statuses.includes(workItem.status);
   });
-}
+  if (!controls.length) return "";
+  const id = esc(workItem.id);
+  const reasonId = `control-reason-${id}`;
+  const needsReason = controls.some((control) => tables.reasonRequired.includes(control));
+  const reason = needsReason ? `<label class="reason-field" for="${reasonId}"><span class="reason-label">Reason <span class="req">(required for cancel and retry)</span></span><input id="${reasonId}" data-control-reason="${id}" autocomplete="off" placeholder="Why cancel or retry" /></label>` : "";
+  const buttons = controls.map(
+    (control) => `<button type="button" data-work-control="${control}" data-work-item-id="${id}" data-risk="${esc(workItem.risk)}"${needsReason ? ` aria-describedby="${reasonId}"` : ""}${connected ? "" : " disabled"}>${tables.labels[control]}</button>`
+  ).join("");
+  return `<div class="detail-section work-controls" data-work-controls="${id}"><h4>Controls</h4>${reason}<div class="approval-actions" role="group" aria-label="Controls for ${esc(workItem.title)}">${buttons}</div><output id="control-result-${id}" class="approval-result" aria-live="polite"></output></div>`;
+};
+const controlsTemplateTables = {"controls":["cancel","retry","clone"],"statuses":{"cancel":["draft","pending_policy","needs_approval","approved","running","blocked"],"retry":["succeeded","failed","cancelled","rejected"],"clone":["*"]},"labels":{"cancel":"Cancel work item","retry":"Retry as new item","clone":"Clone as new item"},"reasonRequired":["cancel","retry"]};
 function workItemControlsMarkup(workItem, connected) {
-  const controls = workItemControlsFor(String(workItem.status || ''));
-  if (!controls.length) return '';
-  const id = escapeClient(workItem.id);
-  const reasonId = 'control-reason-' + id;
-  const needsReason = controls.some(function (control) { return reasonRequiredControls.indexOf(control) !== -1; });
-  const reason = needsReason
-    ? '<label class="reason-field" for="' + reasonId + '"><span class="reason-label">Reason <span class="req">(required for cancel and retry)</span></span><input id="' + reasonId + '" data-control-reason="' + id + '" autocomplete="off" placeholder="Why cancel or retry" /></label>'
-    : '';
-  const buttons = controls.map(function (control) {
-    return '<button type="button" data-work-control="' + control + '" data-work-item-id="' + id + '" data-risk="' + escapeClient(workItem.risk) + '"' + (needsReason ? ' aria-describedby="' + reasonId + '"' : '') + (connected ? '' : ' disabled') + '>' + workItemControlLabels[control] + '</button>';
-  }).join('');
-  return '<div class="detail-section work-controls" data-work-controls="' + id + '"><h4>Controls</h4>' + reason + '<div class="approval-actions" role="group" aria-label="Controls for ' + escapeClient(workItem.title) + '">' + buttons + '</div><output id="control-result-' + id + '" class="approval-result" aria-live="polite"></output></div>';
+  return renderControlsTemplate(
+    { id: workItem.id, title: workItem.title, status: String(workItem.status || ''), risk: workItem.risk },
+    connected,
+    escapeClient,
+    controlsTemplateTables
+  );
 }
 let workItemControlInFlight = false;
 document.addEventListener('click', async function (event) {
@@ -1070,6 +1192,21 @@ setInterval(function () {
   if (sseConnected && document.visibilityState !== 'hidden') scheduleDashboardRefresh(0);
 }, 30000);
 
+// Filter controls live inside fragment targets that are replaced wholesale, so a
+// coalesced refresh destroys and recreates the element the operator is typing into.
+// Without an explicit capture, focus and caret are lost mid-word on every refresh.
+const FILTER_CONTROL_IDS = ['execution-search', 'execution-stage', 'audit-search', 'audit-type'];
+
+function captureTextControlState(control) {
+  const state = { value: control.value };
+  if (typeof control.selectionStart === 'number') {
+    state.selectionStart = control.selectionStart;
+    state.selectionEnd = control.selectionEnd;
+    state.scrollTop = control.scrollTop;
+  }
+  return state;
+}
+
 function captureOperatorState() {
   const active = document.activeElement;
   const reasons = {};
@@ -1080,11 +1217,24 @@ function captureOperatorState() {
   document.querySelectorAll('.approval-result[id]').forEach(function (output) {
     if (output.textContent) outputs[output.id] = output.textContent;
   });
+  // Preserve every filter control's value, plus the caret and scroll position of
+  // whichever one currently has focus, so typing survives a refresh.
+  const filters = {};
+  FILTER_CONTROL_IDS.forEach(function (id) {
+    const control = document.getElementById(id);
+    if (control) filters[id] = captureTextControlState(control);
+  });
+  const activeFilterId =
+    active && FILTER_CONTROL_IDS.indexOf(active.id) !== -1 ? active.id : null;
+  const activeFilter = activeFilterId ? captureTextControlState(active) : null;
   return {
     activeId: active && active.id ? active.id : null,
     activeSelector: active && active.dataset && active.dataset.workItem ? '[data-work-item="' + cssAttr(active.dataset.workItem) + '"]' : null,
     reasons: reasons,
-    outputs: outputs
+    outputs: outputs,
+    filters: filters,
+    activeFilterId: activeFilterId,
+    activeFilter: activeFilter
   };
 }
 
@@ -1104,10 +1254,29 @@ function restoreOperatorState(state) {
       selected.setAttribute('aria-current', 'true');
     }
   }
+  // Restore filter values first, then focus and caret. Order matters: assigning
+  // .value resets the caret to the end, so the selection must be reapplied after.
+  Object.keys(state.filters || {}).forEach(function (id) {
+    const control = document.getElementById(id);
+    const saved = state.filters[id];
+    if (control && saved && control.value !== saved.value) control.value = saved.value;
+  });
   const target = (state.activeId && document.getElementById(state.activeId)) ||
     (state.activeSelector && document.querySelector(state.activeSelector));
   if (target && document.activeElement !== target && typeof target.focus === 'function') {
     target.focus({ preventScroll: true });
+  }
+  if (state.activeFilterId && state.activeFilter) {
+    const control = document.getElementById(state.activeFilterId);
+    if (control && typeof control.setSelectionRange === 'function') {
+      const { selectionStart, selectionEnd, scrollTop } = state.activeFilter;
+      try {
+        control.setSelectionRange(selectionStart, selectionEnd);
+      } catch {
+        // Some input types (for example number) reject selection ranges.
+      }
+      if (typeof scrollTop === 'number') control.scrollTop = scrollTop;
+    }
   }
 }
 
@@ -1432,6 +1601,9 @@ function writeSelectedItemToLocation(id) {
 }
 function selectWorkItem(id, options) {
   if (!id) return;
+  // A location-driven selection must never write the URL back: the URL is the input
+  // being synced from, and rewriting it during popstate/hashchange fights history.
+  const fromLocation = !!(options && options.fromLocation);
   document.querySelectorAll('[data-work-item]').forEach(function (candidate) {
     const match = candidate.dataset.workItem === id;
     candidate.classList.toggle('selected', match);
@@ -1439,7 +1611,7 @@ function selectWorkItem(id, options) {
   });
   openWorkDrawer();
   selectedWorkItemId = id;
-  writeSelectedItemToLocation(id);
+  if (!fromLocation) writeSelectedItemToLocation(id);
   if (options && options.scroll) {
     const row = document.querySelector('[data-work-item="' + cssAttr(id) + '"]');
     if (row && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
@@ -1455,7 +1627,36 @@ function openWorkItemFromLocation() {
   if (!location.hash) showView('queue');
   selectWorkItem(id, { scroll: true });
 }
-window.addEventListener('popstate', openWorkItemFromLocation);
+
+/**
+ * Derive the whole view state from location on every history transition.
+ *
+ * Back/Forward must not leave the URL and the UI disagreeing. Deriving both the
+ * active view and the drawer from location, on both popstate and hashchange, means:
+ *   URL item A -> drawer A
+ *   URL item B -> drawer B
+ *   no item    -> drawer closed
+ *   unknown item -> the drawer opens on that id and shows a deterministic
+ *                   not-found/error state from the normal detail fetch, rather than
+ *                   silently keeping the previously shown item.
+ * The previous implementation only closed the drawer when ?item= disappeared, so
+ * moving from item B back to item A could leave the drawer showing B.
+ */
+function syncViewStateFromLocation() {
+  showView(location.hash.slice(1) || 'overview');
+  const id = workItemIdFromLocation();
+  const drawer = document.getElementById('work-drawer');
+  const drawerOpen = !!drawer && !drawer.hidden;
+  if (!id) {
+    if (drawerOpen) closeWorkDrawer({ fromLocation: true });
+    return;
+  }
+  if (drawerOpen && selectedWorkItemId === id) return;
+  if (!location.hash) showView('queue');
+  selectWorkItem(id, { scroll: true, fromLocation: true });
+}
+window.addEventListener('popstate', syncViewStateFromLocation);
+window.addEventListener('hashchange', syncViewStateFromLocation);
 
 // --- #14 live wait badges between refreshes.
 function formatWaitClient(ms) {
@@ -1745,7 +1946,7 @@ document.getElementById('theme-toggle')?.addEventListener('click', function () {
 renderThemeToggle();
 
 
-const pageMeta = {"overview":{"title":"Mission Control","description":"Coordinate work, agents, and outcomes across the control plane.","icon":"⌂"},"queue":{"title":"Work Queue","description":"Inspect work, admission, policy, and the next action that needs your attention.","icon":"▤"},"execution":{"title":"Execution","description":"Monitor live attempts, queues, failures, and throughput across the control plane.","icon":"▷"},"approvals":{"title":"Approvals","description":"Review policy-bound requests and record an explicit operator decision.","icon":"◇"},"agents":{"title":"Agents","description":"Registry identities, capability coverage, assignments, and observed health.","icon":"♧"},"executors":{"title":"Executors","description":"Inspect managed bridges, attested runtimes, and execution capabilities.","icon":"⬡"},"connectors":{"title":"Connectors","description":"Registered integrations, granted scopes, and authenticated tunnel sessions.","icon":"⌘"},"metrics":{"title":"Metrics","description":"Persisted execution telemetry and observed control-plane counters.","icon":"▥"},"audit":{"title":"Audit","description":"Investigate immutable events, actors, resources, and correlated decisions.","icon":"▦"},"policy":{"title":"Policy","description":"Understand evaluations, matched rules, and fail-closed decisions.","icon":"⛨"},"system":{"title":"System","description":"Readiness checks, execution admission, and connected infrastructure.","icon":"⚙"}};
+const pageMeta = {"overview":{"title":"Mission Control","description":"Coordinate work, agents, and outcomes across the control plane."},"queue":{"title":"Work Queue","description":"Inspect work, admission, policy, and the next action that needs your attention."},"execution":{"title":"Execution","description":"Monitor live attempts, queues, failures, and throughput across the control plane."},"approvals":{"title":"Approvals","description":"Review policy-bound requests and record an explicit operator decision."},"agents":{"title":"Agents","description":"Registry identities, capability coverage, assignments, and observed health."},"dispatch":{"title":"Dispatch","description":"Execute approved missions through ACS, or review a separate host-side CLI run."},"executors":{"title":"Executors","description":"Inspect managed bridges, attested runtimes, and execution capabilities."},"connectors":{"title":"Connectors","description":"Registered integrations, granted scopes, and authenticated tunnel sessions."},"metrics":{"title":"Metrics","description":"Persisted execution telemetry and observed control-plane counters."},"audit":{"title":"Audit","description":"Investigate immutable events, actors, resources, and correlated decisions."},"policy":{"title":"Policy","description":"Understand evaluations, matched rules, and fail-closed decisions."},"system":{"title":"System","description":"Readiness checks, execution admission, and connected infrastructure."}};
 let drawerReturnFocus = null;
 let executionSearch = '';
 let executionStageFilter = '';
@@ -1759,10 +1960,7 @@ function closeAuditDrawer() {
   document.querySelector('aside').inert = false;
   Array.from(document.getElementById('main-content').children).forEach(function (child) { child.inert = false; });
   document.body.style.overflow = '';
-  const replacement = auditReturnFocus?.dataset.inspectAudit
-    ? document.querySelector('[data-inspect-audit="' + cssAttr(auditReturnFocus.dataset.inspectAudit) + '"]') : null;
-  const target = auditReturnFocus?.isConnected ? auditReturnFocus : replacement || document.getElementById('audit-search') || document.getElementById('main-content');
-  target?.focus({ preventScroll: true });
+  if (auditReturnFocus?.isConnected) auditReturnFocus.focus({ preventScroll: true });
 }
 document.getElementById('audit-drawer-close')?.addEventListener('click', closeAuditDrawer);
 document.addEventListener('click', function (event) {
@@ -1782,7 +1980,7 @@ document.addEventListener('click', function (event) {
 });
 document.addEventListener('keydown', function (event) {
   const drawer = document.getElementById('audit-drawer');
-  if (event.defaultPrevented || drawer.hidden || (document.getElementById('shortcut-help') && !document.getElementById('shortcut-help').hidden) || document.getElementById('approval-confirm-dialog')) return;
+  if (drawer.hidden) return;
   if (event.key === 'Escape') { event.preventDefault(); closeAuditDrawer(); }
   if (event.key === 'Tab') {
     const fields = Array.from(drawer.querySelectorAll('button:not([disabled]), a[href], summary, [tabindex="0"]')).filter(function (e) { return !e.hidden; });
@@ -1800,7 +1998,7 @@ function openWorkDrawer() {
   Array.from(document.getElementById('main-content').children).forEach(function (child) { if (child !== drawer) child.inert = true; });
   document.body.style.overflow = 'hidden';
 }
-function closeWorkDrawer() {
+function closeWorkDrawer(options) {
   const drawer = document.getElementById('work-drawer');
   if (!drawer || drawer.hidden) return;
   drawer.hidden = true;
@@ -1808,19 +2006,24 @@ function closeWorkDrawer() {
   Array.from(document.getElementById('main-content').children).forEach(function (child) { child.inert = false; });
   document.body.style.overflow = '';
   selectedWorkItemId = null;
-  document.querySelectorAll('[data-work-item]').forEach(function (row) {
-    row.classList.remove('selected'); row.removeAttribute('aria-current');
+  // Clear the row highlight too. Leaving a row marked selected after the drawer is
+  // closed presented stale state that no longer matched the URL or the selection.
+  document.querySelectorAll('[data-work-item].selected').forEach(function (row) {
+    row.classList.remove('selected');
+    row.removeAttribute('aria-current');
   });
   workDetailGeneration += 1;
   stopLeaseExpiryWarningRefresh();
-  writeSelectedItemToLocation(null);
+  // A location-driven close must not rewrite the URL: location is the source of
+  // truth during history navigation, and writing back would fight the browser.
+  if (!(options && options.fromLocation)) writeSelectedItemToLocation(null);
   if (drawerReturnFocus && drawerReturnFocus.isConnected) drawerReturnFocus.focus({ preventScroll: true });
   else document.getElementById('main-content').focus({ preventScroll: true });
 }
 document.getElementById('work-drawer-close')?.addEventListener('click', closeWorkDrawer);
 document.addEventListener('keydown', function (event) {
   const drawer = document.getElementById('work-drawer');
-  if (event.defaultPrevented || !drawer || drawer.hidden || (document.getElementById('shortcut-help') && !document.getElementById('shortcut-help').hidden) || document.getElementById('approval-confirm-dialog')) return;
+  if (!drawer || drawer.hidden || document.getElementById('approval-confirm-dialog')) return;
   if (event.key === 'Escape') { event.preventDefault(); closeWorkDrawer(); }
   if (event.key === 'Tab') {
     const fields = Array.from(drawer.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], summary, [tabindex="0"]')).filter(function (e) { return !e.hidden; });
@@ -1836,6 +2039,26 @@ function syncPageHeading(view) {
   document.querySelectorAll('nav a[data-nav]').forEach(function (link) {
     if (link.dataset.nav === view) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
   });
+}
+/**
+ * Command palette results visibility.
+ *
+ * Closing used to be a side effect of the delegated click handler, so results stayed
+ * open for any click that did not match one of its targets. Visibility is now owned
+ * by one helper, and every path that should close the palette goes through it.
+ */
+function closeCommandResults(options) {
+  const results = document.getElementById('command-results');
+  if (!results || results.hidden) return false;
+  results.hidden = true;
+  // Only pull focus back when it was inside the panel we just closed.
+  if (options && options.restoreFocus && results.contains(document.activeElement)) {
+    document.getElementById('command-search')?.focus({ preventScroll: true });
+  }
+  return true;
+}
+function isCommandSurface(node) {
+  return !!(node && node.closest && node.closest('#command-results, #command-search'));
 }
 function applyOperationFilters() {
   const text = executionSearch.toLowerCase();
@@ -1888,7 +2111,7 @@ document.addEventListener('click', function (event) {
     selectedAgentId = node.dataset.inspectAgent; void loadAgentDetail(selectedAgentId);
   } else if (node.hasAttribute('data-create-task')) {
     showView('overview'); history.pushState(null, '', '#overview');
-    const composer = document.getElementById('dispatch');
+    const composer = document.getElementById('create-task');
     composer.open = true;
     composer.scrollIntoView?.({ block: 'start' }); composer.querySelector('input')?.focus();
   } else if (node.hasAttribute('data-refresh-dashboard')) {
@@ -1896,7 +2119,13 @@ document.addEventListener('click', function (event) {
   } else if (node.dataset.searchView) {
     showView(node.dataset.searchView); history.pushState(null, '', '#' + node.dataset.searchView);
   }
-  document.getElementById('command-results').hidden = true;
+  closeCommandResults();
+});
+// Any click outside the palette input and its results closes the palette,
+// including navigation and card clicks that match none of the delegated targets.
+document.addEventListener('click', function (event) {
+  if (isCommandSurface(event.target)) return;
+  closeCommandResults();
 });
 function searchCommands() {
   const query = document.getElementById('command-search').value.trim().toLowerCase();
@@ -1922,10 +2151,11 @@ function searchCommands() {
 document.getElementById('command-search')?.addEventListener('input', searchCommands);
 document.addEventListener('keydown', function (event) {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); document.getElementById('command-search').focus(); }
-  if (event.key === 'Escape') document.getElementById('command-results').hidden = true;
+  if (event.key === 'Escape') closeCommandResults({ restoreFocus: true });
 });
-window.addEventListener('hashchange', function () { showView(location.hash.slice(1)); });
-window.addEventListener('popstate', function () { showView(location.hash.slice(1)); if (!workItemIdFromLocation()) closeWorkDrawer(); });
+// View and drawer state on Back/Forward is derived from location in one place.
+// See syncViewStateFromLocation() in operator-workflow.ts; duplicating a partial
+// version here is what allowed the URL and drawer to disagree.
 window.addEventListener('pagehide', function () { if (sseSource) sseSource.close(); });
 applyOperationFilters();
 
@@ -1989,7 +2219,7 @@ function bindWorkItems() {
   document.addEventListener('click', function (event) {
     const button = event.target && event.target.closest ? event.target.closest('[data-work-item]') : null;
     if (!button) return;
-    selectWorkItem(button.dataset.workItem);
+    selectWorkItem(button.dataset.workItem, { keepFocus: true });
   });
 }
 
@@ -2925,21 +3155,65 @@ function applyConfirmedExecutionMode(mode, problem) {
   if (admin) { admin.hidden = mode !== 'admin'; admin.textContent = mode === 'admin' ? "ACS ADMIN MODE -- human approval disabled" : ''; }
   if (issue) { issue.hidden = !problem; issue.textContent = problem ? 'ACS execution mode ' + problem + ' -- fail closed' : ''; }
 }
+function requestAdminModeConfirm() {
+  return new Promise(function (resolve) {
+    const existing = document.getElementById('admin-mode-confirm-dialog');
+    if (existing) existing.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'admin-mode-confirm-dialog';
+    overlay.className = 'approval-confirm-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-labelledby', 'admin-mode-confirm-title');
+    overlay.innerHTML = '<div class="approval-confirm-card">' +
+      '<h3 id="admin-mode-confirm-title">Enable Admin mode?</h3>' +
+      '<p>Human approval is disabled for approval-gated work until Admin mode expires or you switch back to Strict. Policy denials still apply and privileged_exec stays human-only.</p>' +
+      '<label for="admin-mode-reason">Reason (required, at least 8 characters)</label>' +
+      '<input id="admin-mode-reason" type="text" maxlength="512" autocomplete="off">' +
+      '<p id="admin-mode-reason-error" class="field-error" role="alert"></p>' +
+      '<div class="approval-confirm-actions">' +
+      '<button type="button" id="admin-mode-cancel">Keep Strict</button>' +
+      '<button type="button" id="admin-mode-ok">Enable Admin</button></div></div>';
+    document.body.appendChild(overlay);
+    const reasonInput = overlay.querySelector('#admin-mode-reason');
+    const errorLine = overlay.querySelector('#admin-mode-reason-error');
+    function finish(reason) {
+      document.removeEventListener('keydown', onKey);
+      overlay.remove();
+      resolve(reason);
+    }
+    function onKey(event) { if (event.key === 'Escape') { event.preventDefault(); finish(null); } }
+    document.addEventListener('keydown', onKey);
+    overlay.querySelector('#admin-mode-cancel').addEventListener('click', function () { finish(null); });
+    overlay.querySelector('#admin-mode-ok').addEventListener('click', function () {
+      const reason = reasonInput.value.trim();
+      if (reason.length < 8) { errorLine.textContent = 'Enter a reason of at least 8 characters.'; reasonInput.focus(); return; }
+      finish(reason);
+    });
+    reasonInput.focus();
+  });
+}
 document.addEventListener('change', async function (event) {
   const input = event.target;
   if (!input.matches('input[name="executionMode"]') || !input.checked || executionModeInFlight) return;
   const output = document.querySelector('#execution-mode-result');
   const nextMode = input.value;
+  let modeReason = 'operator set ' + nextMode + ' from mission control';
+  if (nextMode === 'admin') {
+    const adminReason = await requestAdminModeConfirm();
+    if (adminReason === null) { applyConfirmedExecutionMode(confirmedExecutionMode); if (output) output.textContent = 'Admin mode not enabled'; return; }
+    modeReason = adminReason;
+  }
   executionModeInFlight = true;
   document.querySelectorAll('input[name="executionMode"]').forEach(function (radio) { radio.disabled = true; });
   if (output) output.textContent = 'Saving mode…';
   try {
     const res = await fetch('/execution-mode', { method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ mode: nextMode, reason: 'operator set ' + nextMode + ' from mission control' }) });
+      body: JSON.stringify({ mode: nextMode, reason: modeReason }) });
     const body = await res.json().catch(function () { return {}; });
     if (!res.ok || (body.executionMode !== 'strict' && body.executionMode !== 'admin')) throw new Error(body.error || body.code || 'Mode change rejected (' + res.status + ')');
     applyConfirmedExecutionMode(body.executionMode);
-    if (output) output.textContent = 'mode ' + body.executionMode;
+    if (output) output.textContent = body.executionMode === 'admin' && body.expiresAt ? 'admin until ' + new Date(body.expiresAt).toLocaleTimeString() : 'mode ' + body.executionMode;
     scheduleDashboardRefresh(0);
   } catch (error) {
     applyConfirmedExecutionMode(confirmedExecutionMode);
@@ -3152,6 +3426,542 @@ composerForm?.addEventListener('submit', async function (event) {
 });
 
 
+const mcpState = { summary: null, clients: [], legacy: [], loaded: false, skewMs: 0, liveWindowMs: 300000 };
+// Liveness comes from lastSeenAt and the server's clock, so it expires between refreshes.
+function mcpIsLive(client) {
+  const age = Date.now() + mcpState.skewMs - new Date(client.lastSeenAt).getTime();
+  return Number.isFinite(age) && age <= mcpState.liveWindowMs;
+}
+let mcpRefreshTimer = null;
+const MCP_KIND_LABELS = { chatgpt: 'ChatGPT', muse: 'Muse', grok: 'Grok', claude: 'Claude', gemini: 'Gemini', other: 'Other' };
+
+function mcpAgo(value) {
+  const ms = Date.now() + mcpState.skewMs - new Date(value).getTime();
+  if (!Number.isFinite(ms)) return '—';
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.round(s / 60) + 'm ago';
+  if (s < 86400) return Math.round(s / 3600) + 'h ago';
+  return Math.round(s / 86400) + 'd ago';
+}
+
+function mcpPolicyBlocks() { return !!(mcpState.summary && mcpState.summary.policy === 'require_label'); }
+
+function renderMcpClients() {
+  const body = document.getElementById('mcp-clients-body');
+  if (!body) return;
+  const summary = mcpState.summary || { total: 0, unrecognized: 0, liveUnrecognized: 0, policy: 'observe' };
+  const policy = document.getElementById('mcp-clients-policy');
+  if (policy) {
+    policy.textContent = summary.policy === 'require_label' ? 'Unlabelled clients are blocked' : 'Observe only';
+    policy.className = 'pill ' + (summary.policy === 'require_label' ? 'blocked' : 'off');
+  }
+  const count = document.getElementById('mcp-clients-count');
+  if (count) count.textContent = summary.total + ' client' + (summary.total === 1 ? '' : 's') + ' · ' + summary.unrecognized + ' unrecognized';
+  const notice = document.getElementById('mcp-clients-notice');
+  if (notice) {
+    const lines = [];
+    if (summary.policy === 'require_label' && summary.unrecognized > 0) lines.push(summary.unrecognized + ' unlabelled client' + (summary.unrecognized === 1 ? ' is' : 's are') + ' blocked from ACS capability issuance until you label ' + (summary.unrecognized === 1 ? 'it' : 'them') + '.');
+    if (summary.policy === 'observe' && summary.unrecognized > 0) lines.push('Unrecognized clients can still use ACS. Label the ones you trust; set ACS_MCP_CLIENT_POLICY=require_label on the gateway to block the rest.');
+    notice.hidden = lines.length === 0;
+    notice.textContent = lines.join(' ');
+  }
+  if (!mcpState.clients.length) {
+    body.innerHTML = '<tr><td colspan="6" class="muted">No MCP client has connected yet. When ChatGPT, Muse, Grok or another client uses the endpoint it will appear here.</td></tr>';
+  } else {
+    body.innerHTML = mcpState.clients.map(function (client) {
+      const who = client.status === 'labelled'
+        ? '<strong>' + escapeClient(client.label) + '</strong> <span class="pill labelled">' + escapeClient(MCP_KIND_LABELS[client.kind] || client.kind) + '</span>' + (client.note ? '<br><small class="muted">' + escapeClient(client.note) + '</small>' : '')
+        : '<span class="pill unrecognized">Unrecognized</span>' + (client.suggestedKind ? '<br><small class="muted">Looks like ' + escapeClient(MCP_KIND_LABELS[client.suggestedKind] || client.suggestedKind) + ' (unverified)</small>' : '');
+      const claims = client.claims && client.claims.length
+        ? '<ul class="mcp-claims">' + client.claims.map(function (c) { return '<li>' + escapeClient([c.name, c.version].filter(Boolean).join(' ') || '—') + (c.userAgent ? '<br><small class="muted">' + escapeClient(c.userAgent) + '</small>' : '') + '</li>'; }).join('') + '</ul>'
+        : '<span class="muted">nothing declared</span>';
+      const lanes = (client.lanes || []).map(function (lane) { return lane === 'jc' ? 'Jace Commander' : 'Desktop Commander'; }).join(', ');
+      const activity = client.connects + ' connect' + (client.connects === 1 ? '' : 's') + ' · ' + client.issued + ' issued · ' + client.denied + ' denied' + (client.lastTool ? '<br><small class="muted">last: ' + escapeClient(client.lastTool) + '</small>' : '');
+      const action = client.status === 'labelled'
+        ? '<button type="button" class="tool-button" data-mcp-edit="' + escapeClient(client.clientId) + '">Edit</button> <button type="button" class="tool-button" data-mcp-clear="' + escapeClient(client.clientId) + '">Clear</button>'
+        : '<button type="button" class="tool-button" data-mcp-label="' + escapeClient(client.clientId) + '">Label…</button>';
+      return '<tr data-mcp-client="' + escapeClient(client.clientId) + '"><td>' + who + '<div class="mcp-actions">' + action + '</div></td><td><code>' + escapeClient(client.clientId) + '</code>' + (client.subjects && client.subjects.length ? '<br><small class="muted">subject ' + escapeClient(client.subjects.join(', ')) + '</small>' : '') + '</td><td>' + claims + '</td><td>' + escapeClient(lanes) + '</td><td>' + activity + '</td><td><span class="' + (mcpIsLive(client) ? 'mcp-live' : 'mcp-idle') + '" aria-hidden="true"></span>' + escapeClient(mcpIsLive(client) ? 'live' : mcpAgo(client.lastSeenAt)) + '<br><small class="muted">first ' + escapeClient(formatClientTime(client.firstSeenAt)) + '</small></td></tr>';
+    }).join('');
+  }
+  const legacy = document.getElementById('mcp-legacy');
+  const legacyBody = document.getElementById('mcp-legacy-body');
+  if (legacy && legacyBody) {
+    legacy.hidden = !mcpState.legacy.length;
+    legacyBody.innerHTML = mcpState.legacy.map(function (row) {
+      return '<tr><td><code>' + escapeClient(row.subject) + '</code></td><td>' + escapeClient(row.lane === 'jc' ? 'Jace Commander' : 'Desktop Commander') + '</td><td>' + escapeClient(row.issued) + '</td><td>' + escapeClient(row.denied) + '</td><td>' + escapeClient(mcpAgo(row.lastSeenAt)) + '</td></tr>';
+    }).join('');
+  }
+  renderMcpAlert();
+}
+
+function renderMcpAlert() {
+  const alert = document.getElementById('mcp-client-alert');
+  if (!alert) return;
+  const summary = mcpState.summary;
+  const live = mcpState.clients.filter(function (c) { return c.status === 'unrecognized' && mcpIsLive(c); });
+  if (!summary || !live.length) { alert.hidden = true; alert.textContent = ''; return; }
+  const names = live.slice(0, 3).map(function (c) { return c.suggestedKind ? (MCP_KIND_LABELS[c.suggestedKind] + '?') : c.clientId.slice(0, 18); }).join(', ');
+  alert.textContent = (mcpPolicyBlocks() ? 'Blocked: ' : 'Unrecognized MCP client active: ') + live.length + ' (' + names + '). ' + (mcpPolicyBlocks() ? 'Label it in Connectors to allow it.' : 'Review in Connectors.');
+  alert.hidden = false;
+}
+
+async function loadMcpClients() {
+  try {
+    const res = await fetch('/api/mcp-clients');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const body = await res.json();
+    mcpState.summary = body.summary || null;
+    mcpState.clients = body.clients || [];
+    mcpState.legacy = body.legacy || [];
+    mcpState.skewMs = body.now ? new Date(body.now).getTime() - Date.now() : 0;
+    mcpState.liveWindowMs = body.liveWindowMs || 300000;
+    mcpState.loaded = true;
+    renderMcpClients();
+  } catch (error) {
+    const bodyEl = document.getElementById('mcp-clients-body');
+    if (bodyEl && !mcpState.loaded) bodyEl.innerHTML = '<tr><td colspan="6" class="muted" role="alert">Could not load MCP clients: ' + escapeClient(redactClient(error.message)) + '</td></tr>';
+  }
+}
+
+function scheduleMcpClientsRefresh() {
+  if (mcpRefreshTimer) return;
+  mcpRefreshTimer = setTimeout(function () { mcpRefreshTimer = null; loadMcpClients(); }, 800);
+}
+
+function onMcpClientAuditEvent(eventName) {
+  if (eventName.startsWith('mcp_client.') || eventName === 'connector.requested') scheduleMcpClientsRefresh();
+}
+
+function mcpDialog(title, html) {
+  return new Promise(function (resolve) {
+    const existing = document.getElementById('mcp-client-dialog');
+    if (existing) existing.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'mcp-client-dialog';
+    overlay.className = 'approval-confirm-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-labelledby', 'mcp-client-dialog-title');
+    overlay.innerHTML = '<div class="approval-confirm-card"><h3 id="mcp-client-dialog-title"></h3>' + html + '<p id="mcp-dialog-error" class="field-error" role="alert"></p><div class="approval-confirm-actions"><button type="button" id="mcp-dialog-cancel">Cancel</button><button type="button" id="mcp-dialog-ok">Save</button></div></div>';
+    document.body.appendChild(overlay);
+    overlay.querySelector('#mcp-client-dialog-title').textContent = title;
+    function finish(value) { document.removeEventListener('keydown', onKey); overlay.remove(); resolve(value); }
+    function onKey(event) { if (event.key === 'Escape') { event.preventDefault(); finish(null); } }
+    document.addEventListener('keydown', onKey);
+    overlay.querySelector('#mcp-dialog-cancel').addEventListener('click', function () { finish(null); });
+    overlay.querySelector('#mcp-dialog-ok').addEventListener('click', function () { finish({ overlay: overlay, close: function () { finish(true); } }); });
+    const first = overlay.querySelector('select, input');
+    if (first) first.focus(); else overlay.querySelector('#mcp-dialog-cancel').focus();
+  });
+}
+
+async function mcpPost(url, payload) {
+  const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+  const body = await res.json().catch(function () { return {}; });
+  if (!res.ok) throw new Error(body.error || body.code || ('Request failed (' + res.status + ')'));
+  return body;
+}
+
+async function labelMcpClient(clientId) {
+  const client = mcpState.clients.find(function (c) { return c.clientId === clientId; });
+  if (!client) return;
+  if (!sseConnected) { announce('Disconnected: labelling is disabled until the live stream reconnects'); return; }
+  const kind = client.kind || client.suggestedKind || 'other';
+  const options = Object.keys(MCP_KIND_LABELS).map(function (k) { return '<option value="' + k + '"' + (k === kind ? ' selected' : '') + '>' + MCP_KIND_LABELS[k] + '</option>'; }).join('');
+  const warn = mcpPolicyBlocks() ? '<p class="muted">Labelling lets this client use ACS capability issuance. Approvals, policy and leases still apply to every call.</p>' : '<p class="muted">A label is a name for your records. It does not approve or widen anything.</p>';
+  const dialog = mcpDialog(client.status === 'labelled' ? 'Edit client label' : 'Label this client',
+    '<p>Client ID: <code id="mcp-dialog-id"></code></p>' + warn +
+    '<div class="mcp-label-form"><label>Kind<select id="mcp-dialog-kind">' + options + '</select></label>' +
+    '<label>Label<input id="mcp-dialog-label" maxlength="64" autocomplete="off"></label>' +
+    '<label>Note (optional)<input id="mcp-dialog-note" maxlength="200" autocomplete="off"></label></div>');
+  const overlay = document.getElementById('mcp-client-dialog');
+  overlay.querySelector('#mcp-dialog-id').textContent = clientId;
+  const labelInput = overlay.querySelector('#mcp-dialog-label');
+  const kindSelect = overlay.querySelector('#mcp-dialog-kind');
+  labelInput.value = client.label || MCP_KIND_LABELS[kind];
+  overlay.querySelector('#mcp-dialog-note').value = client.note || '';
+  kindSelect.addEventListener('change', function () { if (!client.label) labelInput.value = MCP_KIND_LABELS[kindSelect.value]; });
+  const result = await dialog;
+  if (!result) return;
+  const label = labelInput.value.trim();
+  if (!label) { announce('A label is required'); return; }
+  try {
+    await mcpPost('/api/mcp-clients/label', { clientId: clientId, kind: kindSelect.value, label: label, note: overlay.querySelector('#mcp-dialog-note').value.trim() || undefined });
+    announce('Labelled ' + label);
+  } catch (error) { announce('Could not label: ' + redactClient(error.message)); }
+  await loadMcpClients();
+}
+
+async function clearMcpClient(clientId) {
+  const client = mcpState.clients.find(function (c) { return c.clientId === clientId; });
+  if (!client) return;
+  if (!sseConnected) { announce('Disconnected: changes are disabled until the live stream reconnects'); return; }
+  const message = mcpPolicyBlocks() ? '<p>This client will be blocked from ACS capability issuance until it is labelled again.</p>' : '<p>The client will show as Unrecognized again.</p>';
+  const result = await mcpDialog('Clear label for ' + (client.label || clientId) + '?', message);
+  if (!result) return;
+  try { await mcpPost('/api/mcp-clients/label/clear', { clientId: clientId }); announce('Label cleared'); }
+  catch (error) { announce('Could not clear label: ' + redactClient(error.message)); }
+  await loadMcpClients();
+}
+
+document.addEventListener('click', function (event) {
+  const target = event.target && event.target.closest ? event.target : null;
+  if (!target) return;
+  // A bare #connectors link only changes the hash; go through the dashboard's own navigation so the panel shows.
+  if (target.closest('#mcp-client-alert')) { event.preventDefault(); showView('connectors'); history.pushState(null, '', '#connectors'); return; }
+  const label = target.closest('[data-mcp-label],[data-mcp-edit]');
+  if (label) { void labelMcpClient(label.dataset.mcpLabel || label.dataset.mcpEdit); return; }
+  const clear = target.closest('[data-mcp-clear]');
+  if (clear) void clearMcpClient(clear.dataset.mcpClear);
+});
+
+setTimeout(loadMcpClients, 0);
+// Keep "live" and relative times honest without refetching.
+setInterval(function () { if (mcpState.loaded) renderMcpClients(); }, 30000);
+
+
+const dispatchState = { agents: [], dispatch: { enabled: false, repoRoots: [], repos: [] }, runs: [], selectedRunId: null, loaded: false };
+let dispatchRunsTimer = null;
+
+async function dispatchJson(url, init) {
+  const res = await fetch(url, init);
+  const body = await res.json().catch(function () { return {}; });
+  if (!res.ok) { const error = new Error(body.error || body.code || ('Request failed (' + res.status + ')')); error.code = body.code; throw error; }
+  return body;
+}
+
+function dispatchStatusPill(agent) {
+  if (!agent.installed) return '<span class="pill missing">not installed</span>';
+  if (agent.dispatchBlockedReason) return '<span class="pill blocked">blocked</span>';
+  if (!dispatchState.dispatch.enabled) return '<span class="pill off">dispatch off</span>';
+  return '<span class="pill ready">ready</span>';
+}
+
+function renderCliAgents() {
+  const grid = document.getElementById('cli-agent-grid');
+  const banner = document.getElementById('dispatch-banner');
+  if (!grid) return;
+  if (banner) {
+    const off = !dispatchState.dispatch.enabled;
+    banner.hidden = !off;
+    banner.textContent = off ? 'Agent dispatch is off on this gateway. Set ACS_AGENT_DISPATCH_ENABLED=1 and ACS_AGENT_REPO_ROOTS (colon-separated repository roots), then restart it. Agents below are detected but cannot run.' : '';
+  }
+  if (!dispatchState.agents.length) { grid.innerHTML = '<p class="muted">No CLI agents known.</p>'; return; }
+  grid.innerHTML = dispatchState.agents.map(function (agent) {
+    const test = agent.lastTest
+      ? '<p>Last test ' + escapeClient(formatClientTime(agent.lastTest.at)) + ': ' + (agent.lastTest.ok ? 'passed' : 'failed — ' + escapeClient(redactClient(agent.lastTest.detail).slice(0, 140))) + '</p>'
+      : '<p>Not tested yet.</p>';
+    const reason = agent.unavailableReason ? '<p class="cli-reason">' + escapeClient(agent.unavailableReason) + '</p>' : '';
+    const meta = [
+      agent.version ? 'v' + escapeClient(agent.version) : '',
+      agent.versionDrift ? 'newer than verified (' + escapeClient(agent.verifiedAgainst) + ')' : '',
+      agent.installed ? (agent.loginDetected ? 'login found' : 'no login found') : '',
+      agent.readOnlySupported ? 'read-only mode' : 'edit only',
+      agent.registered ? 'in roster' : ''
+    ].filter(Boolean).map(function (item) { return '<span class="pill">' + item + '</span>'; }).join('');
+    return '<div class="cli-card" data-cli-agent="' + escapeClient(agent.id) + '"><h3>' + escapeClient(agent.displayName) + dispatchStatusPill(agent) + '</h3>' +
+      '<div class="cli-meta">' + meta + '</div>' + reason + test +
+      '<p>' + escapeClient(agent.editContainment) + '</p>' +
+      '<p class="cli-governance" data-governance="' + escapeClient(agent.governance) + '"><strong>ACS governance:</strong> ' + escapeClient(agent.governanceSummary) + '</p>' +
+      '<div><button type="button" class="tool-button" data-cli-test="' + escapeClient(agent.id) + '"' + (agent.installed && dispatchState.dispatch.enabled ? '' : ' disabled') + '>Test connection</button></div></div>';
+  }).join('');
+}
+
+function renderDispatchForm() {
+  const form = document.getElementById('dispatch-form');
+  if (!form) return;
+  const select = form.querySelector('select[name="agentId"]');
+  const previous = select.value;
+  const ready = dispatchState.agents.filter(function (agent) { return agent.dispatchable; });
+  select.innerHTML = ready.length
+    ? ready.map(function (agent) { return '<option value="' + escapeClient(agent.id) + '">' + escapeClient(agent.displayName) + '</option>'; }).join('')
+    : '<option value="">No agent is ready</option>';
+  if (previous && ready.some(function (agent) { return agent.id === previous; })) select.value = previous;
+  const repos = form.querySelector('#dispatch-repos');
+  const suggestions = dispatchState.dispatch.repos && dispatchState.dispatch.repos.length ? dispatchState.dispatch.repos : dispatchState.dispatch.repoRoots;
+  repos.innerHTML = suggestions.map(function (path) { return '<option value="' + escapeClient(path) + '"></option>'; }).join('');
+  const repoInput = form.querySelector('input[name="repo"]');
+  if (!repoInput.value && suggestions.length) repoInput.value = suggestions[0];
+  syncDispatchModes();
+  form.querySelector('#dispatch-submit').disabled = !ready.length;
+}
+
+function syncDispatchModes() {
+  const form = document.getElementById('dispatch-form');
+  if (!form) return;
+  const agent = dispatchState.agents.find(function (item) { return item.id === form.querySelector('select[name="agentId"]').value; });
+  const readOnly = form.querySelector('input[name="mode"][value="read-only"]');
+  readOnly.disabled = !agent || !agent.readOnlySupported;
+  if (readOnly.disabled && readOnly.checked) form.querySelector('input[name="mode"][value="edit"]').checked = true;
+}
+
+async function loadCliAgents() {
+  try {
+    const body = await dispatchJson('/api/agent-clis');
+    dispatchState.agents = body.agents || [];
+    dispatchState.dispatch = body.dispatch || dispatchState.dispatch;
+    dispatchState.loaded = true;
+    renderCliAgents();
+    renderDispatchForm();
+  } catch (error) {
+    const grid = document.getElementById('cli-agent-grid');
+    if (grid) grid.innerHTML = '<p class="muted" role="alert">Could not load CLI agents: ' + escapeClient(redactClient(error.message)) + '</p>';
+  }
+}
+
+function renderAgentRuns() {
+  const list = document.getElementById('agent-run-list');
+  const count = document.getElementById('agent-runs-count');
+  if (!list) return;
+  if (count) count.textContent = dispatchState.runs.length + ' recent';
+  if (!dispatchState.runs.length) { list.innerHTML = '<p class="muted">No runs yet.</p>'; return; }
+  list.innerHTML = dispatchState.runs.map(function (run) {
+    return '<button type="button" class="agent-run-row" data-agent-run="' + escapeClient(run.runId) + '"' + (run.runId === dispatchState.selectedRunId ? ' aria-current="true"' : '') + '>' +
+      '<span>' + escapeClient(run.agentId) + ' · ' + escapeClient(run.mode) + ' <span class="pill ' + escapeClient(run.status) + '">' + escapeClient(run.status) + '</span></span>' +
+      '<small>' + escapeClient(redactClient(run.promptPreview).slice(0, 90)) + '</small>' +
+      '<small>' + escapeClient(formatClientTime(run.requestedAt)) + '</small></button>';
+  }).join('');
+}
+
+async function loadAgentRuns() {
+  try {
+    const body = await dispatchJson('/api/agent-runs');
+    dispatchState.runs = body.runs || [];
+    renderAgentRuns();
+    await loadMissionDispatchProgress();
+    if (dispatchState.selectedRunId) await loadAgentRunDetail(dispatchState.selectedRunId);
+    syncDispatchRunsTimer();
+  } catch (error) {
+    const list = document.getElementById('agent-run-list');
+    if (list) list.innerHTML = '<p class="muted" role="alert">Could not load runs: ' + escapeClient(redactClient(error.message)) + '</p>';
+  }
+}
+
+function syncDispatchRunsTimer() {
+  const active = dispatchState.runs.some(function (run) { return run.status === 'running' || run.status === 'queued'; });
+  const visible = document.body.dataset.activeView === 'dispatch';
+  if (active && visible && !dispatchRunsTimer) {
+    dispatchRunsTimer = setInterval(function () { if (dispatchState.selectedRunId) loadAgentRunDetail(dispatchState.selectedRunId); }, 2500);
+  } else if ((!active || !visible) && dispatchRunsTimer) {
+    clearInterval(dispatchRunsTimer);
+    dispatchRunsTimer = null;
+  }
+}
+
+async function loadAgentRunDetail(runId) {
+  const target = document.getElementById('agent-run-detail');
+  if (!target) return;
+  try {
+    const body = await dispatchJson('/api/agent-runs/' + encodeURIComponent(runId));
+    if (runId !== dispatchState.selectedRunId) return;
+    const run = body.run;
+    const active = run.status === 'running' || run.status === 'queued';
+    const rows = [
+      ['Agent', run.agentId + ' (' + run.mode + ')'],
+      ['Repository', run.repoRoot],
+      ['Branch', run.branch || '—'],
+      ['Worktree', run.worktreePath || '—'],
+      ['Requested', formatClientTime(run.requestedAt) + ' by ' + run.actorId],
+      ['Duration', run.durationMs !== undefined ? Math.round(run.durationMs / 1000) + 's' : '—'],
+      ['Exit code', run.exitCode === undefined || run.exitCode === null ? '—' : String(run.exitCode)]
+    ].map(function (row) { return '<dt>' + escapeClient(row[0]) + '</dt><dd>' + escapeClient(redactClient(row[1])) + '</dd>'; }).join('');
+    const files = run.changedFiles && run.changedFiles.length
+      ? '<div><strong>Changed files (' + run.changedFiles.length + ')</strong><ul>' + run.changedFiles.map(function (file) { return '<li><code>' + escapeClient(file) + '</code></li>'; }).join('') + '</ul></div>' : (run.changedFiles ? '<p class="muted">The agent left no uncommitted file changes.' + (run.commitsAhead ? ' It made ' + escapeClient(run.commitsAhead) + ' commit(s) on the branch.' : '') + '</p>' : '');
+    const diff = run.diffStat ? '<pre class="run-output" aria-label="Diff summary"></pre>' : '';
+    target.innerHTML = '<div class="detail-head"><div><h3>' + escapeClient(run.runId) + '</h3></div><div><span class="pill ' + escapeClient(run.status) + '">' + escapeClient(run.status) + '</span></div></div>' +
+      '<dl>' + rows + '</dl>' + (run.error ? '<p role="alert">' + escapeClient(redactClient(run.error)) + '</p>' : '') + files + diff +
+      '<div class="approval-actions">' + (active ? '<button type="button" data-agent-run-cancel="' + escapeClient(run.runId) + '">Cancel run</button>' : '') + (run.worktreePath ? '<button type="button" data-copy-text="' + escapeClient(run.worktreePath) + '">Copy worktree path</button>' : '') + '</div>' +
+      '<pre class="run-output" id="agent-run-output" aria-label="Agent output"></pre><output id="agent-run-result" role="status" aria-live="polite"></output>';
+    const outputNode = document.getElementById('agent-run-output');
+    outputNode.textContent = body.output || (active ? 'Waiting for output…' : 'No output was captured.');
+    if (run.diffStat) { const pre = target.querySelector('pre[aria-label="Diff summary"]'); if (pre) pre.textContent = run.diffStat; }
+    if (active) outputNode.scrollTop = outputNode.scrollHeight;
+  } catch (error) {
+    target.innerHTML = '<p class="muted" role="alert">Could not load run: ' + escapeClient(redactClient(error.message)) + '</p>';
+  }
+}
+
+function requestDispatchConfirm(preview, prompt) {
+  return new Promise(function (resolve) {
+    const existing = document.getElementById('dispatch-confirm-dialog');
+    if (existing) existing.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'dispatch-confirm-dialog';
+    overlay.className = 'approval-confirm-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-labelledby', 'dispatch-confirm-title');
+    overlay.innerHTML = '<div class="approval-confirm-card dispatch-confirm"><h3 id="dispatch-confirm-title">Dispatch ' + escapeClient(preview.displayName) + '?</h3>' +
+      '<dl><dt>Mode</dt><dd>' + escapeClient(preview.mode) + '</dd><dt>Repository</dt><dd>' + escapeClient(preview.repoRoot) + '</dd>' +
+      '<dt>Branch</dt><dd>' + escapeClient(preview.branchPattern) + '</dd><dt>Time limit</dt><dd>' + escapeClient(Math.round(preview.timeoutSec / 60)) + ' min</dd>' +
+      '<dt>Containment</dt><dd>' + escapeClient(preview.containment) + '</dd><dt>ACS governance</dt><dd>' + escapeClient(preview.governanceSummary) + '</dd><dt>Prompt</dt><dd>' + escapeClient(preview.promptChars) + ' characters (shown below)</dd>' +
+      '<dt>Command hash</dt><dd><code>' + escapeClient(preview.confirmationHash.slice(0, 16)) + '…</code></dd></dl>' +
+      '<pre class="run-output" id="dispatch-confirm-prompt"></pre>' +
+      '<p class="muted">This runs on your machine with your login. It cannot push or merge; it works on its own branch in a new worktree.</p>' +
+      '<div class="approval-confirm-actions"><button type="button" id="dispatch-confirm-cancel">Cancel</button><button type="button" id="dispatch-confirm-ok">Dispatch</button></div></div>';
+    document.body.appendChild(overlay);
+    overlay.querySelector('#dispatch-confirm-prompt').textContent = prompt;
+    function finish(value) { document.removeEventListener('keydown', onKey); overlay.remove(); resolve(value); }
+    function onKey(event) { if (event.key === 'Escape') { event.preventDefault(); finish(false); } }
+    document.addEventListener('keydown', onKey);
+    overlay.querySelector('#dispatch-confirm-cancel').addEventListener('click', function () { finish(false); });
+    overlay.querySelector('#dispatch-confirm-ok').addEventListener('click', function () { finish(true); });
+    overlay.querySelector('#dispatch-confirm-cancel').focus();
+  });
+}
+
+let pendingMissionDispatch = null;
+async function loadMissionDispatchProgress() {
+  const target = document.getElementById('mission-dispatch-progress');
+  if (!target) return;
+  try {
+    const body = await dispatchJson('/api/mission-dispatch');
+    target.textContent = !body.enabled ? 'Governed mission dispatch is off on this gateway.' :
+      (body.dispatches || []).map(function (entry) {
+        return entry.missionId + ': ' + (entry.code || (entry.observation && entry.observation.code) || (entry.progress.completion ? 'completed' : entry.progress.operations.map(function (operation) { return operation.operationId + ' ' + operation.status; }).join(', ')));
+      }).join('\n') || 'No governed missions dispatched.';
+  } catch (error) { target.textContent = 'Could not load mission progress: ' + redactClient(error.message); }
+}
+document.addEventListener('submit', async function (event) {
+  const form = event.target;
+  if (!form || form.id !== 'mission-dispatch-form') return;
+  event.preventDefault();
+  pendingMissionDispatch = null;
+  const output = document.getElementById('mission-dispatch-result');
+  const confirm = document.getElementById('mission-dispatch-confirm');
+  const review = document.getElementById('mission-dispatch-review');
+  confirm.hidden = true;
+  review.hidden = true;
+  if (!sseConnected) { output.textContent = 'Disconnected: reconnect before reviewing a mission.'; return; }
+  const data = new FormData(form);
+  const missionId = String(data.get('missionId') || '').trim();
+  const approvalId = String(data.get('approvalId') || '').trim();
+  const submit = form.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  output.textContent = 'Checking the approved mission…';
+  try {
+    const snapshot = await dispatchJson('/work-items/' + encodeURIComponent(missionId) + '/change-sets');
+    const payload = { missionId: missionId, approvalId: approvalId, expectedManifestHash: snapshot.manifestHash };
+    const preview = (await dispatchJson('/api/mission-dispatch/preview', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })).preview;
+    pendingMissionDispatch = Object.assign({}, payload, { confirmationHash: preview.confirmationHash });
+    review.textContent = preview.objective + ' — Executor: ' + preview.executingActorId + '. Operations: ' + preview.operations.map(function (operation) { return operation.toolName; }).join(', ') + '. Approval expires: ' + formatClientTime(preview.expiresAt);
+    review.hidden = false;
+    confirm.hidden = false;
+    output.textContent = 'Review the approved operations, then confirm execution.';
+  } catch (error) { output.textContent = 'Rejected: ' + redactClient(error.message); }
+  finally { submit.disabled = false; }
+});
+document.addEventListener('input', function (event) {
+  if (event.target && event.target.closest && event.target.closest('#mission-dispatch-form')) {
+    pendingMissionDispatch = null;
+    document.getElementById('mission-dispatch-confirm').hidden = true;
+    document.getElementById('mission-dispatch-review').hidden = true;
+  }
+});
+document.addEventListener('click', async function (event) {
+  const target = event.target;
+  if (!target) return;
+  if (target.id === 'mission-dispatch-refresh') { await loadMissionDispatchProgress(); return; }
+  if (target.id !== 'mission-dispatch-confirm' || !pendingMissionDispatch) return;
+  const output = document.getElementById('mission-dispatch-result');
+  if (!sseConnected) { output.textContent = 'Disconnected: reconnect before dispatching.'; return; }
+  target.disabled = true;
+  try {
+    await dispatchJson('/api/mission-dispatch', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(pendingMissionDispatch) });
+    pendingMissionDispatch = null;
+    target.hidden = true;
+    output.textContent = 'Scheduled for the ACS worker. Accepted scheduling does not mean execution completed.';
+    await loadMissionDispatchProgress();
+  } catch (error) { output.textContent = 'Rejected: ' + redactClient(error.message); }
+  finally { target.disabled = false; }
+});
+
+document.addEventListener('submit', async function (event) {
+  const form = event.target;
+  if (!form || form.id !== 'dispatch-form') return;
+  event.preventDefault();
+  const output = document.getElementById('dispatch-result');
+  const data = new FormData(form);
+  const payload = {
+    agentId: String(data.get('agentId') || ''),
+    repo: String(data.get('repo') || '').trim(),
+    mode: String(data.get('mode') || 'edit'),
+    prompt: String(data.get('prompt') || '').trim(),
+    timeoutSec: Math.min(60, Math.max(1, Number(data.get('minutes')) || 15)) * 60
+  };
+  if (!payload.agentId || !payload.repo || !payload.prompt) { output.textContent = 'Choose an agent, a repository, and describe the task.'; return; }
+  if (!sseConnected) { output.textContent = 'Disconnected: dispatch is disabled until the live stream reconnects.'; return; }
+  const submit = form.querySelector('#dispatch-submit');
+  submit.disabled = true;
+  output.textContent = 'Checking…';
+  try {
+    const preview = (await dispatchJson('/api/agent-runs/preview', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })).preview;
+    output.textContent = '';
+    if (!(await requestDispatchConfirm(preview, payload.prompt))) { output.textContent = 'Not dispatched.'; return; }
+    const started = await dispatchJson('/api/agent-runs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(Object.assign({}, payload, { confirmationHash: preview.confirmationHash })) });
+    dispatchState.selectedRunId = started.run.runId;
+    output.textContent = 'Dispatched ' + started.run.runId;
+    announce('Dispatched ' + preview.displayName);
+    form.querySelector('textarea[name="prompt"]').value = '';
+    await loadAgentRuns();
+  } catch (error) {
+    output.textContent = 'Rejected: ' + redactClient(error.message);
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+document.addEventListener('change', function (event) {
+  if (event.target && event.target.matches && event.target.matches('#dispatch-form select[name="agentId"]')) syncDispatchModes();
+});
+
+document.addEventListener('click', async function (event) {
+  const target = event.target && event.target.closest ? event.target : null;
+  if (!target) return;
+  const runButton = target.closest('[data-agent-run]');
+  if (runButton) { dispatchState.selectedRunId = runButton.dataset.agentRun; renderAgentRuns(); await loadAgentRunDetail(dispatchState.selectedRunId); syncDispatchRunsTimer(); return; }
+  const cancel = target.closest('[data-agent-run-cancel]');
+  if (cancel) {
+    cancel.disabled = true;
+    const out = document.getElementById('agent-run-result');
+    try { await dispatchJson('/api/agent-runs/' + encodeURIComponent(cancel.dataset.agentRunCancel) + '/cancel', { method: 'POST' }); if (out) out.textContent = 'Cancel requested'; }
+    catch (error) { cancel.disabled = false; if (out) out.textContent = 'Rejected: ' + redactClient(error.message); }
+    return;
+  }
+  const copy = target.closest('[data-copy-text]');
+  if (copy) { try { await navigator.clipboard.writeText(copy.dataset.copyText); announce('Copied'); } catch { announce('Copy is not available here'); } return; }
+  const test = target.closest('[data-cli-test]');
+  if (test) {
+    test.disabled = true;
+    const label = test.textContent;
+    test.textContent = 'Testing…';
+    try { await dispatchJson('/api/agent-clis/' + encodeURIComponent(test.dataset.cliTest) + '/test', { method: 'POST' }); }
+    catch (error) { announce('Test rejected: ' + redactClient(error.message)); }
+    test.textContent = label;
+    await loadCliAgents();
+    return;
+  }
+  if (target.closest('#cli-agents-refresh')) { await loadCliAgents(); await loadAgentRuns(); return; }
+  if (target.closest('#cli-agents-sync')) {
+    try { const result = await dispatchJson('/api/agent-clis/sync', { method: 'POST' }); announce('Roster updated: ' + result.created + ' added, ' + result.updated + ' refreshed'); refreshAgentRoster(); }
+    catch (error) { announce('Could not update roster: ' + redactClient(error.message)); }
+    await loadCliAgents();
+  }
+});
+
+function onDispatchAuditEvent(eventName) {
+  if (!eventName.startsWith('agent_run.') && eventName !== 'agent_cli.tested') return;
+  if (document.body.dataset.activeView !== 'dispatch') return;
+  if (eventName === 'agent_cli.tested') loadCliAgents(); else loadAgentRuns();
+}
+
+function onDispatchViewShown() {
+  loadCliAgents();
+  loadAgentRuns();
+}
+
+
 const viewAliases = {
   overview: 'overview',
   queue: 'queue',
@@ -3166,7 +3976,8 @@ const viewAliases = {
   audit: 'audit',
   policy: 'policy',
   system: 'system',
-  dispatch: 'overview'
+  dispatch: 'dispatch',
+  'create-task': 'overview'
 };
 function showView(name) {
   const view = viewAliases[name] || 'overview';
@@ -3175,6 +3986,7 @@ function showView(name) {
   document.querySelectorAll('nav a[data-nav]').forEach((link) => {
     link.classList.toggle('active', link.dataset.nav === view);
   });
+  if (view === 'dispatch') onDispatchViewShown();
   if (view === 'executors') refreshExecutorRoster();
   if (view === 'connectors') refreshConnectorRoster();
   syncSystemProbes();
@@ -3224,6 +4036,111 @@ document.querySelector('aside nav')?.addEventListener('click', (event) => {
   history.pushState(null, '', href);
 });
 showView((location.hash || '#overview').replace('#', ''));
-openWorkItemFromLocation();</script>
+openWorkItemFromLocation();
+
+const codingMissionDecision = function codingMissionApprovalDecision(status) {
+  if (status === 409) return "refresh";
+  if (status >= 200 && status < 300) return "accepted";
+  return "show_error";
+};
+let codingMissionTimer = null;
+
+function codingMissionEscape(value) {
+  return String(value ?? '').replace(/[&<>"']/g, function (character) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character];
+  });
+}
+
+function codingMissionLabel(mission) {
+  if (mission.state === 'WAITING_FOR_APPROVAL') return 'waiting';
+  if (mission.state === 'EXECUTING') return mission.deploymentRequired ? 'Merging / deploying' : 'Merging';
+  if (mission.state === 'VERIFYING') return 'Verifying';
+  if (mission.state === 'COMPLETED') return 'Complete';
+  return codingMissionEscape(mission.state || 'unknown');
+}
+
+function codingMissionCard(mission) {
+  const hash = typeof mission.changeSet === 'string' ? mission.changeSet : '';
+  const files = Array.isArray(mission.files) ? mission.files : [];
+  const checks = mission.checks && typeof mission.checks === 'object' ? mission.checks : {};
+  const pull = mission.pullRequest || {};
+  const checkText = Object.keys(checks).map(function (name) {
+    return '<li><span>' + codingMissionEscape(name) + '</span> <strong>' + codingMissionEscape(checks[name]) + '</strong></li>';
+  }).join('');
+  const fileText = files.map(function (file) {
+    return '<li><code>' + codingMissionEscape(file) + '</code></li>';
+  }).join('');
+  const pullText = pull.url
+    ? '<a href="' + codingMissionEscape(pull.url) + '" rel="noreferrer">' + codingMissionEscape(pull.number ? '#' + pull.number : pull.url) + '</a>'
+    : (pull.number ? '#' + codingMissionEscape(pull.number) : 'none');
+  const approve = mission.state === 'WAITING_FOR_APPROVAL' && /^[a-f0-9]{64}$/.test(hash)
+    ? '<button type="button" class="primary-button" data-approve-change-set data-mission-id="' + codingMissionEscape(mission.missionId) + '" data-change-set-hash="' + codingMissionEscape(hash) + '">Approve change set</button>'
+    : '';
+  return '<article class="coding-mission"><p><strong>' + codingMissionEscape(mission.summary || mission.missionId) + '</strong> <span>' + codingMissionLabel(mission) + '</span></p>'
+    + '<p>Change set <code>' + codingMissionEscape(hash || 'unavailable') + '</code></p>'
+    + '<p>Pull request ' + pullText + '</p>'
+    + '<p>Deployment ' + codingMissionEscape(mission.deploymentRequired ? 'required' : 'not required') + ': ' + codingMissionEscape(mission.deploymentImpact || '') + '</p>'
+    + '<ul>' + (checkText || '<li>No validation result</li>') + '</ul>'
+    + '<ul>' + (fileText || '<li>No proposed mutations</li>') + '</ul>'
+    + approve + '</article>';
+}
+
+async function refreshCodingMissions() {
+  const root = document.getElementById('coding-mission-list');
+  if (!root) return;
+  let payload = null;
+  try {
+    const response = await fetch('/coding-missions', { credentials: 'same-origin', headers: { accept: 'application/json' } });
+    if (!response.ok) {
+      root.innerHTML = '<p class="empty">Coding missions are unavailable.</p>';
+      return;
+    }
+    payload = await response.json();
+  } catch (error) {
+    root.innerHTML = '<p class="empty">Coding missions are unavailable.</p>';
+    return;
+  }
+  const missions = payload && Array.isArray(payload.missions) ? payload.missions : [];
+  root.innerHTML = missions.length
+    ? '<p id="coding-mission-note" class="muted"></p>' + missions.map(codingMissionCard).join('')
+    : '<p class="empty">No coding missions are waiting for approval.</p>';
+  const pending = missions.some(function (mission) {
+    return mission.state !== 'COMPLETED' && mission.state !== 'FAILED' && mission.state !== 'DEGRADED';
+  });
+  if (pending && !codingMissionTimer) codingMissionTimer = setInterval(refreshCodingMissions, 4000);
+  if (!pending && codingMissionTimer) {
+    clearInterval(codingMissionTimer);
+    codingMissionTimer = null;
+  }
+}
+
+document.addEventListener('click', async function (event) {
+  const button = event.target && event.target.closest ? event.target.closest('[data-approve-change-set]') : null;
+  if (!button || button.disabled) return;
+  const missionId = button.getAttribute('data-mission-id');
+  const hash = button.getAttribute('data-change-set-hash');
+  const displayed = button.parentElement ? button.parentElement.querySelector('code') : null;
+  if (!missionId || !hash || !displayed || displayed.textContent !== hash) return;
+  button.disabled = true;
+  const response = await fetch('/coding-missions/' + encodeURIComponent(missionId) + '/approve', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ expectedChangeSetHash: hash })
+  });
+  const decision = codingMissionDecision(response.status);
+  if (decision === 'refresh') {
+    const note = document.getElementById('coding-mission-note');
+    if (note) note.textContent = 'This change set changed. Refreshing the proposal.';
+    await refreshCodingMissions();
+    const refreshed = document.getElementById('coding-mission-note');
+    if (refreshed) refreshed.textContent = 'This change set changed. Refreshing the proposal.';
+    return;
+  }
+  await refreshCodingMissions();
+});
+
+refreshCodingMissions();
+</script>
   </body>
 </html>

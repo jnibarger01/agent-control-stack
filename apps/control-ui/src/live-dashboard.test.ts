@@ -49,6 +49,19 @@ describe("dashboard fragments", () => {
 });
 
 describe("live dashboard client (#6, #7, #8, #9)", () => {
+  it("does not pull server-only renderer code into the client graph (#21)", () => {
+    const html = renderDashboard({ workItems: [item("wrk_a")], events: [], now: NOW });
+    const match = /const pageMeta = (\{.*?\});/u.exec(html);
+    expect(match).not.toBeNull();
+    const pageMeta = JSON.parse(match![1]!) as Record<string, Record<string, unknown>>;
+
+    // Only the titles and descriptions the browser reads are shipped.
+    for (const meta of Object.values(pageMeta)) {
+      expect(Object.keys(meta).sort()).toEqual(["description", "title"]);
+    }
+    expect(html).not.toContain('"icon"');
+  });
+
   it("contains no hard-reload paths in the client script (#7)", () => {
     const html = renderDashboard({ workItems: [item("wrk_a")], events: [], now: NOW });
     expect(html).not.toContain("location.assign");
@@ -257,6 +270,82 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     for (let i = 0; i < 8; i += 1) app.emit("work_item.running", { "work_item.id": `wrk_${i}` });
     await app.advance(2_000);
     expect(app.fragmentFetches()).toBe(baseline + 1);
+  });
+
+  it("keeps filter focus, caret and value while typing across a refresh (#5)", async () => {
+    const app = bootLive({
+      workItems: [item("wrk_a"), item("wrk_b", { status: "running" })],
+      events: [],
+      now: NOW
+    });
+    app.open();
+    await app.advance(2_000);
+
+    // The execution filter lives inside #execution-operations, which is replaced
+    // wholesale on refresh. Type part-way into a word, mid-string, then refresh.
+    const search = app.document.querySelector("#execution-search") as HTMLInputElement;
+    expect(search).not.toBeNull();
+    search.value = "deployment wrk_a rollback";
+    search.dispatchEvent(new app.window.Event("input", { bubbles: true }));
+    search.focus();
+    search.setSelectionRange(10, 13); // caret inside "wrk_a"
+    const elementBefore = search;
+    await app.flush();
+
+    // Change the model so the execution fragment genuinely differs and is replaced.
+    app.setModel({
+      workItems: [item("wrk_a"), item("wrk_b", { status: "running" }), item("wrk_d")],
+      events: [],
+      now: NOW
+    });
+    app.emit("work_item.running", { "work_item.id": "wrk_b" });
+    await app.advance(1_500);
+
+    const searchAfter = app.document.querySelector("#execution-search") as HTMLInputElement;
+    // The region really was re-rendered, so this is not trivially passing.
+    expect(searchAfter).not.toBe(elementBefore);
+    expect(app.fragmentFetches()).toBeGreaterThan(0);
+    // Value, focus and caret all survive.
+    expect(searchAfter.value).toBe("deployment wrk_a rollback");
+    expect(app.document.activeElement).toBe(searchAfter);
+    expect(searchAfter.selectionStart).toBe(10);
+    expect(searchAfter.selectionEnd).toBe(13);
+  });
+
+  it("keeps the stage and audit filters across a refresh (#5)", async () => {
+    const app = bootLive({
+      workItems: [item("wrk_a"), item("wrk_b", { status: "running" })],
+      events: [],
+      now: NOW
+    });
+    app.open();
+    await app.advance(2_000);
+
+    const stage = app.document.querySelector("#execution-stage") as HTMLSelectElement;
+    const auditSearch = app.document.querySelector("#audit-search") as HTMLInputElement;
+    const auditType = app.document.querySelector("#audit-type") as HTMLInputElement;
+    expect(stage).not.toBeNull();
+    expect(auditSearch).not.toBeNull();
+
+    stage.value = "Running";
+    stage.dispatchEvent(new app.window.Event("change", { bubbles: true }));
+    auditSearch.value = "policy";
+    auditSearch.dispatchEvent(new app.window.Event("input", { bubbles: true }));
+    auditType.value = "policy.decided";
+    auditType.dispatchEvent(new app.window.Event("input", { bubbles: true }));
+    await app.flush();
+
+    app.emit("work_item.running", { "work_item.id": "wrk_b" });
+    await app.advance(1_500);
+
+    const stageAfter = app.document.querySelector("#execution-stage") as HTMLSelectElement;
+    const auditSearchAfter = app.document.querySelector("#audit-search") as HTMLInputElement;
+    const auditTypeAfter = app.document.querySelector("#audit-type") as HTMLInputElement;
+    // Values persist because the client re-applies its own filter state; the caret
+    // and focus guarantees are covered above.
+    expect(stageAfter.value).toBe("Running");
+    expect(auditSearchAfter.value).toBe("policy");
+    expect(auditTypeAfter.value).toBe("policy.decided");
   });
 
   it("keeps typed reasons, focus, selection, and the queue filter across a patch", async () => {
@@ -504,5 +593,209 @@ describe("live dashboard review fixes", () => {
     expect(app.document.querySelector('[data-work-item="wrk_b"]')).not.toBeNull();
     expect(app.liveText()).not.toContain("refresh failed");
     expect(app.text("#dashboard-updated")).toMatch(/^Updated /);
+  });
+});
+
+describe("history navigation derives view and drawer state from location (#6)", () => {
+  const model: MissionControlViewModel = {
+    workItems: [item("wrk_a"), item("wrk_b"), item("wrk_c")],
+    events: [],
+    now: NOW
+  };
+
+  function boot() {
+    const app = bootLive(model, {}, { url: "https://acs.local/#queue" });
+    const drawer = () => app.document.getElementById("work-drawer") as HTMLElement;
+    const activeView = () => app.document.body.dataset.activeView;
+    const selected = () =>
+      Array.from(app.document.querySelectorAll("[data-work-item].selected")).map(
+        (row) => (row as HTMLElement).dataset.workItem
+      );
+    // Simulate a real history transition: the browser has already updated location
+    // before firing popstate.
+    const navigate = async (url: string) => {
+      app.window.history.pushState(null, "", url);
+      app.window.dispatchEvent(new app.window.PopStateEvent("popstate"));
+      await app.flush();
+    };
+    const hashChange = async (url: string) => {
+      app.window.history.pushState(null, "", url);
+      app.window.dispatchEvent(new app.window.HashChangeEvent("hashchange"));
+      await app.flush();
+    };
+    return { app, drawer, activeView, selected, navigate, hashChange };
+  }
+
+  it("shows the drawer for the item named by the URL when moving item B to item A", async () => {
+    const { drawer, selected, navigate } = boot();
+
+    await navigate("?item=wrk_b#queue");
+    expect(drawer().hidden).toBe(false);
+    expect(selected()).toEqual(["wrk_b"]);
+
+    // Back from B to A must re-derive, not leave B on screen behind an A URL.
+    await navigate("?item=wrk_a#queue");
+    expect(drawer().hidden).toBe(false);
+    expect(selected()).toEqual(["wrk_a"]);
+
+    // Forward again to B.
+    await navigate("?item=wrk_b#queue");
+    expect(drawer().hidden).toBe(false);
+    expect(selected()).toEqual(["wrk_b"]);
+  });
+
+  it("closes the drawer when history moves to a URL without an item", async () => {
+    const { app, drawer, selected, navigate } = boot();
+    await navigate("?item=wrk_a#queue");
+    expect(drawer().hidden).toBe(false);
+
+    // Absolute URL: a bare "#queue" would resolve against the current URL and keep
+    // the existing ?item= query.
+    await navigate("https://acs.local/#queue");
+    expect(drawer().hidden).toBe(true);
+    expect(selected()).toEqual([]);
+    // The URL must not be rewritten while syncing from it.
+    expect(app.window.location.search).toBe("");
+  });
+
+  it("switches drawer contents when a different item is deep-linked while one is open", async () => {
+    const { app, drawer, navigate } = boot();
+    await navigate("?item=wrk_a#queue");
+    const detailBefore = app.document.getElementById("work-detail")?.textContent ?? "";
+    await navigate("?item=wrk_c#queue");
+    expect(drawer().hidden).toBe(false);
+    const detailAfter = app.document.getElementById("work-detail")?.textContent ?? "";
+    expect(detailAfter).not.toBe(detailBefore);
+  });
+
+  it("follows the view hash as well as the item on history transitions", async () => {
+    const { drawer, activeView, navigate } = boot();
+    await navigate("?item=wrk_a#approvals");
+    expect(activeView()).toBe("approvals");
+    await navigate("?item=wrk_a#audit");
+    expect(activeView()).toBe("audit");
+    expect(drawer().hidden).toBe(false);
+    await navigate("https://acs.local/#audit");
+    expect(activeView()).toBe("audit");
+    expect(drawer().hidden).toBe(true);
+  });
+
+  it("derives the same state on hashchange as on popstate", async () => {
+    const { drawer, activeView, hashChange } = boot();
+    await hashChange("?item=wrk_b#agents");
+    expect(activeView()).toBe("agents");
+    expect(drawer().hidden).toBe(false);
+    await hashChange("https://acs.local/#agents");
+    expect(drawer().hidden).toBe(true);
+  });
+
+  it("leaves an unknown item in a deterministic drawer state rather than a stale item", async () => {
+    const { drawer, selected, navigate } = boot();
+    await navigate("?item=wrk_a#queue");
+    expect(selected()).toEqual(["wrk_a"]);
+
+    await navigate("?item=wrk_missing#queue");
+    // The drawer follows the URL, and the previously selected item is not left
+    // presented as if it were the requested one.
+    expect(drawer().hidden).toBe(false);
+    expect(selected()).toEqual([]);
+  });
+});
+
+describe("command palette closes deterministically (#23)", () => {
+  const model: MissionControlViewModel = {
+    workItems: [item("wrk_a"), item("wrk_b")],
+    events: [],
+    now: NOW
+  };
+
+  function boot() {
+    const app = bootLive(model, {}, { url: "https://acs.local/#queue" });
+    const results = () => app.document.getElementById("command-results") as HTMLElement;
+    const search = () => app.document.querySelector("#command-search") as HTMLInputElement;
+    const type = async (text: string) => {
+      const input = search();
+      input.focus();
+      input.value = text;
+      input.dispatchEvent(new app.window.Event("input", { bubbles: true }));
+      await app.flush();
+    };
+    const click = async (selector: string) => {
+      const target = app.document.querySelector(selector) as HTMLElement;
+      target.click();
+      await app.flush();
+    };
+    return { app, results, search, type, click };
+  }
+
+  it("opens on input and closes on a click outside the palette", async () => {
+    const { results, type, click } = boot();
+    await type("wrk");
+    expect(results().hidden).toBe(false);
+
+    // A click that matches none of the delegated targets must still close it.
+    await click("#page-description");
+    expect(results().hidden).toBe(true);
+  });
+
+  it("stays open while clicking inside the palette input or results", async () => {
+    const { results, search, type, click } = boot();
+    await type("wrk");
+    expect(results().hidden).toBe(false);
+
+    (search() as HTMLElement).click();
+    await type("wrk_");
+    expect(results().hidden).toBe(false);
+
+    await click("#command-results .muted, #command-results p");
+    expect(results().hidden).toBe(false);
+  });
+
+  it("closes when a result is selected", async () => {
+    const { results, type, click } = boot();
+    await type("Task wrk_a");
+    expect(results().hidden).toBe(false);
+    await click("#command-results [data-inspect-work]");
+    expect(results().hidden).toBe(true);
+  });
+
+  it("closes on Escape and returns focus only when focus was inside the panel", async () => {
+    const { app, results, search, type } = boot();
+    await type("wrk");
+    const panelButton = app.document.querySelector("#command-results [data-inspect-work]") as HTMLElement;
+    panelButton.focus();
+    expect(app.document.activeElement).toBe(panelButton);
+
+    app.key("Escape");
+    await app.flush();
+    expect(results().hidden).toBe(true);
+    // Focus was inside the panel we closed, so it returns to the search input.
+    expect(app.document.activeElement).toBe(search());
+
+    // Reopen and press Escape while focus is elsewhere: focus is left alone.
+    await type("wrk");
+    const navLink = app.document.querySelector('nav a[data-nav="audit"]') as HTMLElement;
+    navLink.focus();
+    expect(app.document.activeElement).toBe(navLink);
+    app.key("Escape");
+    await app.flush();
+    expect(results().hidden).toBe(true);
+    expect(app.document.activeElement).toBe(navLink);
+  });
+
+  it("closes when the query is cleared", async () => {
+    const { results, type } = boot();
+    await type("wrk");
+    expect(results().hidden).toBe(false);
+    await type("");
+    expect(results().hidden).toBe(true);
+  });
+
+  it("closes on navigation outside the palette", async () => {
+    const { results, type, click } = boot();
+    await type("wrk");
+    expect(results().hidden).toBe(false);
+    await click('nav a[data-nav="audit"]');
+    expect(results().hidden).toBe(true);
   });
 });

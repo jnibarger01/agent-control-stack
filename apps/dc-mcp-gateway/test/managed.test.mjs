@@ -134,12 +134,14 @@ test('managed mode: spoofed _meta stripped, ACS-issued capability injected, iden
       capability: { payload: { forged: true }, signature: 'forged', keyId: 'forged' },
       acsCapability: { payload: { forged: true }, signature: 'forged', keyId: 'forged' },
       acsOther: 1,
+      acsOperationPermitId: 'cs_permit_example',
     };
     const token = tokenFor('a'.repeat(32));
     const { status } = await mcpCall(port, token, spoofed);
     assert.equal(status, 200);
     // ACS received the invocation WITHOUT any client capability, with attribution
     assert.equal(acsRequests.length, 1);
+    assert.equal(acsRequests[0].changeSetPermitId, 'cs_permit_example');
     assert.equal(acsRequests[0].tool, 'start_process');
     assert.equal(acsRequests[0].client_id, 'c1');
     assert.equal(acsRequests[0].argsSummary, JSON.stringify({ command: 'ls' }));
@@ -162,6 +164,7 @@ test('managed mode: spoofed _meta stripped, ACS-issued capability injected, iden
     assert.equal(forwarded.params._meta.acsLeaseBinding.claimActionHash, 'claim-hash');
     assert.equal(forwarded.params._meta.acsLeaseBinding.inputHash, 'input-hash');
     assert.equal(forwarded.params._meta.acsOther, undefined);
+    assert.equal(forwarded.params._meta.acsOperationPermitId, undefined);
   } finally {
     child.kill('SIGKILL'); acs.close(); upstream.close();
   }

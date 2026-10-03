@@ -6,5 +6,5 @@
     "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../work-items" }]
+  "references": [{ "path": "../shared" }, { "path": "../work-items" }]
 }

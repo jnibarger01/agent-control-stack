@@ -9,13 +9,16 @@
   "references": [
     { "path": "../../apps/control-ui" },
     { "path": "../../packages/acp-adapter" },
+    { "path": "../../packages/coding-mission" },
     { "path": "../../packages/evidence" },
     { "path": "../../packages/machine-controller" },
     { "path": "../../packages/moa-orchestrator" },
     { "path": "../../packages/policy-gate" },
     { "path": "../../packages/execution-admission" },
     { "path": "../../packages/sandbox" },
+    { "path": "../../packages/agent-cli" },
     { "path": "../../packages/shared" },
+    { "path": "../../packages/verification" },
     { "path": "../../packages/work-items" }
   ]
 }

@@ -17,7 +17,6 @@ export interface ActorRoutingInput {
   recentFailures?: Set<string>;
   sameTaskFailures?: Set<string>;
   policyEligible?: (agent: RegistryAgentDetail) => boolean;
-  eligibilityReasons?: (agent: RegistryAgentDetail) => string[];
 }
 
 export interface ActorRoutingCandidate {
@@ -43,7 +42,10 @@ export interface ActorRoutingPersistence {
 
 const DEFAULT_HEARTBEAT_TTL_MS = 120_000;
 
-/** Deterministic, explainable actor selection. It never asks an LLM to route work. */
+/**
+ * Deterministic eligibility filter and fallback ranker.
+ * Production selection goes through decideAuthoritativeRoute. This ranker does not override a valid Nimble choice.
+ */
 export function routeActor(agents: RegistryAgentDetail[], input: ActorRoutingInput): ActorRoutingDecision {
   const now = input.now ?? new Date();
   const ttl = input.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS;
@@ -61,7 +63,6 @@ export function routeActor(agents: RegistryAgentDetail[], input: ActorRoutingInp
     if (!heartbeat || now.getTime() - Date.parse(heartbeat) > ttl) reasons.push("stale heartbeat");
     if (input.requiredRole && agent.acpRole !== input.requiredRole) reasons.push("role mismatch");
     if (input.policyEligible && !input.policyEligible(agent)) reasons.push("policy ineligible");
-    reasons.push(...(input.eligibilityReasons?.(agent) ?? []));
     if (input.freeCapacity && (input.freeCapacity[agent.id] ?? 0) <= 0) reasons.push("no free capacity");
     if (reasons.length) {
       excluded[agent.id] = reasons;
@@ -138,4 +139,44 @@ export function routeAndPersistActor(
   return { decision, persisted };
 }
 
-export * from "./nimble.js";
+export {
+  decideAuthoritativeRoute,
+  recordAuthoritativeOutcome,
+  type AuthoritativeRouteResult,
+  type AuthoritativeRoutingContext,
+  type AuthoritativeRoutingPort,
+  type DecideAuthoritativeRouteOptions
+} from "./authoritative.js";
+export {
+  askNimbleToChooseExecutor,
+  probeNimbleRouting,
+  type NimbleChoiceRequest,
+  type NimbleChoiceResult
+} from "./nimble-client.js";
+export {
+  DEFAULT_NIMBLE_CONFIDENCE_THRESHOLD,
+  DEFAULT_NIMBLE_ROUTING_MODEL,
+  DEFAULT_NIMBLE_ROUTING_URL,
+  DEFAULT_NIMBLE_TIMEOUT_MS,
+  NIMBLE_PROMPT_VERSION,
+  NIMBLE_ROUTER_VERSION,
+  NimbleRoutingConfigError,
+  isAuthoritativeRoutingEnabled,
+  resolveNimbleRoutingConfig,
+  type NimbleRoutingConfig
+} from "./nimble-config.js";
+export {
+  DEFAULT_NIMBLE_ROUTING_THRESHOLD,
+  NIMBLE_ROUTING_ALGORITHM_VERSION,
+  evaluateNimbleCandidate,
+  routeNimbleActor,
+  validateNimbleRoutingOptions
+} from "./nimble.js";
+export type {
+  ActorNimbleRoutingInput,
+  ActorNimbleRoutingResult,
+  NimbleCandidateResult,
+  NimbleClientOptions,
+  NimbleRoutingState,
+  NimbleRoutingStateInput
+} from "./nimble.js";

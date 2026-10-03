@@ -31,7 +31,7 @@ const credentials: GatewayCredential[] = [
     actor: "user",
     actorId: "user",
     roles: ["operator"],
-    scopes: ["acs:read", "acs:write", "acs:approve"]
+    scopes: ["acs:read", "acs:write", "acs:approve", "acs:execution-mode:admin"]
   },
   // An approver whose actor id equals the requesting subject: self-approval.
   {
@@ -311,9 +311,7 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
     }));
 });
 
-// Every approval-gated JC tool refuses requester self-approval and keeps
-// its approver-visible summary. Canonical admin mode may auto-authorize
-// ordinary managed mutations; privileged_exec remains human-only.
+// Every approval-gated JC tool requires a human grant, including in admin mode.
 describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval, B3 approval summary)", () => {
   const GATED = jaceCommanderToolNames().filter((name) => jaceCommanderToolPolicy(name)?.requiresApproval === true);
   const head = "0123456789abcdef0123456789abcdef01234567";
@@ -401,7 +399,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
       workspace
     ));
 
-  it("admin execution mode auto-authorizes ordinary gated tools; privileged_exec stays human-only", () =>
+  it("admin execution mode still requires human approval for every gated JC tool", () =>
     withGateway(
       async (ctx) => {
         const switched = await ctx.app.inject({
@@ -417,18 +415,13 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         for (const tool of GATED) {
           const { args } = fixtures[tool]!;
           const first = await issue(ctx, tool, args);
-          if (tool === "privileged_exec") {
-            expect(first.statusCode, first.body).toBe(409);
-            expect(first.json().capability).toBeUndefined();
-            expect((await approve(ctx, first.json().workItemId, first.json().actionHash)).statusCode).toBe(200);
-            const issued = await issue(ctx, tool, args);
-            expect(issued.statusCode, issued.body).toBe(200);
-            expect(typeof issued.json().capability.payload.approvalId).toBe("string");
-          } else {
-            expect(first.statusCode, `${tool}: ${first.body}`).toBe(200);
-            expect(first.json().decision).toBe("allow");
-            expect(typeof first.json().capability.payload.approvalId).toBe("string");
-          }
+          expect(first.statusCode, `${tool}: ${first.body}`).toBe(409);
+          expect(first.json().decision).toBe("require_approval");
+          expect(first.json().capability).toBeUndefined();
+          expect((await approve(ctx, first.json().workItemId, first.json().actionHash)).statusCode).toBe(200);
+          const issued = await issue(ctx, tool, args);
+          expect(issued.statusCode, `${tool}: ${issued.body}`).toBe(200);
+          expect(typeof issued.json().capability.payload.approvalId).toBe("string");
         }
 
         const db = new DatabaseSync(ctx.dbPath);
@@ -438,7 +431,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
               "SELECT DISTINCT approved_by_actor_id AS actor FROM jace_commander_capability_issuances WHERE approval_id IS NOT NULL ORDER BY actor"
             )
             .all() as Array<{ actor: string }>;
-          expect(approvers.map((row) => row.actor)).toEqual(["acs:admin", "user"]);
+          expect(approvers.map((row) => row.actor)).toEqual(["user"]);
         } finally {
           db.close();
         }
@@ -447,7 +440,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
       workspace
     ));
 
-  it("records a missing auto-authorization audit event when retrying an admin-approved item", () =>
+  it("does not create an auto-authorization audit event for an unapproved JC request", () =>
     withGateway(
       async (ctx) => {
         const switched = await ctx.app.inject({
@@ -459,32 +452,21 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         expect(switched.statusCode).toBe(200);
 
         const db = new DatabaseSync(ctx.dbPath);
-        db.exec(`
-          CREATE TRIGGER fail_auto_authorized_event
-          BEFORE INSERT ON audit_events
-          WHEN NEW.name = 'execution_mode.auto_authorized'
-          BEGIN
-            SELECT RAISE(ABORT, 'injected audit write failure');
-          END;
-        `);
         try {
           const args = { path: join(ctx.root, "workspace", "audit-retry") };
-          const failed = await issue(ctx, "create_directory", args);
-          expect(failed.statusCode).toBe(403);
-          expect(failed.json().workItemId).toBeTruthy();
-
-          db.exec("DROP TRIGGER fail_auto_authorized_event");
-          const retried = await issue(ctx, "create_directory", args);
-          expect(retried.statusCode, retried.body).toBe(200);
+          const response = await issue(ctx, "create_directory", args);
+          expect(response.statusCode).toBe(409);
+          expect(response.json().decision).toBe("require_approval");
+          expect(response.json().capability).toBeUndefined();
 
           const detail = await ctx.app.inject({
             method: "GET",
-            url: `/work-items/${failed.json().workItemId}`,
+            url: `/work-items/${response.json().workItemId}`,
             headers: { authorization: `Bearer ${OP_TOKEN}` }
           });
           expect(
             detail.json().events.filter((event: { name: string }) => event.name === "execution_mode.auto_authorized")
-          ).toHaveLength(1);
+          ).toHaveLength(0);
         } finally {
           db.close();
         }
@@ -493,7 +475,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
       workspace
     ));
 
-  it("fails closed in admin mode when managed authority is not active", () =>
+  it("keeps human approval required when managed authority is not active", () =>
     withGateway(
       async (ctx) => {
         const switched = await ctx.app.inject({
@@ -507,11 +489,8 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         const response = await issue(ctx, "create_directory", {
           path: join(ctx.root, "workspace", "blocked-admin")
         });
-        expect(response.statusCode).toBe(403);
-        expect(response.json()).toMatchObject({
-          decision: "deny",
-          code: "executor_lease_invalid"
-        });
+        expect(response.statusCode).toBe(409);
+        expect(response.json().decision).toBe("require_approval");
         expect(response.json().capability).toBeUndefined();
       },
       true,
@@ -519,21 +498,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
       { ...healthyAuthority, authoritative: false, leaseActive: false, detail: "executor lease inactive" }
     ));
 
-  it("strict mode does not reuse an admin-approved item left behind by failed admission", () => {
-    const delegate = testAdmission();
-    let rejectOnce = true;
-    const executionAdmission: ExecutionAdmissionController = {
-      acquire: async (request) => {
-        if (rejectOnce) {
-          rejectOnce = false;
-          throw new Error("test admission failure");
-        }
-        return delegate.acquire(request);
-      },
-      shutdown: () => delegate.shutdown(),
-      snapshot: () => delegate.snapshot()
-    };
-
+  it("admin mode cannot leave an unapproved item reusable after switching to strict mode", () => {
     return withGateway(
       async (ctx) => {
         const admin = await ctx.app.inject({
@@ -546,21 +511,8 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
 
         const args = { path: join(ctx.root, "workspace", "mode-transition") };
         const interrupted = await issue(ctx, "create_directory", args);
-        expect(interrupted.statusCode).toBe(500);
-
-        const db = new DatabaseSync(ctx.dbPath);
-        let adminWorkItemId: string;
-        try {
-          const row = db
-            .prepare(
-              "SELECT work_item_id AS workItemId FROM execution_plan_approvals WHERE approved_by_actor_id = ? ORDER BY created_at DESC LIMIT 1"
-            )
-            .get("acs:admin") as { workItemId: string } | undefined;
-          expect(row?.workItemId).toBeTruthy();
-          adminWorkItemId = row!.workItemId;
-        } finally {
-          db.close();
-        }
+        expect(interrupted.statusCode).toBe(409);
+        const pendingId = interrupted.json().workItemId;
 
         const strict = await ctx.app.inject({
           method: "POST",
@@ -573,85 +525,70 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         const retry = await issue(ctx, "create_directory", args);
         expect(retry.statusCode).toBe(409);
         expect(retry.json().decision).toBe("require_approval");
-        expect(retry.json().workItemId).not.toBe(adminWorkItemId);
+        expect(retry.json().workItemId).toBe(pendingId);
         expect(retry.json().capability).toBeUndefined();
+        const db = new DatabaseSync(ctx.dbPath);
+        try {
+          const grants = db.prepare("SELECT COUNT(*) AS count FROM execution_plan_approvals WHERE approved_by_actor_id = 'acs:admin'").get() as { count: number };
+          expect(grants.count).toBe(0);
+        } finally {
+          db.close();
+        }
       },
       true,
       workspace,
-      healthyAuthority,
-      executionAdmission
-    );
+      healthyAuthority
+    )
   });
 
-  it("renews expired admin approvals when retrying an interrupted JC request", () => {
-    const delegate = testAdmission();
-    let rejectOnce = true;
-    const executionAdmission: ExecutionAdmissionController = {
-      acquire: async (request) => {
-        if (rejectOnce) {
-          rejectOnce = false;
-          throw new Error("test admission failure before claim");
-        }
-        return delegate.acquire(request);
-      },
-      shutdown: () => delegate.shutdown(),
-      snapshot: () => delegate.snapshot()
-    };
-
-    return withGateway(
+  it("does not renew an expired human approval when retrying a JC request", () =>
+    withGateway(
       async (ctx) => {
         const admin = await ctx.app.inject({
           method: "POST",
           url: "/execution-mode",
           headers: { authorization: `Bearer ${OP_TOKEN}` },
-          payload: { mode: "admin", reason: "seed expired admin approval retry" }
+          payload: { mode: "admin", reason: "expired human approval remains gated" }
         });
         expect(admin.statusCode).toBe(200);
 
         const args = { path: join(ctx.root, "workspace", "expired-admin-grant") };
-        const interrupted = await issue(ctx, "create_directory", args);
-        expect(interrupted.statusCode).toBe(500);
+        const pending = await issue(ctx, "create_directory", args);
+        expect(pending.statusCode).toBe(409);
+        expect((await approve(ctx, pending.json().workItemId, pending.json().actionHash)).statusCode).toBe(200);
 
         const db = new DatabaseSync(ctx.dbPath);
         try {
-          db.prepare("UPDATE approval_records SET expires_at = ? WHERE approved_by = ?").run(
-            "2000-01-01T00:00:00.000Z",
-            "acs:admin"
+          db.prepare("UPDATE approval_records SET expires_at = ? WHERE work_item_id = ?").run(
+            "2000-01-01T00:00:00.000Z", pending.json().workItemId
           );
-          db.prepare("UPDATE execution_plan_approvals SET status = 'expired' WHERE approved_by_actor_id = ?").run(
-            "acs:admin"
+          db.prepare("UPDATE execution_plan_approvals SET status = 'expired' WHERE work_item_id = ?").run(
+            pending.json().workItemId
           );
         } finally {
           db.close();
         }
 
         const retried = await issue(ctx, "create_directory", args);
-        expect(retried.statusCode, retried.body).toBe(200);
-        expect(retried.json().capability.payload.approvalId).toEqual(expect.any(String));
+        expect(retried.statusCode).toBe(409);
+        expect(retried.json().decision).toBe("require_approval");
+        expect(retried.json().capability).toBeUndefined();
       },
       true,
       workspace,
-      healthyAuthority,
-      executionAdmission
-    );
-  });
+      healthyAuthority
+    )
+  );
 
-  it("revalidates admin mode after admission before consuming the admin approval", () => {
+  it("does not enter admission before a human approves an admin-mode JC request", () => {
     const delegate = testAdmission();
-    let markAdmissionEntered!: () => void;
-    let resumeAdmission!: () => void;
-    const admissionEntered = new Promise<void>((resolve) => {
-      markAdmissionEntered = resolve;
-    });
-    const admissionResume = new Promise<void>((resolve) => {
-      resumeAdmission = resolve;
-    });
+    let admissionCalls = 0;
     const executionAdmission: ExecutionAdmissionController = {
       acquire: async (request) => {
-        markAdmissionEntered();
-        await admissionResume;
+        admissionCalls += 1;
         return delegate.acquire(request);
       },
+      restoreActivePermit: (input) => delegate.restoreActivePermit(input),
       shutdown: () => delegate.shutdown(),
       snapshot: () => delegate.snapshot()
     };
@@ -667,25 +604,11 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         expect(admin.statusCode).toBe(200);
 
         const args = { path: join(ctx.root, "workspace", "queued-mode-transition") };
-        const pending = issue(ctx, "create_directory", args);
-        await admissionEntered;
-
-        const strict = await ctx.app.inject({
-          method: "POST",
-          url: "/execution-mode",
-          headers: { authorization: `Bearer ${OP_TOKEN}` },
-          payload: { mode: "strict", reason: "switch while JC request is queued" }
-        });
-        expect(strict.statusCode).toBe(200);
-
-        resumeAdmission();
-        const response = await pending;
-        expect(response.statusCode).toBe(403);
-        expect(response.json()).toMatchObject({
-          decision: "deny",
-          code: "admin_authorization_failed"
-        });
+        const response = await issue(ctx, "create_directory", args);
+        expect(response.statusCode).toBe(409);
+        expect(response.json().decision).toBe("require_approval");
         expect(response.json().capability).toBeUndefined();
+        expect(admissionCalls).toBe(0);
 
         const db = new DatabaseSync(ctx.dbPath);
         try {

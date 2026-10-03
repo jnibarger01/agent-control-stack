@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
@@ -19,12 +19,40 @@ function resolveInstalledOpenclaw(): string | undefined {
   return undefined;
 }
 
+function openclawFixtureEnvironment(home: string, state: string, config: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of ["PATH", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"]) {
+    if (process.env[key] !== undefined) env[key] = process.env[key];
+  }
+  return {
+    ...env,
+    HOME: home,
+    XDG_CONFIG_HOME: join(home, ".config"),
+    XDG_CACHE_HOME: join(home, ".cache"),
+    XDG_DATA_HOME: join(home, ".local", "share"),
+    OPENCLAW_STATE_DIR: state,
+    OPENCLAW_CONFIG_PATH: config,
+    OPENCLAW_GATEWAY_TOKEN: "deterministic-openclaw-gateway-token",
+    OPENCLAW_SKIP_CHANNELS: "1"
+  };
+}
+
+async function stopFixtureProcess(child: ReturnType<typeof spawn> | undefined): Promise<void> {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise<void>((resolve, reject) => {
+    child.once("close", () => resolve());
+    child.once("error", reject);
+    child.kill("SIGTERM");
+  });
+}
+
 const openclawExecutable = resolveInstalledOpenclaw();
 
 describe("installed OpenClaw interoperability", () => {
   it.skipIf(!openclawExecutable)(
     "drives the real OpenClaw local agent through ACS MCP and the fixture agent",
     async () => {
+      if (!openclawExecutable) throw new Error("OpenClaw executable unavailable");
       const dir = mkdtempSync(join(tmpdir(), "acs-gateway-openclaw-e2e-"));
       const allowed = join(dir, "allowed");
       const dbPath = join(dir, "control.db");
@@ -51,9 +79,9 @@ describe("installed OpenClaw interoperability", () => {
       );
 
       const modelBodies: Array<Record<string, unknown>> = [];
-      const toolResultDiagnostics: string[] = [];
       let finalResponseSent = false;
       let discoveredToolId: string | undefined;
+      const bridgeCalls: string[] = [];
       const modelServer = createServer((request, response) => {
         if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
           response.writeHead(404).end();
@@ -66,143 +94,94 @@ describe("installed OpenClaw interoperability", () => {
           modelBodies.push(body);
           const tools = Array.isArray(body.tools) ? body.tools : [];
           const messages = Array.isArray(body.messages) ? body.messages : [];
-          const toolName = (candidate: unknown): string | undefined => {
-            if (!candidate || typeof candidate !== "object") return undefined;
+          const tool = tools.find((candidate) => {
+            if (!candidate || typeof candidate !== "object") return false;
             const functionValue = (candidate as Record<string, unknown>).function;
             const name =
               functionValue && typeof functionValue === "object"
                 ? (functionValue as Record<string, unknown>).name
                 : (candidate as Record<string, unknown>).name;
-            return typeof name === "string" ? name : undefined;
-          };
-          const tool = tools.find((candidate) => {
-            const name = toolName(candidate);
-            return name !== undefined && (name.includes("test_agent_run") || name.includes("test-agent-run"));
+            return typeof name === "string" && (name.includes("test_agent_run") || name.includes("test-agent-run"));
           }) as Record<string, unknown> | undefined;
-          const directToolName = toolName(tool);
-          const availableControlTools = new Set(
-            tools.map(toolName).filter((name): name is string => name !== undefined)
-          );
-          const toolResults = messages.filter(
+          const functionValue = tool?.function;
+          const functionName =
+            functionValue && typeof functionValue === "object"
+              ? (functionValue as Record<string, unknown>).name
+              : tool?.name;
+          const results = messages.filter(
             (message) => message && typeof message === "object" && (message as Record<string, unknown>).role === "tool"
-          ) as Array<Record<string, unknown>>;
-          const lastTool = toolResults.at(-1);
-          const priorToolCalls = messages
-            .filter(
-              (message) =>
-                message &&
-                typeof message === "object" &&
-                (message as Record<string, unknown>).role === "assistant" &&
-                Array.isArray((message as Record<string, unknown>).tool_calls)
-            )
-            .flatMap((message) => (message as Record<string, unknown>).tool_calls as unknown[]);
-          const lastToolCall = priorToolCalls.at(-1);
-          const lastToolName = toolName(lastToolCall);
-          const content = lastTool?.content;
-          const resultText =
-            typeof content === "string" ? content : content === undefined ? "" : JSON.stringify(content);
-          if (lastTool) {
-            toolResultDiagnostics.push(JSON.stringify({ name: lastTool.name, content: resultText.slice(0, 1_500) }));
+          ) as Record<string, unknown>[];
+          const lastResult = results.at(-1);
+          const calls = messages.flatMap((message) => {
+            const value =
+              message && typeof message === "object" ? (message as Record<string, unknown>).tool_calls : undefined;
+            return Array.isArray(value) ? value : [];
+          }) as Array<{ id?: string; function?: { name?: string } }>;
+          const lastName =
+            lastResult?.name ?? calls.find((call) => call.id === lastResult?.tool_call_id)?.function?.name;
+          const content =
+            typeof lastResult?.content === "string" ? lastResult.content : JSON.stringify(lastResult?.content ?? "");
+          // Native search returns a JSON array inside an untrusted-content
+          // wrapper. Decode data only; never execute the surrounding text.
+          const begin = content.search(/[[{]/u);
+          const finish = Math.max(content.lastIndexOf("}"), content.lastIndexOf("]"));
+          let parsed: unknown;
+          try {
+            if (begin >= 0 && finish > begin) parsed = JSON.parse(content.slice(begin, finish + 1));
+          } catch {
+            /* diagnostic assertions below reject unusable results */
           }
-          let toolResult: unknown;
-          let jsonStart = -1;
-          const jsonStack: string[] = [];
-          let inJsonString = false;
-          let escaped = false;
-          for (let index = 0; index < resultText.length; index += 1) {
-            const character = resultText[index]!;
-            if (jsonStart < 0) {
-              if (character === "{" || character === "[") {
-                jsonStart = index;
-                jsonStack.push(character);
-              }
-              continue;
+          const findTarget = (value: unknown, depth = 0): string | undefined => {
+            if (!value || typeof value !== "object" || depth > 12) return undefined;
+            const row = value as Record<string, unknown>;
+            if (typeof row.name === "string" && /test[._-]agent[._-]run/.test(row.name)) {
+              return typeof row.id === "string" ? row.id : row.name;
             }
-            if (inJsonString) {
-              if (escaped) escaped = false;
-              else if (character === "\\") escaped = true;
-              else if (character === '"') inJsonString = false;
-              continue;
+            for (const child of Object.values(row)) {
+              const found = findTarget(child, depth + 1);
+              if (found) return found;
             }
-            if (character === '"') inJsonString = true;
-            else if (character === "{" || character === "[") jsonStack.push(character);
-            else if (character === "}" || character === "]") {
-              const opening = jsonStack.pop();
-              if ((opening === "{" && character !== "}") || (opening === "[" && character !== "]")) {
-                jsonStack.length = 0;
-                jsonStart = -1;
-                continue;
-              }
-              if (jsonStack.length === 0) {
-                try {
-                  toolResult = JSON.parse(resultText.slice(jsonStart, index + 1)) as unknown;
-                } catch {
-                  toolResult = undefined;
-                }
-                break;
-              }
+            return undefined;
+          };
+          const advertised = tools.map(
+            (entry) =>
+              (entry as { function?: { name?: string }; name?: string }).function?.name ??
+              (entry as { name?: string }).name
+          );
+          const invocation = {
+            agent: "openclaw",
+            prompt: "OpenClaw deterministic interoperability check",
+            cwd: allowed,
+            timeoutSeconds: 5,
+            permissionMode: "read-only"
+          };
+          let selectedName: string | undefined;
+          let selectedArgs: Record<string, unknown> | undefined;
+          if (!lastResult && typeof functionName === "string") {
+            selectedName = functionName;
+            selectedArgs = invocation;
+          } else if (!lastResult && advertised.includes("tool_search")) {
+            selectedName = "tool_search";
+            selectedArgs = { query: "ACS test agent run", limit: 5 };
+          } else if (lastName === "tool_search") {
+            discoveredToolId = findTarget(parsed);
+            if (discoveredToolId && advertised.includes("tool_describe")) {
+              selectedName = "tool_describe";
+              selectedArgs = { id: discoveredToolId };
             }
-          }
-          if (lastToolName === "tool_search" && toolResult) {
-            const findTarget = (value: unknown): string | undefined => {
-              if (!value || typeof value !== "object") return undefined;
-              if (Array.isArray(value)) {
-                for (const entry of value) {
-                  const match = findTarget(entry);
-                  if (match) return match;
-                }
-                return undefined;
-              }
-              const record = value as Record<string, unknown>;
-              const name = typeof record.name === "string" ? record.name : "";
-              const id = typeof record.id === "string" ? record.id : undefined;
-              if (id && /test[._-]agent[._-]run/iu.test(name)) return id;
-              for (const entry of Object.values(record)) {
-                const match = findTarget(entry);
-                if (match) return match;
-              }
-              return undefined;
-            };
-            discoveredToolId = findTarget(toolResult);
+          } else if (lastName === "tool_describe" && discoveredToolId && advertised.includes("tool_call")) {
+            selectedName = "tool_call";
+            selectedArgs = { id: discoveredToolId, args: invocation };
           }
 
           const completionId = `openclaw-fixture-${modelBodies.length}`;
-          let call: { name: string; args: Record<string, unknown> } | undefined;
-          if (toolResults.length === 0 && directToolName) {
-            call = {
-              name: directToolName,
-              args: {
-                agent: "openclaw",
-                prompt: "OpenClaw deterministic interoperability check",
-                cwd: allowed,
-                timeoutSeconds: 5,
-                permissionMode: "read-only"
-              }
-            };
-          } else if (toolResults.length === 0 && availableControlTools.has("tool_search")) {
-            call = { name: "tool_search", args: { query: "test agent run", limit: 5 } };
-          } else if (lastToolName === "tool_search" && discoveredToolId && availableControlTools.has("tool_describe")) {
-            call = { name: "tool_describe", args: { id: discoveredToolId } };
-          } else if (lastToolName === "tool_describe" && discoveredToolId && availableControlTools.has("tool_call")) {
-            call = {
-              name: "tool_call",
-              args: {
-                id: discoveredToolId,
-                args: {
-                  agent: "openclaw",
-                  prompt: "OpenClaw deterministic interoperability check",
-                  cwd: allowed,
-                  timeoutSeconds: 5,
-                  permissionMode: "read-only"
-                }
-              }
-            };
-          }
-          if (call) {
+          if (selectedName && selectedArgs) {
+            bridgeCalls.push(selectedName);
+            const argumentsValue = JSON.stringify(selectedArgs);
             const toolCall = {
               id: `openclaw-fixture-call-${modelBodies.length}`,
               type: "function",
-              function: { name: call.name, arguments: JSON.stringify(call.args) }
+              function: { name: selectedName, arguments: argumentsValue }
             };
             if (body.stream === false) {
               response.writeHead(200, { "content-type": "application/json" });
@@ -309,7 +288,9 @@ describe("installed OpenClaw interoperability", () => {
           openclawConfigPath,
           JSON.stringify({
             gateway: { mode: "local", bind: "loopback", port: openclawGatewayPort },
-            tools: { profile: "coding", sandbox: { tools: { alsoAllow: ["bundle-mcp"] } } },
+            // OpenClaw 2026.9 defers MCP schemas behind tool_search for this loopback
+            // fixture provider when toolSearch is unset. Direct schemas keep test.agent.run callable.
+            tools: { profile: "coding", toolSearch: false },
             agents: {
               defaults: {
                 workspace: allowed,
@@ -352,7 +333,7 @@ describe("installed OpenClaw interoperability", () => {
           })
         );
         openclawGatewayProcess = spawn(
-          "openclaw",
+          openclawExecutable,
           [
             "--profile",
             "acs-test",
@@ -369,24 +350,16 @@ describe("installed OpenClaw interoperability", () => {
           ],
           {
             cwd: allowed,
-            env: {
-              ...process.env,
-              HOME: dir,
-              OPENCLAW_STATE_DIR: openclawStateDir,
-              OPENCLAW_CONFIG_PATH: openclawConfigPath,
-              OPENCLAW_GATEWAY_TOKEN: "deterministic-openclaw-gateway-token",
-              OPENCLAW_SKIP_CHANNELS: "1"
-            },
-            detached: true,
+            env: openclawFixtureEnvironment(dir, openclawStateDir, openclawConfigPath),
             stdio: ["ignore", "pipe", "pipe"]
           }
         );
         openclawGatewayProcess.stdout?.on("data", (chunk: Buffer) => (gatewayOutput += chunk.toString("utf8")));
         openclawGatewayProcess.stderr?.on("data", (chunk: Buffer) => (gatewayOutput += chunk.toString("utf8")));
-        await waitForPort(openclawGatewayPort);
+        await waitForPort(openclawGatewayPort, () => gatewayOutput);
         expect(openclawGatewayProcess.exitCode, gatewayOutput).toBeNull();
         openclawProcess = spawn(
-          "openclaw",
+          openclawExecutable,
           [
             "--profile",
             "acs-test",
@@ -403,15 +376,7 @@ describe("installed OpenClaw interoperability", () => {
           ],
           {
             cwd: allowed,
-            env: {
-              ...process.env,
-              HOME: dir,
-              OPENCLAW_STATE_DIR: openclawStateDir,
-              OPENCLAW_CONFIG_PATH: openclawConfigPath,
-              OPENCLAW_GATEWAY_TOKEN: "deterministic-openclaw-gateway-token",
-              OPENCLAW_SKIP_CHANNELS: "1"
-            },
-            detached: true,
+            env: openclawFixtureEnvironment(dir, openclawStateDir, openclawConfigPath),
             stdio: ["ignore", "pipe", "pipe"]
           }
         );
@@ -425,21 +390,20 @@ describe("installed OpenClaw interoperability", () => {
         const diagnosticEvents = new SqliteWorkItemStore(dbPath);
         const diagnosticEventNames = diagnosticEvents.readEvents().map((event) => event.name);
         diagnosticEvents.close();
-        const modelToolSets = modelBodies.map((body) => {
-          const tools = Array.isArray(body.tools) ? body.tools : [];
-          return tools.flatMap((candidate) => {
-            if (!candidate || typeof candidate !== "object") return [];
-            const fn = (candidate as Record<string, unknown>).function;
-            const name =
-              fn && typeof fn === "object"
-                ? (fn as Record<string, unknown>).name
-                : (candidate as Record<string, unknown>).name;
-            return typeof name === "string" ? [name] : [];
-          });
-        });
-        const diagnostic = `${output}\nOpenClaw gateway:\n${gatewayOutput}\nEvents:${diagnosticEventNames.join(",")}\nModel bodies:${modelBodies.length}\nModel tool sets:${JSON.stringify(modelToolSets)}\nTool results:${toolResultDiagnostics.join(" | ")}`;
+        const diagnostic = `${output}\nOpenClaw gateway:\n${gatewayOutput}\nEvents:${diagnosticEventNames.join(",")}\nModel bodies:${modelBodies.length}\nTool names:${JSON.stringify(
+          modelBodies.map((body) =>
+            (Array.isArray(body.tools) ? body.tools : []).map((tool) => {
+              const entry = tool as Record<string, unknown>;
+              const fn = entry.function as Record<string, unknown> | undefined;
+              return fn?.name ?? entry.name;
+            })
+          )
+        )}`;
         expect(modelBodies.length, diagnostic).toBeGreaterThan(1);
         expect(finalResponseSent, diagnostic).toBe(true);
+        if (bridgeCalls[0] === "tool_search") {
+          expect(bridgeCalls, diagnostic).toEqual(["tool_search", "tool_describe", "tool_call"]);
+        }
         expect(
           modelBodies.some((request) => Array.isArray(request.tools)),
           diagnostic
@@ -476,8 +440,7 @@ describe("installed OpenClaw interoperability", () => {
         }
         expect(readFileSync(join(dir, "machine-audit.jsonl"), "utf8")).toContain('"tool":"test.agent.run"');
       } finally {
-        await stopChild(openclawProcess);
-        await stopChild(openclawGatewayProcess);
+        await Promise.all([stopFixtureProcess(openclawProcess), stopFixtureProcess(openclawGatewayProcess)]);
         await app.close();
         await new Promise<void>((resolve) => modelServer.close(() => resolve()));
         rmSync(dir, { recursive: true, force: true });
@@ -500,8 +463,8 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-async function waitForPort(port: number): Promise<void> {
-  const deadline = Date.now() + 10_000;
+async function waitForPort(port: number, diagnostics: () => string): Promise<void> {
+  const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     try {
       await new Promise<void>((resolve, reject) => {
@@ -517,51 +480,7 @@ async function waitForPort(port: number): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
-  throw new Error(`OpenClaw gateway did not listen on 127.0.0.1:${port}`);
-}
-
-async function stopChild(child: ChildProcess | undefined): Promise<void> {
-  if (!child) return;
-  if (child.exitCode === null && child.signalCode === null) {
-    signalChildGroup(child, "SIGTERM");
-  }
-  if (await waitForChildExit(child, 5_000)) {
-    child.stdout?.destroy();
-    child.stderr?.destroy();
-    return;
-  }
-  if (child.exitCode === null && child.signalCode === null) {
-    signalChildGroup(child, "SIGKILL");
-  }
-  if (!(await waitForChildExit(child, 5_000))) {
-    throw new Error("OpenClaw test process did not exit after termination");
-  }
-  child.stdout?.destroy();
-  child.stderr?.destroy();
-}
-
-function signalChildGroup(child: ChildProcess, signal: NodeJS.Signals): void {
-  if (child.pid === undefined) return;
-  try {
-    process.kill(-child.pid, signal);
-  } catch (error) {
-    if (!(error instanceof Error) || !("code" in error) || error.code !== "ESRCH") throw error;
-  }
-}
-
-function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const onExit = (): void => {
-      clearTimeout(timer);
-      resolve(true);
-    };
-    const timer = setTimeout(() => {
-      child.removeListener("exit", onExit);
-      resolve(child.exitCode !== null || child.signalCode !== null);
-    }, timeoutMs);
-    child.once("exit", onExit);
-  });
+  throw new Error(`OpenClaw gateway did not listen on 127.0.0.1:${port}. Output: ${diagnostics()}`);
 }
 
 function seedActor(dbPath: string, id: string, externalRef: string): void {
