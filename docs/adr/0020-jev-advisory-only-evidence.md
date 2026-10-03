@@ -68,3 +68,14 @@ recommendation is telemetry, not a lifecycle transition.
 - **Inferring `choice`/`score` support from a decision response.** Rejected: the
   running model does not advertise it; absent fields stay absent and never
   default to `false` or `true`.
+
+## Enforcement
+
+The boundary is a lint rule, not only convention. `eslint.config.js` forbids importing
+`@agent-control-stack/jev-advisor` everywhere except the adapter package itself,
+`packages/policy-gate/src/jev-shadow.ts` and `packages/evidence/src/observation-worker.ts`
+(tests excepted). Policy-gate decision modules may additionally not import `./jev-shadow.js`,
+and authority code outside the gateway MCP observation path may not import Jev shadow hooks
+through the `@agent-control-stack/policy-gate` barrel. `tests/jev-boundary.test.ts` proves the
+direct and barrel-import rules fire for authority paths and stay quiet for the documented
+observation paths. Widening the allow-list requires amending this ADR.

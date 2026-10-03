@@ -13,6 +13,100 @@ export default tseslint.config(
     }
   },
   {
+    // ADR 0020: Jev is advisory evidence only. Only the shadow hook and the observation worker
+    // may touch the adapter; everything else (authority packages, apps) must not import it.
+    files: ["**/*.{ts,tsx,js,mjs,cjs}"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "@agent-control-stack/policy-gate",
+              importNames: ["maybeRunJevShadowAdvisory", "runJevShadowAdvisory"],
+              message:
+                "Jev shadow hooks are advisory-only (ADR 0020). Only the gateway MCP observation path may import them from the policy-gate barrel."
+            }
+          ],
+          patterns: [
+            {
+              group: ["@agent-control-stack/jev-advisor", "@agent-control-stack/jev-advisor/*", "**/jev-advisor/**"],
+              message:
+                "Jev is advisory-only (ADR 0020). Import it only from the allow-listed shadow hook or observation worker, never from authority code."
+            },
+            {
+              group: [
+                "@agent-control-stack/policy-gate/*jev-shadow*",
+                "**/policy-gate/src/jev-shadow.js",
+                "**/policy-gate/src/jev-shadow.ts"
+              ],
+              message:
+                "Jev shadow hooks are advisory-only (ADR 0020). Do not deep-import the shadow module from authority code."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    files: [
+      "packages/jev-advisor/**/*.ts",
+      "packages/policy-gate/src/jev-shadow.ts",
+      "packages/evidence/src/observation-worker.ts",
+      "**/*.test.{ts,mjs}"
+    ],
+    rules: { "no-restricted-imports": "off" }
+  },
+  {
+    // The gateway MCP transport is the single production caller of the advisory shadow hook.
+    // Keep the raw adapter forbidden here while allowing the policy-gate wrapper.
+    files: ["apps/gateway/src/mcp.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["@agent-control-stack/jev-advisor", "@agent-control-stack/jev-advisor/*", "**/jev-advisor/**"],
+              message: "Jev is advisory-only (ADR 0020). Use the policy-gate shadow hook from this observation path."
+            },
+            {
+              group: [
+                "@agent-control-stack/policy-gate/*jev-shadow*",
+                "**/policy-gate/src/jev-shadow.js",
+                "**/policy-gate/src/jev-shadow.ts"
+              ],
+              message: "Jev shadow hooks are advisory-only (ADR 0020). Use the policy-gate barrel, not a deep import."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    // The deterministic decision modules must not depend on the Jev shadow hook either, so Jev
+    // output cannot reach classification, policy, routing or approval.
+    files: ["packages/policy-gate/src/**/*.ts"],
+    ignores: ["packages/policy-gate/src/jev-shadow.ts", "packages/policy-gate/src/index.ts", "**/*.test.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["@agent-control-stack/jev-advisor", "@agent-control-stack/jev-advisor/*", "**/jev-advisor/**"],
+              message: "Jev is advisory-only (ADR 0020)."
+            },
+            {
+              group: ["./jev-shadow.js", "**/jev-shadow.js"],
+              message: "Policy and classification modules must not import the Jev shadow hook (ADR 0020)."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
     files: ["**/*.js", "**/*.mjs"],
     languageOptions: {
       globals: {
