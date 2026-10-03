@@ -311,6 +311,15 @@ setup N3
 ACS_DEPLOY_WAIT_SEC=40 run_deploy
 expect "when none existed the guidance says to remove the one installed" grep -q "remove $DROPINS/50-agent-dispatch.conf" "$SANDBOX/out.log"
 
+# --- O: a relative ACS_DB_PATH resolves differently for the gateway than for the deploy -----------------------
+echo "O: a relative ACS_DB_PATH is rejected before anything is touched"
+setup O
+printf 'ACS_DB_PATH=storage/local.db\nPORT=3000\nACS_GATEWAY_TOKEN=test\n' >"$HOME/.config/agent-control-stack/gateway.env"
+ACS_DEPLOY_WAIT_SEC=4 run_deploy
+expect "exit non-zero" test "$(exit_code)" -ne 0
+expect "says the path must be absolute" grep -q "must be an absolute path" "$SANDBOX/out.log"
+expect "no service action and no backup" bash -c '! grep -q "systemctl" "$SANDBOX/calls.log" && ! ls "$SANDBOX"/store/control.db.pre-* >/dev/null 2>&1'
+
 # --- E: the build must not inherit the gateway's NODE_ENV=production -------------------------------------
 echo "E: build step is immune to the gateway env file"
 expect "npm ci and the build run with NODE_ENV unset" bash -c '

@@ -122,6 +122,13 @@ set -a
 source "$ENV_FILE"
 set +a
 LIVE_DB="${ACS_DB_PATH:?ACS_DB_PATH missing from $ENV_FILE}"
+# The gateway resolves a relative ACS_DB_PATH against its systemd WorkingDirectory, which this deploy changes to the new
+# release directory. The lock, backup and automatic restore below would then act on a different file than the live
+# database (a rollback could "succeed" while the real database stays migrated). Refuse before touching anything.
+if [[ "$LIVE_DB" != /* ]]; then
+  echo "ACS_DB_PATH in $ENV_FILE must be an absolute path (got '$LIVE_DB'): a relative path resolves differently for the gateway than for this deploy" >&2
+  exit 2
+fi
 
 # Second lock, keyed by the database itself. Two different units (or env files) can point at one database; each would
 # take its own unit lock, yet both back up, migrate and possibly restore that database. Key it by the canonical path.

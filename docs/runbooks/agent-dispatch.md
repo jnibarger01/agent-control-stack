@@ -33,6 +33,8 @@ else touching the service.
 
 - **One at a time.** Locks keyed by the unit and by the database (canonical path), in the account's own `/run/user/<uid>`, refuse a second deploy, whatever
   `ACS_RELEASES_DIR`, `TMPDIR` or `XDG_RUNTIME_DIR` it uses.
+- **`ACS_DB_PATH` must be absolute.** The gateway resolves a relative path against its systemd working directory, which a
+  deploy changes; the script refuses a relative path before touching anything.
 - **Backup first.** Activation backs up the live database and the current drop-ins before changing anything.
 - **Automatic rollback restores the database.** If the new release is not live within `ACS_DEPLOY_WAIT_SEC` (default
   180s), or the unit crash-loops, the script stops the unit, restores the pre-activation backup over the live database
