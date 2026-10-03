@@ -240,7 +240,7 @@ export class ObservationWorker {
       outcome: failure ?? "OK",
       degraded: advisory.result.degraded,
       retryable: failure === "TIMEOUT" || failure === "UNAVAILABLE",
-      telemetryCorrelationId: null
+      telemetryCorrelationId: advisory.telemetry.correlation.trace_id ?? null
     };
   }
 

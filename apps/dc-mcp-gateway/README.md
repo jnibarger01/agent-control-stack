@@ -35,14 +35,23 @@ ChatGPT ──HTTPS──► https://jacen-ubuntu.tailaa6d41.ts.net/mcp
   downstream HTTP transport and session record per client.
   - Downstream request ids are rewritten to gateway-generated upstream ids and
     restored on response, so independent clients may reuse JSON-RPC ids.
-  - Downstream `initialize` handshakes are virtualized from the single
-    canonical upstream initialization; notifications are forwarded without
+  - Downstream `initialize` handshakes are serialized through the canonical
+    executor with a fresh ACS challenge per session; notifications are forwarded without
     response routes. An unexpected upstream client-directed request or orphan
     response fails closed because it has no deterministic downstream owner.
   - Unknown/mismatched `Mcp-Session-Id` gets HTTP 400
     'session unknown; reconnect and re-initialize'; closing one session leaves
     other sessions live. If the executor crashes, the pair is respawned once
     and existing sessions must re-initialize.
+  - `/healthz` is bridge liveness. DC `/ready` stays 503 during cold startup
+    until the child sends `notifications/acs/runtime-ready` with schema version
+    `acs.runtime-ready.v1` and runtime `desktop_commander`, or completes an
+    initialize handshake. The child sends this notification only after its MCP
+    transport connects; the bridge consumes it rather than forwarding it.
+    Older executors lacking the signal become ready only after initialization.
+    Readiness resets on executor replacement and cannot grant authority:
+    `/authority.authoritative` still requires managed ownership and a completed
+    initialize handshake. Initialize timeout and challenge checks are unchanged.
 - `test-e2e.sh` — end-to-end flow test (run against `GW=<url>`).
 
 ## Jace Commander lane (`/jc/mcp`)

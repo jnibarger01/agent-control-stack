@@ -20,7 +20,7 @@ import {
   type JevResult
 } from "./index.js";
 
-const ENV_KEYS = ["ACS_JEV_ENABLED", "ACS_JEV_URL", "ACS_JEV_TIMEOUT_MS"];
+const ENV_KEYS = ["ACS_JEV_ENABLED", "ACS_JEV_URL", "ACS_JEV_TIMEOUT_MS", "ACS_JEV_CAPABILITY_PROFILE"];
 const QUESTIONS = {
   actionable: noul("Does this need action?"),
   needs_code: noul("Does this need code?")
@@ -85,6 +85,55 @@ describe("feature gate", () => {
     expect(calls).toHaveLength(0);
   });
 });
+describe("operator capability configuration", () => {
+  it("uses a complete configured profile for typed requests", async () => {
+    process.env.ACS_JEV_CAPABILITY_PROFILE = JSON.stringify(FULL_CAPABILITY);
+    const { impl, calls } = mockFetch({
+      model: "typed-model",
+      answers: { mode: { type: "choice", choice: "ok", probabilities: { ok: 1, other: 0 }, confidence: 1 } }
+    });
+    const result = await classifyJev(
+      "state",
+      { mode: choice("Mode?", { ok: "ok", other: "other" }) },
+      {
+        enabled: true,
+        fetchImpl: impl
+      }
+    );
+    expect(calls).toHaveLength(1);
+    expect(result.degraded).toBe(false);
+    expect(result.capability).toEqual(FULL_CAPABILITY);
+  });
+
+  it.each([
+    "not-json",
+    "null",
+    "[]",
+    "{}",
+    JSON.stringify({ ...FULL_CAPABILITY, supportsChoice: undefined }),
+    JSON.stringify({ ...FULL_CAPABILITY, supportsScore: "true" }),
+    " ".repeat(4097)
+  ])("degrades without transport for an invalid configured profile (%#)", async (profile) => {
+    process.env.ACS_JEV_CAPABILITY_PROFILE = profile;
+    const { impl, calls } = mockFetch(noulBody({ actionable: 0.9, needs_code: 0.1 }));
+    const result = await classifyJev("state", QUESTIONS, { enabled: true, fetchImpl: impl });
+    expect(result).toMatchObject({ degraded: true, failureReason: "INCOMPATIBLE_MODEL", capability: null });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("honors explicit capability injection over environment configuration", async () => {
+    process.env.ACS_JEV_CAPABILITY_PROFILE = "not-json";
+    const { impl, calls } = mockFetch(noulBody({ actionable: 0.9, needs_code: 0.1 }));
+    const result = await classifyJev("state", QUESTIONS, {
+      enabled: true,
+      fetchImpl: impl,
+      capabilityProfile: LOCAL_BINARY_CAPABILITY
+    });
+    expect(result.degraded).toBe(false);
+    expect(calls).toHaveLength(1);
+  });
+});
+
 describe("Noul semantics and thresholds", () => {
   it("treats Noul as P(yes), including the 0.02 strong-NO regression", () => {
     const pair = [0.15, 0.85] as const;

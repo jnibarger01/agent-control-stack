@@ -5,6 +5,7 @@ import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
+import { redactValue } from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
 import { buildGateway } from "./server.js";
 
@@ -354,7 +355,21 @@ describe("installed OpenClaw interoperability", () => {
         );
         openclawGatewayProcess.stdout?.on("data", (chunk: Buffer) => (gatewayOutput += chunk.toString("utf8")));
         openclawGatewayProcess.stderr?.on("data", (chunk: Buffer) => (gatewayOutput += chunk.toString("utf8")));
-        await waitForPort(openclawGatewayPort);
+        try {
+          await waitForPort(openclawGatewayPort);
+        } catch (error) {
+          const diagnostic = String(
+            redactValue(gatewayOutput, [
+              "deterministic-openclaw-token",
+              "deterministic-openclaw-gateway-token",
+              "fixture-key"
+            ])
+          ).slice(-8192);
+          throw new Error(
+            `OpenClaw startup failed; exit=${openclawGatewayProcess.exitCode}, signal=${openclawGatewayProcess.signalCode}\n${diagnostic}`,
+            { cause: error }
+          );
+        }
         expect(openclawGatewayProcess.exitCode, gatewayOutput).toBeNull();
         openclawProcess = spawn(
           openclawExecutable,

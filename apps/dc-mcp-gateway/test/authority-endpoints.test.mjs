@@ -42,12 +42,13 @@ async function waitHealthy(url, proc, ms = 8000) {
 }
 
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc-authority-endpoints-'));
+const readyFile = path.join(stateDir, 'transport-ready');
 const port = await freePort();
 const BR = `http://127.0.0.1:${port}`;
 const bridge = startBridge({
   BRIDGE_PORT: String(port),
   DC_CMD: process.execPath,
-  DC_ARGS: path.join(ROOT, 'test', 'stub-dc.mjs'),
+  DC_ARGS: `${path.join(ROOT, 'test', 'stub-dc.mjs')} ${readyFile}`,
   // Pin the stub's cwd; the bridge default is a host-specific checkout path.
   DC_CWD: ROOT,
   DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: stateDir,
@@ -55,6 +56,18 @@ const bridge = startBridge({
 
 try {
   await waitHealthy(BR, bridge);
+  const starting = await fetch(`${BR}/ready`);
+  assert.equal(starting.status, 503, 'spawned process must not imply transport readiness');
+  const startingAuthority = await (await fetch(`${BR}/authority`)).json();
+  assert.equal(startingAuthority.bridge.transportReady, false, 'invalid version/runtime signals cannot establish readiness');
+  assert.equal(startingAuthority.authoritative, false);
+  fs.writeFileSync(readyFile, 'ready');
+  const readyDeadline = Date.now() + 8000;
+  while ((await fetch(`${BR}/ready`)).status !== 200 && Date.now() < readyDeadline) await sleep(25);
+  const readyAuthority = await (await fetch(`${BR}/authority`)).json();
+  assert.equal(readyAuthority.bridge.transportReady, true);
+  assert.equal(readyAuthority.bridge.initialized, false);
+  assert.equal(readyAuthority.authoritative, false, 'transport readiness must not confer authority');
 
   // /health: process-alive framing.
   {

@@ -1697,13 +1697,57 @@ describe("human-issued Autonomous Authority Grants", () => {
 });
 
 describe("Change Set result verification", () => {
+  it.each(["unsupported adapter", "invalid expectation", "unbound resource", "too many checks"])(
+    "rejects human-approved %s before creating execution state",
+    async (scenario) => {
+      const ctx = fixture();
+      try {
+        const proposal = await proposeForApproval(ctx, true, (definition) => {
+          const check = definition.verification[0]!;
+          if (scenario === "unsupported adapter") check.kind = "http_probe";
+          if (scenario === "invalid expectation") check.expectation = { passed: true };
+          if (scenario === "unbound resource") check.expectation.path = join(ctx.root, "unapproved");
+          if (scenario === "too many checks")
+            for (let index = 0; index < 32; index++)
+              definition.verification.push({ ...check, requirementId: `additional-${index}` });
+        });
+        const approval = await ctx.app.inject({
+          method: "POST",
+          url: `${ctx.url}/approve`,
+          headers: reviewerHeaders,
+          payload: proposal
+        });
+        expect(approval.statusCode, approval.body).toBe(201);
+        const response = await ctx.app.inject({
+          method: "POST",
+          url: `${ctx.url}/operations/a/permit`,
+          headers: ctx.headers,
+          payload: { expectedManifestHash: proposal.expectedManifestHash, approvalId: approval.json().approvalId }
+        });
+        expect(response.statusCode, response.body).toBe(scenario === "invalid expectation" ? 400 : 409);
+        const store = new SqliteWorkItemStore(ctx.dbPath);
+        try {
+          expect(store.list()).toHaveLength(1);
+          expect(
+            store.getChangeSetOperationPermitForOperation(ctx.mission.id, proposal.expectedManifestHash, "a")
+          ).toBeUndefined();
+          expect(store.readEvents({ name: "change_set.operation_permitted" })).toHaveLength(0);
+        } finally {
+          store.close();
+        }
+      } finally {
+        await ctx.app.close();
+        rmSync(ctx.root, { recursive: true, force: true });
+      }
+    }
+  );
+
   it.each([
     "absent file",
     "wrong content",
     "simulated execution",
     "wrong invocation",
     "missing requirement",
-    "unsupported adapter",
     "independent review",
     "missing evidence",
     "executor self-approval",
@@ -1731,7 +1775,6 @@ describe("Change Set result verification", () => {
           definition.operations = [definition.operations[0]!];
           definition.verification[0]!.operationIds = ["a"];
         }
-        if (scenario === "unsupported adapter") definition.verification[0]!.kind = "http_probe";
         if (scenario === "two reviewers")
           for (let reviewer = 0; reviewer < 2; reviewer++)
             definition.verification.push({
@@ -2230,7 +2273,6 @@ describe("Change Set result verification", () => {
         "simulated execution": "verification_execution_binding_mismatch",
         "wrong invocation": "verification_execution_binding_mismatch",
         "missing requirement": "verification_not_satisfied",
-        "unsupported adapter": "verification_adapter_unavailable",
         "independent review": "independent_review_required"
       };
       expect(response.json().code).toBe(codes[scenario]);

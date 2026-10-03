@@ -218,8 +218,9 @@ function primitiveOf(question: unknown): JevPrimitive | null {
   const type = (question as { type?: unknown }).type;
   return type === "noul" || type === "choice" || type === "score" ? type : null;
 }
-function sanitizeCapability(profile: JevCapability | null | undefined): JevCapability | null {
-  if (!profile) return null;
+function sanitizeCapability(input: unknown): JevCapability | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const profile = input as Record<string, unknown>;
   if (
     typeof profile.promptVersion !== "string" ||
     !/^[A-Za-z0-9._:-]{1,64}$/.test(profile.promptVersion) ||
@@ -252,6 +253,17 @@ async function resolveCapability(options: ClassifyJevOptions): Promise<JevCapabi
   if (options.capabilityProvider !== undefined) {
     try {
       return sanitizeCapability(await options.capabilityProvider());
+    } catch {
+      return null;
+    }
+  }
+  // This is operator configuration, never a model-produced authority decision.
+  // An explicitly configured but invalid profile must not silently fall back.
+  const configured = readEnv("ACS_JEV_CAPABILITY_PROFILE");
+  if (configured !== undefined) {
+    if (configured.length > 4096) return null;
+    try {
+      return sanitizeCapability(JSON.parse(configured));
     } catch {
       return null;
     }
@@ -437,11 +449,7 @@ export const JEV_TRACE_QUESTIONS = {
     "high",
     "immediate"
   ]),
-  capability_issuance_latency: score("How fast was capability issuance in this trace?", [
-    "fast",
-    "moderate",
-    "slow"
-  ]),
+  capability_issuance_latency: score("How fast was capability issuance in this trace?", ["fast", "moderate", "slow"]),
   execution_latency: score("How fast was execution in this trace?", ["fast", "moderate", "slow"])
 } as const satisfies JevQuestions;
 

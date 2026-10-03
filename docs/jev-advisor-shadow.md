@@ -38,7 +38,7 @@ and confidence. Typed Choice and Score are implemented in the adapter but
 remain unusable against a runtime whose complete capability profile says they
 are unsupported.
 
-Current local runtime capability:
+Default local binary capability profile:
 
 | Primitive | Support |
 | --------- | ------- |
@@ -48,8 +48,8 @@ Current local runtime capability:
 
 ## Runtime capability negotiation
 
-LOCAL_BINARY_CAPABILITY is the default profile for the currently deployed
-binary; it is not permanent architectural truth. classifyJev can consume a
+LOCAL_BINARY_CAPABILITY is the historical binary default profile;
+it is not permanent architectural truth. classifyJev can consume a
 complete profile supplied by runtime configuration, transport initialization,
 trusted health/metadata discovery, or injected tests.
 
@@ -57,6 +57,17 @@ Missing response capability fields do not mean false. Only a complete trusted
 capability source can establish full primitive support. Unsupported requested
 primitives degrade with INCOMPATIBLE_MODEL before transport; they are never
 silently converted to Noul.
+
+Operators may supply a complete JSON profile through
+`ACS_JEV_CAPABILITY_PROFILE`. It requires `promptVersion`, boolean
+`supportsNoul`, `supportsChoice`, and `supportsScore`, and a `fingerprint`
+string; `ggufRevision` is optional. Use values verified against the installed
+engine contract. A ready health response or prompt version alone does not
+establish primitive support. Invalid, incomplete, or oversized profiles degrade
+without transport rather than falling back to the local binary profile.
+Explicit injected profiles/providers take precedence over this environment
+configuration. This configuration changes advisory transport only; it grants
+no execution or completion authority.
 
 ## Mission-intake fan-out
 
@@ -232,14 +243,19 @@ identity: `trace_id + question_set_version + classifier_version`. Repeated
 scheduling does not produce uncontrolled duplicate model calls. Retries
 are bounded and never affect ACS lifecycle.
 
+Completed or classified-degraded observations persist the canonical trace ID
+as `telemetry_correlation_id`, matching `correlation.trace_id` in emitted
+telemetry. Missing/incomplete traces that cannot be classified retain a null
+correlation. A persisted correlation does not assert that the telemetry sink
+successfully delivered the event.
+
 ### Current runtime behavior
 
-The deployed runtime remains Noul-only (Choice and Score unsupported).
-Automatic trace observation against the existing jev-trace@1 mixed
-primitive set will normally produce INCOMPATIBLE_MODEL without sending a
-System One request. This is acceptable and remains observable in
-calibration telemetry. Do not alter the trace question set merely to force
-the current runtime to return a classification. A future runtime that
-explicitly advertises complete Noul+Choice+Score support should begin
-performing the typed trace analysis without requiring another architecture
-change.
+Without explicit capability configuration, automatic trace observation against
+the `jev-trace@1` mixed primitive set produces `INCOMPATIBLE_MODEL` before
+transport because the default binary profile lacks Choice/Score support.
+This is an adapter default, not proof of the installed engine's capabilities.
+Do not alter the trace question set merely to force a classification. Verify
+the installed engine contract and configure its complete profile to activate
+typed trace analysis. Degraded observations remain visible telemetry and must
+never block authoritative work.

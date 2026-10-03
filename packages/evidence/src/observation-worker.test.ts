@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { JEV_TRACE_QUESTIONS } from "@agent-control-stack/jev-advisor";
 import type {
   CanonicalTraceEvent,
   ObservationCapacity,
@@ -96,9 +97,51 @@ class FakeStore implements ObservationStore {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 describe("JEV observation worker", () => {
+  it("persists the emitted trace correlation for a configured typed observation", async () => {
+    vi.stubEnv(
+      "ACS_JEV_CAPABILITY_PROFILE",
+      JSON.stringify({
+        promptVersion: "typed-test",
+        supportsNoul: true,
+        supportsChoice: true,
+        supportsScore: true,
+        fingerprint: "test-engine"
+      })
+    );
+    const answers = Object.fromEntries(
+      Object.entries(JEV_TRACE_QUESTIONS).map(([name, question]) => {
+        if (question.type === "noul") return [name, { type: "noul", noul: 0.5 }];
+        const options = Object.keys(question.criteria);
+        const probabilities = Object.fromEntries(options.map((option, index) => [option, index === 0 ? 1 : 0]));
+        return [
+          name,
+          question.type === "choice"
+            ? { type: "choice", choice: options[0], probabilities, confidence: 1 }
+            : { type: "score", score: 0, probabilities, confidence: 1 }
+        ];
+      })
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ model: "typed-test", answers })))
+    );
+    const store = new FakeStore();
+    const lines: string[] = [];
+    const worker = new ObservationWorker(store, { telemetrySink: (line) => lines.push(line) });
+    await worker.runOnce();
+    expect(store.jobs[0]).toMatchObject({
+      status: "completed",
+      classifierOutcome: "OK",
+      telemetryCorrelationId: job().traceId
+    });
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!)).toMatchObject({ correlation: { trace_id: job().traceId }, degraded: false });
+  });
+
   it("is inert when disabled", async () => {
     const store = new FakeStore();
     const classifier = vi.fn();
@@ -186,6 +229,7 @@ describe("JEV observation worker", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(store.jobs[0]?.status).toBe("degraded");
     expect(store.jobs[0]?.classifierOutcome).toBe("INCOMPATIBLE_MODEL");
+    expect(store.jobs[0]?.telemetryCorrelationId).toBe(job().traceId);
   });
 
   it("uses the current Noul-only capability profile without a Choice/Score network call", async () => {

@@ -545,8 +545,17 @@ function spawnPair() {
     expiredRoutes: new Set(),
     initTail: Promise.resolve(),
     initializedOnce: false,
+    transportReady: false,
   };
   upstream.onmessage = async (msg) => {
+    // Only the child stdio channel can establish process readiness. This is
+    // never an authority grant or a substitute for challenge attestation.
+    if (!JC && isNotification(msg) && msg.method === 'notifications/acs/runtime-ready') {
+      if (msg.params?.schemaVersion === 'acs.runtime-ready.v1' && msg.params?.runtime === 'desktop_commander') {
+        next.transportReady = true;
+      }
+      return;
+    }
     if (isResponse(msg)) {
       const responseId = String(msg.id);
       if (next.expiredRoutes.delete(responseId)) return;
@@ -742,7 +751,7 @@ function computeAuthority() {
     authorityOwner: executorLease.active ? `managed:pid:${executorLease.pid}`
       : breakGlass.active ? `break_glass:pid:${breakGlass.pid}` : 'none',
     executor: { lease: executorLease, breakGlass },
-    bridge: { hasUpstreamPair: !!pair, initialized, spawnCount, sessionCount: pair ? pair.sessions.size : 0 },
+    bridge: { hasUpstreamPair: !!pair, initialized, transportReady: !!pair?.transportReady, spawnCount, sessionCount: pair ? pair.sessions.size : 0 },
     enforcement: {
       gatewayAttestationActive: !!GATEWAY_ATTESTATION_KEY,
       capabilityVerificationActive: !!PIPELINE_ACS_PUBLIC_KEY,
@@ -766,7 +775,7 @@ const httpServer = http.createServer(async (req, res) => {
   if (path === '/authority') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(computeAuthority())); return; }
   if (path === '/ready') {
     const authority = computeAuthority();
-    const ready = !!pair && authority.observedMode !== 'ambiguous_conflict' && !authority.executor.lease.ambiguous && !authority.executor.breakGlass.ambiguous;
+    const ready = !!pair && (pair.transportReady || pair.initializedOnce) && authority.observedMode !== 'ambiguous_conflict' && !authority.executor.lease.ambiguous && !authority.executor.breakGlass.ambiguous;
     res.writeHead(ready ? 200 : 503, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ready, observedMode: authority.observedMode, hasUpstreamPair: !!pair }));
     return;

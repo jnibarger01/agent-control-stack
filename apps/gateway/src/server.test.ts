@@ -786,16 +786,19 @@ describe("mission control gateway", () => {
       requestedActions: [{ kind: "manual", description: "bound" }],
       risk: "low"
     });
-    for (let index = 0; index < MAX_EVENT_LIMIT + 20; index += 1) {
-      seed.recordPolicyDecision({
-        workItemId: workItem.id,
-        actionHash: `hash-${index}`,
-        decision: "allow",
-        reason: "test",
-        matchedRules: [],
-        context: {}
-      });
-    }
+    seed.withTransaction(() => {
+      for (let index = 0; index < MAX_EVENT_LIMIT + 20; index += 1) {
+        seed.recordPolicyDecision({
+          workItemId: workItem.id,
+          actionHash: `hash-${index}`,
+          decision: "allow",
+          reason: "test",
+          matchedRules: [],
+          context: {}
+        });
+      }
+    });
+    expect(seed.verifyAuditChain().ok).toBe(true);
     seed.close();
     const app = buildTestGateway({ dbPath, logger: false });
 
@@ -1661,7 +1664,9 @@ describe("gateway MCP transport", () => {
       const allowed = join(dir, "allowed");
       const configPath = join(dir, "machine-controller.json");
       const dbPath = join(dir, "control.db");
-      const opencodeConfigPath = join(dir, "opencode.json");
+      // Use explicit-only config names: a project-discovered opencode.json
+      // would override the negative probe's independent credential config.
+      const opencodeConfigPath = join(dir, "opencode-fixture.json");
       mkdirSync(allowed);
       writeFileSync(
         configPath,
@@ -1837,13 +1842,10 @@ describe("gateway MCP transport", () => {
         let stderr = "";
         opencodeProcess.stdout?.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
         opencodeProcess.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
-        const exitCode = await new Promise<number | null>((resolve, reject) => {
+        const validCompletion = new Promise<number | null>((resolve, reject) => {
           opencodeProcess?.once("error", reject);
           opencodeProcess?.once("close", resolve);
         });
-        expect(exitCode, stderr).toBe(0);
-        expect(stdout).toContain("OpenCode fixture invocation completed");
-        expect(modelRequests.some((request) => Array.isArray(request.tools))).toBe(true);
         const invalidConfig = JSON.parse(readFileSync(opencodeConfigPath, "utf8")) as Record<string, unknown>;
         (
           (invalidConfig.mcp as Record<string, Record<string, unknown>>)["acs-gateway"].headers as Record<
@@ -1851,23 +1853,33 @@ describe("gateway MCP transport", () => {
             string
           >
         )["Authorization"] = "Bearer invalid-opencode-token";
-        writeFileSync(opencodeConfigPath, JSON.stringify(invalidConfig));
+        // These independent authorization probes share only the fixture server.
+        // Separate homes/configs prevent concurrent CLI initialization from
+        // sharing mutable config, caches, or its session database.
+        const invalidHome = join(dir, "invalid-home");
+        mkdirSync(invalidHome);
+        const invalidConfigPath = join(invalidHome, "opencode-invalid.json");
+        writeFileSync(invalidConfigPath, JSON.stringify(invalidConfig));
         invalidRun = spawn(
           opencodeExecutable!,
           ["run", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
           {
             cwd: allowed,
-            env: opencodeE2eEnvironment(dir, opencodeConfigPath),
+            env: opencodeE2eEnvironment(invalidHome, invalidConfigPath),
             stdio: ["ignore", "pipe", "pipe"]
           }
         );
         let invalidOutput = "";
         invalidRun.stdout?.on("data", (chunk: Buffer) => (invalidOutput += chunk.toString("utf8")));
         invalidRun.stderr?.on("data", (chunk: Buffer) => (invalidOutput += chunk.toString("utf8")));
-        const invalidExitCode = await new Promise<number | null>((resolve, reject) => {
+        const invalidCompletion = new Promise<number | null>((resolve, reject) => {
           invalidRun!.once("error", reject);
           invalidRun!.once("close", resolve);
         });
+        const [exitCode, invalidExitCode] = await Promise.all([validCompletion, invalidCompletion]);
+        expect(exitCode, stderr).toBe(0);
+        expect(stdout).toContain("OpenCode fixture invocation completed");
+        expect(modelRequests.some((request) => Array.isArray(request.tools))).toBe(true);
         expect(invalidExitCode).toBe(0);
         expect(invalidOutput).toContain("No ACS direct-agent tool was advertised");
         expect(

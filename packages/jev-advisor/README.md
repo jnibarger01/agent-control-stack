@@ -34,7 +34,14 @@ POST /v1/systemone.
 
 ## Current runtime capability
 
-The currently deployed local binary profile is:
+Production may configure a complete operator-verified capability profile using
+`ACS_JEV_CAPABILITY_PROFILE` (JSON fields: `promptVersion`, `supportsNoul`,
+`supportsChoice`, `supportsScore`, `fingerprint`, optional `ggufRevision`).
+Incomplete or invalid configured profiles degrade without a model request.
+Absent configuration retains the default local binary profile below. This
+affects advisory transport only and cannot grant authority.
+
+The default historical local binary profile is:
 
 | Primitive | Supported |
 | --------- | --------- |
@@ -43,7 +50,7 @@ The currently deployed local binary profile is:
 | Score     | no        |
 
 Typed Choice/Score support exists architecturally but is capability-gated.
-The local profile is only the default for the current runtime; callers may
+The local profile is only a default; callers may
 supply a complete trusted capability profile through runtime configuration,
 transport initialization, trusted metadata discovery, or injected tests.
 Missing capability fields are unknown, not false. An incomplete metadata

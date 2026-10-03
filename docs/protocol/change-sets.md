@@ -260,7 +260,8 @@ existence, byte counts and hashes; file content is not logged.
 Failed observations reject the result/evidence transaction and block success.
 Missing or mismatched requirements also block success. Simulated results cannot
 satisfy bundle mutation verification. Unsupported verification kinds fail closed
-at result acceptance; they are not yet rejected before execution. Independent
+before a new operation permit or child is created under either authority path;
+result acceptance also checks adapter availability. Independent
 review is mandatory for every mutation under completion policy v2; the separately
 authenticated review endpoint below binds it to the persisted result. No worker-provided
 success message is treated as the verification verdict. Exact accepted-result
@@ -338,15 +339,24 @@ inspection, fail closed rather than inheriting a mission's filesystem scope.
 Arbitrary process execution, remote/network/deployment/service/secret operations
 fail before a child execution is created: the current runtime cannot prove
 their full resource confinement. Unsupported machine verification kinds also
-fail before grant execution.
+fail before execution under either approval or a grant.
+
+Both human-approved and grant-authorized operations require an implemented
+verification adapter before a new execution permit/child is created. Each
+operation supports at most 32 verification checks. File verification requires
+configured containment and Linux descriptor validation; its resource must belong
+to the exact approved operation. Human approval does not bypass these checks.
+
 `fs_inspect` expectations must pass the supported verifier schema at permit
 issuance. These are remaining implementation requirements, not permissions
 silently removed from an otherwise complete autonomy system.
 
 The real isolated acceptance test runs both authority modes: one human bundle
 approval, or one human mission-scope grant with automatic snapshot authorization,
-followed by two dependent DC writes and independent read-back. It does not prove
-JC grant execution, production deployment, or interruption during an in-flight
+followed by two dependent DC writes and independent read-back. Separate source
+acceptance covers a JC write and one mixed DC/JC mission under a scoped grant,
+with independent review before completion. These tests do not prove production
+deployment or interruption during an in-flight
 mutation. Runtime restart between accepted operations and mission closure are
 covered below; these remaining
 capabilities are required before ACS is complete.
@@ -406,7 +416,7 @@ second file write occurs. These failures are retained rather than replayed.
 In-flight lease-loss acceptance proves that observed runtime mutations with no
 durable result stop for reconciliation; it does not prove automatic reconciliation
 or retry. This does not prove automatic model
-planning, failed-operation retries/amendments, broader command/deployment authority, JC runtime execution, or deployment
+planning, failed-operation retries/amendments, broader command/deployment authority, or deployment
 of this source to production. Those remain explicit implementation/proof gaps.
 
 ## Recovery decision safety

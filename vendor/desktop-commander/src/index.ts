@@ -184,6 +184,13 @@ async function runServer() {
     };
 
     await server.connect(transport);
+    // Process startup readiness only. ACS challenge attestation and capability
+    // verification still gate initialized sessions and every governed tool.
+    await transport.send({
+      jsonrpc: "2.0",
+      method: "notifications/acs/runtime-ready",
+      params: { schemaVersion: "acs.runtime-ready.v1", runtime: "desktop_commander" }
+    });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     logger.error(`FATAL ERROR: ${errorMessage}`);

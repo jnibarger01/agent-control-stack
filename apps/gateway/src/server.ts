@@ -2000,16 +2000,36 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                 "autonomous_authority_runtime_unconfined",
                 "runtime cannot enforce this grant's resource boundary"
               );
-            const checks = record.snapshot.definition.verification.filter((rule) =>
-              rule.operationIds.includes(operation.operationId)
+          }
+          // Human approval cannot make an unavailable verifier executable.
+          // Validate before creating child work, regardless of authority source.
+          const checks = record.snapshot.definition.verification.filter((rule) =>
+            rule.operationIds.includes(operation.operationId)
+          );
+          if (checks.length > 32)
+            throw new ControlStackError(
+              "verification_resource_limit",
+              "too many verification checks for one operation"
             );
-            if (checks.some((rule) => !["fs_inspect", "independent_review"].includes(rule.kind)))
+          if (checks.some((rule) => !["fs_inspect", "independent_review"].includes(rule.kind)))
+            throw new ControlStackError(
+              "verification_adapter_unavailable",
+              "execution needs implemented verification before dispatch"
+            );
+          for (const check of checks.filter((rule) => rule.kind === "fs_inspect")) {
+            const expected = fileReadbackExpectationSchema.parse(check.expectation);
+            const containment = jc ? jcContainment : dcContainment;
+            if (!containment || process.platform !== "linux")
+              throw new ControlStackError("verification_adapter_unavailable", "bounded file verifier is unavailable");
+            const path = expected.path ?? operation.action.params.path;
+            if (typeof path !== "string")
+              throw new ControlStackError("verification_resource_missing", "verification needs a bound path");
+            const canonical = containPath(containment, path).canonical;
+            if (!operation.resources.some((resource) => resource.kind === "path" && resource.id === canonical))
               throw new ControlStackError(
-                "verification_adapter_unavailable",
-                "grant execution needs implemented verification before mutation"
+                "verification_resource_out_of_scope",
+                "verification resource not in approved operation"
               );
-            for (const check of checks.filter((rule) => rule.kind === "fs_inspect"))
-              fileReadbackExpectationSchema.parse(check.expectation);
           }
           const child = tools.create_work_item(
             changeSetExecutionInput({

@@ -153,7 +153,7 @@ export async function startCombinedDcBridge(box: Sandbox, acs: CombinedAcsHandle
       DESKTOP_COMMANDER_DISABLE_TELEMETRY: "1"
     },
     port,
-    "/healthz"
+    "/ready"
   );
 }
 
