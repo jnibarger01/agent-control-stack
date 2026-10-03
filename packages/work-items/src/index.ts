@@ -13,6 +13,7 @@ export * from "./publication.js";
 export * from "./execution-read.js";
 export * from "./scheduler-firing.js";
 export * from "./liveness.js";
+export * from "./actor-discovery.js";
 export * from "./state-machine.js";
 export * from "./store.js";
 export {

@@ -114,6 +114,7 @@ import {
   MAX_DASHBOARD_FINISHED_LIMIT,
   MAX_EVENT_LIMIT,
   DEFAULT_HEARTBEAT_TTL_MS,
+  discoverLocalActors,
   isHeartbeatExpired,
   resolveTraceProducerConfig,
   validateHeartbeatTtl,
@@ -126,7 +127,8 @@ import {
   type StoredAuditEvent,
   type ExecutionAttempt,
   type ExecutionPlanRecord,
-  type WorkItem
+  type WorkItem,
+  type DiscoverLocalActorsDeps
 } from "@agent-control-stack/work-items";
 import { z, ZodError } from "zod";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
@@ -278,6 +280,11 @@ export interface GatewayOptions {
   /** Governed ports for autonomous coding missions. Absent ports fail closed. */
   codingMissionPorts?: CodingMissionPorts;
   heartbeatTtlMs?: number;
+  /**
+   * Re-probe the local agent CLIs and refresh their heartbeats on this cadence. Without it nothing renews
+   * a heartbeat and every agent expires to offline after the TTL. 0 or absent disables the loop.
+   */
+  actorDiscovery?: { intervalMs: number } & Partial<DiscoverLocalActorsDeps>;
   /** `observe` (default) or `require_label`. Defaults to ACS_MCP_CLIENT_POLICY. */
   mcpClientPolicy?: McpClientPolicy;
   /** Agent CLI dispatch settings. Defaults to the ACS_AGENT_* environment (off unless enabled). */
@@ -4007,6 +4014,33 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     });
   });
 
+  const actorDiscoveryConfig = options.actorDiscovery;
+  if (actorDiscoveryConfig && actorDiscoveryConfig.intervalMs > 0) {
+    let sweeping = false;
+    let closing = false;
+    const sweep = async () => {
+      if (sweeping || closing) return;
+      sweeping = true;
+      try {
+        await discoverLocalActors({ store: workItems, ...actorDiscoveryConfig });
+        workItems.reconcileStaleAgents();
+      } catch (error) {
+        app.log.warn({ err: error }, "actor discovery sweep failed");
+      } finally {
+        sweeping = false;
+      }
+    };
+    const timer = setInterval(() => void sweep(), actorDiscoveryConfig.intervalMs);
+    timer.unref();
+    app.addHook("onReady", async () => {
+      void sweep();
+    });
+    app.addHook("onClose", async () => {
+      closing = true;
+      clearInterval(timer);
+    });
+  }
+
   const adminExpirySweep = setInterval(() => {
     try {
       workItems.expireAdminModeIfDue();
@@ -4986,14 +5020,17 @@ export function renderLoginPage(redirectTo = "/"): string {
 </html>`;
 }
 
-export async function startGateway(): Promise<FastifyInstance> {
+export async function startGateway(
+  startOptions: Pick<GatewayOptions, "actorDiscovery"> = {}
+): Promise<FastifyInstance> {
   validateProductionConfig();
   const listen = gatewayListenConfig();
   const dbPath = process.env.ACS_DB_PATH ?? "storage/local.db";
   const codingMissionPorts = codingMissionPortsFromEnv(process.env, { dbPath });
   const app = buildGateway({
     dbPath,
-    ...(codingMissionPorts ? { codingMissionPorts } : {})
+    ...(codingMissionPorts ? { codingMissionPorts } : {}),
+    ...(startOptions.actorDiscovery ? { actorDiscovery: startOptions.actorDiscovery } : {})
   });
   await app.listen(listen);
   return app;
