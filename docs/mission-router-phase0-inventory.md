@@ -1,5 +1,7 @@
 # Mission Router Phase 0 inventory
 
+Status update: Mission Router is not an ACS execution authority. Authoritative executor selection is Nimble through `decideAuthoritativeRoute`, described in `docs/authoritative-nimble-routing.md`. This file remains a historical inventory.
+
 Date: 2026-07-11T22:35:33-05:00
 Status: bounded local inventory complete; retirement proof incomplete
 
@@ -22,19 +24,19 @@ This is not proof about remote machines, deleted integrations, inaccessible root
 
 ## Live integration findings
 
-| Surface | Result | Evidence |
-|---|---|---|
-| `mission-router` executable in `PATH` | Not found | `command -v mission-router` returned no path |
-| User systemd service/timer | Not found | Filtered `systemctl --user` unit-file and active-unit listings |
-| System systemd service/timer | Not found | Filtered system unit-file and active-unit listings |
-| User/system cron | Not found | User crontab and bounded `/etc/cron.*` searches |
-| Hermes cron | Not found | Six scheduled jobs listed; direct `~/.hermes/cron` content search returned zero references |
-| Running process | Not found | Filtered process table |
-| Docker/Podman container | Not found | Filtered running-container listings |
-| Shell alias/startup reference | Not found | `.bashrc`, `.profile`, `.zshrc` and config searches |
-| Global/local npm installation/link | Not found | npm/global-link checks |
-| Other local repository caller | Not found in checked roots | Bounded source/config searches listed above |
-| ACS compatibility package | Present, not a Mission Router process caller | `packages/agentos-contracts` contains shared/legacy contracts; ACS `policy-gate` imports it |
+| Surface                               | Result                                       | Evidence                                                                                    |
+| ------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `mission-router` executable in `PATH` | Not found                                    | `command -v mission-router` returned no path                                                |
+| User systemd service/timer            | Not found                                    | Filtered `systemctl --user` unit-file and active-unit listings                              |
+| System systemd service/timer          | Not found                                    | Filtered system unit-file and active-unit listings                                          |
+| User/system cron                      | Not found                                    | User crontab and bounded `/etc/cron.*` searches                                             |
+| Hermes cron                           | Not found                                    | Six scheduled jobs listed; direct `~/.hermes/cron` content search returned zero references  |
+| Running process                       | Not found                                    | Filtered process table                                                                      |
+| Docker/Podman container               | Not found                                    | Filtered running-container listings                                                         |
+| Shell alias/startup reference         | Not found                                    | `.bashrc`, `.profile`, `.zshrc` and config searches                                         |
+| Global/local npm installation/link    | Not found                                    | npm/global-link checks                                                                      |
+| Other local repository caller         | Not found in checked roots                   | Bounded source/config searches listed above                                                 |
+| ACS compatibility package             | Present, not a Mission Router process caller | `packages/agentos-contracts` contains shared/legacy contracts; ACS `policy-gate` imports it |
 
 **Conclusion:** no active local Mission Router runtime consumer was identified in the checked surfaces. This does not prove that no remote or external consumer exists.
 
@@ -42,14 +44,14 @@ This is not proof about remote machines, deleted integrations, inaccessible root
 
 Canonical local store found at `~/.mission-router`:
 
-| Artifact | Inventory |
-|---|---|
-| Mission JSON files | 3 |
-| States | 2 `DISPATCHED`; 1 `AWAITING_APPROVAL` |
-| JSONL audit events | 13 |
-| Event types | 3 each of `task_received`, `task_validated`, `risk_classified`, `route_selected`; 1 `approval_requested` |
-| Chain verification | `node src/cli.mjs verify` returned `{ "ok": true }` |
-| Mutation check | SHA-256 hashes of all four files matched before and after verification |
+| Artifact           | Inventory                                                                                                |
+| ------------------ | -------------------------------------------------------------------------------------------------------- |
+| Mission JSON files | 3                                                                                                        |
+| States             | 2 `DISPATCHED`; 1 `AWAITING_APPROVAL`                                                                    |
+| JSONL audit events | 13                                                                                                       |
+| Event types        | 3 each of `task_received`, `task_validated`, `risk_classified`, `route_selected`; 1 `approval_requested` |
+| Chain verification | `node src/cli.mjs verify` returned `{ "ok": true }`                                                      |
+| Mutation check     | SHA-256 hashes of all four files matched before and after verification                                   |
 
 Raw mission goals and event bodies were intentionally not copied into this report.
 

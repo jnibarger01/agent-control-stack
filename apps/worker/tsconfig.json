@@ -9,8 +9,10 @@
   "references": [
     { "path": "../../apps/scheduler" },
     { "path": "../../packages/advisory" },
+    { "path": "../../packages/coding-mission" },
     { "path": "../../packages/evidence" },
     { "path": "../../packages/desktop-commander-adapter" },
+    { "path": "../../packages/execution-admission" },
     { "path": "../../packages/policy-gate" },
     { "path": "../../packages/procedural-learning" },
     { "path": "../../packages/sandbox" },

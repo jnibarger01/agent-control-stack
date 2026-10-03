@@ -19,12 +19,40 @@ function resolveInstalledOpenclaw(): string | undefined {
   return undefined;
 }
 
+function openclawFixtureEnvironment(home: string, state: string, config: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of ["PATH", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"]) {
+    if (process.env[key] !== undefined) env[key] = process.env[key];
+  }
+  return {
+    ...env,
+    HOME: home,
+    XDG_CONFIG_HOME: join(home, ".config"),
+    XDG_CACHE_HOME: join(home, ".cache"),
+    XDG_DATA_HOME: join(home, ".local", "share"),
+    OPENCLAW_STATE_DIR: state,
+    OPENCLAW_CONFIG_PATH: config,
+    OPENCLAW_GATEWAY_TOKEN: "deterministic-openclaw-gateway-token",
+    OPENCLAW_SKIP_CHANNELS: "1"
+  };
+}
+
+async function stopFixtureProcess(child: ReturnType<typeof spawn> | undefined): Promise<void> {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise<void>((resolve, reject) => {
+    child.once("close", () => resolve());
+    child.once("error", reject);
+    child.kill("SIGTERM");
+  });
+}
+
 const openclawExecutable = resolveInstalledOpenclaw();
 
 describe("installed OpenClaw interoperability", () => {
   it.skipIf(!openclawExecutable)(
     "drives the real OpenClaw local agent through ACS MCP and the fixture agent",
     async () => {
+      if (!openclawExecutable) throw new Error("OpenClaw executable unavailable");
       const dir = mkdtempSync(join(tmpdir(), "acs-gateway-openclaw-e2e-"));
       const allowed = join(dir, "allowed");
       const dbPath = join(dir, "control.db");
@@ -52,6 +80,8 @@ describe("installed OpenClaw interoperability", () => {
 
       const modelBodies: Array<Record<string, unknown>> = [];
       let finalResponseSent = false;
+      let discoveredToolId: string | undefined;
+      const bridgeCalls: string[] = [];
       const modelServer = createServer((request, response) => {
         if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
           response.writeHead(404).end();
@@ -78,23 +108,80 @@ describe("installed OpenClaw interoperability", () => {
             functionValue && typeof functionValue === "object"
               ? (functionValue as Record<string, unknown>).name
               : tool?.name;
-          const hasToolResult = messages.some(
+          const results = messages.filter(
             (message) => message && typeof message === "object" && (message as Record<string, unknown>).role === "tool"
+          ) as Record<string, unknown>[];
+          const lastResult = results.at(-1);
+          const calls = messages.flatMap((message) => {
+            const value =
+              message && typeof message === "object" ? (message as Record<string, unknown>).tool_calls : undefined;
+            return Array.isArray(value) ? value : [];
+          }) as Array<{ id?: string; function?: { name?: string } }>;
+          const lastName =
+            lastResult?.name ?? calls.find((call) => call.id === lastResult?.tool_call_id)?.function?.name;
+          const content =
+            typeof lastResult?.content === "string" ? lastResult.content : JSON.stringify(lastResult?.content ?? "");
+          // Native search returns a JSON array inside an untrusted-content
+          // wrapper. Decode data only; never execute the surrounding text.
+          const begin = content.search(/[[{]/u);
+          const finish = Math.max(content.lastIndexOf("}"), content.lastIndexOf("]"));
+          let parsed: unknown;
+          try {
+            if (begin >= 0 && finish > begin) parsed = JSON.parse(content.slice(begin, finish + 1));
+          } catch {
+            /* diagnostic assertions below reject unusable results */
+          }
+          const findTarget = (value: unknown, depth = 0): string | undefined => {
+            if (!value || typeof value !== "object" || depth > 12) return undefined;
+            const row = value as Record<string, unknown>;
+            if (typeof row.name === "string" && /test[._-]agent[._-]run/.test(row.name)) {
+              return typeof row.id === "string" ? row.id : row.name;
+            }
+            for (const child of Object.values(row)) {
+              const found = findTarget(child, depth + 1);
+              if (found) return found;
+            }
+            return undefined;
+          };
+          const advertised = tools.map(
+            (entry) =>
+              (entry as { function?: { name?: string }; name?: string }).function?.name ??
+              (entry as { name?: string }).name
           );
+          const invocation = {
+            agent: "openclaw",
+            prompt: "OpenClaw deterministic interoperability check",
+            cwd: allowed,
+            timeoutSeconds: 5,
+            permissionMode: "read-only"
+          };
+          let selectedName: string | undefined;
+          let selectedArgs: Record<string, unknown> | undefined;
+          if (!lastResult && typeof functionName === "string") {
+            selectedName = functionName;
+            selectedArgs = invocation;
+          } else if (!lastResult && advertised.includes("tool_search")) {
+            selectedName = "tool_search";
+            selectedArgs = { query: "ACS test agent run", limit: 5 };
+          } else if (lastName === "tool_search") {
+            discoveredToolId = findTarget(parsed);
+            if (discoveredToolId && advertised.includes("tool_describe")) {
+              selectedName = "tool_describe";
+              selectedArgs = { id: discoveredToolId };
+            }
+          } else if (lastName === "tool_describe" && discoveredToolId && advertised.includes("tool_call")) {
+            selectedName = "tool_call";
+            selectedArgs = { id: discoveredToolId, args: invocation };
+          }
 
           const completionId = `openclaw-fixture-${modelBodies.length}`;
-          if (!hasToolResult && typeof functionName === "string") {
-            const argumentsValue = JSON.stringify({
-              agent: "openclaw",
-              prompt: "OpenClaw deterministic interoperability check",
-              cwd: allowed,
-              timeoutSeconds: 5,
-              permissionMode: "read-only"
-            });
+          if (selectedName && selectedArgs) {
+            bridgeCalls.push(selectedName);
+            const argumentsValue = JSON.stringify(selectedArgs);
             const toolCall = {
-              id: "openclaw-fixture-call",
+              id: `openclaw-fixture-call-${modelBodies.length}`,
               type: "function",
-              function: { name: functionName, arguments: argumentsValue }
+              function: { name: selectedName, arguments: argumentsValue }
             };
             if (body.stream === false) {
               response.writeHead(200, { "content-type": "application/json" });
@@ -201,7 +288,9 @@ describe("installed OpenClaw interoperability", () => {
           openclawConfigPath,
           JSON.stringify({
             gateway: { mode: "local", bind: "loopback", port: openclawGatewayPort },
-            tools: { profile: "coding" },
+            // OpenClaw 2026.9 defers MCP schemas behind tool_search for this loopback
+            // fixture provider when toolSearch is unset. Direct schemas keep test.agent.run callable.
+            tools: { profile: "coding", toolSearch: false },
             agents: {
               defaults: {
                 workspace: allowed,
@@ -244,7 +333,7 @@ describe("installed OpenClaw interoperability", () => {
           })
         );
         openclawGatewayProcess = spawn(
-          "openclaw",
+          openclawExecutable,
           [
             "--profile",
             "acs-test",
@@ -261,23 +350,16 @@ describe("installed OpenClaw interoperability", () => {
           ],
           {
             cwd: allowed,
-            env: {
-              ...process.env,
-              HOME: dir,
-              OPENCLAW_STATE_DIR: openclawStateDir,
-              OPENCLAW_CONFIG_PATH: openclawConfigPath,
-              OPENCLAW_GATEWAY_TOKEN: "deterministic-openclaw-gateway-token",
-              OPENCLAW_SKIP_CHANNELS: "1"
-            },
+            env: openclawFixtureEnvironment(dir, openclawStateDir, openclawConfigPath),
             stdio: ["ignore", "pipe", "pipe"]
           }
         );
         openclawGatewayProcess.stdout?.on("data", (chunk: Buffer) => (gatewayOutput += chunk.toString("utf8")));
         openclawGatewayProcess.stderr?.on("data", (chunk: Buffer) => (gatewayOutput += chunk.toString("utf8")));
-        await waitForPort(openclawGatewayPort);
+        await waitForPort(openclawGatewayPort, () => gatewayOutput);
         expect(openclawGatewayProcess.exitCode, gatewayOutput).toBeNull();
         openclawProcess = spawn(
-          "openclaw",
+          openclawExecutable,
           [
             "--profile",
             "acs-test",
@@ -294,14 +376,7 @@ describe("installed OpenClaw interoperability", () => {
           ],
           {
             cwd: allowed,
-            env: {
-              ...process.env,
-              HOME: dir,
-              OPENCLAW_STATE_DIR: openclawStateDir,
-              OPENCLAW_CONFIG_PATH: openclawConfigPath,
-              OPENCLAW_GATEWAY_TOKEN: "deterministic-openclaw-gateway-token",
-              OPENCLAW_SKIP_CHANNELS: "1"
-            },
+            env: openclawFixtureEnvironment(dir, openclawStateDir, openclawConfigPath),
             stdio: ["ignore", "pipe", "pipe"]
           }
         );
@@ -315,9 +390,20 @@ describe("installed OpenClaw interoperability", () => {
         const diagnosticEvents = new SqliteWorkItemStore(dbPath);
         const diagnosticEventNames = diagnosticEvents.readEvents().map((event) => event.name);
         diagnosticEvents.close();
-        const diagnostic = `${output}\nOpenClaw gateway:\n${gatewayOutput}\nEvents:${diagnosticEventNames.join(",")}\nModel bodies:${modelBodies.length}`;
+        const diagnostic = `${output}\nOpenClaw gateway:\n${gatewayOutput}\nEvents:${diagnosticEventNames.join(",")}\nModel bodies:${modelBodies.length}\nTool names:${JSON.stringify(
+          modelBodies.map((body) =>
+            (Array.isArray(body.tools) ? body.tools : []).map((tool) => {
+              const entry = tool as Record<string, unknown>;
+              const fn = entry.function as Record<string, unknown> | undefined;
+              return fn?.name ?? entry.name;
+            })
+          )
+        )}`;
         expect(modelBodies.length, diagnostic).toBeGreaterThan(1);
         expect(finalResponseSent, diagnostic).toBe(true);
+        if (bridgeCalls[0] === "tool_search") {
+          expect(bridgeCalls, diagnostic).toEqual(["tool_search", "tool_describe", "tool_call"]);
+        }
         expect(
           modelBodies.some((request) => Array.isArray(request.tools)),
           diagnostic
@@ -354,8 +440,7 @@ describe("installed OpenClaw interoperability", () => {
         }
         expect(readFileSync(join(dir, "machine-audit.jsonl"), "utf8")).toContain('"tool":"test.agent.run"');
       } finally {
-        if (openclawProcess && openclawProcess.exitCode === null) openclawProcess.kill("SIGTERM");
-        if (openclawGatewayProcess && openclawGatewayProcess.exitCode === null) openclawGatewayProcess.kill("SIGTERM");
+        await Promise.all([stopFixtureProcess(openclawProcess), stopFixtureProcess(openclawGatewayProcess)]);
         await app.close();
         await new Promise<void>((resolve) => modelServer.close(() => resolve()));
         rmSync(dir, { recursive: true, force: true });
@@ -378,8 +463,8 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-async function waitForPort(port: number): Promise<void> {
-  const deadline = Date.now() + 10_000;
+async function waitForPort(port: number, diagnostics: () => string): Promise<void> {
+  const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     try {
       await new Promise<void>((resolve, reject) => {
@@ -395,7 +480,7 @@ async function waitForPort(port: number): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
-  throw new Error(`OpenClaw gateway did not listen on 127.0.0.1:${port}`);
+  throw new Error(`OpenClaw gateway did not listen on 127.0.0.1:${port}. Output: ${diagnostics()}`);
 }
 
 function seedActor(dbPath: string, id: string, externalRef: string): void {

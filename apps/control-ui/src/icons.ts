@@ -7,6 +7,7 @@ export function icon(name: string): string {
     approvals: '<path d="m12 3 9 9-9 9-9-9z"/><path d="m8 12 3 3 5-6"/>',
     agents:
       '<circle cx="12" cy="7" r="3"/><circle cx="5" cy="15" r="2"/><circle cx="19" cy="15" r="2"/><path d="M7 21v-2a5 5 0 0 1 10 0v2M3 11l4-3M21 11l-4-3"/>',
+    dispatch: '<path d="M4 12 20 4l-4 16-4-7z"/><path d="m12 13 8-9"/>',
     executors: '<path d="m12 2 9 5v10l-9 5-9-5V7z"/><path d="m7 9 5 3 5-3M12 12v6"/>',
     connectors:
       '<circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="m8 8 8 8M13 6h8M18 3v6M3 18h8M6 15v6"/>',

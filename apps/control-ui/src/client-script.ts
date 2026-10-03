@@ -1,3 +1,5 @@
+import { AGENT_DISPATCH_EVENT_NAMES, agentDispatchClientSource } from "./agent-dispatch.js";
+import { codingMissionPanelSource } from "./coding-mission-panel.js";
 import { operationsClientSource } from "./operations-client.js";
 import { CONFIRM_COPY } from "./approval-actions.js";
 import { auditTimelineClientSource } from "./audit-timeline.js";
@@ -28,6 +30,7 @@ let leaseWarningRoot = null;
 // clock backwards by the delay.
 const SERVER_CLOCK_MAX_RTT_MS = 10000;
 const sseEventNames = [
+${AGENT_DISPATCH_EVENT_NAMES.map((name) => `  '${name}',`).join("\n")}
   'work_item.created',
   'work_item.pending_policy',
   'work_item.needs_approval',
@@ -155,6 +158,7 @@ function appendAuditEvent(event) {
   if (data.name === 'work_item.needs_approval') notifyApprovalNeeded(data);
   const eventName = String(data.name || event.type || '');
   onLiveAuditEvent(eventName, data);
+  onDispatchAuditEvent(eventName);
   if (eventName.startsWith('agent.') || eventName.startsWith('acp.')) {
     refreshAgentRoster();
     if (selectedAgentId) loadAgentDetail(selectedAgentId);
@@ -249,7 +253,7 @@ function bindWorkItems() {
   document.addEventListener('click', function (event) {
     const button = event.target && event.target.closest ? event.target.closest('[data-work-item]') : null;
     if (!button) return;
-    selectWorkItem(button.dataset.workItem);
+    selectWorkItem(button.dataset.workItem, { keepFocus: true });
   });
 }
 
@@ -1263,6 +1267,7 @@ document.addEventListener('click', async (event) => {
 
 
 ${composerClientSource()}
+${agentDispatchClientSource()}
 
 const viewAliases = {
   overview: 'overview',
@@ -1278,7 +1283,8 @@ const viewAliases = {
   audit: 'audit',
   policy: 'policy',
   system: 'system',
-  dispatch: 'overview'
+  dispatch: 'dispatch',
+  'create-task': 'overview'
 };
 function showView(name) {
   const view = viewAliases[name] || 'overview';
@@ -1287,6 +1293,7 @@ function showView(name) {
   document.querySelectorAll('nav a[data-nav]').forEach((link) => {
     link.classList.toggle('active', link.dataset.nav === view);
   });
+  if (view === 'dispatch') onDispatchViewShown();
   if (view === 'executors') refreshExecutorRoster();
   if (view === 'connectors') refreshConnectorRoster();
   syncSystemProbes();
@@ -1336,5 +1343,6 @@ document.querySelector('aside nav')?.addEventListener('click', (event) => {
   history.pushState(null, '', href);
 });
 showView((location.hash || '#overview').replace('#', ''));
-openWorkItemFromLocation();`;
+openWorkItemFromLocation();
+${codingMissionPanelSource()}`;
 }

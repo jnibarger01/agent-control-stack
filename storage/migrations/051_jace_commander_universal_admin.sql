@@ -1,4 +1,4 @@
--- 040_jace_commander_universal_admin
+-- 051_jace_commander_universal_admin
 -- Admin mode may auto-authorize every approval-gated JC tool, including privileged_exec.
 DROP TRIGGER IF EXISTS jace_commander_capability_issuances_no_change;
 DROP TRIGGER IF EXISTS jace_commander_capability_issuances_no_delete;
@@ -7,7 +7,7 @@ DROP INDEX IF EXISTS idx_jc_capability_one_per_approval;
 DROP INDEX IF EXISTS idx_jc_capability_issued;
 
 ALTER TABLE jace_commander_capability_issuances
-  RENAME TO jace_commander_capability_issuances__pre040;
+  RENAME TO jace_commander_capability_issuances__pre051;
 
 CREATE TABLE jace_commander_capability_issuances (
   capability_issuance_id TEXT PRIMARY KEY,
@@ -58,9 +58,9 @@ INSERT INTO jace_commander_capability_issuances
     capability_issuance_id, lease_id, attempt_id, work_item_id, runtime_id, tool_name,
     action_hash, request_hash, invocation_hash, approval_id, approved_by_actor_id,
     key_id, nonce_hash, issued_at, expires_at
-  FROM jace_commander_capability_issuances__pre040;
+  FROM jace_commander_capability_issuances__pre051;
 
-DROP TABLE jace_commander_capability_issuances__pre040;
+DROP TABLE jace_commander_capability_issuances__pre051;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jc_capability_one_per_invocation
   ON jace_commander_capability_issuances(lease_id, attempt_id, work_item_id, invocation_hash);

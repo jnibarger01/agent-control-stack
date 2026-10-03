@@ -12,7 +12,7 @@ afterEach(() => {
 });
 
 describe("acs mode", () => {
-  it("reports strict by default and persists an explicit admin switch", async () => {
+  it("reports strict and refuses unauthenticated local admin activation", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-mode-cli-"));
     const dbPath = join(dir, "control.db");
     process.env.ACS_DB_PATH = dbPath;
@@ -30,12 +30,10 @@ describe("acs mode", () => {
       expect(io.stdout.chunks).toContain("Execution mode: strict");
       expect(io.stdout.chunks).toContain("Approval policy: policy");
       io.stdout.chunks = "";
-      expect(await runAcsCli(["mode", "admin"], io)).toBe(0);
-      expect(io.stdout.chunks).toContain("Execution mode: admin");
-      expect(io.stdout.chunks).toContain("Approval policy: auto");
+      expect(await runAcsCli(["mode", "admin"], io)).toBe(1);
       io.stdout.chunks = "";
       expect(await runAcsCli(["mode", "status"], io)).toBe(0);
-      expect(io.stdout.chunks).toContain("Execution mode: admin");
+      expect(io.stdout.chunks).toContain("Execution mode: strict");
       io.stdout.chunks = "";
       expect(await runAcsCli(["mode", "strict"], io)).toBe(0);
       expect(io.stdout.chunks).toContain("Execution mode: strict");

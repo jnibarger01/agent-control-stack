@@ -121,6 +121,12 @@ export function setExecutionModeFromCli(
   mode: "strict" | "admin",
   dbPath = defaultDbPath()
 ): { text: string; ok: boolean } {
+  if (mode === "admin") {
+    return {
+      text: "Admin activation requires an authenticated human operator through POST /execution-mode.\n",
+      ok: false
+    };
+  }
   const store = new SqliteWorkItemStore(dbPath, { heartbeatTtlMs: DEFAULT_HEARTBEAT_TTL_MS });
   try {
     store.setExecutionMode({ mode, updatedBy: "acs-cli", reason: `acs mode ${mode}` });
