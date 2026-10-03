@@ -80,6 +80,7 @@ export const AGENT_RUN_EVENTS = {
   rejected: "agent_run.rejected",
   cancelRequested: "agent_run.cancel_requested",
   interrupted: "agent_run.interrupted",
+  processStarted: "agent_run.process_started",
   reviewed: "agent_run.reviewed"
 } as const;
 
@@ -382,6 +383,18 @@ export class AgentRunService {
         command,
         cwd: worktree.worktreePath,
         signal: controller.signal,
+        onStart: (pid) => {
+          if (pid === undefined) return;
+          try {
+            this.store.recordSystemEvent({
+              name: AGENT_RUN_EVENTS.processStarted,
+              body: { runId, ownerToken, pid, startTicks: processStartTicks(pid) ?? null },
+              attributes: attrs
+            });
+          } catch {
+            /* the run proceeds; recovery then cannot identify the process and will say so */
+          }
+        },
         onSnapshot: (text) => writeAtomic(outputPath, text)
       });
       writeAtomic(outputPath, result.output);
@@ -473,14 +486,34 @@ export class AgentRunService {
     return this.get(runId)!;
   }
 
-  /** Runs recorded as active but with no process in this gateway died with a previous gateway. */
+  /**
+   * Runs recorded as active but with no process in this gateway died with a previous gateway. A process that
+   * outlived it is no longer under any authority, so it is terminated (only if its identity still matches the
+   * recorded pid and start time) and the run is marked interrupted with what actually happened.
+   */
   reconcile(): number {
     let count = 0;
+    const processes = new Map<string, { pid: number; startTicks: number | null }>();
+    for (const event of this.store.readEvents({ name: AGENT_RUN_EVENTS.processStarted, limit: 500 })) {
+      const body = event.body as Record<string, unknown>;
+      if (typeof body.runId === "string" && typeof body.pid === "number") {
+        processes.set(body.runId, {
+          pid: body.pid,
+          startTicks: typeof body.startTicks === "number" ? body.startTicks : null
+        });
+      }
+    }
     for (const run of this.list(200)) {
       if ((run.status === "queued" || run.status === "running") && !this.active.has(run.runId)) {
+        const recorded = processes.get(run.runId);
+        const fate = recorded ? terminateOrphan(recorded.pid, recorded.startTicks) : "no_process_recorded";
         this.store.recordSystemEvent({
           name: AGENT_RUN_EVENTS.interrupted,
-          body: { runId: run.runId, reason: "gateway restarted before the run finished" },
+          body: {
+            runId: run.runId,
+            reason: `gateway restarted before the run finished (${ORPHAN_FATE_TEXT[fate]})`,
+            orphan: fate
+          },
           attributes: { "agent_run.id": run.runId }
         });
         count += 1;
@@ -518,6 +551,55 @@ export class AgentRunService {
 
   catalog(): { id: string; displayName: string }[] {
     return AGENT_CLI_IDS.map((id) => ({ id, displayName: AGENT_CLI_CATALOG[id].displayName }));
+  }
+}
+
+export type OrphanFate = "terminated" | "already_exited" | "identity_unverified" | "no_process_recorded";
+const ORPHAN_FATE_TEXT: Record<OrphanFate, string> = {
+  terminated: "its orphaned agent process was terminated",
+  already_exited: "its agent process had already exited",
+  identity_unverified: "its agent process may still be running; it could not be verified, so it was left alone",
+  no_process_recorded: "no agent process was recorded"
+};
+
+/** Field 22 of /proc/<pid>/stat: start time in clock ticks since boot. Identifies a process across pid reuse. */
+export function processStartTicks(pid: number): number | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    const ticks = Number(fields[19]);
+    return Number.isFinite(ticks) ? ticks : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function terminateOrphan(pid: number, recordedTicks: number | null): OrphanFate {
+  let alive = true;
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    alive = (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+  if (!alive) return "already_exited";
+  const current = processStartTicks(pid);
+  if (current === undefined) return "already_exited";
+  if (recordedTicks === null || current !== recordedTicks) {
+    // Same pid, different (or unrecorded) process: never signal something we cannot prove is ours.
+    return recordedTicks === null ? "identity_unverified" : "already_exited";
+  }
+  try {
+    process.kill(-pid, "SIGTERM");
+    setTimeout(() => {
+      try {
+        if (processStartTicks(pid) === recordedTicks) process.kill(-pid, "SIGKILL");
+      } catch {
+        /* gone */
+      }
+    }, 2_000).unref();
+    return "terminated";
+  } catch {
+    return "identity_unverified";
   }
 }
 

@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
-import { assessResult, foldRuns, type AgentDispatchConfig } from "./agent-runs.js";
+import { spawn } from "node:child_process";
+import { assessResult, foldRuns, processStartTicks, type AgentDispatchConfig } from "./agent-runs.js";
 import { buildGateway, type GatewayCredential } from "./server.js";
 
 const OP = "operator-credential".padEnd(40, "_");
@@ -525,5 +526,85 @@ describe("agent run state folding", () => {
     expect(assessResult("edit", noisy, { changedFiles: ["a"], commitsAhead: 0 }).outcome).toBe("succeeded");
     expect(assessResult("edit", noisy, { changedFiles: [], commitsAhead: 0 }).outcome).toBe("failed");
     expect(assessResult("edit", { outcome: "cancelled", output: "" }, undefined)).toEqual({ outcome: "cancelled" });
+  });
+});
+
+describe("restart recovery of agent processes", () => {
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const seed = (dbPath: string, runId: string, pid: number, startTicks: number | null) => {
+    const store = new SqliteWorkItemStore(dbPath);
+    const attrs = { "agent_run.id": runId };
+    store.recordSystemEvent({
+      name: "agent_run.requested",
+      body: { runId, agentId: "claude", mode: "edit", repoRoot: "/x", actorId: "user", ownerToken: "t" },
+      attributes: attrs
+    });
+    store.recordSystemEvent({
+      name: "agent_run.process_started",
+      body: { runId, ownerToken: "t", pid, startTicks },
+      attributes: attrs
+    });
+    store.close();
+  };
+
+  it("terminates an orphaned agent process whose identity still matches, and reports it", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "acs-orphan-")));
+    const child = spawn("sleep", ["60"], { detached: true, stdio: "ignore" });
+    child.unref();
+    try {
+      const pid = child.pid!;
+      seed(join(root, "c.db"), "run_bbbbbbbbbbbb", pid, processStartTicks(pid) ?? null);
+      const app = buildGateway({
+        dbPath: join(root, "c.db"),
+        logger: false,
+        agentDispatch: { enabled: true, repoRoots: [root], maxConcurrent: 1, worktreeRoot: root, outputRoot: root },
+        auth: { token: "", actor: "user", actorId: "user", credentials }
+      });
+      const run = (await app.inject({ method: "GET", url: "/api/agent-runs", headers: bearer(OP) })).json().runs[0];
+      expect(run.status).toBe("interrupted");
+      expect(run.error).toMatch(/orphaned agent process was terminated/);
+      await waitFor(async () => (alive(pid) ? undefined : true), 5_000);
+      await app.close();
+    } finally {
+      try {
+        process.kill(-child.pid!, "SIGKILL");
+      } catch {
+        /* already terminated */
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("never signals a process it cannot prove is the recorded one", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "acs-orphan-")));
+    const child = spawn("sleep", ["60"], { detached: true, stdio: "ignore" });
+    child.unref();
+    try {
+      seed(join(root, "c.db"), "run_cccccccccccc", child.pid!, 1);
+      const app = buildGateway({
+        dbPath: join(root, "c.db"),
+        logger: false,
+        agentDispatch: { enabled: true, repoRoots: [root], maxConcurrent: 1, worktreeRoot: root, outputRoot: root },
+        auth: { token: "", actor: "user", actorId: "user", credentials }
+      });
+      const run = (await app.inject({ method: "GET", url: "/api/agent-runs", headers: bearer(OP) })).json().runs[0];
+      expect(run.status).toBe("interrupted");
+      expect(alive(child.pid!)).toBe(true);
+      await app.close();
+    } finally {
+      try {
+        process.kill(-child.pid!, "SIGKILL");
+      } catch {
+        /* already terminated */
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

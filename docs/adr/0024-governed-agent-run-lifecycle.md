@@ -47,15 +47,29 @@ All of this lives in `AgentRunService`; the plan contract, worker and scheduler 
 - **Jev is not on this path.** `agent-runs.ts` and `agent-routes.ts` do not import or mention Jev, and a test
   fails if they do. Disabling, degrading or poisoning Jev therefore cannot change dispatch.
 
+## Addendum: restart recovery and the governed path
+
+- **Orphan handling.** The runner's pid and Linux process start time are recorded (`agent_run.process_started`).
+  On gateway start, a run left active is marked `interrupted`; if its process is still alive and the pid and
+  start time still match, the process group is terminated, because it is no longer under any authority. A process
+  that cannot be verified is left alone and the reason says so. ACS never signals a pid it cannot prove is its own.
+- **Governed execution has its own path.** Mission Control's mission dispatch
+  ([runbook](../runbooks/governed-mission-dispatch.md)) schedules an approved Change Set through the existing
+  mission runner: policy, approval, operation permit, scheduler admission, capability and fenced lease. That
+  covers work item, lease and result validation for governed DC/JC execution. It deliberately does not launch
+  CLIs, so the plan contract is unchanged.
+- **Jev.** Neither dispatch path references Jev, and a test runs mission dispatch with Jev disabled, down and
+  adversarial and requires identical results and zero calls to the advisor.
+
 ## Not done: the remaining authority gap
 
 These need their own design and are deliberately out of this change:
 
-1. Dispatch does not create a work item, execution plan, lease or approval record, so the existing scheduler,
-   worker lease generation and policy gate do not govern it.
+1. Host-side CLI runs still create no work item, execution plan, lease or approval record. Only the governed
+   mission path above does.
 2. After start, the CLI's own tool calls are not routed through ACS. Containment is still the CLI's permission mode
    plus the worktree.
-3. Reconciliation after a gateway restart marks runs `interrupted`; it does not re-adopt a surviving process.
+3. Reconciliation terminates a surviving process rather than re-adopting it and its output.
 4. Jev observations are not correlated to run or action IDs, because Jev is not consulted for runs at all.
 
 Until (1) and (2) land, ACS must not claim it governs everything an agent does.
