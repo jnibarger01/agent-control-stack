@@ -47,15 +47,46 @@ All of this lives in `AgentRunService`; the plan contract, worker and scheduler 
 - **Jev is not on this path.** `agent-runs.ts` and `agent-routes.ts` do not import or mention Jev, and a test
   fails if they do. Disabling, degrading or poisoning Jev therefore cannot change dispatch.
 
+## Addendum: restart recovery and the governed path
+
+- **Orphan handling.** The runner's pid and Linux process start time are recorded (`agent_run.process_started`).
+  On gateway start, a run left active is marked `interrupted`; if its process is still alive and the pid and
+  start time still match, the process group is terminated, because it is no longer under any authority. A process
+  that cannot be verified is left alone and the reason says so. ACS never signals a pid it cannot prove is its own.
+- **Governed execution has its own path.** Mission Control's mission dispatch
+  ([runbook](../runbooks/governed-mission-dispatch.md)) schedules an approved Change Set through the existing
+  mission runner: policy, approval, operation permit, scheduler admission, capability and fenced lease. That
+  covers work item, lease and result validation for governed DC/JC execution. It deliberately does not launch
+  CLIs, so the plan contract is unchanged.
+- **Jev.** Neither dispatch path references Jev, and a test runs mission dispatch with Jev disabled, down and
+  adversarial and requires identical results and zero calls to the advisor.
+
+- **Managed tool path (Claude Code only).** Claude runs install an ACS `PreToolUse` hook through `--settings`. It
+  logs every tool call to the run's `tool-calls.jsonl`, denies file writes outside the worktree, reads of
+  credential stores, `git push`, remote changes, network and remote-shell tools, privilege escalation and package
+  publishing, and fails closed if it cannot parse a call or record it. The run view shows the call and denial
+  counts. This is a deny-list: Bash is matched by pattern, so it is not a sandbox.
+- **Per-call ACS decisions.** With `ACS_AGENT_GUARD_URL` set (https, or http on loopback), the hook asks the gateway
+  to decide each call at `POST /api/agent-runs/{id}/tool-check`, authenticated by a random per-run token held in a
+  0600 file (never in argv) that is valid only while the run is active. The gateway writes each decision to the
+  audit chain (`agent_run.tool_call`), enforces a per-run call budget, and the local deny-list stays a floor that
+  ACS can tighten but never lift. If the gateway is unreachable or refuses, the hook denies. Verified live with
+  the installed `claude` through a real gateway dispatch.
+- **Accurate reporting.** Every CLI carries a governance level, shown on its card and in the confirmation dialog:
+  `acs_guarded` (Claude), `os_sandboxed` (Codex: its own OS sandbox, no per-call visibility) or `host_permissions`
+  (the other seven: ACS cannot see or govern their tool calls). Nothing is claimed beyond that.
+
 ## Not done: the remaining authority gap
 
 These need their own design and are deliberately out of this change:
 
-1. Dispatch does not create a work item, execution plan, lease or approval record, so the existing scheduler,
-   worker lease generation and policy gate do not govern it.
-2. After start, the CLI's own tool calls are not routed through ACS. Containment is still the CLI's permission mode
-   plus the worktree.
-3. Reconciliation after a gateway restart marks runs `interrupted`; it does not re-adopt a surviving process.
+1. Host-side CLI runs still create no work item, execution plan, lease or approval record. Only the governed
+   mission path above does.
+2. Seven CLIs have no verified hook mechanism, so their tool calls are not routed through ACS; Codex relies on its
+   OS sandbox. Claude's per-call decision is a deny-list policy, not the full capability and approval flow that
+   governed Change Set execution uses. Routing Claude through that flow means mapping tool calls to Change Set
+   operations, which is a separate design.
+3. Reconciliation terminates a surviving process rather than re-adopting it and its output.
 4. Jev observations are not correlated to run or action IDs, because Jev is not consulted for runs at all.
 
 Until (1) and (2) land, ACS must not claim it governs everything an agent does.

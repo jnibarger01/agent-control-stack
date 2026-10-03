@@ -1,3 +1,4 @@
+import { resumeDispatchedMissions } from "../../../apps/worker/src/mission-dispatch.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -31,6 +32,7 @@ describe.skipIf(!E2E_ENABLED)("real governed Change Set execution", () => {
     { authorityMode: "human approval", driver: "manual" },
     { authorityMode: "autonomous grant", driver: "manual" },
     { authorityMode: "human approval", driver: "durable runner" },
+    { authorityMode: "human approval", driver: "Mission Control dispatch" },
     { authorityMode: "autonomous grant", driver: "durable runner" },
     { authorityMode: "human approval", driver: "executor crash" },
     { authorityMode: "autonomous grant", driver: "executor crash" },
@@ -52,6 +54,7 @@ describe.skipIf(!E2E_ENABLED)("real governed Change Set execution", () => {
       let resultHeld = false;
       let lateResultStatus: number | undefined;
       const acs = await startAcs(box, await desktopCommanderRuntimeId(box), {
+        missionDispatchEnabled: driver === "Mission Control dispatch",
         beforeListen:
           driver === "in-flight lease loss"
             ? (app) => {
@@ -191,6 +194,21 @@ describe.skipIf(!E2E_ENABLED)("real governed Change Set execution", () => {
           selector = { approvalId: approved.json().approvalId };
           runnerAuthority = { approvalId: approved.json().approvalId };
         }
+        if (driver === "Mission Control dispatch") {
+          if (!("approvalId" in selector)) throw new Error("human approval required by fixture");
+          const payload = {
+            missionId: mission.id,
+            approvalId: selector.approvalId,
+            expectedManifestHash: submission.json().manifestHash
+          };
+          const preview = await post("/api/mission-dispatch/preview", payload, true);
+          expect(preview.statusCode, preview.body).toBe(200);
+          const confirmed = { ...payload, confirmationHash: preview.json().preview.confirmationHash };
+          const receipt = await post("/api/mission-dispatch", confirmed, true);
+          expect(receipt.statusCode, receipt.body).toBe(202);
+          const replay = await post("/api/mission-dispatch", confirmed, true);
+          expect(replay.json().dispatch.dispatchId).toBe(receipt.json().dispatch.dispatchId);
+        }
         const permits: ChangeSetOperationPermit[] = [];
         const refreshPermits = () => {
           const reader = new SqliteWorkItemStore(join(box.root, "acs.db"));
@@ -207,7 +225,7 @@ describe.skipIf(!E2E_ENABLED)("real governed Change Set execution", () => {
             reader.close();
           }
         };
-        if (driver !== "concurrent runners") {
+        if (driver !== "concurrent runners" && driver !== "Mission Control dispatch") {
           for (const operationId of ["a", "b"]) {
             const permitted = await post(`${url}/operations/${operationId}/permit`, {
               expectedManifestHash: submission.json().manifestHash,
@@ -224,7 +242,7 @@ describe.skipIf(!E2E_ENABLED)("real governed Change Set execution", () => {
         });
         expect(prematureCompletion.statusCode, prematureCompletion.body).toBe(409);
         expect(prematureCompletion.json().code).toBe("change_set_completion_pending");
-        if (driver !== "concurrent runners") {
+        if (driver !== "concurrent runners" && driver !== "Mission Control dispatch") {
           const premature = await client.call("write_file", definition.operations[1]!.action.params, {
             acsOperationPermitId: permits[1]!.permitId
           });
@@ -276,6 +294,14 @@ describe.skipIf(!E2E_ENABLED)("real governed Change Set execution", () => {
             gatewayUrl: acs.url,
             gatewayToken: "e2e-planner-token",
             runtimes: { desktop_commander: { url: `${edge.origin}/mcp`, token: accessToken(edge.origin) } }
+          };
+          const dispatchEnv = {
+            ACS_MISSION_DISPATCH_ENABLED: "1",
+            ACS_MISSION_EXECUTING_ACTOR_ID: definition.executingActorId,
+            ACS_MISSION_GATEWAY_URL: acs.url,
+            ACS_MISSION_GATEWAY_TOKEN: "e2e-planner-token",
+            ACS_MISSION_DC_MCP_URL: `${edge.origin}/mcp`,
+            ACS_MISSION_DC_MCP_TOKEN: accessToken(edge.origin)
           };
           const createReviewedClient = () => {
             const connection = createMissionRunnerClient(config);
@@ -329,7 +355,11 @@ describe.skipIf(!E2E_ENABLED)("real governed Change Set execution", () => {
             if (driver === "concurrent runners") {
               await raceOperation(firstClient, "a");
             } else {
-              const firstTick = await runMissionOnce(firstClient.ports, options);
+              const firstTick =
+                driver === "Mission Control dispatch"
+                  ? (await resumeDispatchedMissions(join(box.root, "acs.db"), dispatchEnv))[0]!
+                  : await runMissionOnce(firstClient.ports, options);
+              if (driver === "Mission Control dispatch") refreshPermits();
               expect(firstTick.operationId).toBe("a");
               expect(["progressed", "awaiting_results"]).toContain(firstTick.status);
             }
@@ -460,11 +490,19 @@ describe.skipIf(!E2E_ENABLED)("real governed Change Set execution", () => {
                 (await acs.workItem(permits[1]!.executionWorkItemId)).workItem.status === "succeeded" ? true : undefined
               );
             }
-            const resumed = await runMission(resumedClient.ports, {
-              ...options,
-              maxRuntimeMs: 10_000,
-              pollIntervalMs: 50
-            });
+            const resumed =
+              driver === "Mission Control dispatch"
+                ? await waitFor(async () => {
+                    await reviewPending();
+                    const ticks = await resumeDispatchedMissions(join(box.root, "acs.db"), dispatchEnv);
+                    refreshPermits();
+                    return ticks.find((tick) => tick.status === "completed");
+                  }, 10_000)
+                : await runMission(resumedClient.ports, {
+                    ...options,
+                    maxRuntimeMs: 10_000,
+                    pollIntervalMs: 50
+                  });
             const diagnostic = new SqliteWorkItemStore(join(box.root, "acs.db"));
             let failureContext: unknown;
             try {
