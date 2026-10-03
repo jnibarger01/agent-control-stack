@@ -143,6 +143,12 @@ expect "resume refuses a release that was never published" bash -c '
   rm -rf "$FINAL"; ( cd "$ROOT" && PATH="$SANDBOX/shims:$PATH" ACS_RELEASE_NODE_DIR="$HOME/releases/_node/v24.18.0/bin" \
     scripts/deploy-gateway-release.sh --ref HEAD --label test --resume ) >/dev/null 2>&1; [ $? -ne 0 ]'
 
+# --- E: the build must not inherit the gateway's NODE_ENV=production -------------------------------------
+echo "E: build step is immune to the gateway env file"
+expect "npm ci and the build run with NODE_ENV unset" bash -c '
+  grep -n "npm ci" "$ROOT/scripts/deploy-gateway-release.sh" | grep -q "env -u NODE_ENV npm ci" &&
+  grep -n "npm run build" "$ROOT/scripts/deploy-gateway-release.sh" | grep -q "env -u NODE_ENV npm run build"'
+
 echo
 if [[ "$failures" -eq 0 ]]; then echo "deploy script sandbox test: all checks passed"; else echo "deploy script sandbox test: $failures check(s) FAILED"; fi
 exit "$failures"

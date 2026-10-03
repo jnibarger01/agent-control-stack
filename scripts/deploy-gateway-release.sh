@@ -85,7 +85,9 @@ if [[ "$RESUME" -eq 0 && -z "${ACS_DEPLOY_PREBUILT_STAGE:-}" ]]; then
 log "stage $RELEASE_NAME from $SHA"
 mkdir -p "$STAGE"
 git -C "$REPO" archive "$SHA" | tar -x -C "$STAGE"
-(cd "$STAGE" && npm ci --no-audit --no-fund && npm run build)
+# The gateway env file (sourced above for LIVE_DB and the smoke test) sets NODE_ENV=production, which would make
+# npm ci skip the dev dependencies the build needs. Build with it unset.
+(cd "$STAGE" && env -u NODE_ENV npm ci --no-audit --no-fund && env -u NODE_ENV npm run build)
 
 log "seal"
 (cd "$STAGE" \
