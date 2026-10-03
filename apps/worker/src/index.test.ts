@@ -86,8 +86,6 @@ describe("worker policy gate", () => {
     }
   });
 
-
-
   it("executes a Nimble assignment only after an authenticated claim callback matches persisted lease authority", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-worker-authenticated-nimble-"));
     const dbPath = join(dir, "control.db");
