@@ -43,20 +43,26 @@ DROPIN_DIR="$UNIT_DIR/$UNIT.d"
 ENV_FILE="${ACS_GATEWAY_ENV_FILE:-$HOME/.config/agent-control-stack/gateway.env}"
 DISPATCH_ROOTS="${ACS_AGENT_REPO_ROOTS:-$HOME/projects}"
 SMOKE_PORT="${ACS_SMOKE_PORT:-3999}"
+# The PATH the systemd drop-in installs; the smoke test uses the same one to prove the CLIs are visible to the service.
+# Defined here, not in the build block, because --resume installs the drop-in without building.
+AGENT_PATH="$HOME/.local/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 
 SHA="$(git -C "$REPO" rev-parse --verify "$REF^{commit}")"
 SHORT="${SHA:0:7}"
 RELEASE_NAME="$SHORT-$LABEL"
 FINAL="$RELEASES/acs/$RELEASE_NAME"
-STAGE="$RELEASES/_staging/$RELEASE_NAME.$$"
+# ACS_DEPLOY_PREBUILT_STAGE (tests): treat this directory as an already built, sealed and smoke-tested stage.
+STAGE="${ACS_DEPLOY_PREBUILT_STAGE:-$RELEASES/_staging/$RELEASE_NAME.$$}"
 SMOKE_DIR=""
 SMOKE_PID=""
 
 log() { printf '\n==> %s\n' "$*"; }
 cleanup() {
-  [[ -n "$SMOKE_PID" ]] && kill "$SMOKE_PID" 2>/dev/null || true
-  [[ -n "$SMOKE_DIR" ]] && rm -rf "$SMOKE_DIR"
+  # Must return 0: this is the EXIT trap, and a false last test would turn a successful run into exit 1.
+  if [[ -n "$SMOKE_PID" ]]; then kill "$SMOKE_PID" 2>/dev/null || true; fi
+  if [[ -n "$SMOKE_DIR" ]]; then rm -rf "$SMOKE_DIR"; fi
+  return 0
 }
 trap cleanup EXIT
 
@@ -75,7 +81,7 @@ source "$ENV_FILE"
 set +a
 LIVE_DB="${ACS_DB_PATH:?ACS_DB_PATH missing from $ENV_FILE}"
 
-if [[ "$RESUME" -eq 0 ]]; then
+if [[ "$RESUME" -eq 0 && -z "${ACS_DEPLOY_PREBUILT_STAGE:-}" ]]; then
 log "stage $RELEASE_NAME from $SHA"
 mkdir -p "$STAGE"
 git -C "$REPO" archive "$SHA" | tar -x -C "$STAGE"
@@ -92,8 +98,6 @@ SMOKE_DIR="$(mktemp -d)"
 sqlite3 "$LIVE_DB" ".backup '$SMOKE_DIR/control.db'"
 
 SMOKE_TOKEN="${ACS_GATEWAY_TOKEN:-}"
-# Same PATH the systemd drop-in installs, so the smoke test proves the CLIs are visible to the service.
-AGENT_PATH="$HOME/.local/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin"
 (
   cd "$STAGE"
   # No Desktop Commander or tunnel wiring: the smoke gateway must not contend with the live runtime.

@@ -20,6 +20,7 @@
     "test": "npm run test:vitest && npm run test:release-integrity && npm run test:agentos && npm run test:public-site-safety && npm run test:dc-mcp-gateway && npm run test:dc-relay",
     "test:release-integrity": "npm test -w packages/release-integrity",
     "release:integrity": "node scripts/release-integrity.mjs",
+    "test:deploy-script": "bash scripts/deploy-gateway-release.test.sh",
     "test:vitest": "vitest run",
     "test:protocol-conformance": "npm run build && vitest run apps/gateway/src/security-contract-conformance.test.ts",
     "test:agentos": "npm test -w packages/agentos-contracts",
