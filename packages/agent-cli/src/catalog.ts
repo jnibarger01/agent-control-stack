@@ -28,6 +28,8 @@ export interface AgentCliInvocationInput {
   timeoutSec: number;
   /** Absolute worktree path. Always also the process cwd. */
   cwd: string;
+  /** `--settings` JSON installing the ACS tool guard. Only honoured by CLIs that support hooks (Claude Code). */
+  guardSettings?: string;
 }
 
 export interface AgentCliSpec {
@@ -66,9 +68,16 @@ export const AGENT_CLI_CATALOG: Readonly<Record<AgentCliId, AgentCliSpec>> = {
     versionArgs: ["--version"],
     loginPaths: [".claude"],
     envPassthrough: ["ANTHROPIC_", "CLAUDE_CODE_"],
-    editContainment: "acceptEdits permission mode: file edits auto-approved, other tools gated by Claude's own rules",
+    editContainment:
+      "acceptEdits permission mode plus the ACS tool guard: every tool call is logged, file writes outside the worktree, git push, network and privilege tools are denied (a deny-list, not a sandbox)",
     readOnlySupported: true,
-    buildArgs: ({ prompt, mode }) => ["-p", prompt, "--permission-mode", mode === "edit" ? "acceptEdits" : "plan"]
+    buildArgs: ({ prompt, mode, guardSettings }) => [
+      "-p",
+      prompt,
+      "--permission-mode",
+      mode === "edit" ? "acceptEdits" : "plan",
+      ...(guardSettings ? ["--settings", guardSettings] : [])
+    ]
   },
   codex: {
     id: "codex",
@@ -221,3 +230,49 @@ export const AGENT_CLI_CATALOG: Readonly<Record<AgentCliId, AgentCliSpec>> = {
 export function agentCliSpec(id: string): AgentCliSpec | undefined {
   return (AGENT_CLI_IDS as readonly string[]).includes(id) ? AGENT_CLI_CATALOG[id as AgentCliId] : undefined;
 }
+
+/**
+ * How much of a CLI's own tool use ACS can see and govern. Shown to the operator, so it must never
+ * overstate: only `acs_guarded` runs have a per-call ACS decision, and even those are a deny-list.
+ */
+export type AgentGovernance = "acs_guarded" | "os_sandboxed" | "host_permissions";
+export const AGENT_GOVERNANCE: Readonly<Record<AgentCliId, { level: AgentGovernance; summary: string }>> = {
+  claude: {
+    level: "acs_guarded",
+    summary:
+      "ACS decides and audits every tool call through a PreToolUse hook (a deny-list, not a sandbox). Per-call decisions come from the gateway when ACS_AGENT_GUARD_URL is set; otherwise the hook enforces the same deny-list locally."
+  },
+  codex: {
+    level: "os_sandboxed",
+    summary:
+      "Codex's own OS sandbox limits writes to the worktree. ACS cannot see or decide individual tool calls and does not audit them."
+  },
+  opencode: {
+    level: "host_permissions",
+    summary: "Runs with your host permissions under OpenCode's own rules. ACS cannot see or govern its tool calls."
+  },
+  gemini: {
+    level: "host_permissions",
+    summary: "Runs with your host permissions under Gemini's own rules. ACS cannot see or govern its tool calls."
+  },
+  hermes: {
+    level: "host_permissions",
+    summary: "Runs with your host permissions under Hermes' own approvals. ACS cannot see or govern its tool calls."
+  },
+  openclaw: {
+    level: "host_permissions",
+    summary: "Runs with your host permissions. ACS cannot see or govern its tool calls."
+  },
+  "cursor-agent": {
+    level: "host_permissions",
+    summary: "Runs with your host permissions under Cursor's own trust model. ACS cannot see or govern its tool calls."
+  },
+  goose: {
+    level: "host_permissions",
+    summary: "Runs with your host permissions under Goose's configured mode. ACS cannot see or govern its tool calls."
+  },
+  cline: {
+    level: "host_permissions",
+    summary: "Runs its own tools with your host permissions. ACS cannot see or govern its tool calls."
+  }
+};

@@ -40,6 +40,14 @@ interrupted`) and rebuilt from those events. No migration. Output is redacted li
 - A CLI that cannot be dispatched today (not installed, or a verified failure such as an expired login) is
   refused with its specific reason rather than failing mid-run.
 
+## Governed mission dispatch
+
+Mission Control also exposes a separate [governed mission dispatch](../runbooks/governed-mission-dispatch.md)
+path for existing approved Change Sets. It schedules the existing worker mission
+runner, which uses ACS operation permits, scheduler admission, capabilities,
+leases and validated results. It does not make these host-side CLI runs governed
+or allow Jev to grant authority.
+
 ## Consequences
 
 - Admin ("YOLO") mode has no role here: dispatch is always a human click, and a run never approves anything.

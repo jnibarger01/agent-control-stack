@@ -1,3 +1,4 @@
+import { resumeDispatchedMissions } from "./mission-dispatch.js";
 import { ExecutionAdmissionScheduler } from "@agent-control-stack/execution-admission";
 import {
   claimNextAuthoritativeWorkItem,
@@ -177,6 +178,7 @@ export function isReadOnlyWorkerWorkItem(workItem: Pick<WorkItem, "requestedActi
 
 export async function runWorkerOnce(options: WorkerOptions = {}): Promise<WorkerResult> {
   const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
+  await resumeDispatchedMissions(dbPath);
   if (options.resumeCodingMissions) await options.resumeCodingMissions(dbPath);
   else await resumeConfiguredCodingMissions(dbPath);
   const executionBackend = options.executionBackend ?? resolveExecutionBackend();

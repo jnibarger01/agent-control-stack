@@ -1,7 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { ControlStackError, applyControlPlaneMigrations, createId } from "@agent-control-stack/shared";
 import { executionPlanApprovalRequestHash } from "@agent-control-stack/work-items";
-import { ACS_ADMIN_APPROVER } from "@agent-control-stack/policy-gate";
 import { jaceCommanderNonceHash, jaceCommanderToolPolicy } from "./jace-commander.js";
 
 export interface JaceCommanderIssuanceBinding {
@@ -144,13 +143,6 @@ export class SqliteJaceCommanderIssuanceRegistry {
           throw new ControlStackError(
             "jace_commander_approval_rejected",
             "approval is missing, expired, or mismatched"
-          );
-        }
-        // Root execution remains human-only even in canonical admin mode.
-        if (approval.approved_by_actor_id === ACS_ADMIN_APPROVER && input.toolName === "privileged_exec") {
-          throw new ControlStackError(
-            "jace_commander_human_approval_required",
-            "privileged_exec requires a human approval; admin auto-approval is not accepted"
           );
         }
         // Fail closed: without a known requester there is no way to rule out

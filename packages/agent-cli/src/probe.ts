@@ -2,7 +2,14 @@ import { spawn } from "node:child_process";
 import { accessSync, constants, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { AGENT_CLI_CATALOG, AGENT_CLI_IDS, type AgentCliId, type AgentCliSpec } from "./catalog.js";
+import {
+  AGENT_CLI_CATALOG,
+  AGENT_CLI_IDS,
+  AGENT_GOVERNANCE,
+  type AgentCliId,
+  type AgentCliSpec,
+  type AgentGovernance
+} from "./catalog.js";
 
 export interface AgentCliProbe {
   id: AgentCliId;
@@ -18,6 +25,8 @@ export interface AgentCliProbe {
   loginDetected: boolean;
   readOnlySupported: boolean;
   editContainment: string;
+  governance: AgentGovernance;
+  governanceSummary: string;
   /** Why dispatch is refused for this CLI right now, if it is. */
   dispatchBlockedReason?: string;
   error?: string;
@@ -92,6 +101,8 @@ export async function probeAgentCli(
     verifiedAgainst: spec.verifiedAgainst,
     readOnlySupported: spec.readOnlySupported,
     editContainment: spec.editContainment,
+    governance: AGENT_GOVERNANCE[spec.id].level,
+    governanceSummary: AGENT_GOVERNANCE[spec.id].summary,
     ...(spec.dispatchBlockedReason ? { dispatchBlockedReason: spec.dispatchBlockedReason } : {}),
     loginDetected: spec.loginPaths.some((path) => existsSync(join(home, path)))
   };

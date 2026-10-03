@@ -783,6 +783,7 @@ const executionAuditEventNames = new Set([
   "execution.completed",
   "desktop_commander.capability_issued",
   "desktop_commander.capability_denied",
+  "desktop_commander.scheduler_admitted",
   "desktop_commander.tool_called",
   "desktop_commander.tool_succeeded",
   "desktop_commander.tool_failed",
@@ -1478,6 +1479,12 @@ export interface WorkItemStore {
   }>;
   recordSystemEvent(input: {
     name: string;
+    body?: Record<string, unknown>;
+    attributes?: Record<string, string | number | boolean>;
+  }): StoredAuditEvent;
+  recordSystemEventOnceForWorkItem(input: {
+    name: string;
+    workItemId: string;
     body?: Record<string, unknown>;
     attributes?: Record<string, string | number | boolean>;
   }): StoredAuditEvent;
@@ -7435,6 +7442,28 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return this.write(() => {
       const name = requiredString(input.name, "name");
       const event = this.appendAuditEvent(createEvent(name, input.body ?? {}, input.attributes ?? {}));
+      return { value: event, events: [event] };
+    });
+  }
+
+  recordSystemEventOnceForWorkItem(input: {
+    name: string;
+    workItemId: string;
+    body?: Record<string, unknown>;
+    attributes?: Record<string, string | number | boolean>;
+  }): StoredAuditEvent {
+    return this.write(() => {
+      const name = requiredString(input.name, "name");
+      const workItemId = requiredString(input.workItemId, "workItemId");
+      const existing = this.db
+        .prepare(
+          `SELECT * FROM audit_events WHERE name = ? AND json_extract(attributes, '$."work_item.id"') = ? LIMIT 1`
+        )
+        .get(name, workItemId) as unknown as EventRow | undefined;
+      if (existing) return { value: rowToEvent(existing), events: [] };
+
+      const attributes = { ...(input.attributes ?? {}), "work_item.id": workItemId };
+      const event = this.appendAuditEvent(createEvent(name, input.body ?? {}, attributes));
       return { value: event, events: [event] };
     });
   }

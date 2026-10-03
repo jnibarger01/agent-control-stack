@@ -15,7 +15,12 @@ import {
 import { ControlStackError } from "@agent-control-stack/shared";
 import type { StoredAuditEvent, WorkItemStore } from "@agent-control-stack/work-items";
 import { AgentRunService } from "./agent-runs.js";
-import { agentRunBodySchema, agentRunConfirmedBodySchema } from "./public-contracts.js";
+import {
+  agentRunBodySchema,
+  agentRunConfirmedBodySchema,
+  agentRunReviewBodySchema,
+  agentToolCheckBodySchema
+} from "./public-contracts.js";
 
 const dispatchBodySchema = agentRunBodySchema;
 const confirmedDispatchBodySchema = agentRunConfirmedBodySchema;
@@ -237,8 +242,9 @@ export function registerAgentRoutes(deps: AgentRouteDeps): void {
 
   app.post("/api/agent-runs/preview", { config: limit(60) }, async (request, reply) => {
     try {
-      if (!requireHumanActor(request, reply)) return;
-      return { preview: await service.preview(dispatchBodySchema.parse(request.body)) };
+      const actorId = requireHumanActor(request, reply);
+      if (!actorId) return;
+      return { preview: await service.preview(dispatchBodySchema.parse(request.body), actorId) };
     } catch (error) {
       return sendError(reply, error);
     }
@@ -277,6 +283,39 @@ export function registerAgentRoutes(deps: AgentRouteDeps): void {
       }
     }
   );
+
+  /**
+   * Called by the Claude tool guard hook, authenticated by the run's own short-lived token (not a gateway
+   * credential). Fails closed: anything but a valid token on an active run is a 401.
+   */
+  app.post<{ Params: { id: string } }>(
+    "/api/agent-runs/:id/tool-check",
+    { config: limit(1_200) },
+    async (request, reply) => {
+      try {
+        const header = request.headers.authorization ?? "";
+        const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+        const body = agentToolCheckBodySchema.parse(request.body);
+        return service.checkTool(request.params.id, token, body.tool, body.input);
+      } catch (error) {
+        if (error instanceof ControlStackError && error.code === "agent_guard_unauthorized") {
+          return reply.code(401).send({ error: error.message, code: error.code });
+        }
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.post<{ Params: { id: string } }>("/api/agent-runs/:id/review", { config: limit(30) }, async (request, reply) => {
+    try {
+      const actorId = requireHumanActor(request, reply);
+      if (!actorId) return;
+      const body = agentRunReviewBodySchema.parse(request.body);
+      return { run: service.review(request.params.id, actorId, body.decision, body.note) };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
 
   app.post<{ Params: { id: string } }>("/api/agent-runs/:id/cancel", { config: limit(30) }, async (request, reply) => {
     try {

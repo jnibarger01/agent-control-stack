@@ -34,6 +34,9 @@ ADR status values:
 | [0019](0019-acs-dc-execution-chain-monorepo.md)                          | Consolidate the ACS / Desktop Commander execution chain into this monorepo                | Proposed                          |
 | [0020](0020-jev-advisory-only-evidence.md)                               | Jev is advisory-only evidence, never an authority                                         | Accepted                          |
 | [0021](0021-looptrace-evidence-spine.md)                                 | LoopTrace is an observational evidence/replay spine, not an authority                     | Accepted                          |
+| [0022](0022-human-authorized-agent-runs.md)                              | Human-authorized agent runs                                                               | Accepted                          |
+| [0023](0023-desktop-commander-concurrency-scheduler.md)                  | Centralize Desktop Commander concurrency scheduling in ACS                                | Accepted                          |
+| [0024](0024-governed-agent-run-lifecycle.md)                             | Harden agent runs: expiring confirmations, fencing, verified results, review              | Accepted                          |
 
 ## Decision rules
 

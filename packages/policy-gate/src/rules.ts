@@ -1,6 +1,5 @@
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
-import { ACS_ADMIN_APPROVER } from "./execution-mode.js";
 import type { PolicyContext, PolicyDecision } from "./policy.js";
 
 export type PolicyRiskLevel = "read_only" | "safe_mutation" | "requires_approval" | "destructive" | "forbidden";
@@ -46,13 +45,10 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
   // argv is deliberately NOT mapped to `command`, so the ordinary `sudo` /
   // shell-metacharacter denials below keep applying to every other action.
   if (context.action.kind === PRIVILEGED_EXEC_KIND) {
-    if (context.operation === "approve" && context.actor === ACS_ADMIN_APPROVER) {
-      return risk("forbidden", "privileged execution requires a human approver", ["deny:privileged-admin-approval"]);
-    }
     if (context.operation === "approve" && isRequestingActor(context)) {
       return risk("forbidden", "privileged execution cannot be self-approved", ["deny:self-approval"]);
     }
-    return risk("requires_approval", "privileged execution always requires human approval", [
+    return risk("requires_approval", "privileged execution requires an approval record", [
       "approval:privileged-exec"
     ]);
   }

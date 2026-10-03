@@ -269,3 +269,60 @@ describe("Dispatch page", () => {
     expect(ctx.calls.filter((c) => c.url === "/api/agent-runs" && c.method === "GET").length).toBeGreaterThan(before);
   });
 });
+
+describe("governed mission dispatch UI", () => {
+  it("reviews a snapshot, invalidates edited confirmation, and schedules only after a separate click", async () => {
+    const hash = "a".repeat(64);
+    const ctx = boot({
+      "GET /work-items/mission-fixture/change-sets": () => ({ body: { manifestHash: hash } }),
+      "POST /api/mission-dispatch/preview": () => ({
+        body: {
+          preview: {
+            confirmationHash: "b".repeat(64),
+            objective: "<script>untrusted</script>",
+            executingActorId: "planner",
+            operations: [{ toolName: "read_file" }],
+            expiresAt: "2026-10-03T12:00:00Z"
+          }
+        }
+      }),
+      "POST /api/mission-dispatch": () => ({ body: { enabled: true, dispatches: [] } })
+    });
+    try {
+      ctx.connect();
+      const form = ctx.document.getElementById("mission-dispatch-form") as HTMLFormElement;
+      (form.elements.namedItem("missionId") as HTMLInputElement).value = "mission-fixture";
+      (form.elements.namedItem("approvalId") as HTMLInputElement).value = "approval-fixture";
+      form.dispatchEvent(new ctx.dom.window.Event("submit", { bubbles: true, cancelable: true }));
+      await ctx.settle();
+      expect(ctx.calls.filter((call) => call.url === "/api/mission-dispatch" && call.method === "POST")).toHaveLength(
+        0
+      );
+      expect(ctx.document.querySelector("#mission-dispatch-review script")).toBeNull();
+      expect(ctx.document.getElementById("mission-dispatch-review")!.textContent).toContain(
+        "<script>untrusted</script>"
+      );
+      const confirm = ctx.document.getElementById("mission-dispatch-confirm") as HTMLButtonElement;
+      expect(confirm.hidden).toBe(false);
+      form.dispatchEvent(new ctx.dom.window.Event("input", { bubbles: true }));
+      expect(confirm.hidden).toBe(true);
+      form.dispatchEvent(new ctx.dom.window.Event("submit", { bubbles: true, cancelable: true }));
+      await ctx.settle();
+      confirm.click();
+      await ctx.settle();
+      const requests = ctx.calls.filter((call) => call.url === "/api/mission-dispatch" && call.method === "POST");
+      expect(requests).toHaveLength(1);
+      expect(requests[0]!.body).toEqual({
+        missionId: "mission-fixture",
+        approvalId: "approval-fixture",
+        expectedManifestHash: hash,
+        confirmationHash: "b".repeat(64)
+      });
+      expect(ctx.document.getElementById("mission-dispatch-result")!.textContent).toContain(
+        "does not mean execution completed"
+      );
+    } finally {
+      ctx.dom.window.close();
+    }
+  });
+});

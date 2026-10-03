@@ -236,6 +236,18 @@ const operations = {
     "method": "POST",
     "path": "/mcp-clients/observe"
   },
+  "listMissionDispatches": {
+    "method": "GET",
+    "path": "/api/mission-dispatch"
+  },
+  "previewMissionDispatch": {
+    "method": "POST",
+    "path": "/api/mission-dispatch/preview"
+  },
+  "requestMissionDispatch": {
+    "method": "POST",
+    "path": "/api/mission-dispatch"
+  },
   "listAgentClis": {
     "method": "GET",
     "path": "/api/agent-clis"
@@ -263,6 +275,10 @@ const operations = {
   "getAgentRun": {
     "method": "GET",
     "path": "/api/agent-runs/{id}"
+  },
+  "reviewAgentRun": {
+    "method": "POST",
+    "path": "/api/agent-runs/{id}/review"
   },
   "cancelAgentRun": {
     "method": "POST",

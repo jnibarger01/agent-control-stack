@@ -1,5 +1,10 @@
 import { directAgentNames } from "@agent-control-stack/machine-controller";
-import { explainPolicyInputSchema, workItemToolNames } from "@agent-control-stack/policy-gate";
+import {
+  missionDispatchInputSchema,
+  missionDispatchConfirmedSchema,
+  explainPolicyInputSchema,
+  workItemToolNames
+} from "@agent-control-stack/policy-gate";
 import {
   missionTraceQuerySchema,
   changeSetReviewBodySchema,
@@ -192,6 +197,14 @@ export const agentRunBodySchema = z
   .strict();
 export const agentRunConfirmedBodySchema = agentRunBodySchema
   .extend({ confirmationHash: z.string().regex(/^[a-f0-9]{64}$/u) })
+  .strict();
+
+export const agentRunReviewBodySchema = z
+  .object({ decision: z.enum(["accept", "reject"]), note: z.string().max(500).optional() })
+  .strict();
+
+export const agentToolCheckBodySchema = z
+  .object({ tool: z.string().min(1).max(128), input: z.record(z.string(), z.unknown()) })
   .strict();
 
 export const executionModeBodySchema = z
@@ -889,6 +902,27 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
   },
   {
     method: "get",
+    path: "/api/mission-dispatch",
+    operationId: "listMissionDispatches",
+    summary: "List governed mission dispatch receipts and authoritative progress."
+  },
+  {
+    method: "post",
+    path: "/api/mission-dispatch/preview",
+    operationId: "previewMissionDispatch",
+    summary: "Review an approved immutable mission snapshot.",
+    requestSchema: missionDispatchInputSchema
+  },
+  {
+    method: "post",
+    path: "/api/mission-dispatch",
+    operationId: "requestMissionDispatch",
+    summary: "Schedule a confirmed approved mission for the existing worker.",
+    requestSchema: missionDispatchConfirmedSchema,
+    successStatus: 202
+  },
+  {
+    method: "get",
     path: "/api/agent-clis",
     operationId: "listAgentClis",
     summary: "List the dispatchable CLI agents with install, login and dispatch state."
@@ -926,6 +960,13 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/api/agent-runs/{id}",
     operationId: "getAgentRun",
     summary: "Read an agent run with its redacted output."
+  },
+  {
+    method: "post",
+    path: "/api/agent-runs/{id}/review",
+    operationId: "reviewAgentRun",
+    summary: "Accept or reject a succeeded agent run (human operator only). Nothing is promoted.",
+    requestSchema: agentRunReviewBodySchema
   },
   {
     method: "post",
