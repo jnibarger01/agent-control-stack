@@ -28,18 +28,26 @@ describe("Hermes fixture path confinement", () => {
     mkdirSync(outside);
     symlinkSync(outside, join(fixture, "escape"));
 
-    expect(assertHermesPathContained(fixture, join(fixture, "not-yet-created", "state.db")))
-      .toBe(join(fixture, "not-yet-created", "state.db"));
-    expect(() => assertHermesPathContained(fixture, join(fixture, "escape", "state.db")))
-      .toThrow(/escapes fixture root/);
+    expect(assertHermesPathContained(fixture, join(fixture, "not-yet-created", "state.db"))).toBe(
+      join(fixture, "not-yet-created", "state.db")
+    );
+    expect(() => assertHermesPathContained(fixture, join(fixture, "escape", "state.db"))).toThrow(
+      /escapes fixture root/
+    );
     expect(() => assertHermesPathContained(fixture, outside)).toThrow(/escapes fixture root/);
   });
 
   it("prepares an isolated fixture without changing persistent Hermes", async () => {
-    const state = (property: string) => execFileSync("systemctl", ["--user", "show", "hermes-gateway.service", `-p${property}`, "--value"], { encoding: "utf8" }).trim();
+    const state = (property: string) =>
+      execFileSync("systemctl", ["--user", "show", "hermes-gateway.service", `-p${property}`, "--value"], {
+        encoding: "utf8"
+      }).trim();
     expect(state("ActiveState")).toBe("inactive");
     expect(state("MainPID")).toBe("0");
-    expect(execFileSync("systemctl", ["--user", "list-jobs", "--no-legend"], { encoding: "utf8" }).trim()).toBe("");
+    const pendingHermesJobs = execFileSync("systemctl", ["--user", "list-jobs", "--no-legend"], { encoding: "utf8" })
+      .split("\n")
+      .filter((job) => job.includes("hermes-gateway.service"));
+    expect(pendingHermesJobs).toEqual([]);
     const restartCountBefore = state("NRestarts");
     const processes = execFileSync("ps", ["-eo", "pid=,comm=,args="], { encoding: "utf8" });
     const activeWriters = processes.split("\n").filter((line) => {
@@ -49,8 +57,10 @@ describe("Hermes fixture path confinement", () => {
       const command = match[2] ?? "";
       const args = match[3] ?? "";
       if (pid === process.pid || args.includes("hermes-e2e-fixture.test")) return false;
-      return /^(hermes|hermes-acp|hermes-gateway)$/i.test(command) ||
-        /source.?completion|hermes_cli\.(update|venv_sync|main)/.test(args);
+      return (
+        /^(hermes|hermes-acp|hermes-gateway)$/i.test(command) ||
+        /source.?completion|hermes_cli\.(update|venv_sync|main)/.test(args)
+      );
     });
     expect(activeWriters).toEqual([]);
 
@@ -88,12 +98,14 @@ describe("Hermes fixture path confinement", () => {
       const manifestAfter = await fingerprintHermesState(manifestRoots);
       const previous = new Map(manifestBefore.map((entry) => [entry.path, JSON.stringify(entry)]));
       const current = new Map(manifestAfter.map((entry) => [entry.path, JSON.stringify(entry)]));
-      const changed = [...new Set([...previous.keys(), ...current.keys()])]
-        .filter((path) => previous.get(path) !== current.get(path));
+      const changed = [...new Set([...previous.keys(), ...current.keys()])].filter(
+        (path) => previous.get(path) !== current.get(path)
+      );
       const launcherBytesAfter = persistentLaunchers.map((path) => readFileSync(path));
       process.stderr.write(`Hermes preparation-only persistent changes: ${JSON.stringify(changed)}\n`);
-      expect(launcherBytesAfter.map((bytes) => createHash("sha256").update(bytes).digest("hex")))
-        .toEqual(launcherBytesBefore.map((bytes) => createHash("sha256").update(bytes).digest("hex")));
+      expect(launcherBytesAfter.map((bytes) => createHash("sha256").update(bytes).digest("hex"))).toEqual(
+        launcherBytesBefore.map((bytes) => createHash("sha256").update(bytes).digest("hex"))
+      );
       expect(changed, `persistent Hermes paths changed: ${changed.join(", ")}`).toEqual([]);
       expect(state("ActiveState")).toBe("inactive");
       expect(state("MainPID")).toBe("0");

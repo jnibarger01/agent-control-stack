@@ -1,6 +1,18 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  realpathSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync
+} from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -31,7 +43,7 @@ export interface HermesFixture extends HermesInstallation {
 const PERSISTENT_HERMES_ROOT = "/home/jacen/.hermes";
 
 function findInstalledLauncher(executable: string): string {
-  let candidate = realpathSync(executable);
+  const candidate = realpathSync(executable);
   for (let depth = 0; depth < 4; depth += 1) {
     const contents = readFileSync(candidate, "utf8");
     const match = contents.match(/^exec\s+['"]?(\/[^\s'";]+\.hermes\/bin\/hermes)['"]?/m);
@@ -73,7 +85,8 @@ export function inspectHermesInstallation(executable: string): HermesInstallatio
   const status = execFileSync("git", ["-C", sourceRoot, "status", "--porcelain=v1", "--untracked-files=no"], {
     encoding: "utf8"
   });
-  if (status.trim()) throw new Error("Installed Hermes source has tracked modifications; refusing to copy an ambiguous source tree");
+  if (status.trim())
+    throw new Error("Installed Hermes source has tracked modifications; refusing to copy an ambiguous source tree");
   return {
     launcher,
     sourceRoot,
@@ -90,7 +103,14 @@ function copyTrackedSource(sourceRoot: string, fixtureRoot: string): void {
     encoding: "utf8",
     stdio: "pipe"
   });
-  execFileSync("git", ["-C", fixtureRoot, "remote", "set-url", "origin", "https://github.com/NousResearch/Hermes-Agent.git"]);
+  execFileSync("git", [
+    "-C",
+    fixtureRoot,
+    "remote",
+    "set-url",
+    "origin",
+    "https://github.com/NousResearch/Hermes-Agent.git"
+  ]);
 }
 
 interface HermesPluginHome {
@@ -180,18 +200,38 @@ function inspectHermesPluginHomes(installation: HermesInstallation): HermesPlugi
       const profile = join(profilesRoot, name);
       if (!lstatSync(profile).isDirectory() || existsSync(join(profilesRoot, ".deleted", name))) continue;
       const markers = ["config.yaml", ".env", "SOUL.md", "profile.yaml", "auth.json", "state.db"];
-      if (!markers.some((marker) => existsSync(join(profile, marker)) || (() => { try { return lstatSync(join(profile, marker)).isSymbolicLink(); } catch { return false; } })())) continue;
+      if (
+        !markers.some(
+          (marker) =>
+            existsSync(join(profile, marker)) ||
+            (() => {
+              try {
+                return lstatSync(join(profile, marker)).isSymbolicLink();
+              } catch {
+                return false;
+              }
+            })()
+        )
+      )
+        continue;
       homes.push(profile);
     }
   }
 
   return homes.map((home) => {
     const selection = parsePluginSelection(join(home, "config.yaml"));
-    const enabled = selection.enabled.filter((name, index) =>
-      !selection.disabled.includes(name) && !selection.disabled.includes(name.split("/").at(-1) ?? name) && selection.enabled.indexOf(name) === index
+    const enabled = selection.enabled.filter(
+      (name, index) =>
+        !selection.disabled.includes(name) &&
+        !selection.disabled.includes(name.split("/").at(-1) ?? name) &&
+        selection.enabled.indexOf(name) === index
     );
     const names = [...enabled];
-    if (selection.memoryProvider && !names.includes(selection.memoryProvider) && existsSync(join(home, "plugins", selection.memoryProvider))) {
+    if (
+      selection.memoryProvider &&
+      !names.includes(selection.memoryProvider) &&
+      existsSync(join(home, "plugins", selection.memoryProvider))
+    ) {
       names.push(selection.memoryProvider);
     }
     const plugins = names.flatMap((name) => {
@@ -219,12 +259,21 @@ function yamlString(value: string): string {
 
 function writePluginHome(home: string, selection: HermesPluginHome): void {
   mkdirSync(home, { recursive: true });
-  const lines = ["plugins:", `  enabled: ${JSON.stringify(selection.enabled)}`, `  disabled: ${JSON.stringify(selection.disabled)}`];
+  const lines = [
+    "plugins:",
+    `  enabled: ${JSON.stringify(selection.enabled)}`,
+    `  disabled: ${JSON.stringify(selection.disabled)}`
+  ];
   if (selection.memoryProvider) lines.push("memory:", `  provider: ${yamlString(selection.memoryProvider)}`);
   writeFileSync(join(home, "config.yaml"), `${lines.join("\n")}\n`);
 }
 
-function copyPluginHomes(homes: HermesPluginHome[], installation: HermesInstallation, fixtureRoot: string, fixtureHome: string): HermesPluginHome[] {
+function copyPluginHomes(
+  homes: HermesPluginHome[],
+  installation: HermesInstallation,
+  fixtureRoot: string,
+  fixtureHome: string
+): HermesPluginHome[] {
   for (const selection of homes) {
     const destinationHome = selection.relativeHome === "." ? fixtureHome : join(fixtureHome, selection.relativeHome);
     writePluginHome(destinationHome, selection);
@@ -286,7 +335,12 @@ function rewriteCopiedEnvironment(
     const info = lstatSync(path);
     if (info.isSymbolicLink()) {
       const target = readlinkSync(path);
-      if (isAbsolute(target) && [oldEnvironment, oldRuntime, installation.installState, installation.hermesHome].some((oldPath) => target.startsWith(oldPath))) {
+      if (
+        isAbsolute(target) &&
+        [oldEnvironment, oldRuntime, installation.installState, installation.hermesHome].some((oldPath) =>
+          target.startsWith(oldPath)
+        )
+      ) {
         const updated = replacePaths(target);
         lstatSync(path);
         unlinkSync(path);
@@ -339,9 +393,10 @@ function rewriteCopiedEnvironment(
   venv.environment = fixtureEnvironment;
   if (typeof venv.resolved_lock === "string") {
     const relativeLock = relative(sourceGeneration, venv.resolved_lock);
-    venv.resolved_lock = relativeLock && !relativeLock.startsWith(`..${sep}`)
-      ? join(fixtureGeneration, relativeLock)
-      : replacePaths(venv.resolved_lock);
+    venv.resolved_lock =
+      relativeLock && !relativeLock.startsWith(`..${sep}`)
+        ? join(fixtureGeneration, relativeLock)
+        : replacePaths(venv.resolved_lock);
   }
   mkdirSync(fixtureState, { recursive: true });
   const environmentsRoot = join(installation.installState, "environments");
@@ -350,8 +405,11 @@ function rewriteCopiedEnvironment(
     recursive: true,
     preserveTimestamps: true,
     verbatimSymlinks: true,
-    filter: (path) => path !== environmentsRoot && !path.startsWith(`${environmentsRoot}${sep}`) &&
-      path !== pmRuntimeRoot && !path.startsWith(`${pmRuntimeRoot}${sep}`)
+    filter: (path) =>
+      path !== environmentsRoot &&
+      !path.startsWith(`${environmentsRoot}${sep}`) &&
+      path !== pmRuntimeRoot &&
+      !path.startsWith(`${pmRuntimeRoot}${sep}`)
   });
   writeFileSync(join(fixtureState, "facts.json"), `${JSON.stringify(facts)}\n`);
   const inputStamps = join(installation.installState, "inputs");
@@ -402,11 +460,18 @@ function assertFixtureOwnedExecution(executable: string, args: string[], cwd: st
     const fromRoot = relative(persistentRoot, canonical);
     return fromRoot === "" || (!fromRoot.startsWith(`..${sep}`) && fromRoot !== ".." && !isAbsolute(fromRoot));
   };
-  const candidates = [executable, cwd, ...args, ...Object.values(env).filter((value): value is string => typeof value === "string")];
+  const candidates = [
+    executable,
+    cwd,
+    ...args,
+    ...Object.values(env).filter((value): value is string => typeof value === "string")
+  ];
   for (const candidate of candidates) {
     const paths = candidate === env.PATH ? candidate.split(sep) : [candidate];
     if (paths.some((path) => path.includes(persistentRoot) || (isAbsolute(path) && isPersistentPath(path)))) {
-      throw new Error(`Hermes fixture preparation attempted persistent Hermes execution or environment access: ${candidate}`);
+      throw new Error(
+        `Hermes fixture preparation attempted persistent Hermes execution or environment access: ${candidate}`
+      );
     }
   }
 }
@@ -434,7 +499,9 @@ export function prepareHermesE2eFixture(executable: string, directory: string): 
   if (realpathSync(installation.sourceRoot) !== realpathSync(expectedSource)) {
     throw new Error(`Hermes control launcher resolved an unexpected source root: ${installation.sourceRoot}`);
   }
-  const actualHead = execFileSync("git", ["-C", installation.sourceRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const actualHead = execFileSync("git", ["-C", installation.sourceRoot, "rev-parse", "HEAD"], {
+    encoding: "utf8"
+  }).trim();
   if (actualHead !== expectedHead) throw new Error(`Persistent Hermes source baseline changed: ${actualHead}`);
   if (realpathSync(installation.hermesHome) !== realpathSync(PERSISTENT_HERMES_ROOT)) {
     throw new Error(`Persistent Hermes home changed: ${installation.hermesHome}`);
@@ -453,7 +520,11 @@ export function prepareHermesE2eFixture(executable: string, directory: string): 
   const pluginHomes = inspectHermesPluginHomes(installation);
   copyTrackedSource(installation.sourceRoot, fixtureRoot);
   copyPluginHomes(pluginHomes, installation, fixtureRoot, fixtureHome);
-  cpSync(installation.runtimeRoot, fixtureRuntime, { recursive: true, preserveTimestamps: true, verbatimSymlinks: true });
+  cpSync(installation.runtimeRoot, fixtureRuntime, {
+    recursive: true,
+    preserveTimestamps: true,
+    verbatimSymlinks: true
+  });
   for (const path of walkFiles(fixtureRuntime)) {
     if (!lstatSync(path).isSymbolicLink()) continue;
     const target = readlinkSync(path);
@@ -475,12 +546,15 @@ export function prepareHermesE2eFixture(executable: string, directory: string): 
       cpSync(source, join(fixtureRoot, name), { preserveTimestamps: true });
       if (name === "install-stamp.json") {
         const stamp = readFileSync(join(fixtureRoot, name), "utf8");
-        writeFileSync(join(fixtureRoot, name), stamp
-          .replaceAll(installation.installState, copied.state)
-          .replaceAll(installation.environment, copied.environment)
-          .replaceAll(installation.runtimeRoot, fixtureRuntime)
-          .replaceAll(installation.hermesHome, fixtureHome)
-          .replaceAll(installation.sourceRoot, fixtureRoot));
+        writeFileSync(
+          join(fixtureRoot, name),
+          stamp
+            .replaceAll(installation.installState, copied.state)
+            .replaceAll(installation.environment, copied.environment)
+            .replaceAll(installation.runtimeRoot, fixtureRuntime)
+            .replaceAll(installation.hermesHome, fixtureHome)
+            .replaceAll(installation.sourceRoot, fixtureRoot)
+        );
       }
     }
   }
@@ -498,7 +572,14 @@ export function prepareHermesE2eFixture(executable: string, directory: string): 
     PATH: `${dirname(fixturePython)}:/usr/bin:/bin`
   };
   mkdirSync(fixtureEnvironment.HOME, { recursive: true });
-  for (const path of [fixtureEnvironment.XDG_CONFIG_HOME, fixtureEnvironment.XDG_CACHE_HOME, fixtureEnvironment.XDG_DATA_HOME, fixtureEnvironment.UV_CACHE_DIR, fixtureEnvironment.TMPDIR]) mkdirSync(path, { recursive: true });
+  for (const path of [
+    fixtureEnvironment.XDG_CONFIG_HOME,
+    fixtureEnvironment.XDG_CACHE_HOME,
+    fixtureEnvironment.XDG_DATA_HOME,
+    fixtureEnvironment.UV_CACHE_DIR,
+    fixtureEnvironment.TMPDIR
+  ])
+    mkdirSync(path, { recursive: true });
   const launcherArgs = ["-B", join(fixtureRoot, "hermes_cli", "_launchers.py"), launcherDirectory];
   assertFixtureOwnedExecution(fixturePython, launcherArgs, fixtureRoot, fixtureEnvironment);
   execFileSync(fixturePython, launcherArgs, { cwd: fixtureRoot, env: fixtureEnvironment, stdio: "pipe" });
@@ -506,20 +587,20 @@ export function prepareHermesE2eFixture(executable: string, directory: string): 
   const acpLauncher = join(launcherDirectory, "hermes-acp");
 
   const readyArgs = [
-        "-B",
-        "-I",
-        "-c",
-        `import json,sys\nfrom pathlib import Path\nroot=Path(sys.argv[1])\nsys.path.insert(0,str(root))\nimport pm\nfrom hermes_constants import get_default_hermes_root\nfrom pm.environments import activate_dependencies,committed_venv,install_state_dir,store_root\nactivate_dependencies(root)\nfrom pm.packages import Venv\nfrom pm.install import _still_declared\nfrom pm.workspace import enabled_member_dirs\nfrom pm._uv import _toolchain\nfrom pm.runtime import _inputs,runtime_python\nenv=committed_venv(root)\nif env is None: raise RuntimeError("fixture has no committed dependency generation")\nstate=install_state_dir(root); facts_path=state/"facts.json"; facts=json.loads(facts_path.read_text()); fact=facts["packages"]["venv"]\nfact["stamp"]=Venv(root).expected_stamp(_still_declared(Venv(root),fact["extras"]),plugin_dirs=enabled_member_dirs())\nfacts_path.write_text(json.dumps(facts)+"\\n")\nruntime=state/"pm-runtime"; selected_path=runtime/"selected.json"; selected=json.loads(selected_path.read_text()); generation=runtime/selected["generation"]; tools=_toolchain(realize=False)\nif tools is None: raise RuntimeError("fixture PM toolchain metadata is unavailable")\nidentity=_inputs(root/"pm",tools[1])\nselected["inputs"]=identity; selected_path.write_text(json.dumps(selected)+"\\n"); marker=generation/"pm-runtime.json"; runtime_fact=json.loads(marker.read_text()); runtime_fact["inputs"]=identity; marker.write_text(json.dumps(runtime_fact)+"\\n")\nmanager=runtime_python(bootstrap=False)\nif not pm.venv_is_current(project_root=root): raise RuntimeError("fixture dependencies are not ready after rebasing the copied selection")\nif (state/"source-completion-pending").exists(): raise RuntimeError("fixture has a pending source-completion tail")\n\nprint(json.dumps({"state":str(state),"environment":str(env),"runtime":str(store_root(root)),"home":str(get_default_hermes_root()),"pm_python":str(manager)}))`,
-        fixtureRoot
-      ];
+    "-B",
+    "-I",
+    "-c",
+    `import json,sys\nfrom pathlib import Path\nroot=Path(sys.argv[1])\nsys.path.insert(0,str(root))\nimport pm\nfrom hermes_constants import get_default_hermes_root\nfrom pm.environments import activate_dependencies,committed_venv,install_state_dir,store_root\nactivate_dependencies(root)\nfrom pm.packages import Venv\nfrom pm.install import _still_declared\nfrom pm.workspace import enabled_member_dirs\nfrom pm._uv import _toolchain\nfrom pm.runtime import _inputs,runtime_python\nenv=committed_venv(root)\nif env is None: raise RuntimeError("fixture has no committed dependency generation")\nstate=install_state_dir(root); facts_path=state/"facts.json"; facts=json.loads(facts_path.read_text()); fact=facts["packages"]["venv"]\nfact["stamp"]=Venv(root).expected_stamp(_still_declared(Venv(root),fact["extras"]),plugin_dirs=enabled_member_dirs())\nfacts_path.write_text(json.dumps(facts)+"\\n")\nruntime=state/"pm-runtime"; selected_path=runtime/"selected.json"; selected=json.loads(selected_path.read_text()); generation=runtime/selected["generation"]; tools=_toolchain(realize=False)\nif tools is None: raise RuntimeError("fixture PM toolchain metadata is unavailable")\nidentity=_inputs(root/"pm",tools[1])\nselected["inputs"]=identity; selected_path.write_text(json.dumps(selected)+"\\n"); marker=generation/"pm-runtime.json"; runtime_fact=json.loads(marker.read_text()); runtime_fact["inputs"]=identity; marker.write_text(json.dumps(runtime_fact)+"\\n")\nmanager=runtime_python(bootstrap=False)\nif not pm.venv_is_current(project_root=root): raise RuntimeError("fixture dependencies are not ready after rebasing the copied selection")\nif (state/"source-completion-pending").exists(): raise RuntimeError("fixture has a pending source-completion tail")\n\nprint(json.dumps({"state":str(state),"environment":str(env),"runtime":str(store_root(root)),"home":str(get_default_hermes_root()),"pm_python":str(manager)}))`,
+    fixtureRoot
+  ];
   assertFixtureOwnedExecution(fixturePython, readyArgs, fixtureRoot, fixtureEnvironment);
-  const ready = JSON.parse(
-    execFileSync(
-      fixturePython,
-      readyArgs,
-      { env: fixtureEnvironment, encoding: "utf8" }
-    )
-  ) as { state: string; environment: string; runtime: string; home: string; pm_python: string };
+  const ready = JSON.parse(execFileSync(fixturePython, readyArgs, { env: fixtureEnvironment, encoding: "utf8" })) as {
+    state: string;
+    environment: string;
+    runtime: string;
+    home: string;
+    pm_python: string;
+  };
   if (
     ready.state !== copied.state ||
     ready.environment !== copied.environment ||
@@ -529,9 +610,35 @@ export function prepareHermesE2eFixture(executable: string, directory: string): 
   ) {
     throw new Error("Hermes fixture resolved mutable state outside its prepared paths");
   }
-  if (!existsSync(join(fixtureRoot, ".git"))) throw new Error("Hermes fixture source Git metadata is required for isolated source completion");
+  if (!existsSync(join(fixtureRoot, ".git")))
+    throw new Error("Hermes fixture source Git metadata is required for isolated source completion");
   if (!existsSync(acpLauncher)) throw new Error("Fixture Hermes ACP launcher was not published");
-  const criticalPaths = [fixtureRoot, launcherDirectory, launcher, acpLauncher, fixturePython, fixtureRuntime, copied.environment, copied.state, join(fixtureRuntime, "facts.json"), join(copied.state, "facts.json"), join(copied.state, "pm-runtime", "selected.json"), join(copied.state, "source-completion-pending"), join(copied.state, "source-completion-attempts"), join(fixtureRoot, "install-stamp.json"), join(fixtureRoot, ".hermes-bootstrap-complete"), fixtureEnvironment.HOME, fixtureHome, join(fixtureHome, "config.yaml"), join(copied.state, "bootstrap"), fixtureEnvironment.XDG_CONFIG_HOME, fixtureEnvironment.XDG_CACHE_HOME, fixtureEnvironment.XDG_DATA_HOME, fixtureEnvironment.UV_CACHE_DIR, fixtureEnvironment.TMPDIR];
+  const criticalPaths = [
+    fixtureRoot,
+    launcherDirectory,
+    launcher,
+    acpLauncher,
+    fixturePython,
+    fixtureRuntime,
+    copied.environment,
+    copied.state,
+    join(fixtureRuntime, "facts.json"),
+    join(copied.state, "facts.json"),
+    join(copied.state, "pm-runtime", "selected.json"),
+    join(copied.state, "source-completion-pending"),
+    join(copied.state, "source-completion-attempts"),
+    join(fixtureRoot, "install-stamp.json"),
+    join(fixtureRoot, ".hermes-bootstrap-complete"),
+    fixtureEnvironment.HOME,
+    fixtureHome,
+    join(fixtureHome, "config.yaml"),
+    join(copied.state, "bootstrap"),
+    fixtureEnvironment.XDG_CONFIG_HOME,
+    fixtureEnvironment.XDG_CACHE_HOME,
+    fixtureEnvironment.XDG_DATA_HOME,
+    fixtureEnvironment.UV_CACHE_DIR,
+    fixtureEnvironment.TMPDIR
+  ];
   for (const path of criticalPaths) assertHermesPathContained(directory, path);
   for (const root of [fixtureRoot, fixtureRuntime, fixtureHome]) {
     for (const path of walkFiles(root)) {
@@ -549,13 +656,21 @@ export function prepareHermesE2eFixture(executable: string, directory: string): 
   }
   for (const name of ["hermes", "hermes-acp"] as const) {
     const text = readFileSync(join(launcherDirectory, name), "utf8");
-    if (!text.includes(fixturePython) || !text.includes(fixtureRoot)) throw new Error(`Fixture ${name} launcher is not bound to fixture Python/source`);
+    if (!text.includes(fixturePython) || !text.includes(fixtureRoot))
+      throw new Error(`Fixture ${name} launcher is not bound to fixture Python/source`);
     if (text.includes(PERSISTENT_HERMES_ROOT) || /\/tmp\/acs-gateway-hermes-e2e-[^\s'"\\]*/.test(text)) {
       throw new Error(`Fixture ${name} launcher retains an old persistent or temporary Hermes path`);
     }
   }
-  for (const path of [join(fixtureRoot, "install-stamp.json"), join(copied.state, "facts.json"), join(copied.state, "pm-runtime", "selected.json"), join(fixtureRuntime, "facts.json"), join(copied.environment, "pyvenv.cfg")]) {
-    if (readFileSync(path, "utf8").includes(PERSISTENT_HERMES_ROOT)) throw new Error(`Fixture runtime metadata retains a persistent Hermes path: ${path}`);
+  for (const path of [
+    join(fixtureRoot, "install-stamp.json"),
+    join(copied.state, "facts.json"),
+    join(copied.state, "pm-runtime", "selected.json"),
+    join(fixtureRuntime, "facts.json"),
+    join(copied.environment, "pyvenv.cfg")
+  ]) {
+    if (readFileSync(path, "utf8").includes(PERSISTENT_HERMES_ROOT))
+      throw new Error(`Fixture runtime metadata retains a persistent Hermes path: ${path}`);
   }
 
   const persistentRoots = [
@@ -587,10 +702,17 @@ export interface HermesManifestEntry {
   type: string;
   mode: number;
   size: number;
+  device?: string;
+  inode?: string;
   mtimeNs?: string;
   ctimeNs?: string;
   sha256?: string;
   target?: string;
+}
+
+export interface HermesFingerprintOptions {
+  /** Hash smaller files while retaining filesystem identity and timestamps for larger state files. */
+  hashFilesAtMostBytes?: number;
 }
 
 async function hashFile(path: string): Promise<string> {
@@ -598,14 +720,17 @@ async function hashFile(path: string): Promise<string> {
   const hash = createHash("sha256");
   await new Promise<void>((resolvePromise, reject) => {
     const stream = createReadStream(path);
-    stream.on("data", (chunk: Buffer) => hash.update(chunk));
+    stream.on("data", (chunk: Buffer | string) => hash.update(chunk));
     stream.on("error", reject);
     stream.on("end", resolvePromise);
   });
   return hash.digest("hex");
 }
 
-export async function fingerprintHermesState(roots: string[]): Promise<HermesManifestEntry[]> {
+export async function fingerprintHermesState(
+  roots: string[],
+  options: HermesFingerprintOptions = {}
+): Promise<HermesManifestEntry[]> {
   const entries: HermesManifestEntry[] = [];
   const seen = new Set<string>();
   const uniqueRoots = roots
@@ -626,11 +751,18 @@ export async function fingerprintHermesState(roots: string[]): Promise<HermesMan
         type: info.isSymbolicLink() ? "symlink" : info.isDirectory() ? "directory" : info.isFile() ? "file" : "other",
         mode: Number(info.mode & 0o7777n),
         size: Number(info.size),
+        device: info.dev.toString(),
+        inode: info.ino.toString(),
         mtimeNs: info.mtimeNs.toString(),
         ctimeNs: info.ctimeNs.toString()
       };
       if (info.isSymbolicLink()) entry.target = readlinkSync(path);
-      else if (info.isFile()) entry.sha256 = await hashFile(path);
+      else if (
+        info.isFile() &&
+        (options.hashFilesAtMostBytes === undefined || Number(info.size) <= options.hashFilesAtMostBytes)
+      ) {
+        entry.sha256 = await hashFile(path);
+      }
       entries.push(entry);
     }
   }
