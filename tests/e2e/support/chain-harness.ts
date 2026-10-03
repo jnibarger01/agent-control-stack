@@ -306,7 +306,7 @@ export async function startBridge(box: Sandbox, acs: AcsHandle): Promise<Service
       DESKTOP_COMMANDER_DISABLE_TELEMETRY: "1"
     },
     port,
-    "/healthz"
+    "/ready"
   );
 }
 
