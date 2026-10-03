@@ -1044,28 +1044,30 @@ function redactedAttributesJsonClient(value) {
 }
 
 
-const workItemControlStatuses = {"cancel":["draft","pending_policy","needs_approval","approved","running","blocked"],"retry":["succeeded","failed","cancelled","rejected"],"clone":["*"]};
-const workItemControlLabels = {"cancel":"Cancel work item","retry":"Retry as new item","clone":"Clone as new item"};
 const reasonRequiredControls = ["cancel","retry"];
-function workItemControlsFor(status) {
-  return ["cancel","retry","clone"].filter(function (control) {
-    const statuses = workItemControlStatuses[control];
-    return statuses.indexOf('*') !== -1 || statuses.indexOf(status) !== -1;
+const renderControlsTemplate = function renderControlsTemplate(workItem, connected, esc, tables) {
+  const controls = tables.controls.filter((control) => {
+    const statuses = tables.statuses[control];
+    return statuses.includes("*") || statuses.includes(workItem.status);
   });
-}
+  if (!controls.length) return "";
+  const id = esc(workItem.id);
+  const reasonId = `control-reason-${id}`;
+  const needsReason = controls.some((control) => tables.reasonRequired.includes(control));
+  const reason = needsReason ? `<label class="reason-field" for="${reasonId}"><span class="reason-label">Reason <span class="req">(required for cancel and retry)</span></span><input id="${reasonId}" data-control-reason="${id}" autocomplete="off" placeholder="Why cancel or retry" /></label>` : "";
+  const buttons = controls.map(
+    (control) => `<button type="button" data-work-control="${control}" data-work-item-id="${id}" data-risk="${esc(workItem.risk)}"${needsReason ? ` aria-describedby="${reasonId}"` : ""}${connected ? "" : " disabled"}>${tables.labels[control]}</button>`
+  ).join("");
+  return `<div class="detail-section work-controls" data-work-controls="${id}"><h4>Controls</h4>${reason}<div class="approval-actions" role="group" aria-label="Controls for ${esc(workItem.title)}">${buttons}</div><output id="control-result-${id}" class="approval-result" aria-live="polite"></output></div>`;
+};
+const controlsTemplateTables = {"controls":["cancel","retry","clone"],"statuses":{"cancel":["draft","pending_policy","needs_approval","approved","running","blocked"],"retry":["succeeded","failed","cancelled","rejected"],"clone":["*"]},"labels":{"cancel":"Cancel work item","retry":"Retry as new item","clone":"Clone as new item"},"reasonRequired":["cancel","retry"]};
 function workItemControlsMarkup(workItem, connected) {
-  const controls = workItemControlsFor(String(workItem.status || ''));
-  if (!controls.length) return '';
-  const id = escapeClient(workItem.id);
-  const reasonId = 'control-reason-' + id;
-  const needsReason = controls.some(function (control) { return reasonRequiredControls.indexOf(control) !== -1; });
-  const reason = needsReason
-    ? '<label class="reason-field" for="' + reasonId + '"><span class="reason-label">Reason <span class="req">(required for cancel and retry)</span></span><input id="' + reasonId + '" data-control-reason="' + id + '" autocomplete="off" placeholder="Why cancel or retry" /></label>'
-    : '';
-  const buttons = controls.map(function (control) {
-    return '<button type="button" data-work-control="' + control + '" data-work-item-id="' + id + '" data-risk="' + escapeClient(workItem.risk) + '"' + (needsReason ? ' aria-describedby="' + reasonId + '"' : '') + (connected ? '' : ' disabled') + '>' + workItemControlLabels[control] + '</button>';
-  }).join('');
-  return '<div class="detail-section work-controls" data-work-controls="' + id + '"><h4>Controls</h4>' + reason + '<div class="approval-actions" role="group" aria-label="Controls for ' + escapeClient(workItem.title) + '">' + buttons + '</div><output id="control-result-' + id + '" class="approval-result" aria-live="polite"></output></div>';
+  return renderControlsTemplate(
+    { id: workItem.id, title: workItem.title, status: String(workItem.status || ''), risk: workItem.risk },
+    connected,
+    escapeClient,
+    controlsTemplateTables
+  );
 }
 let workItemControlInFlight = false;
 document.addEventListener('click', async function (event) {

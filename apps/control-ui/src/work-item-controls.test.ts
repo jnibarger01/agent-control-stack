@@ -244,3 +244,29 @@ describe("work-item controls in the live client (#3)", () => {
     expect(app.posts()).toHaveLength(0);
   });
 });
+
+describe("single controls template", () => {
+  it("renders identical markup on the server and in the dashboard client for every status and connection state", () => {
+    const dom = new JSDOM(renderDashboard({ workItems: [], events: [], now: new Date("2026-09-22T00:01:00.000Z") }), {
+      runScripts: "dangerously",
+      beforeParse(window) {
+        (window as unknown as { EventSource: unknown }).EventSource = class {
+          addEventListener() {}
+          close() {}
+        };
+        (window as unknown as { fetch: unknown }).fetch = async () => ({ ok: true, json: async () => ({}) });
+      }
+    });
+    const clientMarkup = (
+      dom.window as unknown as { workItemControlsMarkup: (item: unknown, connected: boolean) => string }
+    ).workItemControlsMarkup;
+    expect(typeof clientMarkup).toBe("function");
+    for (const status of WORK_ITEM_STATUS_VALUES) {
+      for (const connected of [true, false]) {
+        const item = { id: 'wrk_<&">', title: 'T <b>"x"</b>', status, risk: "high" };
+        expect(clientMarkup(item, connected)).toBe(workItemControlsHtml(item, connected));
+      }
+    }
+    dom.window.close();
+  });
+});
