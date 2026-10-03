@@ -6,16 +6,19 @@
  * (`agent_run.*`). Agents, workers and service credentials cannot dispatch. Nothing here commits,
  * merges, pushes or promotes: the result is a branch in a worktree for a human to review.
  */
-import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   AGENT_CLI_CATALOG,
   AGENT_CLI_IDS,
+  AGENT_GOVERNANCE,
+  type AgentGovernance,
   agentCliSpec,
   allowedRepoRoots,
   createDispatchWorktree,
+  decideToolCall,
   defaultWorktreeRoot,
   inspectWorktree,
   planAgentCommand,
@@ -74,6 +77,11 @@ export interface AgentDispatchConfig {
   maxConcurrent: number;
   worktreeRoot: string;
   outputRoot: string;
+  /**
+   * Base URL the Claude tool guard uses to ask this gateway to decide each tool call (ACS_AGENT_GUARD_URL,
+   * e.g. http://127.0.0.1:3000). Unset: the guard enforces its local deny-list only.
+   */
+  guardUrl?: string;
 }
 
 export const AGENT_RUN_EVENTS = {
@@ -84,12 +92,14 @@ export const AGENT_RUN_EVENTS = {
   cancelRequested: "agent_run.cancel_requested",
   interrupted: "agent_run.interrupted",
   processStarted: "agent_run.process_started",
+  toolCall: "agent_run.tool_call",
   reviewed: "agent_run.reviewed"
 } as const;
 
 /** A preview is only dispatchable for this long, and only by the operator it was issued to. */
 export const PREVIEW_TTL_MS = 10 * 60_000;
 const MAX_ISSUED_PREVIEWS = 500;
+const MAX_GUARDED_CALLS_PER_RUN = 5_000;
 
 /** Output that means the CLI never did the work even though it exited 0 (e.g. goose on a 401). */
 const FAILURE_SIGNATURES = [
@@ -149,7 +159,16 @@ export function agentDispatchConfigFromEnv(env: NodeJS.ProcessEnv = process.env)
     throw new Error("ACS_AGENT_RUN_MAX_CONCURRENT must be an integer from 1 to 16");
   }
   const home = env.HOME ?? homedir();
+  const guardUrl = env.ACS_AGENT_GUARD_URL?.trim();
+  if (guardUrl) {
+    const parsed = new URL(guardUrl);
+    const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname);
+    if (!(parsed.protocol === "https:" || (parsed.protocol === "http:" && loopback))) {
+      throw new Error("ACS_AGENT_GUARD_URL must be https, or http on a loopback host");
+    }
+  }
   return {
+    ...(guardUrl ? { guardUrl } : {}),
     enabled: env.ACS_AGENT_DISPATCH_ENABLED === "1",
     repoRoots: allowedRepoRoots(env),
     maxConcurrent: max,
@@ -174,6 +193,9 @@ export interface DispatchPreview {
   repoRoot: string;
   timeoutSec: number;
   containment: string;
+  /** What ACS can and cannot govern of this CLI's own tool use. */
+  governance: AgentGovernance;
+  governanceSummary: string;
   branchPattern: string;
   promptChars: number;
   confirmationHash: string;
@@ -191,6 +213,8 @@ interface IssuedPreview {
 export class AgentRunService {
   private readonly active = new Map<string, AbortController>();
   private readonly issued = new Map<string, IssuedPreview>();
+  /** Per-run guard credentials (sha256 of the bearer token) and the worktree each run is confined to. */
+  private readonly guards = new Map<string, { tokenHash: Buffer; worktree: string; calls: number; logPath: string }>();
 
   constructor(
     private readonly store: Pick<WorkItemStore, "recordSystemEvent" | "readEvents">,
@@ -269,6 +293,8 @@ export class AgentRunService {
       timeoutSec,
       containment:
         request.mode === "edit" ? spec.editContainment : "the CLI's own read-only mode; nothing should be written",
+      governance: AGENT_GOVERNANCE[spec.id].level,
+      governanceSummary: AGENT_GOVERNANCE[spec.id].summary,
       branchPattern: `acs/agent/${spec.id}-<run id>`,
       promptChars: request.prompt.trim().length,
       confirmationHash: sha256(
@@ -362,13 +388,26 @@ export class AgentRunService {
         worktreeRoot: this.config.worktreeRoot
       });
       const toolLogPath = join(outDir, "tool-calls.jsonl");
+      let online: { url: string; runId: string; tokenFile: string } | undefined;
+      if (preview.agentId === "claude" && this.config.guardUrl) {
+        const token = randomBytes(24).toString("hex");
+        const tokenFile = join(outDir, "guard.token");
+        writeFileSync(tokenFile, token, { mode: 0o600 });
+        this.guards.set(runId, {
+          tokenHash: createHash("sha256").update(token).digest(),
+          worktree: worktree.worktreePath,
+          calls: 0,
+          logPath: toolLogPath
+        });
+        online = { url: this.config.guardUrl, runId, tokenFile };
+      }
       const command = planAgentCommand({
         agentId: preview.agentId,
         prompt,
         mode: preview.mode,
         cwd: worktree.worktreePath,
         timeoutSec: preview.timeoutSec,
-        toolGuardLog: toolLogPath
+        toolGuard: { logPath: toolLogPath, ...(online ? { online } : {}) }
       });
       const outputPath = join(outDir, "output.log");
       this.store.recordSystemEvent({
@@ -458,7 +497,48 @@ export class AgentRunService {
       }
     } finally {
       this.active.delete(runId);
+      this.guards.delete(runId);
+      rmSync(join(outDir, "guard.token"), { force: true });
     }
+  }
+
+  /**
+   * ACS decides one tool call of an active Claude run. Authenticated by that run's own token, which is only
+   * valid while the run is active. Every decision is written to the audit chain and the run's tool log.
+   */
+  checkTool(
+    runId: string,
+    token: string,
+    toolName: string,
+    toolInput: Record<string, unknown>
+  ): { decision: "allow" | "deny"; reason?: string } {
+    const guard = this.guards.get(runId);
+    const presented = createHash("sha256").update(token).digest();
+    if (!guard || !this.active.has(runId) || !timingSafeEqual(guard.tokenHash, presented)) {
+      throw new ControlStackError("agent_guard_unauthorized", "invalid or expired run credential");
+    }
+    guard.calls += 1;
+    const verdict =
+      guard.calls > MAX_GUARDED_CALLS_PER_RUN
+        ? ({ decision: "deny", reason: `tool call budget of ${MAX_GUARDED_CALLS_PER_RUN} exhausted` } as const)
+        : decideToolCall(toolName, toolInput, guard.worktree);
+    const raw = toolInput.command ?? toolInput.file_path ?? toolInput.notebook_path ?? toolInput.path ?? "";
+    const summary = redactLines(String(raw)).slice(0, 300);
+    this.store.recordSystemEvent({
+      name: AGENT_RUN_EVENTS.toolCall,
+      body: { runId, tool: toolName.slice(0, 64), decision: verdict.decision, reason: verdict.reason, summary },
+      attributes: { "agent_run.id": runId, "agent_run.tool": toolName.slice(0, 64) }
+    });
+    try {
+      appendFileSync(
+        guard.logPath,
+        `${JSON.stringify({ at: new Date().toISOString(), tool: toolName, decision: verdict.decision, reason: verdict.reason, summary })}\n`,
+        { mode: 0o600 }
+      );
+    } catch {
+      /* the audit event above is the authoritative record */
+    }
+    return verdict;
   }
 
   cancel(runId: string, actorId: string): AgentRunView {
@@ -545,7 +625,11 @@ export class AgentRunService {
   }
 
   list(limit = 50): AgentRunView[] {
-    const events = Object.values(AGENT_RUN_EVENTS).flatMap((name) => this.store.readEvents({ name, limit: 500 }));
+    // Tool-call and process events are high volume and do not change a run's folded state.
+    const names = Object.values(AGENT_RUN_EVENTS).filter(
+      (name) => name !== AGENT_RUN_EVENTS.toolCall && name !== AGENT_RUN_EVENTS.processStarted
+    );
+    const events = names.flatMap((name) => this.store.readEvents({ name, limit: 500 }));
     return foldRuns(events).slice(0, limit);
   }
 

@@ -203,6 +203,10 @@ export const agentRunReviewBodySchema = z
   .object({ decision: z.enum(["accept", "reject"]), note: z.string().max(500).optional() })
   .strict();
 
+export const agentToolCheckBodySchema = z
+  .object({ tool: z.string().min(1).max(128), input: z.record(z.string(), z.unknown()) })
+  .strict();
+
 export const executionModeBodySchema = z
   .object({
     mode: z.enum(["strict", "admin"]),

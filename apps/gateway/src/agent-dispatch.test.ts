@@ -608,3 +608,96 @@ describe("restart recovery of agent processes", () => {
     }
   });
 });
+
+describe("ACS-decided tool calls for Claude runs", () => {
+  const FAKE_CLAUDE = `#!${process.execPath}
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
+const hook = settings.hooks.PreToolUse[0].hooks[0].command;
+const cwd = process.cwd();
+const calls = [
+  { tool_name: "Write", tool_input: { file_path: cwd + "/ok.txt" } },
+  { tool_name: "Write", tool_input: { file_path: "/etc/acs-should-not-write" } },
+  { tool_name: "Bash", tool_input: { command: "git push origin main" } }
+];
+for (const call of calls) {
+  const r = spawnSync("sh", ["-c", hook], { input: JSON.stringify(call), encoding: "utf8" });
+  const out = r.stdout ? JSON.parse(r.stdout).hookSpecificOutput.permissionDecisionReason : "allowed";
+  console.log("CALL " + call.tool_name + " => " + out);
+}
+`;
+
+  async function runWithGuard(guardUrl: "live" | string) {
+    const bin2 = join(root, "bin");
+    const path = join(bin2, "claude");
+    writeFileSync(path, FAKE_CLAUDE.replace("const { spawnSync }", "const { spawnSync }"));
+    chmodSync(path, 0o755);
+    const cfg = config();
+    const app = makeGateway(cfg);
+    if (guardUrl === "live") {
+      await app.listen({ port: 0, host: "127.0.0.1" });
+      const address = app.server.address();
+      cfg.guardUrl = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+    } else {
+      cfg.guardUrl = guardUrl;
+    }
+    const payload = { ...request, repo };
+    const hash = (
+      await app.inject({ method: "POST", url: "/api/agent-runs/preview", headers: bearer(OP), payload })
+    ).json().preview.confirmationHash;
+    const sent = await app.inject({
+      method: "POST",
+      url: "/api/agent-runs",
+      headers: bearer(OP),
+      payload: { ...payload, confirmationHash: hash }
+    });
+    const runId = sent.json().run.runId as string;
+    const done = await waitFor(async () => {
+      const r = (await app.inject({ method: "GET", url: `/api/agent-runs/${runId}`, headers: bearer(OP) })).json();
+      return r.run.status === "queued" || r.run.status === "running" ? undefined : r;
+    });
+    return { app, runId, done };
+  }
+
+  it("has ACS decide and audit each call, and the run token dies with the run", async () => {
+    const { app, runId, done } = await runWithGuard("live");
+    expect(done.output).toContain("CALL Write => allowed");
+    expect(done.output).toMatch(/CALL Write => ACS tool guard: writes are limited/);
+    expect(done.output).toMatch(/CALL Bash => ACS tool guard: git push is not allowed/);
+    expect(done.run.toolCalls).toMatchObject({ total: 3, denied: 2 });
+    const store = new SqliteWorkItemStore(join(root, "control.db"));
+    try {
+      const calls = store.readEvents({ name: "agent_run.tool_call", limit: 50 });
+      // The local deny-list floor stops obviously denied calls before they leave the hook; only the allowed
+      // call is decided by the gateway, and it is recorded in the audit chain.
+      expect(calls.map((e) => (e.body as { decision: string }).decision)).toEqual(["allow"]);
+      expect(store.verifyAuditChain().ok).toBe(true);
+    } finally {
+      store.close();
+    }
+    const stale = await app.inject({
+      method: "POST",
+      url: `/api/agent-runs/${runId}/tool-check`,
+      headers: { authorization: "Bearer not-the-token" },
+      payload: { tool: "Write", input: { file_path: "/x" } }
+    });
+    expect(stale.statusCode).toBe(401);
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: `/api/agent-runs/${runId}/tool-check`,
+          payload: { tool: "Write", input: {} }
+        })
+      ).statusCode
+    ).toBe(401);
+  }, 30_000);
+
+  it("fails closed when the gateway cannot be reached", async () => {
+    const { done } = await runWithGuard("http://127.0.0.1:9");
+    expect(done.output).toMatch(/CALL Write => ACS tool guard: ACS gateway unreachable; failing closed/);
+    expect(done.output).not.toContain("=> allowed");
+    expect(done.run.toolCalls).toMatchObject({ total: 3, denied: 3 });
+  }, 30_000);
+});

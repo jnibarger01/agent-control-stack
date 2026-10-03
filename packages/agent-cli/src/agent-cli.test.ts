@@ -348,7 +348,7 @@ describe("ACS tool guard", () => {
       prompt: "x",
       mode: "edit",
       cwd: "/work/run1",
-      toolGuardLog: "/tmp/log",
+      toolGuard: { logPath: "/tmp/log" },
       pathValue: bin
     });
     expect(withGuard.args).toContain("--settings");

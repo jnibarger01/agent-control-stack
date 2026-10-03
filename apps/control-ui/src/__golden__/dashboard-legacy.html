@@ -3663,6 +3663,7 @@ function renderCliAgents() {
     return '<div class="cli-card" data-cli-agent="' + escapeClient(agent.id) + '"><h3>' + escapeClient(agent.displayName) + dispatchStatusPill(agent) + '</h3>' +
       '<div class="cli-meta">' + meta + '</div>' + reason + test +
       '<p>' + escapeClient(agent.editContainment) + '</p>' +
+      '<p class="cli-governance" data-governance="' + escapeClient(agent.governance) + '"><strong>ACS governance:</strong> ' + escapeClient(agent.governanceSummary) + '</p>' +
       '<div><button type="button" class="tool-button" data-cli-test="' + escapeClient(agent.id) + '"' + (agent.installed && dispatchState.dispatch.enabled ? '' : ' disabled') + '>Test connection</button></div></div>';
   }).join('');
 }
@@ -3794,7 +3795,7 @@ function requestDispatchConfirm(preview, prompt) {
     overlay.innerHTML = '<div class="approval-confirm-card dispatch-confirm"><h3 id="dispatch-confirm-title">Dispatch ' + escapeClient(preview.displayName) + '?</h3>' +
       '<dl><dt>Mode</dt><dd>' + escapeClient(preview.mode) + '</dd><dt>Repository</dt><dd>' + escapeClient(preview.repoRoot) + '</dd>' +
       '<dt>Branch</dt><dd>' + escapeClient(preview.branchPattern) + '</dd><dt>Time limit</dt><dd>' + escapeClient(Math.round(preview.timeoutSec / 60)) + ' min</dd>' +
-      '<dt>Containment</dt><dd>' + escapeClient(preview.containment) + '</dd><dt>Prompt</dt><dd>' + escapeClient(preview.promptChars) + ' characters (shown below)</dd>' +
+      '<dt>Containment</dt><dd>' + escapeClient(preview.containment) + '</dd><dt>ACS governance</dt><dd>' + escapeClient(preview.governanceSummary) + '</dd><dt>Prompt</dt><dd>' + escapeClient(preview.promptChars) + ' characters (shown below)</dd>' +
       '<dt>Command hash</dt><dd><code>' + escapeClient(preview.confirmationHash.slice(0, 16)) + '…</code></dd></dl>' +
       '<pre class="run-output" id="dispatch-confirm-prompt"></pre>' +
       '<p class="muted">This runs on your machine with your login. It cannot push or merge; it works on its own branch in a new worktree.</p>' +

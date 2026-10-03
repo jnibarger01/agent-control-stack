@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { redactValue, ControlStackError } from "@agent-control-stack/shared";
 import { agentCliSpec, type AgentCliSpec, type AgentRunMode } from "./catalog.js";
 import { resolveBinary } from "./probe.js";
-import { toolGuardHookCommand, toolGuardSettings } from "./tool-guard.js";
+import { toolGuardHookCommand, toolGuardSettings, type OnlineGuard } from "./tool-guard.js";
 
 /** The guard runs as a plain Node script: the compiled one when built, the TypeScript source under test. */
 export function toolGuardScriptPath(): string {
@@ -58,8 +58,8 @@ export function planAgentCommand(input: {
   pathValue?: string;
   /** Connection tests may run a blocked CLI to see whether the block has cleared. */
   allowBlocked?: boolean;
-  /** Where the ACS tool guard appends its audit log. Enables the guard for CLIs that support hooks. */
-  toolGuardLog?: string;
+  /** Enables the ACS tool guard for CLIs that support hooks. `online` makes ACS decide each call. */
+  toolGuard?: { logPath: string; online?: OnlineGuard };
 }): AgentCommand {
   const spec = agentCliSpec(input.agentId);
   if (!spec) throw new ControlStackError("agent_not_supported", `unknown agent CLI: ${input.agentId}`);
@@ -82,8 +82,10 @@ export function planAgentCommand(input: {
   const binaryPath = resolveBinary(spec.binary, input.pathValue);
   if (!binaryPath) throw new ControlStackError("agent_not_installed", `${spec.binary} was not found on PATH`);
   const guardSettings =
-    spec.id === "claude" && input.toolGuardLog
-      ? toolGuardSettings(toolGuardHookCommand(toolGuardScriptPath(), input.cwd, input.toolGuardLog))
+    spec.id === "claude" && input.toolGuard
+      ? toolGuardSettings(
+          toolGuardHookCommand(toolGuardScriptPath(), input.cwd, input.toolGuard.logPath, input.toolGuard.online)
+        )
       : undefined;
   const args = spec.buildArgs({
     prompt,

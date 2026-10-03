@@ -11,13 +11,14 @@ Run your installed CLI coding agents from Mission Control's **Dispatch** page. D
 
 Set these on the gateway and restart it. Dispatch stays off until both are set.
 
-| Variable                       | Meaning                                                                                                                                      |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ACS_AGENT_DISPATCH_ENABLED=1` | Turns dispatch on.                                                                                                                           |
-| `ACS_AGENT_REPO_ROOTS`         | Colon-separated directories. A run's repository must be a git repo inside one of them. The page suggests the repos directly under each root. |
-| `ACS_AGENT_RUN_MAX_CONCURRENT` | Active runs allowed at once. Default 3, range 1 to 16.                                                                                       |
-| `ACS_AGENT_WORKTREE_ROOT`      | Where run worktrees go. Default `~/.acs/agent-worktrees`. Keep it outside your repos.                                                        |
-| `ACS_AGENT_RUN_OUTPUT_ROOT`    | Where redacted output is kept. Default `~/.acs/agent-runs`.                                                                                  |
+| Variable                       | Meaning                                                                                                                                                      |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ACS_AGENT_DISPATCH_ENABLED=1` | Turns dispatch on.                                                                                                                                           |
+| `ACS_AGENT_REPO_ROOTS`         | Colon-separated directories. A run's repository must be a git repo inside one of them. The page suggests the repos directly under each root.                 |
+| `ACS_AGENT_RUN_MAX_CONCURRENT` | Active runs allowed at once. Default 3, range 1 to 16.                                                                                                       |
+| `ACS_AGENT_WORKTREE_ROOT`      | Where run worktrees go. Default `~/.acs/agent-worktrees`. Keep it outside your repos.                                                                        |
+| `ACS_AGENT_GUARD_URL`          | Optional. Gateway base URL (https, or http on loopback) so ACS decides and audits each Claude tool call. Unset: the guard enforces its local deny-list only. |
+| `ACS_AGENT_RUN_OUTPUT_ROOT`    | Where redacted output is kept. Default `~/.acs/agent-runs`.                                                                                                  |
 
 Sign in to Mission Control with a human operator credential (`actor: user`, `operator` role, `acs:approve`).
 Click **Add to roster** once to list the CLIs under Agents.

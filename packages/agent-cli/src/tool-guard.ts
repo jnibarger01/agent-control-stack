@@ -7,7 +7,7 @@
  *
  * Usage as a hook: `node tool-guard.js <worktree> <log.jsonl>`; the tool call arrives as JSON on stdin.
  */
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
 
@@ -76,10 +76,29 @@ export function decideToolCall(
   return { decision: "allow" };
 }
 
+/** Where an online guard asks ACS for each decision. The token is read from a 0600 file, never from argv. */
+export interface OnlineGuard {
+  url: string;
+  runId: string;
+  tokenFile: string;
+}
+
 /** Shell command string for a hook entry. Arguments are single-quoted. */
-export function toolGuardHookCommand(scriptPath: string, worktree: string, logPath: string): string {
+export function toolGuardHookCommand(
+  scriptPath: string,
+  worktree: string,
+  logPath: string,
+  online?: OnlineGuard
+): string {
   const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
-  return [process.execPath, scriptPath, worktree, logPath].map(quote).join(" ");
+  const args = [
+    process.execPath,
+    scriptPath,
+    worktree,
+    logPath,
+    ...(online ? [online.url, online.runId, online.tokenFile] : [])
+  ];
+  return args.map(quote).join(" ");
 }
 
 /** The `--settings` JSON that installs the guard for every tool. */
@@ -118,8 +137,36 @@ export function summarizeToolLog(text: string): ToolAuditSummary {
   return summary;
 }
 
+/** Ask the ACS gateway to decide. Any failure is a denial: an unreachable authority grants nothing. */
+async function askGateway(
+  online: OnlineGuard,
+  toolName: string,
+  input: Record<string, unknown>
+): Promise<GuardDecision & { answered: boolean }> {
+  try {
+    const token = readFileSync(online.tokenFile, "utf8").trim();
+    const response = await fetch(`${online.url.replace(/\/$/u, "")}/api/agent-runs/${online.runId}/tool-check`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ tool: toolName, input }),
+      signal: AbortSignal.timeout(5_000)
+    });
+    if (!response.ok) {
+      return { decision: "deny", reason: `ACS refused the tool check (HTTP ${response.status})`, answered: false };
+    }
+    const body = (await response.json()) as GuardDecision;
+    return body.decision === "allow"
+      ? { decision: "allow", answered: true }
+      : { decision: "deny", reason: String(body.reason ?? "denied by ACS"), answered: true };
+  } catch {
+    return { decision: "deny", reason: "ACS gateway unreachable; failing closed", answered: false };
+  }
+}
+
 async function main(): Promise<void> {
-  const [worktree, logPath] = process.argv.slice(2);
+  const [worktree, logPath, onlineUrl, onlineRun, onlineToken] = process.argv.slice(2);
+  const online: OnlineGuard | undefined =
+    onlineUrl && onlineRun && onlineToken ? { url: onlineUrl, runId: onlineRun, tokenFile: onlineToken } : undefined;
   if (!worktree || !logPath) {
     process.stderr.write("tool-guard: worktree and log path are required\n");
     process.exit(2);
@@ -129,22 +176,31 @@ async function main(): Promise<void> {
   let decision: GuardDecision;
   let toolName = "unknown";
   let summary = "";
+  let onlineHandled = false;
   try {
     const payload = JSON.parse(raw) as { tool_name?: string; tool_input?: Record<string, unknown> };
     toolName = String(payload.tool_name ?? "unknown");
     const input = payload.tool_input ?? {};
+    // The local deny-list is a floor: ACS can only add restrictions, never lift one.
     decision = decideToolCall(toolName, input, worktree);
+    if (online && decision.decision === "allow") {
+      const answer = await askGateway(online, toolName, input);
+      decision = { decision: answer.decision, ...(answer.reason ? { reason: answer.reason } : {}) };
+      onlineHandled = answer.answered;
+    }
     summary = String(input.command ?? filePath(input) ?? "").slice(0, 300);
   } catch {
     // A guard that cannot read its input must fail closed.
     decision = { decision: "deny", reason: "tool guard could not parse the tool call" };
   }
   try {
-    appendFileSync(
-      logPath,
-      `${JSON.stringify({ at: new Date().toISOString(), tool: toolName, decision: decision.decision, reason: decision.reason, summary })}\n`,
-      { mode: 0o600 }
-    );
+    // When ACS decided, the gateway already recorded the call in its audit chain and this run's log.
+    if (!onlineHandled)
+      appendFileSync(
+        logPath,
+        `${JSON.stringify({ at: new Date().toISOString(), tool: toolName, decision: decision.decision, reason: decision.reason, summary })}\n`,
+        { mode: 0o600 }
+      );
   } catch {
     // An unwritable audit log must also fail closed: no unrecorded tool calls.
     decision = { decision: "deny", reason: "tool guard could not record the call" };
