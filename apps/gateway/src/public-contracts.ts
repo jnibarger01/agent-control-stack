@@ -181,6 +181,19 @@ export const mcpClientLabelBodySchema = z
 
 export const mcpClientClearBodySchema = z.object({ clientId: z.string().min(1).max(256) }).strict();
 
+export const agentRunBodySchema = z
+  .object({
+    agentId: z.string().min(1).max(64),
+    prompt: z.string().min(1).max(32_000),
+    repo: z.string().min(1).max(4_096),
+    mode: z.enum(["edit", "read-only"]),
+    timeoutSec: z.number().int().min(10).max(3_600).optional()
+  })
+  .strict();
+export const agentRunConfirmedBodySchema = agentRunBodySchema
+  .extend({ confirmationHash: z.string().regex(/^[a-f0-9]{64}$/u) })
+  .strict();
+
 export const executionModeBodySchema = z
   .object({
     mode: z.enum(["strict", "admin"]),
@@ -873,6 +886,52 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     summary: "Edge bridge reports a verified client connection (bridge identity only).",
     requestSchema: mcpObservationBodySchema,
     successStatus: 202
+  },
+  {
+    method: "get",
+    path: "/api/agent-clis",
+    operationId: "listAgentClis",
+    summary: "List the dispatchable CLI agents with install, login and dispatch state."
+  },
+  {
+    method: "post",
+    path: "/api/agent-clis/sync",
+    operationId: "syncAgentClis",
+    summary: "Register the CLI agents in the agent registry (idempotent)."
+  },
+  {
+    method: "post",
+    path: "/api/agent-clis/{id}/test",
+    operationId: "testAgentCli",
+    summary: "Run a harmless prompt to verify a CLI agent is signed in and working."
+  },
+  {
+    method: "post",
+    path: "/api/agent-runs/preview",
+    operationId: "previewAgentRun",
+    summary: "Validate an agent dispatch and return the exact command hash the operator must confirm.",
+    requestSchema: agentRunBodySchema
+  },
+  {
+    method: "post",
+    path: "/api/agent-runs",
+    operationId: "dispatchAgentRun",
+    summary: "Dispatch a confirmed agent run into a fresh git worktree (human operator only).",
+    requestSchema: agentRunConfirmedBodySchema,
+    successStatus: 202
+  },
+  { method: "get", path: "/api/agent-runs", operationId: "listAgentRuns", summary: "List recent agent runs." },
+  {
+    method: "get",
+    path: "/api/agent-runs/{id}",
+    operationId: "getAgentRun",
+    summary: "Read an agent run with its redacted output."
+  },
+  {
+    method: "post",
+    path: "/api/agent-runs/{id}/cancel",
+    operationId: "cancelAgentRun",
+    summary: "Cancel an active agent run."
   },
   { method: "get", path: "/api/agents/{id}", operationId: "getAgent", summary: "Read a registered agent." },
   {

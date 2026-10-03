@@ -1,4 +1,5 @@
 import { MCP_CLIENT_EVENT_NAMES, mcpClientsClientSource } from "./mcp-clients.js";
+import { AGENT_DISPATCH_EVENT_NAMES, agentDispatchClientSource } from "./agent-dispatch.js";
 import { codingMissionPanelSource } from "./coding-mission-panel.js";
 import { operationsClientSource } from "./operations-client.js";
 import { CONFIRM_COPY } from "./approval-actions.js";
@@ -32,6 +33,7 @@ const SERVER_CLOCK_MAX_RTT_MS = 10000;
 const sseEventNames = [
 ${MCP_CLIENT_EVENT_NAMES.map((name) => `  '${name}',`).join("\n")}
   'connector.requested',
+${AGENT_DISPATCH_EVENT_NAMES.map((name) => `  '${name}',`).join("\n")}
   'work_item.created',
   'work_item.pending_policy',
   'work_item.needs_approval',
@@ -161,6 +163,7 @@ function appendAuditEvent(event) {
   const eventName = String(data.name || event.type || '');
   onLiveAuditEvent(eventName, data);
   onMcpClientAuditEvent(eventName);
+  onDispatchAuditEvent(eventName);
   if (eventName.startsWith('agent.') || eventName.startsWith('acp.')) {
     refreshAgentRoster();
     if (selectedAgentId) loadAgentDetail(selectedAgentId);
@@ -1270,6 +1273,7 @@ document.addEventListener('click', async (event) => {
 
 ${composerClientSource()}
 ${mcpClientsClientSource()}
+${agentDispatchClientSource()}
 
 const viewAliases = {
   overview: 'overview',
@@ -1285,7 +1289,8 @@ const viewAliases = {
   audit: 'audit',
   policy: 'policy',
   system: 'system',
-  dispatch: 'overview'
+  dispatch: 'dispatch',
+  'create-task': 'overview'
 };
 function showView(name) {
   const view = viewAliases[name] || 'overview';
@@ -1294,6 +1299,7 @@ function showView(name) {
   document.querySelectorAll('nav a[data-nav]').forEach((link) => {
     link.classList.toggle('active', link.dataset.nav === view);
   });
+  if (view === 'dispatch') onDispatchViewShown();
   if (view === 'executors') refreshExecutorRoster();
   if (view === 'connectors') refreshConnectorRoster();
   syncSystemProbes();

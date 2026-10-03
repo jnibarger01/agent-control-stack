@@ -1,5 +1,6 @@
 import { icon } from "../icons.js";
 import { mcpClientAlertHtml, mcpClientsPanelHtml } from "../mcp-clients.js";
+import { agentDispatchPanelHtml } from "../agent-dispatch.js";
 import { PAGE_META, auditSearch } from "./operations.js";
 import { type WorkItem } from "@agent-control-stack/work-items";
 import { clientScript } from "../client-script.js";
@@ -63,6 +64,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
       <section id="approval-summary" data-view-panel="approvals">${fragments.approvalSummary}</section>
       <section id="metrics-operations" data-view-panel="metrics">${fragments.metricsOperations}</section>
       <section id="agent-operations" data-view-panel="agents">${fragments.agentOperations}</section>
+      ${agentDispatchPanelHtml()}
       <section id="overview" class="cards" data-view-panel="overview">${fragments.cards}</section>
       <section class="grid">
         <article id="agents" class="panel wide roster-panel" data-view-panel="agents"><div class="panel-head"><div><h2>Agent Roster</h2><p>Identity, role, activity, and runtime presence</p></div><span id="agent-count">${agents.length} observed identities</span></div><div class="agent-layout">${agentTable(agents)}${agentDetailPanel()}</div></article>
@@ -79,7 +81,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
         <article id="system" class="panel" data-view-panel="system"><div class="panel-head"><h2>System Status</h2><span>readiness · infrastructure</span></div><div id="system-operations">${fragments.systemOperations}</div><div class="system-panel"><div id="system-stats">${fragments.systemStats}</div><div id="system-probes" class="system-probes"></div></div></article>
       </section>
       <section class="grid lower">
-        <article id="dispatch" class="panel composer" data-view-panel="overview"><div class="panel-head"><h2>Create task</h2><span>authenticated session</span></div>${composerHtml(model.composerActionKinds ?? [], agents)}</article>
+        <article id="create-task" class="panel composer" data-view-panel="overview"><div class="panel-head"><h2>Create task</h2><span>authenticated session</span></div>${composerHtml(model.composerActionKinds ?? [], agents)}</article>
         <article id="connectors" class="panel" data-view-panel="connectors"><div class="panel-head"><div><h2>Connectors</h2><p>Registered connector identities + tunnel sessions</p></div><span id="connector-count">loading</span></div><div id="connectors-body">${fragments.connectors}</div></article>
         ${mcpClientsPanelHtml()}
         <article id="policy" class="panel" data-view-panel="policy"><div class="panel-head"><h2>Policy</h2><span>recent decisions</span></div><div id="policy-body" class="policy-body">${fragments.policy}</div></article>

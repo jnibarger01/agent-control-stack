@@ -1,4 +1,5 @@
 import { mcpClientsStyles } from "./mcp-clients.js";
+import { agentDispatchStyles } from "./agent-dispatch.js";
 import { premiumStyles } from "./premium-styles.js";
 export function styles(): string {
   return `
@@ -419,6 +420,7 @@ body[data-active-view="queue"] [data-view-panel~="queue"],
 body[data-active-view="execution"] [data-view-panel~="execution"],
 body[data-active-view="approvals"] [data-view-panel~="approvals"],
 body[data-active-view="agents"] [data-view-panel~="agents"],
+body[data-active-view="dispatch"] [data-view-panel~="dispatch"],
 body[data-active-view="executors"] [data-view-panel~="executors"],
 body[data-active-view="connectors"] [data-view-panel~="connectors"],
 body[data-active-view="metrics"] [data-view-panel~="metrics"],
@@ -427,6 +429,7 @@ body[data-active-view="policy"] [data-view-panel~="policy"],
 body[data-active-view="system"] [data-view-panel~="system"] { display: block; }
 /* The view rule above must not flatten the overview card grid. */
 body[data-active-view="overview"] #overview.cards { display: grid; }
+body[data-active-view="dispatch"] #agent-dispatch.dispatch-grid { display: grid; }
 body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
 .approval-item { background: var(--surface); color: var(--ink); border-color: var(--line); }
 .system-probes { padding: 0 18px 16px; }
@@ -436,5 +439,6 @@ body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
 .system-probes dd { margin: 0; }
 ${premiumStyles()}
 ${mcpClientsStyles()}
+${agentDispatchStyles()}
 `;
 }

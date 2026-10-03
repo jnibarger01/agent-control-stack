@@ -170,7 +170,7 @@ document.addEventListener('click', function (event) {
     selectedAgentId = node.dataset.inspectAgent; void loadAgentDetail(selectedAgentId);
   } else if (node.hasAttribute('data-create-task')) {
     showView('overview'); history.pushState(null, '', '#overview');
-    const composer = document.getElementById('dispatch');
+    const composer = document.getElementById('create-task');
     composer.open = true;
     composer.scrollIntoView?.({ block: 'start' }); composer.querySelector('input')?.focus();
   } else if (node.hasAttribute('data-refresh-dashboard')) {

@@ -130,6 +130,8 @@ import {
 } from "@agent-control-stack/work-items";
 import { z, ZodError } from "zod";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+import { AgentRunService, agentDispatchConfigFromEnv, type AgentDispatchConfig } from "./agent-runs.js";
+import { registerAgentRoutes } from "./agent-routes.js";
 import {
   McpClientService,
   parseMcpClientPolicy,
@@ -295,6 +297,8 @@ export interface GatewayOptions {
   heartbeatTtlMs?: number;
   /** `observe` (default) or `require_label`. Defaults to ACS_MCP_CLIENT_POLICY. */
   mcpClientPolicy?: McpClientPolicy;
+  /** Agent CLI dispatch settings. Defaults to the ACS_AGENT_* environment (off unless enabled). */
+  agentDispatch?: AgentDispatchConfig;
   logger?: boolean;
   auth?: GatewayAuthOptions;
   mcpAuth?: McpAuthOptions;
@@ -1716,6 +1720,19 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       workerId === JC_BRIDGE_WORKER_ID ? "jc" : workerId === DC_BRIDGE_WORKER_ID ? "dc" : undefined,
     sendError
   });
+  const agentRuns = new AgentRunService(workItems, options.agentDispatch ?? agentDispatchConfigFromEnv());
+  agentRuns.reconcile();
+  registerAgentRoutes({
+    app,
+    store: workItems,
+    service: agentRuns,
+    requireRead,
+    requireHumanActor: (request, reply) => requireHumanApprovalActor(request, reply, auth),
+    requireRegistryActor: (request, reply) =>
+      requireMutationActor(request, reply, auth) ? requireBoundActorId(request, reply, auth) : undefined,
+    sendError
+  });
+  app.addHook("onClose", async () => agentRuns.shutdown());
 
   app.get<{ Params: { id: string } }>("/api/agents/:id", { preHandler: requireRead }, async (request, reply) => {
     try {
