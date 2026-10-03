@@ -10,6 +10,7 @@ import { ControlStackError } from "@agent-control-stack/shared";
 import type { RegistryAgentDetail } from "@agent-control-stack/work-items";
 import { assertMissionTransition, assertReadyToComplete, MissionRuntime } from "./index.js";
 import type { CreateMissionInput, DispatchRequest, OperationExecutor } from "./index.js";
+import type { MissionRouter } from "./ports.js";
 
 const directories: string[] = [];
 afterEach(() => {
@@ -42,6 +43,28 @@ function agent(id: string, capability: string, now: string): RegistryAgentDetail
   };
 }
 
+function testRouter(agents: RegistryAgentDetail[]): MissionRouter {
+  return {
+    async assign(request) {
+      const selected = agents.find((candidate) =>
+        request.requiredCapabilities.every((required) => candidate.capabilities.some((item) => item.name === required))
+      );
+      if (!selected) return { kind: "rejected", reason: "no eligible test worker", evidence: { test: true } };
+      return {
+        kind: "assigned",
+        decisionId: `test-routing:${request.workItemId}`,
+        selectedAgentId: selected.id,
+        selectedWorkerId: `worker-for:${selected.id}`,
+        source: "nimble",
+        model: "test-nimble",
+        confidence: 1,
+        threshold: 0.8,
+        evidence: { test: true, operationId: request.operationId }
+      };
+    }
+  };
+}
+
 interface WorldOptions {
   clock?: () => Date;
   leaseTtlMs?: number;
@@ -54,7 +77,7 @@ interface WorldOptions {
   fatal?: boolean;
   verificationObserved?: string;
   apply?: "ok" | "diverged" | "throw-after-record";
-  deploy?: "healthy" | "exit-without-health" | "down";
+  deploy?: "healthy" | "exit-without-health" | "down" | "unknown-after-side-effect" | "unknown-no-side-effect";
   productionObserved?: string;
 }
 
@@ -70,6 +93,7 @@ function world(options: WorldOptions = {}) {
   let applyCalls = 0;
   let deployCalls = 0;
   const applied = new Map<string, string>();
+  let observedReleaseOverride: string | null | undefined;
   const executor: OperationExecutor = {
     async dispatch(request: DispatchRequest) {
       calls.push(request);
@@ -112,62 +136,55 @@ function world(options: WorldOptions = {}) {
       return revision ? { kind: "succeeded" as const, observedRevision: revision } : { kind: "not_started" as const };
     }
   };
-  let rememberedDeployment:
-    | {
-        kind: "observed";
-        exitCode: number;
-        observedVersion: string;
-        restartStatus: string;
-        health: "pass";
-        healthDetail: string;
-      }
-    | undefined;
-  const deployer = {
-    async deploy() {
+  let liveReleaseId: string | null = null;
+  let observationUnavailable = false;
+  const deploymentAuthorization = {
+    async authorize(input: { requestedBy: string }) {
+      return { requestedBy: input.requestedBy, permitId: "permit-test-deploy" };
+    }
+  };
+  const deploymentController = {
+    async deploy(input: { releaseId: string }) {
       deployCalls += 1;
       if (options.deploy === "down")
-        return { kind: "failed" as const, reason: "unit inactive", health: "fail" as const, exitCode: 1 };
-      if (options.deploy === "exit-without-health") {
-        return {
-          kind: "observed" as const,
-          exitCode: 0,
-          observedVersion: "rev-2",
-          restartStatus: "restarted",
-          health: "fail" as const,
-          healthDetail: "unready"
-        };
-      }
-      rememberedDeployment = {
-        kind: "observed",
-        exitCode: 0,
-        observedVersion: "rev-2",
-        restartStatus: "restarted",
-        health: "pass",
-        healthDetail: "ok"
+        return { status: "failed" as const, reason: "deployment controller rejected operation" };
+      if (options.deploy === "unknown-no-side-effect") return { status: "unknown" as const };
+      liveReleaseId = input.releaseId;
+      if (options.deploy === "unknown-after-side-effect") return { status: "unknown" as const };
+      return { status: "succeeded" as const };
+    }
+  };
+  const liveReleaseObserver = {
+    async observe() {
+      if (observationUnavailable) throw new Error("observer unavailable");
+      return {
+        releaseId: observedReleaseOverride === undefined ? liveReleaseId : observedReleaseOverride,
+        observedAt: new Date().toISOString()
       };
-      return rememberedDeployment;
-    },
-    async inspect() {
-      return rememberedDeployment ?? { kind: "not_started" as const };
+    }
+  };
+  const productionObserver = {
+    async observe(input: { kind: string; expected: string }) {
+      if (options.productionObserved) return { observed: options.productionObserved };
+      if (input.kind === "health_endpoint" || input.kind === "service_health") {
+        return { observed: options.deploy === "exit-without-health" ? "fail" : "pass" };
+      }
+      return { observed: liveReleaseId ?? input.expected };
     }
   };
   const runtime = new MissionRuntime({
     dbPath,
     workerId: options.workerId ?? "worker-a",
-    agents: options.agents ?? [agent("agent-jc", "repository_read", now), agent("agent-dc", "host_exec", now)],
+    router: testRouter(
+      options.agents ?? [agent("agent-jc", "repository_read", now), agent("agent-dc", "host_exec", now)]
+    ),
     executor,
     reconciler,
     applier,
-    deployer,
-    ...(options.productionObserved
-      ? {
-          observer: {
-            async observe() {
-              return { observed: options.productionObserved ?? "" };
-            }
-          }
-        }
-      : {}),
+    deploymentAuthorization,
+    deploymentController,
+    liveReleaseObserver,
+    observer: productionObserver,
     ...(options.admission ? { admission: options.admission } : {}),
     ...(options.clock ? { clock: options.clock } : {}),
     ...(options.leaseTtlMs ? { leaseTtlMs: options.leaseTtlMs } : {}),
@@ -179,8 +196,21 @@ function world(options: WorldOptions = {}) {
     calls,
     started,
     executor,
+    reconciler,
     applier,
-    deployer,
+    deploymentPorts: {
+      deploymentAuthorization,
+      deploymentController,
+      liveReleaseObserver,
+      observer: productionObserver
+    },
+    productionObserver,
+    setObservationUnavailable(value: boolean) {
+      observationUnavailable = value;
+    },
+    setObservedReleaseOverride(value: string | null | undefined) {
+      observedReleaseOverride = value;
+    },
     applied,
     get applyCalls() {
       return applyCalls;
@@ -269,13 +299,142 @@ describe("mission lifecycle", () => {
     expect(snapshot.events.filter((event) => event.name === "mission.completed")).toHaveLength(1);
     expect(snapshot.changeSets).toHaveLength(1);
     expect(snapshot.application?.status).toBe("succeeded");
-    expect(snapshot.deployment).toMatchObject({
-      status: "succeeded",
-      healthStatus: "pass",
-      restartStatus: "restarted"
+    expect(snapshot.deploymentOperation).toMatchObject({
+      status: "SUCCEEDED",
+      releaseId: "rev-2",
+      observedReleaseId: "rev-2",
+      requestedBy: "human-operator",
+      permitId: "permit-test-deploy"
     });
+    expect(() =>
+      fixture.runtime.store
+        .database()
+        .prepare(`UPDATE mission_deployment_operations SET status = 'UNKNOWN' WHERE mission_id = ?`)
+        .run(created.mission.missionId)
+    ).toThrow(/deployment operation status transition/);
+    expect(() =>
+      fixture.runtime.store
+        .database()
+        .prepare(`UPDATE mission_deployment_operations SET release_id = 'rev-3' WHERE mission_id = ?`)
+        .run(created.mission.missionId)
+    ).toThrow(/identity is immutable/);
     expect(fixture.applyCalls).toBe(1);
     fixture.runtime.close();
+  });
+
+  it("reconciles lost deployment acknowledgements by independently observing the release before retry", async () => {
+    const appliedButUnknown = world({ deploy: "unknown-after-side-effect" });
+    const firstMission = appliedButUnknown.runtime.createMission(plan({ operations: plan().operations.slice(0, 1) }));
+    await runToApproval(appliedButUnknown.runtime, firstMission.mission.missionId);
+    appliedButUnknown.runtime.recordHumanDecision(firstMission.mission.missionId, "human-operator", "approved", "ship");
+    const first = await appliedButUnknown.runtime.advance(firstMission.mission.missionId);
+    expect(first.status).toBe("WAITING_FOR_RECONCILIATION");
+    expect(appliedButUnknown.deployCalls).toBe(1);
+    expect(appliedButUnknown.runtime.store.snapshot(firstMission.mission.missionId).deploymentOperation?.status).toBe(
+      "UNKNOWN"
+    );
+    appliedButUnknown.runtime.close();
+
+    const resumed = new MissionRuntime({
+      dbPath: appliedButUnknown.dbPath,
+      workerId: "deployment-resume",
+      router: testRouter([agent("agent-jc", "repository_read", new Date().toISOString())]),
+      executor: appliedButUnknown.executor,
+      reconciler: appliedButUnknown.reconciler,
+      applier: appliedButUnknown.applier,
+      ...appliedButUnknown.deploymentPorts,
+      observer: appliedButUnknown.productionObserver
+    });
+    expect((await resumed.advance(firstMission.mission.missionId)).status).toBe("COMPLETED");
+    expect(appliedButUnknown.deployCalls).toBe(1);
+    resumed.close();
+
+    const unavailable = world({ deploy: "unknown-no-side-effect" });
+    const secondMission = unavailable.runtime.createMission(plan({ operations: plan().operations.slice(0, 1) }));
+    await runToApproval(unavailable.runtime, secondMission.mission.missionId);
+    unavailable.runtime.recordHumanDecision(secondMission.mission.missionId, "human-operator", "approved", "ship");
+    expect((await unavailable.runtime.advance(secondMission.mission.missionId)).status).toBe(
+      "WAITING_FOR_RECONCILIATION"
+    );
+    unavailable.runtime.close();
+    unavailable.setObservationUnavailable(true);
+
+    const blockedResume = new MissionRuntime({
+      dbPath: unavailable.dbPath,
+      workerId: "deployment-resume-unavailable",
+      router: testRouter([agent("agent-jc", "repository_read", new Date().toISOString())]),
+      executor: unavailable.executor,
+      reconciler: unavailable.reconciler,
+      applier: unavailable.applier,
+      ...unavailable.deploymentPorts,
+      observer: unavailable.productionObserver
+    });
+    expect((await blockedResume.advance(secondMission.mission.missionId)).status).toBe("WAITING_FOR_RECONCILIATION");
+    expect(unavailable.deployCalls).toBe(1);
+    expect(blockedResume.store.snapshot(secondMission.mission.missionId).deploymentOperation?.status).toBe("UNKNOWN");
+    blockedResume.close();
+  });
+
+  it.each(["after_deploy_intent", "after_deploy_executing"] as const)(
+    "does not invoke the controller again after a crash at %s unless observation proves the release is live",
+    async (stage) => {
+      let crashed = false;
+      const fixture = world({
+        onStage(seen) {
+          if (!crashed && seen === stage) {
+            crashed = true;
+            throw new Error(`crash at ${stage}`);
+          }
+        }
+      });
+      const created = fixture.runtime.createMission(plan({ operations: plan().operations.slice(0, 1) }));
+      await runToApproval(fixture.runtime, created.mission.missionId);
+      fixture.runtime.recordHumanDecision(created.mission.missionId, "human-operator", "approved", "ship");
+      await expect(fixture.runtime.advance(created.mission.missionId)).rejects.toThrow(`crash at ${stage}`);
+      expect(fixture.deployCalls).toBe(0);
+      fixture.runtime.close();
+
+      const resumed = new MissionRuntime({
+        dbPath: fixture.dbPath,
+        workerId: `resume-${stage}`,
+        router: testRouter([agent("agent-jc", "repository_read", new Date().toISOString())]),
+        executor: fixture.executor,
+        reconciler: fixture.reconciler,
+        applier: fixture.applier,
+        ...fixture.deploymentPorts
+      });
+      expect((await resumed.advance(created.mission.missionId)).status).toBe("WAITING_FOR_RECONCILIATION");
+      expect(fixture.deployCalls).toBe(0);
+      expect(resumed.store.snapshot(created.mission.missionId).deploymentOperation?.status).toBe("UNKNOWN");
+      resumed.close();
+    }
+  );
+
+  it("keeps a controller-success operation UNKNOWN until the exact release is observed", async () => {
+    const fixture = world();
+    fixture.setObservedReleaseOverride("rev-1");
+    const created = fixture.runtime.createMission(plan({ operations: plan().operations.slice(0, 1) }));
+    await runToApproval(fixture.runtime, created.mission.missionId);
+    fixture.runtime.recordHumanDecision(created.mission.missionId, "human-operator", "approved", "ship");
+    expect((await fixture.runtime.advance(created.mission.missionId)).status).toBe("WAITING_FOR_RECONCILIATION");
+    const pending = fixture.runtime.store.snapshot(created.mission.missionId).deploymentOperation;
+    expect(pending).toMatchObject({ status: "UNKNOWN", releaseId: "rev-2", observedReleaseId: "rev-1" });
+    expect(fixture.deployCalls).toBe(1);
+    fixture.runtime.close();
+
+    fixture.setObservedReleaseOverride("rev-2");
+    const resumed = new MissionRuntime({
+      dbPath: fixture.dbPath,
+      workerId: "release-observer-resume",
+      router: testRouter([agent("agent-jc", "repository_read", new Date().toISOString())]),
+      executor: fixture.executor,
+      reconciler: fixture.reconciler,
+      applier: fixture.applier,
+      ...fixture.deploymentPorts
+    });
+    expect((await resumed.advance(created.mission.missionId)).status).toBe("COMPLETED");
+    expect(fixture.deployCalls).toBe(1);
+    resumed.close();
   });
 
   it("respects a dependency DAG and skips completed work after restart", async () => {
@@ -290,7 +449,7 @@ describe("mission lifecycle", () => {
     const restarted = new MissionRuntime({
       dbPath: fixture.dbPath,
       workerId: "worker-b",
-      agents: [agent("agent-jc", "repository_read", new Date().toISOString())],
+      router: testRouter([agent("agent-jc", "repository_read", new Date().toISOString())]),
       executor: {
         async dispatch(request) {
           fixture.calls.push(request);
@@ -303,7 +462,7 @@ describe("mission lifecycle", () => {
         }
       },
       applier: fixture.applier,
-      deployer: fixture.deployer
+      ...fixture.deploymentPorts
     });
     const progress = await restarted.advance(created.mission.missionId);
     expect(progress.status).toBe("WAITING_FOR_APPROVAL");
@@ -325,7 +484,7 @@ describe("mission lifecycle", () => {
     const other = new MissionRuntime({
       dbPath: shared.dbPath,
       workerId: "shared-worker",
-      agents: [agent("agent-jc", "repository_read", new Date().toISOString())],
+      router: testRouter([agent("agent-jc", "repository_read", new Date().toISOString())]),
       executor: shared.executor,
       reconciler: {
         async inspect(id: string) {
@@ -339,7 +498,7 @@ describe("mission lifecycle", () => {
         }
       },
       applier: shared.applier,
-      deployer: shared.deployer,
+      ...shared.deploymentPorts,
       admission
     });
     const created = shared.runtime.createMission(
@@ -395,7 +554,7 @@ describe("mission lifecycle", () => {
     const second = new MissionRuntime({
       dbPath: first.dbPath,
       workerId: "worker-b",
-      agents: [agent("agent-jc", "repository_read", new Date().toISOString())],
+      router: testRouter([agent("agent-jc", "repository_read", new Date().toISOString())]),
       executor: first.executor,
       reconciler: {
         async inspect() {
@@ -403,7 +562,7 @@ describe("mission lifecycle", () => {
         }
       },
       applier: first.applier,
-      deployer: first.deployer,
+      ...first.deploymentPorts,
       admission
     });
     const created = first.runtime.createMission(
@@ -461,7 +620,7 @@ describe("mission lifecycle", () => {
     const resumed = new MissionRuntime({
       dbPath: fixture.dbPath,
       workerId: "worker-recovered",
-      agents: [agent("agent-jc", "repository_read", new Date(now).toISOString())],
+      router: testRouter([agent("agent-jc", "repository_read", new Date(now).toISOString())]),
       executor: fixture.executor,
       reconciler: {
         async inspect(id: string) {
@@ -471,7 +630,7 @@ describe("mission lifecycle", () => {
         }
       },
       applier: fixture.applier,
-      deployer: fixture.deployer,
+      ...fixture.deploymentPorts,
       clock
     });
     const progress = await resumed.advance(created.mission.missionId);
@@ -603,7 +762,7 @@ describe("mission lifecycle", () => {
     const resumed = new MissionRuntime({
       dbPath: fixture.dbPath,
       workerId: "worker-resume",
-      agents: [agent("agent-jc", "repository_read", new Date().toISOString())],
+      router: testRouter([agent("agent-jc", "repository_read", new Date().toISOString())]),
       executor: {
         async dispatch() {
           throw new Error("duplicate execution");
@@ -615,7 +774,7 @@ describe("mission lifecycle", () => {
         }
       },
       applier: fixture.applier,
-      deployer: fixture.deployer
+      ...fixture.deploymentPorts
     });
     const progress = await resumed.advance(created.mission.missionId);
     expect(progress.status).toBe("COMPLETED");
@@ -642,7 +801,7 @@ describe("mission lifecycle", () => {
     unhealthy.runtime.recordHumanDecision(deployMission.mission.missionId, "human-operator", "approved", "ship");
     const deployProgress = await unhealthy.runtime.advance(deployMission.mission.missionId);
     expect(deployProgress.status).toBe("FAILED");
-    expect(deployProgress.failureCode).toBe("deployment_failure");
+    expect(deployProgress.failureCode).toBe("production_verification_failure");
     unhealthy.runtime.close();
 
     const production = world({ productionObserved: "wrong" });
@@ -728,8 +887,8 @@ describe("mission lifecycle", () => {
     "after_approval",
     "after_apply_started",
     "after_apply",
-    "after_deploy_started",
-    "after_deploy",
+    "after_deploy_controller",
+    "after_deploy_observed",
     "before_complete"
   ])("resumes after a crash at %s without a second execution or mutation", async (stage) => {
     let now = Date.now();
@@ -767,7 +926,7 @@ describe("mission lifecycle", () => {
     const resumed = new MissionRuntime({
       dbPath: fixture.dbPath,
       workerId: "worker-resume",
-      agents: [agent("agent-jc", "repository_read", new Date(now).toISOString())],
+      router: testRouter([agent("agent-jc", "repository_read", new Date(now).toISOString())]),
       executor: fixture.executor,
       reconciler: {
         async inspect(executionId: string) {
@@ -778,7 +937,7 @@ describe("mission lifecycle", () => {
         }
       },
       applier: fixture.applier,
-      deployer: fixture.deployer,
+      ...fixture.deploymentPorts,
       clock: () => new Date(now)
     });
     let progress = await resumed.advance(missionId);
@@ -804,8 +963,15 @@ describe("mission lifecycle", () => {
     }>;
     expect(versions.map((row) => row.version)).toContain(40);
     expect(versions.some((row) => row.version === 39)).toBe(true);
+    expect(versions.some((row) => row.version === 45)).toBe(true);
     expect(
       store.database().prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'missions'`).get()
+    ).toBeTruthy();
+    expect(
+      store
+        .database()
+        .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mission_deployment_operations'`)
+        .get()
     ).toBeTruthy();
     store.close();
   });

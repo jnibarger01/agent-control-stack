@@ -92,7 +92,8 @@ const migrationFiles = [
   { version: 41, name: "change_sets", filename: "041_change_sets.sql" },
   { version: 42, name: "work_item_assignments", filename: "042_work_item_assignments.sql" },
   { version: 43, name: "migration_lineage_reconciliation", filename: "043_migration_lineage_reconciliation.sql" },
-  { version: 44, name: "mission_runtime", filename: "044_mission_runtime.sql" }
+  { version: 44, name: "mission_runtime", filename: "044_mission_runtime.sql" },
+  { version: 45, name: "mission_deployment_operations", filename: "045_mission_deployment_operations.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {

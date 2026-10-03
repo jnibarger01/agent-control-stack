@@ -15,6 +15,8 @@ import type {
   ClaimResult,
   CreateMissionInput,
   DeploymentRecord,
+  DeploymentOperation,
+  DeploymentOperationStatus,
   MissionEventRecord,
   MissionRecord,
   MissionSnapshot,
@@ -104,6 +106,10 @@ export function missionPlanHash(input: CreateMissionInput): string {
 
 export function executionIdentity(missionId: string, operationId: string): string {
   return domainHash("acs:mission-execution:v1", { missionId, operationId });
+}
+
+export function deploymentOperationIdentity(missionId: string, changeSetHash: string, releaseId: string): string {
+  return domainHash("acs:mission-deployment:v1", { missionId, changeSetHash, releaseId });
 }
 
 export function resultHash(payload: Record<string, unknown>): string {
@@ -918,6 +924,159 @@ export class MissionStore {
     });
   }
 
+  createDeploymentOperation(
+    input: Omit<DeploymentOperation, "status" | "createdAt" | "updatedAt" | "observedReleaseId" | "observedAt">,
+    now: string
+  ): DeploymentOperation {
+    return this.transaction(() => {
+      if (input.id !== deploymentOperationIdentity(input.missionId, input.changeSetHash, input.releaseId)) {
+        throw new ControlStackError(
+          "deployment_operation_id_invalid",
+          "deployment operation ID does not match its binding"
+        );
+      }
+      const authorized = this.db
+        .prepare(
+          `SELECT 1 AS authorized
+           FROM missions AS m
+           JOIN mission_change_sets AS cs ON cs.change_set_id = m.change_set_id
+           JOIN mission_applications AS app ON app.mission_id = m.mission_id
+           JOIN mission_approvals AS approval
+             ON approval.mission_id = m.mission_id
+            AND approval.change_set_id = cs.change_set_id
+            AND approval.change_set_hash = cs.change_set_hash
+           WHERE m.mission_id = ?
+             AND cs.change_set_hash = ?
+             AND cs.status = 'applied'
+             AND app.status = 'succeeded'
+             AND app.change_set_hash = cs.change_set_hash
+             AND app.observed_revision = ?
+             AND approval.approver_id = ?
+             AND approval.decision = 'approved'
+           LIMIT 1`
+        )
+        .get(input.missionId, input.changeSetHash, input.releaseId, input.requestedBy);
+      if (!authorized) {
+        throw new ControlStackError(
+          "deployment_authority_invalid",
+          "deployment intent is not bound to the current approved and applied Change Set"
+        );
+      }
+      const existing = this.readDeploymentOperation(input.missionId);
+      if (existing) {
+        if (
+          existing.id !== input.id ||
+          existing.changeSetHash !== input.changeSetHash ||
+          existing.releaseId !== input.releaseId ||
+          existing.requestedBy !== input.requestedBy ||
+          existing.permitId !== input.permitId
+        ) {
+          throw new ControlStackError(
+            "deployment_operation_conflict",
+            "mission already has a different deployment operation"
+          );
+        }
+        return existing;
+      }
+      this.db
+        .prepare(
+          `INSERT INTO mission_deployment_operations
+            (id, mission_id, change_set_hash, release_id, requested_by, permit_id, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)`
+        )
+        .run(
+          input.id,
+          input.missionId,
+          input.changeSetHash,
+          input.releaseId,
+          input.requestedBy,
+          input.permitId,
+          now,
+          now
+        );
+      this.appendEvent(
+        input.missionId,
+        "deployment.operation.pending",
+        `deployment.operation.pending:${input.id}`,
+        { ...input, status: "PENDING" },
+        now
+      );
+      const created = this.readDeploymentOperation(input.missionId);
+      if (!created) throw new ControlStackError("mission_state_missing", "deployment operation was not persisted");
+      return created;
+    });
+  }
+
+  getDeploymentOperation(missionId: string): DeploymentOperation | undefined {
+    return this.readDeploymentOperation(missionId);
+  }
+
+  setDeploymentOperationStatus(
+    missionId: string,
+    status: DeploymentOperationStatus,
+    observedReleaseId: string | null,
+    observedAt: string | null,
+    now: string
+  ): DeploymentOperation {
+    return this.transaction(() => {
+      const current = this.readDeploymentOperation(missionId);
+      if (!current) throw new ControlStackError("mission_state_missing", "deployment operation was not found");
+      if (current.status === "SUCCEEDED" || current.status === "FAILED") {
+        if (current.status !== status) {
+          throw new ControlStackError("deployment_operation_terminal", "terminal deployment operation is immutable");
+        }
+        return current;
+      }
+      const allowed: Record<DeploymentOperationStatus, DeploymentOperationStatus[]> = {
+        PENDING: ["EXECUTING", "SUCCEEDED", "FAILED", "UNKNOWN"],
+        EXECUTING: ["SUCCEEDED", "FAILED", "UNKNOWN"],
+        UNKNOWN: ["SUCCEEDED", "UNKNOWN"],
+        SUCCEEDED: ["SUCCEEDED"],
+        FAILED: ["FAILED"]
+      };
+      if (!allowed[current.status].includes(status)) {
+        throw new ControlStackError(
+          "deployment_operation_transition_invalid",
+          `cannot transition deployment operation from ${current.status} to ${status}`
+        );
+      }
+      if (status === "SUCCEEDED" && observedReleaseId !== current.releaseId) {
+        throw new ControlStackError(
+          "deployment_release_mismatch",
+          "deployment cannot succeed without observing the requested release identity"
+        );
+      }
+      if (observedAt !== null && Number.isNaN(Date.parse(observedAt))) {
+        throw new ControlStackError("deployment_observation_invalid", "release observation timestamp is invalid");
+      }
+      if (status === "SUCCEEDED" && !observedAt) {
+        throw new ControlStackError(
+          "deployment_observation_missing",
+          "deployment success requires an observation timestamp"
+        );
+      }
+      this.db
+        .prepare(
+          `UPDATE mission_deployment_operations
+           SET status = ?,
+               observed_release_id = CASE WHEN ? IS NOT NULL THEN ? ELSE observed_release_id END,
+               observed_at = COALESCE(?, observed_at), updated_at = ?
+           WHERE mission_id = ?`
+        )
+        .run(status, observedAt, observedReleaseId, observedAt, now, missionId);
+      this.appendEvent(
+        missionId,
+        "deployment.operation.updated",
+        `deployment.operation.updated:${current.id}:${status}:${observedReleaseId ?? "none"}:${observedAt ?? "none"}`,
+        { operationId: current.id, status, observedReleaseId, observedAt },
+        now
+      );
+      const updated = this.readDeploymentOperation(missionId);
+      if (!updated) throw new ControlStackError("mission_state_missing", "deployment operation disappeared");
+      return updated;
+    });
+  }
+
   finishDeployment(
     missionId: string,
     status: DeploymentRecord["status"],
@@ -1185,6 +1344,9 @@ export class MissionStore {
       approvals,
       ...(this.readApplication(missionId) ? { application: this.readApplication(missionId) } : {}),
       ...(this.readDeployment(missionId) ? { deployment: this.readDeployment(missionId) } : {}),
+      ...(this.readDeploymentOperation(missionId)
+        ? { deploymentOperation: this.readDeploymentOperation(missionId) }
+        : {}),
       verifications
     };
   }
@@ -1248,6 +1410,38 @@ export class MissionStore {
       ...(row.reason ? { reason: row.reason } : {}),
       ...(row.started_at ? { startedAt: row.started_at } : {}),
       ...(row.completed_at ? { completedAt: row.completed_at } : {})
+    };
+  }
+
+  private readDeploymentOperation(missionId: string): DeploymentOperation | undefined {
+    const row = this.db.prepare(`SELECT * FROM mission_deployment_operations WHERE mission_id = ?`).get(missionId) as
+      | {
+          id: string;
+          mission_id: string;
+          change_set_hash: string;
+          release_id: string;
+          requested_by: string;
+          permit_id: string;
+          status: DeploymentOperationStatus;
+          observed_release_id: string | null;
+          observed_at: string | null;
+          created_at: string;
+          updated_at: string;
+        }
+      | undefined;
+    if (!row) return undefined;
+    return {
+      id: row.id,
+      missionId: row.mission_id,
+      changeSetHash: row.change_set_hash,
+      releaseId: row.release_id,
+      requestedBy: row.requested_by,
+      permitId: row.permit_id,
+      status: row.status,
+      ...(row.observed_release_id ? { observedReleaseId: row.observed_release_id } : {}),
+      ...(row.observed_at ? { observedAt: row.observed_at } : {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
     };
   }
 

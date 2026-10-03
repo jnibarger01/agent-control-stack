@@ -39,6 +39,19 @@ export function evidenceSealHash(snapshot: MissionSnapshot): string {
           healthStatus: snapshot.deployment.healthStatus ?? null,
           restartStatus: snapshot.deployment.restartStatus ?? null
         }
+      : null,
+    deploymentOperation: snapshot.deploymentOperation
+      ? {
+          id: snapshot.deploymentOperation.id,
+          changeSetHash: snapshot.deploymentOperation.changeSetHash,
+          releaseId: snapshot.deploymentOperation.releaseId,
+          requestedBy: snapshot.deploymentOperation.requestedBy,
+          permitId: snapshot.deploymentOperation.permitId,
+          status: snapshot.deploymentOperation.status,
+          observedReleaseId: snapshot.deploymentOperation.observedReleaseId ?? null,
+          observedAt: snapshot.deploymentOperation.observedAt ?? null,
+          createdAt: snapshot.deploymentOperation.createdAt
+        }
       : null
   });
 }
@@ -106,14 +119,30 @@ export function completionRejection(snapshot: MissionSnapshot): { code: string; 
     }
   }
   if (mission.requiresDeployment) {
+    const deployment = snapshot.deploymentOperation;
+    const head = snapshot.changeSets.find((changeSet) => changeSet.changeSetId === mission.changeSetId);
     if (
-      !snapshot.deployment ||
-      snapshot.deployment.status !== "succeeded" ||
-      snapshot.deployment.healthStatus !== "pass"
+      !deployment ||
+      deployment.status !== "SUCCEEDED" ||
+      !head ||
+      deployment.changeSetHash !== head.changeSetHash ||
+      snapshot.application?.status !== "succeeded" ||
+      snapshot.application.changeSetHash !== deployment.changeSetHash ||
+      snapshot.application.observedRevision !== deployment.releaseId ||
+      deployment.observedReleaseId !== deployment.releaseId ||
+      !deployment.observedAt
     ) {
-      return { code: "deployment_failure", reason: "required deployment has not passed its health check" };
+      return { code: "deployment_failure", reason: "required release identity has not been independently observed" };
     }
-    if (!names.has("deployment.completed"))
+    if (
+      !snapshot.events.some(
+        (event) =>
+          event.name === "deployment.operation.updated" &&
+          event.payload.operationId === deployment.id &&
+          event.payload.status === "SUCCEEDED" &&
+          event.payload.observedReleaseId === deployment.releaseId
+      )
+    )
       return { code: "missing_evidence", reason: "deployment evidence is missing" };
   }
   if (mission.requiresProductionVerification) {

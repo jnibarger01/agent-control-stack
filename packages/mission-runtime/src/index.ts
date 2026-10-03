@@ -3,19 +3,35 @@ export { deriveMissionProgress, type MissionProgress } from "./progress.js";
 export {
   admissionLaneFor,
   admissionToolFor,
-  type DeploymentExecutor,
-  type DeploymentOutcome,
+  type MissionRouter,
+  type MissionRoutingOutcome,
+  type MissionRoutingRequest,
+  type DeploymentAuthorization,
+  type DeploymentController,
+  type DeploymentControllerResult,
+  type LiveReleaseObserver,
   type DispatchOutcome,
   type DispatchRequest,
   type MutationApplier,
   type MutationApplyOutcome,
+  type ChangeSetApplier,
+  type ChangeSetApplyRequest,
+  type ChangeSetApplyOutcome,
+  type ChangeSetApplyInspection,
   type OperationExecutor,
   type OperationReconciler,
   type ProductionObserver,
   type ReconciliationInspection
 } from "./ports.js";
 export { MissionRuntime, resumeOpenMissions, type MissionRuntimeOptions } from "./runner.js";
-export { changeSetDigest, executionIdentity, missionPlanHash, MissionStore, resultHash } from "./store.js";
+export {
+  changeSetDigest,
+  deploymentOperationIdentity,
+  executionIdentity,
+  missionPlanHash,
+  MissionStore,
+  resultHash
+} from "./store.js";
 export {
   assertMissionTransition,
   MISSION_STATUSES,
@@ -23,6 +39,8 @@ export {
   OPERATION_STATUSES,
   type ApplicationRecord,
   type CreateMissionInput,
+  type DeploymentOperation,
+  type DeploymentOperationStatus,
   type MissionSnapshot,
   type MissionStatus,
   type OperationDraft,

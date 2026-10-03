@@ -1,34 +1,38 @@
-import { routeActor } from "@agent-control-stack/actor-router";
 import {
   AdmissionError,
   ExecutionAdmissionScheduler,
   type ExecutionAdmissionController
 } from "@agent-control-stack/execution-admission";
 import { ControlStackError } from "@agent-control-stack/shared";
-import { SqliteWorkItemStore, type RegistryAgentDetail } from "@agent-control-stack/work-items";
+import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { assertReadyToComplete } from "./completion.js";
 import { deriveMissionProgress, type MissionProgress } from "./progress.js";
 import {
   admissionLaneFor,
   admissionToolFor,
-  type DeploymentExecutor,
+  type DeploymentAuthorization,
+  type DeploymentController,
+  type LiveReleaseObserver,
+  type MissionRouter,
   type MutationApplier,
   type OperationExecutor,
   type OperationReconciler,
   type ProductionObserver
 } from "./ports.js";
-import { changeSetDigest, executionIdentity, MissionStore } from "./store.js";
+import { changeSetDigest, deploymentOperationIdentity, executionIdentity, MissionStore } from "./store.js";
 import { assertSupportedVerification, evaluateVerification } from "./verification.js";
 import type { CreateMissionInput, MissionSnapshot, MissionStatus, OperationRecord } from "./types.js";
 
 export interface MissionRuntimeOptions {
   dbPath: string;
   workerId: string;
-  agents: RegistryAgentDetail[];
+  router: MissionRouter;
   executor: OperationExecutor;
   reconciler: OperationReconciler;
   applier: MutationApplier;
-  deployer: DeploymentExecutor;
+  deploymentAuthorization?: DeploymentAuthorization;
+  deploymentController?: DeploymentController;
+  liveReleaseObserver?: LiveReleaseObserver;
   observer?: ProductionObserver;
   admission?: ExecutionAdmissionController;
   workItems?: SqliteWorkItemStore;
@@ -306,40 +310,48 @@ export class MissionRuntime {
 
   private async executeOperation(operation: OperationRecord): Promise<void> {
     this.stage("before_route");
-    const decision = routeActor(this.options.agents, {
-      requiredCapabilities: operation.requiredCapabilities,
-      taskType: operation.lane,
-      now: this.now(),
-      freeCapacity: Object.fromEntries(this.options.agents.map((agent) => [agent.id, 1]))
-    });
-    if (!decision.selected) {
+    let route: Awaited<ReturnType<MissionRouter["assign"]>>;
+    try {
+      route = await this.options.router.assign({
+        missionId: operation.missionId,
+        workItemId: this.store.snapshot(operation.missionId).mission.workItemId,
+        operationId: operation.operationId,
+        requiredCapabilities: operation.requiredCapabilities,
+        lane: operation.lane
+      });
+    } catch {
+      this.move(
+        operation.missionId,
+        "WAITING_FOR_RECONCILIATION",
+        { operationId: operation.operationId, reason: "routing_assignment_unconfirmed" },
+        `mission.route_reconcile:${operation.operationId}`
+      );
+      return;
+    }
+    if (route.kind !== "assigned") {
+      this.store.markRouted(operation.operationId, route.evidence, this.iso());
       this.store.markOperationTerminal(
         operation.operationId,
         "BLOCKED",
         "routing_unresolved",
-        "no eligible executor",
+        route.reason,
         this.iso()
       );
       this.store.block(operation.missionId, "routing_unresolved", `no route for ${operation.operationId}`, this.iso());
       return;
     }
-    const scores = Object.fromEntries(
-      Object.entries(decision.scores).map(([actorId, score]) => [actorId, Math.round(score)])
-    );
-    this.workItems.recordActorRoutingDecision(
-      {
-        workItemId: this.store.snapshot(operation.missionId).mission.workItemId,
-        selectedActorId: decision.selected,
-        eligible: decision.eligible,
-        excluded: decision.excluded,
-        scores,
-        idempotencyKey: `route_${operation.operationId}`
-      },
-      { via: "domain_service", actorId: this.options.workerId }
-    );
     this.store.markRouted(
       operation.operationId,
-      { selected: decision.selected, eligible: decision.eligible, excluded: decision.excluded, scores },
+      {
+        routingDecisionId: route.decisionId,
+        selectedAgentId: route.selectedAgentId,
+        selectedWorkerId: route.selectedWorkerId,
+        source: route.source,
+        model: route.model,
+        confidence: route.confidence,
+        threshold: route.threshold,
+        ...route.evidence
+      },
       this.iso()
     );
     this.stage("after_route");
@@ -351,8 +363,8 @@ export class MissionRuntime {
       permit = await this.admission.acquire({
         requestId: executionId,
         lane: admissionLaneFor(operation.lane),
-        executorId: this.options.workerId,
-        actorId: decision.selected,
+        executorId: route.selectedWorkerId,
+        actorId: route.selectedAgentId,
         toolName: admissionToolFor(operation.lane),
         executionClass: "execution",
         enqueuedAt: this.now().getTime(),
@@ -387,7 +399,8 @@ export class MissionRuntime {
           executionId,
           lane: operation.lane,
           attempt: dispatched.attemptCount,
-          operationType: operation.operationType
+          operationType: operation.operationType,
+          assignment: route
         });
       } catch (error) {
         this.store.markUnknown(
@@ -773,89 +786,192 @@ export class MissionRuntime {
       this.store.fail(mission.missionId, "deployment_failure", "deployment target is missing", this.iso());
       return false;
     }
-    if (snapshot.deployment?.status === "succeeded" && snapshot.deployment.healthStatus === "pass") return true;
-    if (snapshot.deployment?.status === "unknown" || snapshot.deployment?.status === "started") {
-      const inspection = await this.options.deployer.inspect(mission.missionId);
-      if (inspection.kind === "observed" && inspection.health === "pass" && inspection.exitCode === 0) {
-        this.store.finishDeployment(
-          mission.missionId,
-          "succeeded",
-          {
-            observedVersion: inspection.observedVersion,
-            restartStatus: inspection.restartStatus,
-            healthStatus: "pass"
-          },
-          this.iso()
-        );
-        return true;
-      }
-      if (inspection.kind !== "not_started") {
-        this.store.finishDeployment(mission.missionId, "unknown", { reason: "deployment outcome unknown" }, this.iso());
-        this.move(
-          mission.missionId,
-          "WAITING_FOR_RECONCILIATION",
-          { target: mission.deploymentTarget },
-          `mission.deploy_unknown:${mission.missionId}`
-        );
-        return false;
-      }
-    }
-    const expectedRevision = snapshot.application?.observedRevision ?? mission.baseRevision;
-    const started = this.store.startDeployment(
-      mission.missionId,
-      mission.deploymentTarget,
-      expectedRevision,
-      this.iso()
-    );
-    this.stage("after_deploy_started");
-    const outcome = await this.options.deployer.deploy({
-      missionId: mission.missionId,
-      target: mission.deploymentTarget,
-      expectedRevision,
-      attempt: started.attemptCount
-    });
-    this.stage("after_deploy");
-    const healthy =
-      outcome.kind === "observed" &&
-      outcome.exitCode === 0 &&
-      outcome.health === "pass" &&
-      Boolean(outcome.observedVersion);
-    if (!healthy) {
-      this.store.finishDeployment(
-        mission.missionId,
-        outcome.kind === "unknown" ? "unknown" : "failed",
-        {
-          observedVersion: outcome.observedVersion,
-          restartStatus: outcome.restartStatus,
-          healthStatus: outcome.health ?? "fail",
-          reason: outcome.reason ?? "deployment health check failed"
-        },
-        this.iso()
-      );
-      if (outcome.kind === "unknown") {
-        this.move(
-          mission.missionId,
-          "WAITING_FOR_RECONCILIATION",
-          { target: mission.deploymentTarget },
-          `mission.deploy_unknown_result:${mission.missionId}`
-        );
-        return false;
-      }
+    const head = this.headChangeSet(snapshot);
+    const applied = snapshot.application;
+    if (!head || !applied || applied.status !== "succeeded" || applied.changeSetHash !== head.changeSetHash) {
       this.store.fail(
         mission.missionId,
-        "deployment_failure",
-        outcome.reason ?? "deployment did not become healthy",
+        "deployment_authority_missing",
+        "deployment requires the currently approved Change Set to be durably applied",
         this.iso()
       );
       return false;
     }
-    this.store.finishDeployment(
-      mission.missionId,
-      "succeeded",
-      { observedVersion: outcome.observedVersion, restartStatus: outcome.restartStatus, healthStatus: "pass" },
+    const releaseId = applied.observedRevision;
+    if (!releaseId) {
+      this.store.fail(
+        mission.missionId,
+        "deployment_release_missing",
+        "applied release identity is missing",
+        this.iso()
+      );
+      return false;
+    }
+    const { deploymentAuthorization, deploymentController, liveReleaseObserver } = this.options;
+    if (!deploymentAuthorization || !deploymentController || !liveReleaseObserver) {
+      this.store.block(
+        mission.missionId,
+        "deployment_authority_unavailable",
+        "deployment authorization, controller, or independent release observer is unavailable",
+        this.iso()
+      );
+      return false;
+    }
+
+    let operation = this.store.getDeploymentOperation(mission.missionId);
+    if (operation) {
+      if (operation.changeSetHash !== head.changeSetHash || operation.releaseId !== releaseId) {
+        this.store.block(
+          mission.missionId,
+          "deployment_operation_superseded",
+          "stored deployment operation does not match the current applied Change Set and release",
+          this.iso()
+        );
+        return false;
+      }
+      if (operation.status === "SUCCEEDED" && operation.observedReleaseId === operation.releaseId) return true;
+      if (operation.status === "FAILED") {
+        this.store.fail(mission.missionId, "deployment_failure", "deployment operation previously failed", this.iso());
+        return false;
+      }
+
+      // Any resumed operation, including PENDING, must be reconciled against
+      // the independently observed running release before the controller runs.
+      let observed: Awaited<ReturnType<LiveReleaseObserver["observe"]>>;
+      try {
+        observed = await liveReleaseObserver.observe();
+      } catch {
+        this.store.setDeploymentOperationStatus(mission.missionId, "UNKNOWN", null, null, this.iso());
+        this.waitForDeploymentReconciliation(mission.missionId, operation.id);
+        return false;
+      }
+      if (observed.releaseId === operation.releaseId) {
+        this.store.setDeploymentOperationStatus(
+          mission.missionId,
+          "SUCCEEDED",
+          observed.releaseId,
+          observed.observedAt,
+          this.iso()
+        );
+        this.stage("after_deploy_observed");
+        return true;
+      }
+      this.store.setDeploymentOperationStatus(
+        mission.missionId,
+        "UNKNOWN",
+        observed.releaseId,
+        observed.observedAt,
+        this.iso()
+      );
+      this.waitForDeploymentReconciliation(mission.missionId, operation.id);
+      return false;
+    }
+
+    const approval = snapshot.approvals.find(
+      (item) => item.changeSetHash === head.changeSetHash && item.decision === "approved"
+    );
+    if (!approval) {
+      this.store.block(
+        mission.missionId,
+        "deployment_approval_missing",
+        "deployment requires exact-hash human approval",
+        this.iso()
+      );
+      return false;
+    }
+    const operationId = deploymentOperationIdentity(mission.missionId, head.changeSetHash, releaseId);
+    let authorization: { requestedBy: string; permitId: string };
+    try {
+      authorization = await deploymentAuthorization.authorize({
+        operationId,
+        missionId: mission.missionId,
+        changeSetId: head.changeSetId,
+        changeSetHash: head.changeSetHash,
+        releaseId,
+        requestedBy: approval.approverId
+      });
+    } catch {
+      this.store.block(
+        mission.missionId,
+        "deployment_permit_unavailable",
+        "ACS did not issue a deployment permit",
+        this.iso()
+      );
+      return false;
+    }
+    if (!authorization.permitId || authorization.requestedBy !== approval.approverId) {
+      this.store.block(
+        mission.missionId,
+        "deployment_permit_invalid",
+        "deployment permit identity is invalid",
+        this.iso()
+      );
+      return false;
+    }
+    operation = this.store.createDeploymentOperation(
+      {
+        id: operationId,
+        missionId: mission.missionId,
+        changeSetHash: head.changeSetHash,
+        releaseId,
+        requestedBy: authorization.requestedBy,
+        permitId: authorization.permitId
+      },
       this.iso()
     );
-    return true;
+    this.stage("after_deploy_intent");
+    this.store.setDeploymentOperationStatus(mission.missionId, "EXECUTING", null, null, this.iso());
+    this.stage("after_deploy_executing");
+    let result: Awaited<ReturnType<DeploymentController["deploy"]>>;
+    try {
+      result = await deploymentController.deploy({
+        operationId: operation.id,
+        changeSetHash: operation.changeSetHash,
+        releaseId: operation.releaseId,
+        permitId: operation.permitId
+      });
+    } catch {
+      result = { status: "unknown" };
+    }
+    this.stage("after_deploy_controller");
+    if (result.status === "failed") {
+      this.store.setDeploymentOperationStatus(mission.missionId, "FAILED", null, null, this.iso());
+      this.store.fail(mission.missionId, "deployment_failure", result.reason, this.iso());
+      return false;
+    }
+    if (result.status === "unknown") {
+      this.store.setDeploymentOperationStatus(mission.missionId, "UNKNOWN", null, null, this.iso());
+      this.waitForDeploymentReconciliation(mission.missionId, operation.id);
+      return false;
+    }
+    let observed: Awaited<ReturnType<LiveReleaseObserver["observe"]>>;
+    try {
+      observed = await liveReleaseObserver.observe();
+    } catch {
+      this.store.setDeploymentOperationStatus(mission.missionId, "UNKNOWN", null, null, this.iso());
+      this.waitForDeploymentReconciliation(mission.missionId, operation.id);
+      return false;
+    }
+    const matching = observed.releaseId === operation.releaseId;
+    this.store.setDeploymentOperationStatus(
+      mission.missionId,
+      matching ? "SUCCEEDED" : "UNKNOWN",
+      observed.releaseId,
+      observed.observedAt,
+      this.iso()
+    );
+    this.stage("after_deploy_observed");
+    if (!matching) this.waitForDeploymentReconciliation(mission.missionId, operation.id);
+    return matching;
+  }
+
+  private waitForDeploymentReconciliation(missionId: string, operationId: string): void {
+    this.move(
+      missionId,
+      "WAITING_FOR_RECONCILIATION",
+      { deploymentOperationId: operationId },
+      `mission.deploy_unknown:${operationId}`
+    );
   }
 
   private async verifyProduction(snapshot: MissionSnapshot): Promise<boolean> {
@@ -868,7 +984,16 @@ export class MissionRuntime {
         `mission.production:${mission.missionId}`
       );
     }
-    const observer = this.options.observer ?? defaultObserver(snapshot);
+    const observer = this.options.observer;
+    if (!observer) {
+      this.store.block(
+        mission.missionId,
+        "production_observer_unavailable",
+        "declared production verification cannot run without an observer",
+        this.iso()
+      );
+      return false;
+    }
     let failed = false;
     for (const requirement of mission.productionVerification) {
       const observed = await observer.observe({
@@ -990,18 +1115,6 @@ function safeRejection(snapshot: MissionSnapshot): { code: string; reason: strin
     if (error instanceof ControlStackError) return { code: error.code, reason: error.message };
     throw error;
   }
-}
-
-function defaultObserver(snapshot: MissionSnapshot): ProductionObserver {
-  return {
-    async observe(input) {
-      if (input.kind === "health_endpoint" || input.kind === "service_health" || input.kind === "http_response") {
-        return { observed: snapshot.deployment?.healthStatus === "pass" ? input.expected : "fail" };
-      }
-      if (input.kind === "process_restart") return { observed: snapshot.deployment?.restartStatus ?? "" };
-      return { observed: snapshot.deployment?.observedVersion ?? snapshot.application?.observedRevision ?? "" };
-    }
-  };
 }
 
 export async function resumeOpenMissions(runtime: MissionRuntime): Promise<MissionProgress[]> {

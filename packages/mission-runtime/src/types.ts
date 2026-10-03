@@ -229,6 +229,22 @@ export interface DeploymentRecord {
   completedAt?: string;
 }
 
+export type DeploymentOperationStatus = "PENDING" | "EXECUTING" | "SUCCEEDED" | "FAILED" | "UNKNOWN";
+
+export interface DeploymentOperation {
+  id: string;
+  missionId: string;
+  changeSetHash: string;
+  releaseId: string;
+  requestedBy: string;
+  permitId: string;
+  status: DeploymentOperationStatus;
+  observedReleaseId?: string;
+  observedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface VerificationRecord {
   verificationId: string;
   missionId: string;
@@ -262,6 +278,7 @@ export interface MissionSnapshot {
   approvals: ApprovalBinding[];
   application?: ApplicationRecord;
   deployment?: DeploymentRecord;
+  deploymentOperation?: DeploymentOperation;
   verifications: VerificationRecord[];
 }
 

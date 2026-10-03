@@ -11,6 +11,7 @@ import {
   inspectControlPlaneDatabase,
   redactValue,
   stableHash,
+  strictCanonicalJsonV1,
   verifyAuditChain,
   type AttributeValue,
   type AuditChainEvent,
@@ -94,6 +95,14 @@ import {
   type ExecutionPlanRecord,
   type GrantExecutionPlanApprovalInput
 } from "./execution-plan.js";
+import {
+  changeSetManifestHash,
+  changeSetRecordSchema,
+  submitChangeSetInputSchema,
+  type ChangeSetRecord,
+  type SubmitChangeSetInput
+} from "./change-set.js";
+import { insertChangeSetRevision, readChangeSet, readChangeSetSubmission } from "./change-set-store.js";
 import {
   attemptLeaseSchema,
   commandAuthoritySchema,
@@ -985,6 +994,8 @@ export interface WorkItemStore {
   list(input?: unknown): WorkItem[];
   listDashboardWorkItems(options?: DashboardWorkItemsOptions): DashboardWorkItems;
   createExecutionPlan(input: CreateExecutionPlanInput): ExecutionPlanRecord;
+  submitChangeSet(input: SubmitChangeSetInput): ChangeSetRecord;
+  getChangeSet(missionId: string, revision?: number): ChangeSetRecord | undefined;
   getExecutionPlan(planId: string): ExecutionPlanRecord | undefined;
   getCurrentExecutionPlan(workItemId: string): ExecutionPlanRecord | undefined;
   listExecutionPlans(workItemId: string): ExecutionPlanRecord[];
@@ -1411,6 +1422,91 @@ export class SqliteWorkItemStore implements WorkItemStore {
     }
     const finishedTotal = TERMINAL_WORK_ITEM_STATUSES.reduce((sum, status) => sum + (statusCounts[status] ?? 0), 0);
     return { active, finished, finishedTotal, finishedLimit, statusCounts };
+  }
+
+  submitChangeSet(input: SubmitChangeSetInput): ChangeSetRecord {
+    const parsed = submitChangeSetInputSchema.parse(input);
+    const now = (parsed.now ?? new Date()).toISOString();
+    return this.write(() => {
+      const workItem = this.getRequired(parsed.definition.missionId);
+      const existingSubmission = readChangeSetSubmission(this.db, workItem.id, parsed.submissionId);
+      if (existingSubmission) {
+        if (
+          strictCanonicalJsonV1(existingSubmission.snapshot.definition) !== strictCanonicalJsonV1(parsed.definition) ||
+          existingSubmission.createdByActorId !== parsed.createdByActorId
+        ) {
+          throw new ControlStackError(
+            "change_set_submission_conflict",
+            "submission identifier was already used with different content"
+          );
+        }
+        return { value: existingSubmission, events: [] };
+      }
+      if (isTerminalStatus(workItem.status)) {
+        throw new ControlStackError(
+          "change_set_mission_terminal",
+          "cannot submit a change set for a terminal work item"
+        );
+      }
+      if (Date.parse(parsed.definition.expiresAt) <= Date.parse(now)) {
+        throw new ControlStackError("change_set_expired", "change set expiration must be in the future");
+      }
+      if (parsed.definition.subjectInputHash !== executionPlanSubjectInputHash(workItem)) {
+        throw new ControlStackError(
+          "change_set_input_mismatch",
+          "change set is not bound to the current mission inputs"
+        );
+      }
+
+      const current = this.db
+        .prepare("SELECT revision, manifest_hash FROM change_set_heads WHERE mission_id = ?")
+        .get(workItem.id) as { revision: number; manifest_hash: string } | undefined;
+      if (parsed.expectedHeadHash !== (current?.manifest_hash ?? null)) {
+        throw new ControlStackError(
+          "change_set_head_conflict",
+          "change set head changed or an expected head hash was not supplied"
+        );
+      }
+      const snapshot = {
+        revision: (current?.revision ?? 0) + 1,
+        parentManifestHash: current?.manifest_hash ?? null,
+        definition: parsed.definition
+      };
+      const manifestHash = changeSetManifestHash(snapshot);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "change_set.submitted",
+          {
+            missionId: workItem.id,
+            revision: snapshot.revision,
+            manifestHash,
+            parentManifestHash: snapshot.parentManifestHash,
+            submissionId: parsed.submissionId,
+            createdByActorId: parsed.createdByActorId,
+            createdAt: now,
+            executingActorId: parsed.definition.executingActorId
+          },
+          { missionId: workItem.id, changeSetHash: manifestHash }
+        )
+      );
+      const record = changeSetRecordSchema.parse({
+        snapshot,
+        manifestHash,
+        auditEventId: event.id,
+        submissionId: parsed.submissionId,
+        createdByActorId: parsed.createdByActorId,
+        createdAt: now
+      });
+      insertChangeSetRevision(this.db, record);
+      return { value: record, events: [event] };
+    });
+  }
+
+  getChangeSet(missionId: string, revision?: number): ChangeSetRecord | undefined {
+    if (revision !== undefined && (!Number.isSafeInteger(revision) || revision < 1)) {
+      throw new ControlStackError("change_set_revision_invalid", "change set revision must be a positive integer");
+    }
+    return readChangeSet(this.db, missionId, revision);
   }
 
   createExecutionPlan(input: CreateExecutionPlanInput): ExecutionPlanRecord {

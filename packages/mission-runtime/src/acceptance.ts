@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { RegistryAgentDetail } from "@agent-control-stack/work-items";
 import { MissionRuntime } from "./runner.js";
 import type { DispatchOutcome, DispatchRequest } from "./ports.js";
+import type { MissionRouter } from "./ports.js";
 
 export interface AcceptanceCheck {
   name: string;
@@ -42,6 +43,28 @@ function agent(now: string): RegistryAgentDetail {
   };
 }
 
+function acceptanceRouter(agents: RegistryAgentDetail[]): MissionRouter {
+  return {
+    async assign(request) {
+      const selected = agents.find((candidate) =>
+        request.requiredCapabilities.every((required) => candidate.capabilities.some((item) => item.name === required))
+      );
+      if (!selected) return { kind: "rejected", reason: "no eligible acceptance worker", evidence: { fixture: true } };
+      return {
+        kind: "assigned",
+        decisionId: `acceptance-routing:${request.workItemId}`,
+        selectedAgentId: selected.id,
+        selectedWorkerId: "acceptance-assigned-worker",
+        source: "nimble",
+        model: "acceptance-nimble",
+        confidence: 1,
+        threshold: 0.8,
+        evidence: { fixture: true, operationId: request.operationId }
+      };
+    }
+  };
+}
+
 function check(checks: AcceptanceCheck[], name: string, passed: boolean, detail: string): void {
   checks.push({ name, passed, detail });
 }
@@ -75,12 +98,38 @@ export async function runMissionAcceptance(): Promise<AcceptanceReport> {
   const now = new Date().toISOString();
   const lane = new Lane();
   let deployCount = 0;
+  let liveReleaseId: string | null = null;
+  const deploymentPorts = {
+    deploymentAuthorization: {
+      async authorize(input: { requestedBy: string }) {
+        return { requestedBy: input.requestedBy, permitId: "acceptance-deploy-permit" };
+      }
+    },
+    deploymentController: {
+      async deploy(input: { releaseId: string }) {
+        deployCount += 1;
+        liveReleaseId = input.releaseId;
+        return { status: "succeeded" as const };
+      }
+    },
+    liveReleaseObserver: {
+      async observe() {
+        return { releaseId: liveReleaseId, observedAt: new Date().toISOString() };
+      }
+    }
+  };
   const runtime = new MissionRuntime({
     dbPath,
     workerId: "acceptance-worker",
-    agents: [agent(now)],
+    router: acceptanceRouter([agent(now)]),
     executor: lane,
     reconciler: lane,
+    observer: {
+      async observe(input: { kind: string; expected: string }) {
+        if (input.kind === "health_endpoint" || input.kind === "service_health") return { observed: "pass" };
+        return { observed: liveReleaseId ?? input.expected };
+      }
+    },
     applier: {
       async apply(input) {
         lane.applyCount += 1;
@@ -92,22 +141,7 @@ export async function runMissionAcceptance(): Promise<AcceptanceReport> {
         return observedRevision ? { kind: "succeeded", observedRevision } : { kind: "not_started" };
       }
     },
-    deployer: {
-      async deploy() {
-        deployCount += 1;
-        return {
-          kind: "observed",
-          exitCode: 0,
-          observedVersion: "rev-2",
-          restartStatus: "restarted",
-          health: "pass",
-          healthDetail: "ok"
-        };
-      },
-      async inspect() {
-        return { kind: "not_started" };
-      }
-    }
+    ...deploymentPorts
   });
 
   try {
@@ -199,8 +233,10 @@ export async function runMissionAcceptance(): Promise<AcceptanceReport> {
     check(
       checks,
       "deployment",
-      done.deployment?.status === "succeeded" && done.deployment.healthStatus === "pass" && deployCount === 1,
-      done.deployment?.healthStatus ?? "missing"
+      done.deploymentOperation?.status === "SUCCEEDED" &&
+        done.deploymentOperation.observedReleaseId === "rev-2" &&
+        deployCount === 1,
+      done.deploymentOperation?.status ?? "missing"
     );
     check(
       checks,
@@ -214,9 +250,15 @@ export async function runMissionAcceptance(): Promise<AcceptanceReport> {
     const resumed = new MissionRuntime({
       dbPath,
       workerId: "acceptance-restart",
-      agents: [agent(new Date().toISOString())],
+      router: acceptanceRouter([agent(new Date().toISOString())]),
       executor: lane,
       reconciler: lane,
+      observer: {
+        async observe(input: { kind: string; expected: string }) {
+          if (input.kind === "health_endpoint" || input.kind === "service_health") return { observed: "pass" };
+          return { observed: liveReleaseId ?? input.expected };
+        }
+      },
       applier: {
         async apply() {
           lane.applyCount += 1;
@@ -227,21 +269,7 @@ export async function runMissionAcceptance(): Promise<AcceptanceReport> {
           return observedRevision ? { kind: "succeeded", observedRevision } : { kind: "not_started" };
         }
       },
-      deployer: {
-        async deploy() {
-          deployCount += 1;
-          return {
-            kind: "observed",
-            exitCode: 0,
-            observedVersion: "rev-2",
-            restartStatus: "restarted",
-            health: "pass"
-          };
-        },
-        async inspect() {
-          return { kind: "not_started" };
-        }
-      }
+      ...deploymentPorts
     });
     const callsBefore = lane.calls.length;
     const applyBefore = lane.applyCount;
@@ -260,20 +288,12 @@ export async function runMissionAcceptance(): Promise<AcceptanceReport> {
     const unknownRuntime = new MissionRuntime({
       dbPath: join(unknownDir, "control.db"),
       workerId: "acceptance-unknown",
-      agents: [agent(new Date().toISOString())],
+      router: acceptanceRouter([agent(new Date().toISOString())]),
       executor: unknownLane,
       reconciler: unknownLane,
       applier: {
         async apply() {
           return { kind: "failed", reason: "should not apply" };
-        },
-        async inspect() {
-          return { kind: "not_started" };
-        }
-      },
-      deployer: {
-        async deploy() {
-          return { kind: "failed", reason: "should not deploy" };
         },
         async inspect() {
           return { kind: "not_started" };
