@@ -244,9 +244,9 @@ export const AGENT_GOVERNANCE: Readonly<Record<AgentCliId, { level: AgentGoverna
     level: "host_permissions",
     summary: "Runs with your host permissions under OpenCode's own rules. ACS cannot see or govern its tool calls."
   },
-  gemini: {
+  antigravity: {
     level: "host_permissions",
-    summary: "Runs with your host permissions under Gemini's own rules. ACS cannot see or govern its tool calls."
+    summary: "Runs with your host permissions under Antigravity's own rules. ACS cannot see or govern its tool calls."
   },
   hermes: {
     level: "host_permissions",
