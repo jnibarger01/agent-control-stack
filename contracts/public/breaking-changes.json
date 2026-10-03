@@ -7,6 +7,13 @@
       "summary": "simulationMetadata becomes a discriminated union keyed on executionMode.",
       "detail": "The dry_run branch is byte-identical to the prior single-object schema. A new desktop_commander branch (executionMode='desktop_commander', simulated=false, backend='desktop-commander-mcp', toolName, invocationFingerprint, requestId) is added so an ACS-authorized real execution through the local Desktop Commander MCP can persist an honest, non-simulated result. Existing dry_run submitters are unaffected.",
       "migration": "No action for dry_run clients. Real-execution results are only produced by the ACS worker after the full execution-authorization chain (auth -> scope -> work item -> policy -> approval -> exact action hash -> worker lease -> tool allowlist -> argument/path/command validation) has passed."
+    },
+    {
+      "id": "operation-property-type-changed:POST /mcp:id",
+      "contractVersion": "1.0.0",
+      "summary": "The JSON-RPC request id keeps accepting string, number or null; only its JSON Schema spelling changed.",
+      "detail": "The zod 3 to 4 bump (4.6.5) renders z.union([z.string(), z.number(), z.null()]) as \"type\": [\"string\", \"number\", \"null\"] instead of an anyOf of three single-type schemas. The accepted values are identical, so no client is affected. The same upgrade also makes the generated date-time pattern require a seconds field (zod 4 behavior), so a client sending a date-time without seconds, such as 2026-01-01T10:00Z, is now rejected; timestamps from Date#toISOString and from ACS itself always include seconds.",
+      "migration": "No action. Clients that already send a string, number or null id continue to validate."
     }
   ]
 }

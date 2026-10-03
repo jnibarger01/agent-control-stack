@@ -182,7 +182,12 @@ const LEGACY_SUPERSEDED_MIGRATION_CHECKSUMS = {
    * brick every database already recorded against it.
    */
   "037_execution_results_idempotency_unique.sql": "956ee37aed0a4466fb5a128123398e3ecb8cad3a202224205cbaa83ef7ed8545",
-  "038_admission_permits.sql": "11dbde427fe5d3b3fad1fc1fb1d735bc29b18eb59a3b04cb9c1ee82b6e3e2de5"
+  "038_admission_permits.sql": "11dbde427fe5d3b3fad1fc1fb1d735bc29b18eb59a3b04cb9c1ee82b6e3e2de5",
+  /**
+   * Release 464d54b recorded the lineage marker at version 43. Its SQL differs from the shipped
+   * 044 file only in the version number inside the first comment line, so the effect is identical.
+   */
+  "043_migration_lineage_reconciliation.sql": "17d881e7033b4cbd33e1f2b55aefe4e1ae91a0314e8b4b8724a7d46a1fce3c2c"
 } as const;
 
 /** Historical checksum for an already-released migration that the repository no longer ships verbatim. */
@@ -218,6 +223,7 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
   repairExactAlternateSeventeenToTwentyOneLayout(db);
   repairExactPreLeaseRenewalTwentyToTwentyThreeLayout(db);
   repairExactRecoveryThirtySevenThirtyEightLayout(db);
+  repairExactDeployedThirtyNineFortySevenLayout(db);
   for (const migration of controlPlaneMigrations()) {
     // The "already applied?" question is answered fresh inside this
     // migration's own transaction, after BEGIN IMMEDIATE's write lock is
@@ -267,6 +273,84 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
       }
       throw error;
     }
+  }
+}
+
+/**
+ * Release 464d54b recorded admission permits at version 39 through operation-permit grant authority at 47.
+ * Main later reserved 39 for JC admin approvals and moved those migrations to 40-48. A database written by
+ * that release is recognised only by this exact layout (a contiguous prefix of it, each row matching the
+ * shipped SQL under its new number) and renumbered in one transaction; applied_at is preserved, and the
+ * missing 39 and later migrations then run through the ordinary loop. Anything else fails closed.
+ */
+const DEPLOYED_THIRTY_NINE_LAYOUT = [
+  [39, 40, "admission_permits"],
+  [40, 41, "admission_permit_execution_class"],
+  [41, 42, "change_sets"],
+  [42, 43, "work_item_assignments"],
+  [43, 44, "migration_lineage_reconciliation"],
+  [44, 45, "change_set_approvals"],
+  [45, 46, "change_set_operation_permits"],
+  [46, 47, "autonomous_authority"],
+  [47, 48, "operation_permit_grant_authority"]
+] as const;
+
+function repairExactDeployedThirtyNineFortySevenLayout(db: SqliteLike): void {
+  const isDeployedLayout = () => queryMigrationRow(db, 39)?.filename === "039_admission_permits.sql";
+  if (!isDeployedLayout()) return;
+  const canonical = new Map(controlPlaneMigrations().map((migration) => [migration.version, migration]));
+  const fail: (detail: string) => never = (detail) => {
+    throw new Error(`deployed migration layout ${detail}`);
+  };
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    if (!isDeployedLayout()) {
+      db.exec("COMMIT");
+      return;
+    }
+    const matched: Array<{ from: number; to: ControlPlaneMigration }> = [];
+    for (const [from, toVersion, name] of DEPLOYED_THIRTY_NINE_LAYOUT) {
+      const row = queryMigrationRow(db, from);
+      const target = canonical.get(toVersion);
+      if (!row) break;
+      const filename = `${String(from).padStart(3, "0")}_${name}.sql`;
+      const released = (LEGACY_SUPERSEDED_MIGRATION_CHECKSUMS as Record<string, string>)[filename];
+      if (
+        !target ||
+        target.name !== name ||
+        row.name !== name ||
+        row.filename !== filename ||
+        (row.checksum !== target.checksum && row.checksum !== released)
+      ) {
+        fail("metadata mismatch");
+      }
+      matched.push({ from, to: target });
+    }
+    const last = matched[matched.length - 1]?.from ?? 38;
+    if (db.prepare("SELECT version FROM schema_migrations WHERE version > ?").all(last).length > 0) {
+      fail("has a gap or unexpected later metadata");
+    }
+    if (!hasTable(db, "admission_permits")) fail("schema validation failed");
+    if (last >= 41 && !(hasTable(db, "change_set_revisions") && hasTable(db, "change_set_heads"))) {
+      fail("schema validation failed");
+    }
+    // Highest first so each UPDATE lands on a free primary key.
+    for (const { from, to } of [...matched].reverse()) {
+      db.prepare(`UPDATE schema_migrations SET version = ?, filename = ?, checksum = ? WHERE version = ?`).run(
+        to.version,
+        to.filename,
+        to.checksum,
+        from
+      );
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      /* SQLite may already have rolled back. */
+    }
+    throw error;
   }
 }
 

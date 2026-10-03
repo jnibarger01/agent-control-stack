@@ -15,7 +15,7 @@ import {
 import { ControlStackError } from "@agent-control-stack/shared";
 import type { StoredAuditEvent, WorkItemStore } from "@agent-control-stack/work-items";
 import { AgentRunService } from "./agent-runs.js";
-import { agentRunBodySchema, agentRunConfirmedBodySchema } from "./public-contracts.js";
+import { agentRunBodySchema, agentRunConfirmedBodySchema, agentRunReviewBodySchema } from "./public-contracts.js";
 
 const dispatchBodySchema = agentRunBodySchema;
 const confirmedDispatchBodySchema = agentRunConfirmedBodySchema;
@@ -237,8 +237,9 @@ export function registerAgentRoutes(deps: AgentRouteDeps): void {
 
   app.post("/api/agent-runs/preview", { config: limit(60) }, async (request, reply) => {
     try {
-      if (!requireHumanActor(request, reply)) return;
-      return { preview: await service.preview(dispatchBodySchema.parse(request.body)) };
+      const actorId = requireHumanActor(request, reply);
+      if (!actorId) return;
+      return { preview: await service.preview(dispatchBodySchema.parse(request.body), actorId) };
     } catch (error) {
       return sendError(reply, error);
     }
@@ -277,6 +278,17 @@ export function registerAgentRoutes(deps: AgentRouteDeps): void {
       }
     }
   );
+
+  app.post<{ Params: { id: string } }>("/api/agent-runs/:id/review", { config: limit(30) }, async (request, reply) => {
+    try {
+      const actorId = requireHumanActor(request, reply);
+      if (!actorId) return;
+      const body = agentRunReviewBodySchema.parse(request.body);
+      return { run: service.review(request.params.id, actorId, body.decision, body.note) };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
 
   app.post<{ Params: { id: string } }>("/api/agent-runs/:id/cancel", { config: limit(30) }, async (request, reply) => {
     try {

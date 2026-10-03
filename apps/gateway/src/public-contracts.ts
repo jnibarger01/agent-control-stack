@@ -151,6 +151,36 @@ export const cloneBodySchema = z.object({
   risk: workItemRiskSchema.optional()
 });
 
+/** Edge-to-ACS report that a verified OAuth client connected. Attribution only. */
+const claimsSchema = z
+  .object({
+    name: z.string().max(256).optional(),
+    version: z.string().max(256).optional(),
+    userAgent: z.string().max(1_024).optional()
+  })
+  .strict();
+
+export const mcpObservationBodySchema = z
+  .object({
+    lane: z.enum(["jc", "dc"]),
+    clientId: z.string().min(1).max(256),
+    subject: z.string().min(1).max(256),
+    method: z.enum(["initialize", "tools/list"]),
+    claims: claimsSchema.optional()
+  })
+  .strict();
+
+export const mcpClientLabelBodySchema = z
+  .object({
+    clientId: z.string().min(1).max(256),
+    kind: z.enum(["chatgpt", "muse", "grok", "claude", "gemini", "other"]),
+    label: z.string().min(1).max(64),
+    note: z.string().max(200).optional()
+  })
+  .strict();
+
+export const mcpClientClearBodySchema = z.object({ clientId: z.string().min(1).max(256) }).strict();
+
 export const agentRunBodySchema = z
   .object({
     agentId: z.string().min(1).max(64),
@@ -162,6 +192,10 @@ export const agentRunBodySchema = z
   .strict();
 export const agentRunConfirmedBodySchema = agentRunBodySchema
   .extend({ confirmationHash: z.string().regex(/^[a-f0-9]{64}$/u) })
+  .strict();
+
+export const agentRunReviewBodySchema = z
+  .object({ decision: z.enum(["accept", "reject"]), note: z.string().max(500).optional() })
   .strict();
 
 export const executionModeBodySchema = z
@@ -831,6 +865,34 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
   },
   {
     method: "get",
+    path: "/api/mcp-clients",
+    operationId: "listMcpClients",
+    summary: "List the MCP clients seen on the Jace/Desktop Commander edge lanes with their operator labels."
+  },
+  {
+    method: "post",
+    path: "/api/mcp-clients/label",
+    operationId: "labelMcpClient",
+    summary: "Label a seen MCP client (human operator only).",
+    requestSchema: mcpClientLabelBodySchema
+  },
+  {
+    method: "post",
+    path: "/api/mcp-clients/label/clear",
+    operationId: "clearMcpClientLabel",
+    summary: "Remove an MCP client label (human operator only).",
+    requestSchema: mcpClientClearBodySchema
+  },
+  {
+    method: "post",
+    path: "/mcp-clients/observe",
+    operationId: "observeMcpClient",
+    summary: "Edge bridge reports a verified client connection (bridge identity only).",
+    requestSchema: mcpObservationBodySchema,
+    successStatus: 202
+  },
+  {
+    method: "get",
     path: "/api/agent-clis",
     operationId: "listAgentClis",
     summary: "List the dispatchable CLI agents with install, login and dispatch state."
@@ -868,6 +930,13 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/api/agent-runs/{id}",
     operationId: "getAgentRun",
     summary: "Read an agent run with its redacted output."
+  },
+  {
+    method: "post",
+    path: "/api/agent-runs/{id}/review",
+    operationId: "reviewAgentRun",
+    summary: "Accept or reject a succeeded agent run (human operator only). Nothing is promoted.",
+    requestSchema: agentRunReviewBodySchema
   },
   {
     method: "post",

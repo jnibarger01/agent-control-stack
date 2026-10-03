@@ -8,6 +8,9 @@ describe("GatewayMetrics", () => {
     metrics.increment("acs_audit_events_total", { event_name: "work_item.created" });
     metrics.setGauge("acs_admission_active", 2, { class: "execution" });
     metrics.observeDurationMs("acs_admission_wait_ms", 12, { lane: "jc", class: "execution" });
+    metrics.setGauge("scheduler_agent_active", 1, { agent: "claude" });
+    metrics.clearGauges("scheduler_agent_active");
+    metrics.setGauge("scheduler_agent_active", 2, { agent: "chatgpt" });
     metrics.setSqliteReady(true);
 
     const output = metrics.render();
@@ -17,6 +20,8 @@ describe("GatewayMetrics", () => {
     expect(output).toContain('acs_admission_active{class="execution"} 2');
     expect(output).toContain('acs_admission_wait_ms_count{class="execution",lane="jc"} 1');
     expect(output).toContain('acs_admission_wait_ms_sum{class="execution",lane="jc"} 12');
+    expect(output).toContain('scheduler_agent_active{agent="chatgpt"} 2');
+    expect(output).not.toContain('scheduler_agent_active{agent="claude"}');
     expect(output).toContain("acs_sqlite_ready 1");
   });
 });

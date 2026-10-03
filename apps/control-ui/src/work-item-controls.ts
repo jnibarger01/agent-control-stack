@@ -4,7 +4,7 @@
  * These are mutating controls. Eligibility mirrors the backend rules
  * (packages/work-items state machine + store): the gateway still enforces
  * them, the UI only avoids offering controls that are certain to fail.
- * One table feeds both the server-rendered markup and the inline client.
+ * One table and one template feed both the server-rendered markup and the inline client.
  */
 import { escapeHtml } from "./html.js";
 
@@ -45,23 +45,54 @@ export interface WorkItemControlsView {
   risk: string;
 }
 
-/** Controls section for the work-item detail panel. Empty when nothing applies. */
-export function workItemControlsHtml(workItem: WorkItemControlsView, connected = true): string {
-  const controls = workItemControlsFor(workItem.status);
+interface ControlsTemplateTables {
+  controls: readonly WorkItemControl[];
+  statuses: Readonly<Record<WorkItemControl, readonly string[]>>;
+  labels: Readonly<Record<WorkItemControl, string>>;
+  reasonRequired: readonly WorkItemControl[];
+}
+
+/**
+ * The single template for the controls section. It is deliberately self-contained (no module-level
+ * references): the server calls it directly and the dashboard client receives its source text via
+ * `Function.prototype.toString`, so the two renderings cannot drift. Keep it plain ES2022 JavaScript.
+ */
+function renderControlsTemplate(
+  workItem: { id: string; title: string; status: string; risk: string },
+  connected: boolean,
+  esc: (value: string) => string,
+  tables: ControlsTemplateTables
+): string {
+  const controls = tables.controls.filter((control) => {
+    const statuses = tables.statuses[control];
+    return statuses.includes("*") || statuses.includes(workItem.status);
+  });
   if (!controls.length) return "";
-  const id = escapeHtml(workItem.id);
+  const id = esc(workItem.id);
   const reasonId = `control-reason-${id}`;
-  const needsReason = controls.some((control) => REASON_REQUIRED_CONTROLS.includes(control));
+  const needsReason = controls.some((control) => tables.reasonRequired.includes(control));
   const reason = needsReason
     ? `<label class="reason-field" for="${reasonId}"><span class="reason-label">Reason <span class="req">(required for cancel and retry)</span></span><input id="${reasonId}" data-control-reason="${id}" autocomplete="off" placeholder="Why cancel or retry" /></label>`
     : "";
   const buttons = controls
     .map(
       (control) =>
-        `<button type="button" data-work-control="${control}" data-work-item-id="${id}" data-risk="${escapeHtml(workItem.risk)}"${needsReason ? ` aria-describedby="${reasonId}"` : ""}${connected ? "" : " disabled"}>${WORK_ITEM_CONTROL_LABELS[control]}</button>`
+        `<button type="button" data-work-control="${control}" data-work-item-id="${id}" data-risk="${esc(workItem.risk)}"${needsReason ? ` aria-describedby="${reasonId}"` : ""}${connected ? "" : " disabled"}>${tables.labels[control]}</button>`
     )
     .join("");
-  return `<div class="detail-section work-controls" data-work-controls="${id}"><h4>Controls</h4>${reason}<div class="approval-actions" role="group" aria-label="Controls for ${escapeHtml(workItem.title)}">${buttons}</div><output id="control-result-${id}" class="approval-result" aria-live="polite"></output></div>`;
+  return `<div class="detail-section work-controls" data-work-controls="${id}"><h4>Controls</h4>${reason}<div class="approval-actions" role="group" aria-label="Controls for ${esc(workItem.title)}">${buttons}</div><output id="control-result-${id}" class="approval-result" aria-live="polite"></output></div>`;
+}
+
+const CONTROLS_TEMPLATE_TABLES: ControlsTemplateTables = {
+  controls: WORK_ITEM_CONTROLS,
+  statuses: WORK_ITEM_CONTROL_STATUSES,
+  labels: WORK_ITEM_CONTROL_LABELS,
+  reasonRequired: REASON_REQUIRED_CONTROLS
+};
+
+/** Controls section for the work-item detail panel. Empty when nothing applies. */
+export function workItemControlsHtml(workItem: WorkItemControlsView, connected = true): string {
+  return renderControlsTemplate(workItem, connected, escapeHtml, CONTROLS_TEMPLATE_TABLES);
 }
 
 function scriptSafeJson(value: unknown): string {
@@ -75,28 +106,16 @@ function scriptSafeJson(value: unknown): string {
  */
 export function workItemControlsClientSource(): string {
   return `
-const workItemControlStatuses = ${scriptSafeJson(WORK_ITEM_CONTROL_STATUSES)};
-const workItemControlLabels = ${scriptSafeJson(WORK_ITEM_CONTROL_LABELS)};
 const reasonRequiredControls = ${scriptSafeJson(REASON_REQUIRED_CONTROLS)};
-function workItemControlsFor(status) {
-  return ${scriptSafeJson(WORK_ITEM_CONTROLS)}.filter(function (control) {
-    const statuses = workItemControlStatuses[control];
-    return statuses.indexOf('*') !== -1 || statuses.indexOf(status) !== -1;
-  });
-}
+const renderControlsTemplate = ${renderControlsTemplate.toString()};
+const controlsTemplateTables = ${scriptSafeJson(CONTROLS_TEMPLATE_TABLES)};
 function workItemControlsMarkup(workItem, connected) {
-  const controls = workItemControlsFor(String(workItem.status || ''));
-  if (!controls.length) return '';
-  const id = escapeClient(workItem.id);
-  const reasonId = 'control-reason-' + id;
-  const needsReason = controls.some(function (control) { return reasonRequiredControls.indexOf(control) !== -1; });
-  const reason = needsReason
-    ? '<label class="reason-field" for="' + reasonId + '"><span class="reason-label">Reason <span class="req">(required for cancel and retry)</span></span><input id="' + reasonId + '" data-control-reason="' + id + '" autocomplete="off" placeholder="Why cancel or retry" /></label>'
-    : '';
-  const buttons = controls.map(function (control) {
-    return '<button type="button" data-work-control="' + control + '" data-work-item-id="' + id + '" data-risk="' + escapeClient(workItem.risk) + '"' + (needsReason ? ' aria-describedby="' + reasonId + '"' : '') + (connected ? '' : ' disabled') + '>' + workItemControlLabels[control] + '</button>';
-  }).join('');
-  return '<div class="detail-section work-controls" data-work-controls="' + id + '"><h4>Controls</h4>' + reason + '<div class="approval-actions" role="group" aria-label="Controls for ' + escapeClient(workItem.title) + '">' + buttons + '</div><output id="control-result-' + id + '" class="approval-result" aria-live="polite"></output></div>';
+  return renderControlsTemplate(
+    { id: workItem.id, title: workItem.title, status: String(workItem.status || ''), risk: workItem.risk },
+    connected,
+    escapeClient,
+    controlsTemplateTables
+  );
 }
 let workItemControlInFlight = false;
 document.addEventListener('click', async function (event) {

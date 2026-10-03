@@ -747,6 +747,14 @@ export interface ConnectorRequestRecord {
   authTunnelId?: string;
   authSessionId?: string;
   authScopes?: string[];
+  /** OAuth client_id verified by the edge. Attribution for operators; never an authority. */
+  mcpClientId?: string;
+  /** Which edge lane carried the call: Jace Commander (`jc`) or Desktop Commander (`dc`). */
+  mcpLane?: string;
+  /** Self-declared by the MCP client (`initialize.clientInfo`, User-Agent). Unverified. */
+  mcpClientName?: string;
+  mcpClientVersion?: string;
+  mcpUserAgent?: string;
 }
 
 /**
@@ -775,6 +783,7 @@ const executionAuditEventNames = new Set([
   "execution.completed",
   "desktop_commander.capability_issued",
   "desktop_commander.capability_denied",
+  "desktop_commander.scheduler_admitted",
   "desktop_commander.tool_called",
   "desktop_commander.tool_succeeded",
   "desktop_commander.tool_failed",
@@ -1049,9 +1058,30 @@ export interface PrivilegedTransitionOptions {
   leaseToken?: string;
 }
 
+/** Admin execution mode reverts to strict this long after it was set. */
+export const DEFAULT_ADMIN_MODE_TTL_MS = 60 * 60 * 1000;
+export const MIN_ADMIN_MODE_TTL_MS = 60 * 1000;
+export const MAX_ADMIN_MODE_TTL_MS = 24 * 60 * 60 * 1000;
+
+function validateAdminModeTtl(value: number): number {
+  if (!Number.isInteger(value) || value < MIN_ADMIN_MODE_TTL_MS || value > MAX_ADMIN_MODE_TTL_MS) {
+    throw new ControlStackError(
+      "admin_mode_ttl_invalid",
+      `admin mode TTL must be an integer between ${MIN_ADMIN_MODE_TTL_MS} and ${MAX_ADMIN_MODE_TTL_MS} ms`
+    );
+  }
+  return value;
+}
+
 export interface SqliteWorkItemStoreOptions {
   leaseMs?: number;
   heartbeatTtlMs?: number;
+  /**
+   * How long admin execution mode lasts after it is set, in milliseconds.
+   * Past that the effective mode reads as strict until an operator re-enables it.
+   * Defaults to DEFAULT_ADMIN_MODE_TTL_MS (1 hour).
+   */
+  adminModeTtlMs?: number;
   onEvent?: (event: StoredAuditEvent) => void;
   traceInstance?: string;
   releaseSha?: string;
@@ -1459,6 +1489,10 @@ export interface WorkItemStore {
     updatedAt: string | null;
     updatedBy: string | null;
     reason: string | null;
+    /** When admin mode lapses back to strict; null unless admin mode is currently in effect. */
+    expiresAt: string | null;
+    /** True when the stored row says admin but its TTL has lapsed, so the effective mode is strict. */
+    expired: boolean;
   };
   /** Persist the canonical execution mode and append an audit event. */
   setExecutionMode(input: { mode: "strict" | "admin"; updatedBy: string; reason: string }): {
@@ -1501,6 +1535,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
   private readonly db: DatabaseSync;
   private readonly leaseMs: number;
   private readonly heartbeatTtlMs: number;
+  private readonly adminModeTtlMs: number;
   private readonly onEvent: (event: StoredAuditEvent) => void;
   private transactionDepth = 0;
   private pendingEvents: StoredAuditEvent[] = [];
@@ -1533,6 +1568,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     this.db = new DatabaseSync(dbPath);
     this.leaseMs = options.leaseMs ?? 5 * 60 * 1000;
     this.heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
+    this.adminModeTtlMs = validateAdminModeTtl(options.adminModeTtlMs ?? DEFAULT_ADMIN_MODE_TTL_MS);
     this.onEvent = options.onEvent ?? (() => undefined);
     this.onTraceFailure = options.onTraceFailure ?? defaultTraceFailureReporter;
     this.observationEnabled = options.observationEnabled ?? false;
@@ -6334,6 +6370,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
       if (input.authConnectorId) attributes["auth.connector_id"] = input.authConnectorId;
       if (input.authTunnelId) attributes["auth.tunnel_id"] = input.authTunnelId;
       if (input.authSessionId) attributes["auth.session_id"] = input.authSessionId;
+      if (input.mcpClientId) attributes["mcp.client_id"] = input.mcpClientId;
+      if (input.mcpLane) attributes["mcp.lane"] = input.mcpLane;
       const event = this.appendAuditEvent(createEvent("connector.requested", { ...input }, attributes));
       return { value: event, events: [event] };
     });
@@ -7393,49 +7431,60 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
-  recordSystemEventOnceForWorkItem(input: {
-    name: string;
-    workItemId: string;
-    body?: Record<string, unknown>;
-    attributes?: Record<string, string | number | boolean>;
-  }): StoredAuditEvent {
-    return this.write(() => {
-      const name = requiredString(input.name, "name");
-      const workItemId = requiredString(input.workItemId, "workItemId");
-      const existing = this.db
-        .prepare(
-          `SELECT * FROM audit_events WHERE name = ? AND json_extract(attributes, '$."work_item.id"') = ? LIMIT 1`
-        )
-        .get(name, workItemId) as unknown as EventRow | undefined;
-      if (existing) return { value: rowToEvent(existing), events: [] };
-
-      const attributes = { ...(input.attributes ?? {}), "work_item.id": workItemId };
-      const event = this.appendAuditEvent(createEvent(name, input.body ?? {}, attributes));
-      return { value: event, events: [event] };
-    });
-  }
-
-  getExecutionMode(): {
+  getExecutionMode(now: Date = new Date()): {
     mode: "strict" | "admin" | null;
     raw: string | null;
     updatedAt: string | null;
     updatedBy: string | null;
     reason: string | null;
+    expiresAt: string | null;
+    expired: boolean;
   } {
     const row = this.db
       .prepare(`SELECT mode, updated_at, updated_by, reason FROM execution_mode_state WHERE id = 1`)
       .get() as { mode?: string; updated_at?: string; updated_by?: string; reason?: string } | undefined;
     if (!row || typeof row.mode !== "string") {
-      return { mode: null, raw: null, updatedAt: null, updatedBy: null, reason: null };
+      return { mode: null, raw: null, updatedAt: null, updatedBy: null, reason: null, expiresAt: null, expired: false };
     }
-    const mode = row.mode === "strict" || row.mode === "admin" ? row.mode : null;
-    return {
-      mode,
-      raw: row.mode,
-      updatedAt: typeof row.updated_at === "string" ? row.updated_at : null,
-      updatedBy: typeof row.updated_by === "string" ? row.updated_by : null,
-      reason: typeof row.reason === "string" ? row.reason : null
-    };
+    const updatedAt = typeof row.updated_at === "string" ? row.updated_at : null;
+    const updatedBy = typeof row.updated_by === "string" ? row.updated_by : null;
+    const reason = typeof row.reason === "string" ? row.reason : null;
+    if (row.mode === "admin") {
+      // Admin is time-boxed. The stored row is never rewritten on read; the effective
+      // mode simply falls back to strict, the fail-safe direction. An unparseable
+      // timestamp is treated as already expired.
+      const setAt = updatedAt === null ? Number.NaN : Date.parse(updatedAt);
+      const expiresMs = setAt + this.adminModeTtlMs;
+      if (!Number.isFinite(expiresMs) || expiresMs <= now.getTime()) {
+        return { mode: "strict", raw: "strict", updatedAt, updatedBy, reason, expiresAt: null, expired: true };
+      }
+      return {
+        mode: "admin",
+        raw: "admin",
+        updatedAt,
+        updatedBy,
+        reason,
+        expiresAt: new Date(expiresMs).toISOString(),
+        expired: false
+      };
+    }
+    const mode = row.mode === "strict" ? "strict" : null;
+    return { mode, raw: row.mode, updatedAt, updatedBy, reason, expiresAt: null, expired: false };
+  }
+
+  /**
+   * Persist strict mode when a stored admin row has outlived its TTL, so the lapse is
+   * recorded in the audit chain. Returns true when it wrote. Safe to call repeatedly.
+   */
+  expireAdminModeIfDue(now: Date = new Date()): boolean {
+    const current = this.getExecutionMode(now);
+    if (!current.expired) return false;
+    this.setExecutionMode({
+      mode: "strict",
+      updatedBy: "acs:admin-expiry",
+      reason: "admin execution mode expired"
+    });
+    return true;
   }
 
   setExecutionMode(input: { mode: "strict" | "admin"; updatedBy: string; reason: string }): {

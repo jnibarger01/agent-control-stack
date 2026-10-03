@@ -54,7 +54,7 @@ function recorder(handler) {
   return { server, requests, listen: () => new Promise((r) => server.listen(0, '127.0.0.1', () => r(server.address().port))) };
 }
 
-const allowCapability = (req) => ({
+const allowCapability = (req) => (req.path === '/mcp-clients/observe' ? { status: 202, body: { recorded: true } } : {
   status: 200,
   body: {
     decision: 'allow',

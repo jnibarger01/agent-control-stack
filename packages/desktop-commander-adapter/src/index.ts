@@ -104,6 +104,8 @@ export type {
   DesktopCommanderMachineExecutorDeps
 } from "./machine-executor.js";
 
+export * from "./concurrency-scheduler/index.js";
+
 export { disabledDeviceAuthorizationProvider } from "./device-authorization.js";
 export type { DeviceAuthorizationProvider, DeviceAuthorizationGrant } from "./device-authorization.js";
 

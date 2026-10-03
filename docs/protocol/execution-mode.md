@@ -29,7 +29,20 @@ Consumers:
 Do not set a second mode in an environment variable. `ACS_MODE` is not consulted.
 
 `POST /execution-mode` requires a configured `user` identity with the `operator`
-role and `acs:approve` scope. Service, worker, mixed-role, and agent identities
+role and `acs:approve` scope. Enabling `admin` additionally requires the
+`acs:execution-mode:admin` scope and a `reason` of at least 8 characters;
+`acs:approve` alone approves individual actions and cannot relax authorization
+globally. Returning to `strict` needs only the human-operator gate. The legacy
+single gateway token carries the admin scope only when its configured actor is
+`user`.
+
+Admin mode is time-boxed. It lapses to `strict` after `ACS_ADMIN_MODE_TTL_MS`
+(default 3600000 = 1 hour; accepted range 60000 to 86400000). Every reader sees
+the effective mode, so an expired row reads as `strict` immediately; the gateway
+also persists the lapse as an `acs:admin-expiry` `execution_mode.changed` audit
+event. `GET /execution-mode` reports `expiresAt` while admin is in effect.
+Re-enabling restarts the clock. Mission Control asks for the reason in a
+confirmation dialog before it sends the request. Service, worker, mixed-role, and agent identities
 cannot change mode even when they hold that scope. Request-body identity fields
 do not confer authority. This restricts the legacy global mode; it does not yet
 implement mission-scoped Autonomous Authority Grants or make global admin mode

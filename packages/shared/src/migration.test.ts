@@ -339,6 +339,88 @@ describe("control-plane migration pre-lease-renewal 20-23 repair", () => {
   });
 });
 
+describe("deployed 39-47 lineage (admission permits at 39)", () => {
+  // Release 464d54b recorded admission permits at 39 through operation-permit grant authority at 47. Main later
+  // reserved 39 for JC admin approvals and shifted everything after it up by one, so a database written by that
+  // release must be renumbered, not rejected.
+  const RELEASED_MARKER_CHECKSUM = "17d881e7033b4cbd33e1f2b55aefe4e1ae91a0314e8b4b8724a7d46a1fce3c2c";
+
+  function deployedDatabase(lastDeployedVersion = 47): DatabaseSync {
+    const db = database(38);
+    const canonical = new Map(controlPlaneMigrations().map((migration) => [migration.version, migration]));
+    for (let version = 39; version <= lastDeployedVersion; version += 1) {
+      const next = canonical.get(version + 1)!;
+      db.exec(next.sql);
+      db.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)").run(
+        version,
+        next.name,
+        `${String(version).padStart(3, "0")}_${next.name}.sql`,
+        version === 43 ? RELEASED_MARKER_CHECKSUM : next.checksum,
+        `2026-10-02T03:13:50.${String(version).padStart(3, "0")}Z`
+      );
+    }
+    return db;
+  }
+
+  it("renumbers the deployed rows, keeps their timestamps and applies the missing migrations once", () => {
+    const db = deployedDatabase();
+    try {
+      db.exec(
+        "INSERT INTO admission_permits (attempt_id, work_item_id, lease_id, worker_id, action_hash, plan_hash, input_hash, lane) VALUES ('attempt', 'mission', 'lease', 'worker', 'a', 'p', 'i', 'dc')"
+      );
+      applyControlPlaneMigrations(db);
+      const rows = db
+        .prepare("SELECT version, name, filename, applied_at FROM schema_migrations ORDER BY version")
+        .all();
+      expect(rows.map((row) => `${row.version}:${row.name}`)).toEqual(
+        controlPlaneMigrations().map((migration) => `${migration.version}:${migration.name}`)
+      );
+      expect(rows.find((row) => row.version === 40)).toMatchObject({
+        filename: "040_admission_permits.sql",
+        applied_at: "2026-10-02T03:13:50.039Z"
+      });
+      expect(rows.find((row) => row.version === 44)).toMatchObject({
+        name: "migration_lineage_reconciliation",
+        applied_at: "2026-10-02T03:13:50.043Z"
+      });
+      expect(db.prepare("SELECT attempt_id FROM admission_permits").all()).toEqual([{ attempt_id: "attempt" }]);
+      const before = db.prepare("SELECT * FROM schema_migrations ORDER BY version").all();
+      applyControlPlaneMigrations(db);
+      expect(db.prepare("SELECT * FROM schema_migrations ORDER BY version").all()).toEqual(before);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("renumbers a contiguous prefix of the deployed layout", () => {
+    const db = deployedDatabase(42);
+    try {
+      applyControlPlaneMigrations(db);
+      expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({
+        count: controlPlaneMigrations().length
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it.each(["checksum", "name", "gap", "later", "schema"])("refuses %s drift without rewriting metadata", (kind) => {
+    const db = deployedDatabase();
+    try {
+      if (kind === "checksum") db.exec("UPDATE schema_migrations SET checksum = 'bad' WHERE version = 41");
+      if (kind === "name") db.exec("UPDATE schema_migrations SET name = 'other' WHERE version = 42");
+      if (kind === "gap") db.exec("DELETE FROM schema_migrations WHERE version = 44");
+      if (kind === "later") db.exec("INSERT INTO schema_migrations VALUES (48, 'x', '048_x.sql', 'bad', 'now')");
+      if (kind === "schema") db.exec("DROP TABLE admission_permits");
+      const before = db.prepare("SELECT * FROM schema_migrations ORDER BY version").all();
+      expect(() => applyControlPlaneMigrations(db)).toThrow(/deployed migration layout/);
+      expect(db.prepare("SELECT * FROM schema_migrations ORDER BY version").all()).toEqual(before);
+    } finally {
+      db.close();
+    }
+  });
+});
+
 describe("fixture-only migrations", () => {
   it("keeps unregistered duplicate-prefix fixtures non-canonical and clearly marked", () => {
     const registered = new Set(controlPlaneMigrations().map((migration) => migration.filename));
