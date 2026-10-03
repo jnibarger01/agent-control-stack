@@ -15,6 +15,7 @@ import {
   type WorkItem,
   type WorkItemStore
 } from "@agent-control-stack/work-items";
+import { isAuthoritativeRoutingEnabled } from "@agent-control-stack/actor-router";
 import { z } from "zod";
 import { evaluateContractAdmission } from "./contracts.js";
 import { explainPolicy } from "./explain.js";
@@ -261,15 +262,11 @@ function gateWorkerClaimInTransaction(
   policy: PolicyEngine,
   parsed: z.infer<typeof claimInputSchema>
 ): ClaimedWorkItem | undefined {
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-  const candidate = store.findNextApprovedWorkItemForWorker(parsed.workerId, ACS_ADMIN_APPROVER);
-=======
-  const candidate = store.findNextApprovedWorkItemForWorker(parsed.workerId);
->>>>>>> Stashed changes
-=======
-  const candidate = store.findNextApprovedWorkItemForWorker(parsed.workerId);
->>>>>>> Stashed changes
+  const candidate = store
+    .list({ status: "approved" })
+    .filter((workItem) => store.isWorkItemEligibleForWorker(workItem, parsed.workerId, ACS_ADMIN_APPROVER))
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+    .find((workItem) => authoritativeRouteAllows(store, workItem.id, parsed.workerId));
   if (!candidate) {
     return undefined;
   }
@@ -323,8 +320,9 @@ function gateWorkerClaimInTransaction(
   // `approvalId` column; the rest go through additionalApprovals, consumed
   // transactionally with lease issuance the same way.
   const [firstApproval, ...restApprovals] = planApprovals;
-  const running = store.claimNextApprovedWorkItem(parsed.workerId, {
+  const running = store.claimApprovedWorkItemById(candidate.id, executionActionHash(candidate), parsed.workerId, {
     leaseMs: parsed.leaseMs,
+    adminApprovalActorId: ACS_ADMIN_APPROVER,
     attemptAuthority: {
       planHash: plan.planHash,
       admissionId: admission.admissionId,
@@ -373,8 +371,6 @@ function gateWorkerClaimByIdInTransaction(
     return undefined;
   }
   const assignment = store.getWorkItemAssignment(candidate.id);
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
   // A durable assignment is a routing decision, not a hint. A different worker
   // must never claim it, and must never be handed a parallel work item to claim
   // instead, because that would let a bridge bypass routing by retrying. Callers
@@ -387,14 +383,9 @@ function gateWorkerClaimByIdInTransaction(
   const targetedAgents = (candidate.target.services ?? []).filter((agentId) => store.getRegistryAgent(agentId));
   if (targetedAgents.length > 0 && !targetedAgents.includes(parsed.workerId)) {
     throw new ControlStackError("worker_target_mismatch", "work item targets a different registered agent");
-=======
-  if (assignment && assignment.selectedWorkerId !== parsed.workerId) {
-    throw new ControlStackError("work_item_assignment_mismatch", "work item is assigned to a different worker");
->>>>>>> Stashed changes
-=======
-  if (assignment && assignment.selectedWorkerId !== parsed.workerId) {
-    throw new ControlStackError("work_item_assignment_mismatch", "work item is assigned to a different worker");
->>>>>>> Stashed changes
+  }
+  if (!authoritativeRouteAllows(store, candidate.id, parsed.workerId)) {
+    return undefined;
   }
 
   const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, candidate, parsed.workerId, "claim");
@@ -569,6 +560,14 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
       return store.submitWorkResult(input);
     }
   };
+}
+
+/** When Nimble routing is enabled, a claim must match the persisted executor. */
+export function authoritativeRouteAllows(store: WorkItemStore, workItemId: string, workerId: string): boolean {
+  if (!isAuthoritativeRoutingEnabled()) return true;
+  const evidence = store.getLatestAuthoritativeRoutingEvidence(workItemId);
+  if (!evidence || (evidence.decision !== "route" && evidence.decision !== "fallback")) return false;
+  return evidence.selectedActorId === workerId;
 }
 
 export function approvalRequired(evaluations: PolicyEvaluation[]): PolicyEvaluation[] {

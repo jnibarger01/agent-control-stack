@@ -353,12 +353,5 @@ describe("concurrent same-worker idempotency", () => {
         rmSync(directory, { recursive: true, force: true });
       }
     }
-<<<<<<< Updated upstream
   }, 60_000);
-=======
-  }, 15000);
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
 });

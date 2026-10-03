@@ -29,8 +29,6 @@ import {
 import { readMissionTrace, type MissionTrace, type MissionTraceQuery } from "./mission-trace.js";
 import { transitionWorkItem } from "./state-machine.js";
 import {
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
   issueAutonomousAuthorityBodySchema,
   autonomousAuthorityCoreSchema,
   autonomousAuthorityHash,
@@ -85,20 +83,6 @@ import {
   type ChangeSetOperationPermit,
   type BindChangeSetOperationPermit
 } from "./change-set-operation-permit.js";
-=======
-=======
->>>>>>> Stashed changes
-  changeSetManifestHash,
-  changeSetRecordSchema,
-  submitChangeSetInputSchema,
-  type ChangeSetRecord,
-  type SubmitChangeSetInput
-} from "./change-set.js";
-import { insertChangeSetRevision, readChangeSet, readChangeSetSubmission } from "./change-set-store.js";
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
 import {
   assignWorkItemInputSchema,
   workItemAssignmentSchema,
@@ -200,12 +184,22 @@ import {
 import {
   actorReliabilitySchema,
   actorRoutingDecisionSchema,
+  authoritativeRoutingEvidenceSchema,
   recordActorReliabilityInputSchema,
   recordActorRoutingDecisionInputSchema,
+  recordAuthoritativeRoutingEvidenceInputSchema,
+  recordRoutingExecutionOutcomeInputSchema,
+  routingExecutionOutcomeSchema,
+  workItemRoutingSnapshotSchema,
   type ActorReliability,
   type ActorRoutingDecision,
+  type AuthoritativeRoutingEvidence,
   type RecordActorReliabilityInput,
-  type RecordActorRoutingDecisionInput
+  type RecordActorRoutingDecisionInput,
+  type RecordAuthoritativeRoutingEvidenceInput,
+  type RecordRoutingExecutionOutcomeInput,
+  type RoutingExecutionOutcome,
+  type WorkItemRoutingSnapshot
 } from "./routing.js";
 import {
   recordValidationRunInputSchema,
@@ -385,6 +379,39 @@ interface RoutingDecisionRow {
   eligible_json: string;
   excluded_json: string;
   scores_json: string;
+  idempotency_key: string;
+  created_at: string;
+}
+
+interface AuthoritativeEvidenceRow extends RoutingDecisionRow {
+  mission_id: string | null;
+  operation_id: string | null;
+  decision: "route" | "fallback" | "reject";
+  source: "nimble" | "deterministic_fallback";
+  reason_code: string;
+  fallback_reason: string | null;
+  confidence: number | null;
+  model: string | null;
+  lane: "jc" | "dc" | null;
+  router_version: string;
+  prompt_version: string;
+  candidate_json: string;
+  constraints_json: string;
+  normalized_decision_json: string;
+  supersedes_decision_id: string | null;
+}
+
+interface RoutingOutcomeRow {
+  outcome_id: string;
+  decision_id: string;
+  executor_id: string;
+  model: string | null;
+  latency_ms: number;
+  success: number;
+  timed_out: number;
+  verification_result: string | null;
+  tests_result: string | null;
+  retry_count: number;
   idempotency_key: string;
   created_at: string;
 }
@@ -1062,8 +1089,6 @@ export interface TraceEnqueueFailure {
 }
 
 export interface WorkItemStore {
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
   requireActiveChangeSetExecutionAuthority(
     reference: { approvalId?: string; authorizationId?: string },
     manifestHash: string,
@@ -1106,18 +1131,6 @@ export interface WorkItemStore {
     executingActorId: string,
     now?: Date
   ): GrantAuthorization;
-=======
-=======
->>>>>>> Stashed changes
-  assignWorkItem(input: AssignWorkItemInput, options: PrivilegedTransitionOptions): WorkItemAssignment;
-  getWorkItemAssignment(workItemId: string): WorkItemAssignment | undefined;
-  findNextApprovedWorkItemForWorker(workerId: string): WorkItem | undefined;
-  submitChangeSet(input: SubmitChangeSetInput): ChangeSetRecord;
-  getChangeSet(missionId: string, revision?: number): ChangeSetRecord | undefined;
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
   withTransaction<T>(operation: () => T): T;
   create(input: unknown): WorkItem;
   submitChangeSet(input: SubmitChangeSetInput): ChangeSetRecord;
@@ -1194,9 +1207,24 @@ export interface WorkItemStore {
   leaseAttempt(input: IssueLeaseInput, options: PrivilegedTransitionOptions): AttemptLease;
   renewAttemptLease(input: RenewAttemptLeaseInput): AttemptLease;
   transitionAttempt(input: TransitionAttemptInput, options: PrivilegedTransitionOptions): ExecutionAttempt;
-  recordActorRoutingDecision(input: RecordActorRoutingDecisionInput, options: PrivilegedTransitionOptions): ActorRoutingDecision;
+  recordActorRoutingDecision(
+    input: RecordActorRoutingDecisionInput,
+    options: PrivilegedTransitionOptions
+  ): ActorRoutingDecision;
   getActorRoutingDecision(decisionId: string): ActorRoutingDecision | undefined;
   getActorRoutingDecisionForWorkItem(workItemId: string): ActorRoutingDecision | undefined;
+  getWorkItemRoutingSnapshot(workItemId: string): WorkItemRoutingSnapshot | undefined;
+  recordAuthoritativeRoutingEvidence(
+    input: RecordAuthoritativeRoutingEvidenceInput,
+    options: PrivilegedTransitionOptions
+  ): AuthoritativeRoutingEvidence;
+  listAuthoritativeRoutingEvidence(workItemId: string): AuthoritativeRoutingEvidence[];
+  getLatestAuthoritativeRoutingEvidence(workItemId: string): AuthoritativeRoutingEvidence | undefined;
+  recordRoutingExecutionOutcome(
+    input: RecordRoutingExecutionOutcomeInput,
+    options: PrivilegedTransitionOptions
+  ): RoutingExecutionOutcome;
+  listRoutingExecutionOutcomes(decisionId: string): RoutingExecutionOutcome[];
   recordActorReliability(input: RecordActorReliabilityInput, options: PrivilegedTransitionOptions): ActorReliability;
   getActorReliability(actorId: string): ActorReliability | undefined;
   recordValidationRun(input: RecordValidationRunInput, options: PrivilegedTransitionOptions): ValidationRun;
@@ -1519,108 +1547,29 @@ export class SqliteWorkItemStore implements WorkItemStore {
       1,
       10
     );
-    try {
-      this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
-      // Concurrent first-open journal conversion may return SQLITE_BUSY without
-      // honoring busy_timeout. Retry only this idempotent setup operation within
-      // the same five-second contention budget; never retry authority mutations.
-      const deadline = performance.now() + 5_000;
-      const pause = new Int32Array(new SharedArrayBuffer(4));
-      for (;;) {
-        try {
-          this.db.exec("PRAGMA journal_mode = WAL;");
-          break;
-        } catch (error) {
-          const sqliteCode = error && typeof error === "object" && "errcode" in error ? error.errcode : undefined;
-          const remaining = deadline - performance.now();
-          if (sqliteCode !== 5 || remaining <= 0) throw error;
-          Atomics.wait(pause, 0, 0, Math.min(25, remaining));
+    // Concurrent first opens (overlapping schedulers) can hold the migration
+    // write lock longer than one busy interval. Retry the same 5s wait instead
+    // of raising the timeout. Give up after three locked attempts.
+    const maxLockedAttempts = 3;
+    for (let attempt = 1; attempt <= maxLockedAttempts; attempt += 1) {
+      try {
+        this.db.exec(`
+          PRAGMA busy_timeout = 5000;
+          PRAGMA journal_mode = WAL;
+          PRAGMA foreign_keys = ON;
+        `);
+        applyControlPlaneMigrations(this.db);
+        const initialHealth = inspectControlPlaneDatabase(this.db);
+        this.auditChainValid = initialHealth.checks.auditChain.ok;
+        this.readinessDatabaseChecks = { ...initialHealth.checks };
+        break;
+      } catch (error) {
+        if (!isSqliteBusy(error) || attempt === maxLockedAttempts) {
+          this.db.close();
+          throw error;
         }
       }
-      applyControlPlaneMigrations(this.db);
-      const initialHealth = inspectControlPlaneDatabase(this.db);
-      this.auditChainValid = initialHealth.checks.auditChain.ok;
-      this.readinessDatabaseChecks = { ...initialHealth.checks };
-    } catch (error) {
-      this.db.close();
-      throw error;
     }
-  }
-
-  submitChangeSet(input: SubmitChangeSetInput): ChangeSetRecord {
-    strictCanonicalJsonV1(input.definition);
-    const parsed = submitChangeSetInputSchema.parse(input);
-    const definition = parsed.definition;
-    const now = parsed.now ?? new Date();
-    return this.write(() => {
-      const mission = this.getRequired(definition.missionId);
-      if (executionPlanSubjectInputHash(mission) !== definition.subjectInputHash) {
-        throw new ControlStackError("change_set_input_mismatch", "change set does not match current mission inputs");
-      }
-      const head = readChangeSet(this.db, mission.id);
-      const replay = readChangeSetSubmission(this.db, mission.id, parsed.submissionId);
-      if (replay) {
-        if (
-          replay.createdByActorId !== parsed.createdByActorId ||
-          replay.snapshot.parentManifestHash !== parsed.expectedHeadHash ||
-          strictCanonicalJsonV1(replay.snapshot.definition) !== strictCanonicalJsonV1(definition)
-        ) {
-          throw new ControlStackError(
-            "change_set_submission_conflict",
-            "submission id was already used for different inputs"
-          );
-        }
-        return { value: replay, events: [] };
-      }
-      if (["succeeded", "failed", "cancelled", "rejected", "quarantined"].includes(mission.status)) {
-        throw new ControlStackError(
-          "change_set_mission_terminal",
-          "terminal mission cannot accept a change set revision"
-        );
-      }
-      if ((head?.manifestHash ?? null) !== parsed.expectedHeadHash) {
-        throw new ControlStackError("change_set_revision_conflict", "change set head changed before submission");
-      }
-      if (Date.parse(definition.expiresAt) <= now.getTime()) {
-        throw new ControlStackError("change_set_expired", "change set expiration must be in the future");
-      }
-      const snapshot = {
-        revision: (head?.snapshot.revision ?? 0) + 1,
-        parentManifestHash: head?.manifestHash ?? null,
-        definition
-      };
-      const manifestHash = changeSetManifestHash(snapshot);
-      const event = this.appendAuditEvent(
-        createEvent(
-          "change_set.submitted",
-          {
-            missionId: mission.id,
-            revision: snapshot.revision,
-            manifestHash,
-            parentManifestHash: snapshot.parentManifestHash,
-            submissionId: parsed.submissionId,
-            executingActorId: definition.executingActorId,
-            createdByActorId: parsed.createdByActorId,
-            createdAt: now.toISOString()
-          },
-          { "work_item.id": mission.id, "change_set.hash": manifestHash }
-        )
-      );
-      const record = changeSetRecordSchema.parse({
-        snapshot,
-        manifestHash,
-        auditEventId: event.id,
-        submissionId: parsed.submissionId,
-        createdByActorId: parsed.createdByActorId,
-        createdAt: now.toISOString()
-      });
-      insertChangeSetRevision(this.db, record);
-      return { value: record, events: [event] };
-    });
-  }
-
-  getChangeSet(missionId: string, revision?: number): ChangeSetRecord | undefined {
-    return readChangeSet(this.db, missionId, revision);
   }
 
   create(input: unknown): WorkItem {
@@ -3636,103 +3585,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
-  assignWorkItem(input: AssignWorkItemInput, options: PrivilegedTransitionOptions): WorkItemAssignment {
-    requirePrivilegedTransition(options, "assign_work_item");
-    const parsed = assignWorkItemInputSchema.parse(input);
-    if (!options.actorId || options.actorId !== parsed.assignedByActorId) {
-      throw new ControlStackError("assignment_actor_mismatch", "assignment actor must match the authorized caller");
-    }
-    return this.write(() => {
-      const workItem = this.get(parsed.workItemId);
-      if (!workItem || workItem.status !== "approved") {
-        throw new ControlStackError("work_item_not_routable", "only an approved work item can be assigned");
-      }
-      if (parsed.selectedAgentId && !this.getRegistryAgent(parsed.selectedAgentId)) {
-        throw new ControlStackError("agent_not_found", "assigned registry agent does not exist");
-      }
-      if (parsed.routingDecisionId) {
-        const decision = this.getActorRoutingDecision(parsed.routingDecisionId);
-        if (
-          !decision ||
-          decision.workItemId !== parsed.workItemId ||
-          (parsed.selectedAgentId !== undefined && decision.selectedActorId !== parsed.selectedAgentId)
-        ) {
-          throw new ControlStackError("routing_decision_mismatch", "assignment does not match its routing decision");
-        }
-      }
-      const assignedAt = (parsed.now ?? new Date()).toISOString();
-      const assignment = workItemAssignmentSchema.parse({
-        workItemId: parsed.workItemId,
-        selectedWorkerId: parsed.selectedWorkerId,
-        ...(parsed.selectedAgentId ? { selectedAgentId: parsed.selectedAgentId } : {}),
-        ...(parsed.routingDecisionId ? { routingDecisionId: parsed.routingDecisionId } : {}),
-        assignedByActorId: parsed.assignedByActorId,
-        assignedAt
-      });
-      this.db.prepare(
-        `INSERT INTO work_item_assignments
-         (work_item_id, selected_worker_id, selected_agent_id, routing_decision_id, assigned_by_actor_id, assigned_at)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(work_item_id) DO UPDATE SET
-           selected_worker_id = excluded.selected_worker_id,
-           selected_agent_id = excluded.selected_agent_id,
-           routing_decision_id = excluded.routing_decision_id,
-           assigned_by_actor_id = excluded.assigned_by_actor_id,
-           assigned_at = excluded.assigned_at`
-      ).run(
-        assignment.workItemId,
-        assignment.selectedWorkerId,
-        assignment.selectedAgentId ?? null,
-        assignment.routingDecisionId ?? null,
-        assignment.assignedByActorId,
-        assignment.assignedAt
-      );
-      const event = this.appendAuditEvent(
-        createEvent("work_item.assigned", assignment, {
-          "work_item.id": assignment.workItemId,
-          "worker.id": assignment.selectedWorkerId,
-          ...(assignment.selectedAgentId ? { "agent.id": assignment.selectedAgentId } : {}),
-          ...(assignment.routingDecisionId ? { "routing.decision_id": assignment.routingDecisionId } : {})
-        })
-      );
-      return { value: assignment, events: [event] };
-    });
-  }
-
-  getWorkItemAssignment(workItemId: string): WorkItemAssignment | undefined {
-    const row = this.db.prepare(`SELECT * FROM work_item_assignments WHERE work_item_id = ?`).get(workItemId) as
-      | {
-          work_item_id: string;
-          selected_worker_id: string;
-          selected_agent_id: string | null;
-          routing_decision_id: string | null;
-          assigned_by_actor_id: string;
-          assigned_at: string;
-        }
-      | undefined;
-    return row
-      ? workItemAssignmentSchema.parse({
-          workItemId: row.work_item_id,
-          selectedWorkerId: row.selected_worker_id,
-          ...(row.selected_agent_id ? { selectedAgentId: row.selected_agent_id } : {}),
-          ...(row.routing_decision_id ? { routingDecisionId: row.routing_decision_id } : {}),
-          assignedByActorId: row.assigned_by_actor_id,
-          assignedAt: row.assigned_at
-        })
-      : undefined;
-  }
-
-  findNextApprovedWorkItemForWorker(workerId: string): WorkItem | undefined {
-    const row = this.db.prepare(
-      `SELECT wi.* FROM work_items AS wi
-       LEFT JOIN work_item_assignments AS assignment ON assignment.work_item_id = wi.id
-       WHERE wi.status = 'approved'
-         AND (assignment.work_item_id IS NULL OR assignment.selected_worker_id = ?)
-       ORDER BY wi.created_at ASC LIMIT 1`
-    ).get(workerId) as unknown as WorkItemRow | undefined;
-    return row ? rowToWorkItem(row) : undefined;
-  }
-
   recordActorRoutingDecision(
     input: RecordActorRoutingDecisionInput,
     options: PrivilegedTransitionOptions
@@ -3787,6 +3639,230 @@ export class SqliteWorkItemStore implements WorkItemStore {
       .prepare(`SELECT * FROM actor_routing_decisions WHERE work_item_id = ? ORDER BY created_at DESC LIMIT 1`)
       .get(workItemId) as unknown as RoutingDecisionRow | undefined;
     return row ? rowToActorRoutingDecision(row) : undefined;
+  }
+
+  getWorkItemRoutingSnapshot(workItemId: string): WorkItemRoutingSnapshot | undefined {
+    const row = this.db.prepare(`SELECT id, status FROM work_items WHERE id = ?`).get(workItemId) as
+      { id: string; status: string } | undefined;
+    if (!row) return undefined;
+    const result = this.db
+      .prepare(`SELECT 1 AS present FROM execution_results WHERE work_item_id = ?`)
+      .get(workItemId) as { present: number } | undefined;
+    const attempt = this.db
+      .prepare(
+        `SELECT 1 AS present FROM execution_attempts WHERE work_item_id = ? AND status IN ('leased', 'running') LIMIT 1`
+      )
+      .get(workItemId) as { present: number } | undefined;
+    return workItemRoutingSnapshotSchema.parse({
+      workItemId: row.id,
+      status: row.status,
+      hasExecutionResult: result !== undefined,
+      activeAttempt: attempt !== undefined || row.status === "running" || row.status === "cancelling"
+    });
+  }
+
+  recordAuthoritativeRoutingEvidence(
+    input: RecordAuthoritativeRoutingEvidenceInput,
+    options: PrivilegedTransitionOptions
+  ): AuthoritativeRoutingEvidence {
+    requirePrivilegedTransition(options, "record_actor_routing_decision");
+    const parsed = recordAuthoritativeRoutingEvidenceInputSchema.parse(input);
+    return this.write(() => {
+      const count = this.db
+        .prepare(`SELECT COUNT(*) AS count FROM actor_routing_decisions WHERE work_item_id = ?`)
+        .get(parsed.workItemId) as { count: number };
+      const idempotencyKey = `route.${parsed.workItemId}.${count.count}`;
+      const existing = this.db
+        .prepare(`SELECT decision_id FROM actor_routing_decisions WHERE idempotency_key = ?`)
+        .get(idempotencyKey) as { decision_id: string } | undefined;
+      if (existing) {
+        const evidence = this.readAuthoritativeRoutingEvidence(existing.decision_id);
+        if (!evidence) {
+          throw new ControlStackError(
+            "routing_evidence_missing",
+            `routing decision ${existing.decision_id} has no authoritative evidence`
+          );
+        }
+        return { value: evidence, events: [] };
+      }
+      const decisionId = createId("routing");
+      const createdAt = (parsed.now ?? new Date()).toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO actor_routing_decisions
+        (decision_id, work_item_id, attempt_id, selected_actor_id, eligible_json, excluded_json, scores_json, idempotency_key, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          decisionId,
+          parsed.workItemId,
+          parsed.attemptId ?? null,
+          parsed.selectedActorId ?? null,
+          JSON.stringify(parsed.eligible),
+          JSON.stringify(parsed.excluded),
+          JSON.stringify(parsed.scores),
+          idempotencyKey,
+          createdAt
+        );
+      this.db
+        .prepare(
+          `INSERT INTO actor_routing_evidence
+          (decision_id, mission_id, operation_id, decision, source, reason_code, fallback_reason, confidence, model, lane,
+           router_version, prompt_version, candidate_json, constraints_json, normalized_decision_json, supersedes_decision_id, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          decisionId,
+          parsed.missionId ?? null,
+          parsed.operationId ?? parsed.workItemId,
+          parsed.decision,
+          parsed.source,
+          parsed.reasonCode,
+          parsed.fallbackReason ?? null,
+          parsed.confidence ?? null,
+          parsed.model ?? null,
+          parsed.lane ?? null,
+          parsed.routerVersion,
+          parsed.promptVersion,
+          JSON.stringify(parsed.candidates),
+          JSON.stringify(parsed.constraints),
+          JSON.stringify(parsed.normalizedDecision),
+          parsed.supersedesDecisionId ?? null,
+          createdAt
+        );
+      const evidence = this.readAuthoritativeRoutingEvidence(decisionId);
+      if (!evidence) {
+        throw new ControlStackError("routing_evidence_missing", `routing evidence ${decisionId} was not stored`);
+      }
+      const event = this.appendAuditEvent(
+        createEvent(
+          "actor.routing_decision.recorded",
+          {
+            decisionId,
+            workItemId: parsed.workItemId,
+            decision: parsed.decision,
+            source: parsed.source,
+            reasonCode: parsed.reasonCode,
+            fallbackReason: parsed.fallbackReason ?? null,
+            selectedActorId: parsed.selectedActorId ?? null,
+            model: parsed.model ?? null,
+            lane: parsed.lane ?? null,
+            confidence: parsed.confidence ?? null,
+            routerVersion: parsed.routerVersion,
+            promptVersion: parsed.promptVersion
+          },
+          {
+            "work_item.id": parsed.workItemId,
+            "routing.decision_id": decisionId,
+            "actor.id": parsed.selectedActorId ?? "none"
+          }
+        )
+      );
+      return { value: evidence, events: [event] };
+    });
+  }
+
+  listAuthoritativeRoutingEvidence(workItemId: string): AuthoritativeRoutingEvidence[] {
+    const rows = this.db
+      .prepare(
+        `SELECT evidence.decision_id AS decision_id FROM actor_routing_evidence AS evidence
+         JOIN actor_routing_decisions AS decision ON decision.decision_id = evidence.decision_id
+         WHERE decision.work_item_id = ?
+         ORDER BY decision.rowid ASC`
+      )
+      .all(workItemId) as Array<{ decision_id: string }>;
+    return rows.map((row) => {
+      const evidence = this.readAuthoritativeRoutingEvidence(row.decision_id);
+      if (!evidence) {
+        throw new ControlStackError("routing_evidence_missing", `routing evidence ${row.decision_id} is incomplete`);
+      }
+      return evidence;
+    });
+  }
+
+  getLatestAuthoritativeRoutingEvidence(workItemId: string): AuthoritativeRoutingEvidence | undefined {
+    const records = this.listAuthoritativeRoutingEvidence(workItemId);
+    return records.at(-1);
+  }
+
+  recordRoutingExecutionOutcome(
+    input: RecordRoutingExecutionOutcomeInput,
+    options: PrivilegedTransitionOptions
+  ): RoutingExecutionOutcome {
+    requirePrivilegedTransition(options, "record_actor_routing_decision");
+    const parsed = recordRoutingExecutionOutcomeInputSchema.parse(input);
+    return this.write(() => {
+      const existing = this.db
+        .prepare(`SELECT * FROM routing_execution_outcomes WHERE idempotency_key = ?`)
+        .get(parsed.idempotencyKey) as unknown as RoutingOutcomeRow | undefined;
+      if (existing) return { value: rowToRoutingExecutionOutcome(existing), events: [] };
+      const decision = this.db
+        .prepare(`SELECT decision_id FROM actor_routing_decisions WHERE decision_id = ?`)
+        .get(parsed.decisionId) as { decision_id: string } | undefined;
+      if (!decision) {
+        throw new ControlStackError(
+          "routing_decision_not_found",
+          `routing decision ${parsed.decisionId} does not exist`
+        );
+      }
+      const outcomeId = createId("routcome");
+      const createdAt = (parsed.now ?? new Date()).toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO routing_execution_outcomes
+          (outcome_id, decision_id, executor_id, model, latency_ms, success, timed_out, verification_result, tests_result, retry_count, idempotency_key, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          outcomeId,
+          parsed.decisionId,
+          parsed.executorId,
+          parsed.model ?? null,
+          parsed.latencyMs,
+          parsed.success ? 1 : 0,
+          parsed.timedOut ? 1 : 0,
+          parsed.verificationResult ?? null,
+          parsed.testsResult ?? null,
+          parsed.retryCount,
+          parsed.idempotencyKey,
+          createdAt
+        );
+      const row = this.db.prepare(`SELECT * FROM routing_execution_outcomes WHERE outcome_id = ?`).get(outcomeId) as
+        RoutingOutcomeRow | undefined;
+      if (!row) {
+        throw new ControlStackError("routing_outcome_missing", `routing outcome ${outcomeId} was not stored`);
+      }
+      const outcome = rowToRoutingExecutionOutcome(row);
+      const event = this.appendAuditEvent(
+        createEvent("actor.routing_outcome.recorded", outcome, {
+          "routing.decision_id": outcome.decisionId,
+          "actor.id": outcome.executorId
+        })
+      );
+      return { value: outcome, events: [event] };
+    });
+  }
+
+  listRoutingExecutionOutcomes(decisionId: string): RoutingExecutionOutcome[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM routing_execution_outcomes WHERE decision_id = ? ORDER BY created_at ASC`)
+      .all(decisionId) as unknown as RoutingOutcomeRow[];
+    return rows.map((row) => rowToRoutingExecutionOutcome(row));
+  }
+
+  private readAuthoritativeRoutingEvidence(decisionId: string): AuthoritativeRoutingEvidence | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT decision.*, evidence.mission_id, evidence.operation_id, evidence.decision, evidence.source,
+                evidence.reason_code, evidence.fallback_reason, evidence.confidence, evidence.model, evidence.lane,
+                evidence.router_version, evidence.prompt_version, evidence.candidate_json, evidence.constraints_json,
+                evidence.normalized_decision_json, evidence.supersedes_decision_id
+         FROM actor_routing_decisions AS decision
+         JOIN actor_routing_evidence AS evidence ON evidence.decision_id = decision.decision_id
+         WHERE decision.decision_id = ?`
+      )
+      .get(decisionId) as unknown as AuthoritativeEvidenceRow | undefined;
+    return row ? rowToAuthoritativeRoutingEvidence(row) : undefined;
   }
 
   recordActorReliability(input: RecordActorReliabilityInput, options: PrivilegedTransitionOptions): ActorReliability {
@@ -6718,21 +6794,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   claimNextApprovedWorkItem(workerId: string, options: ClaimOptions = {}): ClaimedWorkItem | undefined {
     return this.write(() => {
-<<<<<<< Updated upstream
       const current = this.findNextApprovedWorkItemForWorker(workerId, options.adminApprovalActorId);
       if (!current) {
-=======
-      const row = this.db
-        .prepare(
-          `SELECT wi.* FROM work_items AS wi
-           LEFT JOIN work_item_assignments AS assignment ON assignment.work_item_id = wi.id
-           WHERE wi.status = 'approved'
-             AND (assignment.work_item_id IS NULL OR assignment.selected_worker_id = ?)
-           ORDER BY wi.created_at ASC LIMIT 1`
-        )
-        .get(workerId) as unknown as WorkItemRow | undefined;
-      if (!row) {
->>>>>>> Stashed changes
         return { value: undefined, events: [] };
       }
       if (options.executionModeFence) this.assertAdminApprovalModeFence(current.id, options);
@@ -6793,8 +6856,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
     workerId: string,
     options: ClaimOptions
   ): { value: ClaimedWorkItem; events: StoredAuditEvent[] } {
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
     const operationPermit = this.requireActiveChangeSetOperationPermit(current.id, workerId);
     if (operationPermit) {
       const operation = this.getChangeSet(operationPermit.missionId)!.snapshot.definition.operations.find(
@@ -6805,16 +6866,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
         .get(current.id) as { n: number };
       if (count.n >= operation.retry.maxAttempts)
         throw new ControlStackError("change_set_retry_limit", "approved operation attempt budget exhausted");
-=======
-    const assignment = this.getWorkItemAssignment(current.id);
-    if (assignment && assignment.selectedWorkerId !== workerId) {
-      throw new ControlStackError("work_item_assignment_mismatch", "work item is assigned to a different worker");
->>>>>>> Stashed changes
-=======
-    const assignment = this.getWorkItemAssignment(current.id);
-    if (assignment && assignment.selectedWorkerId !== workerId) {
-      throw new ControlStackError("work_item_assignment_mismatch", "work item is assigned to a different worker");
->>>>>>> Stashed changes
     }
     const authority = options.attemptAuthority;
     if (!authority) {
@@ -6988,13 +7039,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
   ): ClaimedWorkItem | undefined {
     return this.write(() => {
       const row = this.db
-        .prepare(
-          `SELECT wi.* FROM work_items AS wi
-           LEFT JOIN work_item_assignments AS assignment ON assignment.work_item_id = wi.id
-           WHERE wi.id = ? AND wi.status = 'approved'
-             AND (assignment.work_item_id IS NULL OR assignment.selected_worker_id = ?)`
-        )
-        .get(id, workerId) as unknown as WorkItemRow | undefined;
+        .prepare(`SELECT * FROM work_items WHERE id = ? AND status = 'approved'`)
+        .get(id) as unknown as WorkItemRow | undefined;
       if (!row) {
         return { value: undefined, events: [] };
       }
@@ -7084,8 +7130,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
   /**
    * Fence active attempt leases that consume execution capacity without a durable
    * admission reservation. Such a lease cannot be capacity-accounted, so leaving it
@@ -7215,16 +7259,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
   countActiveAttemptLeases(now = new Date(), workerIds?: readonly string[]): number {
     if (workerIds?.length === 0) return 0;
     const workerFilter = workerIds ? ` AND worker_id IN (${workerIds.map(() => "?").join(",")})` : "";
-=======
-  countActiveAttemptLeases(now = new Date(), workerIds?: readonly string[]): number {
-    if (workerIds?.length === 0) return 0;
->>>>>>> Stashed changes
-=======
-  countActiveAttemptLeases(now = new Date(), workerIds?: readonly string[]): number {
-    if (workerIds?.length === 0) return 0;
->>>>>>> Stashed changes
     const nowIso = now.toISOString();
-    const workerFilter = workerIds ? ` AND worker_id IN (${workerIds.map(() => "?").join(", ")})` : "";
     // Prefer authoritative attempt_leases, but also count legacy `leases` rows that
     // have no active attempt_leases twin (test-only legacy claims / dual projection).
     const row = this.db
@@ -7232,24 +7267,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
         `SELECT
            (
              SELECT COUNT(*) FROM attempt_leases
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
              WHERE status = 'active' AND expires_at > ?${workerFilter}
            ) + (
              SELECT COUNT(*) FROM leases
              WHERE status = 'active' AND expires_at > ?${workerFilter}
-=======
-             WHERE status = 'active' AND expires_at > ? ${workerFilter}
-           ) + (
-             SELECT COUNT(*) FROM leases
-             WHERE status = 'active' AND expires_at > ? ${workerFilter}
->>>>>>> Stashed changes
-=======
-             WHERE status = 'active' AND expires_at > ? ${workerFilter}
-           ) + (
-             SELECT COUNT(*) FROM leases
-             WHERE status = 'active' AND expires_at > ? ${workerFilter}
->>>>>>> Stashed changes
                AND lease_id NOT IN (
                  SELECT lease_id FROM attempt_leases WHERE status = 'active'
                )
@@ -7271,8 +7292,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
     lane: "jc" | "dc";
     executionClass: "execution" | "wait";
   }): void {
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
     if (!["jc", "dc"].includes(input.lane) || !["execution", "wait"].includes(input.executionClass)) {
       throw new ControlStackError("admission_binding_invalid", "invalid admission capacity binding");
     }
@@ -7283,19 +7302,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
       if (
         !lease ||
         lease.status !== "active" ||
-=======
-=======
->>>>>>> Stashed changes
-    this.write(() => {
-      const lease = this.getActiveLeaseForAttempt(input.attemptId);
-      const attempt = this.getAttempt(input.attemptId);
-      const workItem = this.get(input.workItemId);
-      if (
-        !lease ||
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
         Date.parse(lease.expiresAt) <= Date.now() ||
         lease.leaseId !== input.leaseId ||
         lease.workItemId !== input.workItemId ||
@@ -7305,8 +7311,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
         lease.inputHash !== input.inputHash ||
         attempt?.status !== "running" ||
         attempt.workItemId !== input.workItemId ||
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
         attempt.planHash !== input.planHash ||
         attempt.inputHash !== input.inputHash ||
         attempt.currentFencingEpoch !== input.fencingEpoch ||
@@ -7317,42 +7321,13 @@ export class SqliteWorkItemStore implements WorkItemStore {
         throw new ControlStackError(
           "admission_binding_invalid",
           "admission reservation does not match current lease authority"
-=======
-=======
->>>>>>> Stashed changes
-        attempt.claimedByWorkerId !== input.workerId ||
-        attempt.currentFencingEpoch !== input.fencingEpoch ||
-        attempt.planHash !== input.planHash ||
-        attempt.inputHash !== input.inputHash ||
-        !workItem ||
-        executionActionHash(workItem) !== input.actionHash
-      ) {
-        throw new ControlStackError(
-          "admission_permit_binding_mismatch",
-          "admission permit requires a current canonical lease binding"
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
         );
       }
       this.db
         .prepare(
           `INSERT INTO admission_permits
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
         (attempt_id, work_item_id, lease_id, worker_id, fencing_epoch, action_hash, plan_hash, input_hash, lane, execution_class, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-=======
-         (attempt_id, work_item_id, lease_id, worker_id, fencing_epoch,
-         action_hash, plan_hash, input_hash, lane, execution_class, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
->>>>>>> Stashed changes
-=======
-         (attempt_id, work_item_id, lease_id, worker_id, fencing_epoch,
-         action_hash, plan_hash, input_hash, lane, execution_class, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
->>>>>>> Stashed changes
         )
         .run(
           input.attemptId,
@@ -7364,8 +7339,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
           input.planHash,
           input.inputHash,
           input.lane,
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
           input.executionClass,
           new Date().toISOString()
         );
@@ -7375,24 +7348,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
           { ...input },
           { "work_item.id": input.workItemId, "attempt.id": input.attemptId }
         )
-=======
-=======
->>>>>>> Stashed changes
-          input.executionClass
-        );
-      const event = this.appendAuditEvent(
-        createEvent("execution_admission.bound", input, {
-          "work_item.id": input.workItemId,
-          "attempt.id": input.attemptId,
-          "lease.id": input.leaseId,
-          "worker.id": input.workerId,
-          "admission.lane": input.lane,
-          "admission.class": input.executionClass
-        })
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
       );
       return { value: undefined, events: [event] };
     });
@@ -9102,6 +9057,52 @@ function rowToActorRoutingDecision(row: RoutingDecisionRow): ActorRoutingDecisio
   });
 }
 
+function rowToAuthoritativeRoutingEvidence(row: AuthoritativeEvidenceRow): AuthoritativeRoutingEvidence {
+  return authoritativeRoutingEvidenceSchema.parse({
+    decisionId: row.decision_id,
+    workItemId: row.work_item_id,
+    ...(row.mission_id === null ? {} : { missionId: row.mission_id }),
+    ...(row.operation_id === null ? {} : { operationId: row.operation_id }),
+    ...(row.attempt_id === null ? {} : { attemptId: row.attempt_id }),
+    ...(row.selected_actor_id === null ? {} : { selectedActorId: row.selected_actor_id }),
+    decision: row.decision,
+    source: row.source,
+    reasonCode: row.reason_code,
+    ...(row.fallback_reason === null ? {} : { fallbackReason: row.fallback_reason }),
+    ...(row.confidence === null ? {} : { confidence: row.confidence }),
+    ...(row.model === null ? {} : { model: row.model }),
+    ...(row.lane === null ? {} : { lane: row.lane }),
+    routerVersion: row.router_version,
+    promptVersion: row.prompt_version,
+    eligible: JSON.parse(row.eligible_json) as string[],
+    excluded: JSON.parse(row.excluded_json) as Record<string, string[]>,
+    scores: JSON.parse(row.scores_json) as Record<string, number>,
+    candidates: JSON.parse(row.candidate_json) as string[],
+    constraints: JSON.parse(row.constraints_json) as Record<string, unknown>,
+    normalizedDecision: JSON.parse(row.normalized_decision_json) as Record<string, unknown>,
+    ...(row.supersedes_decision_id === null ? {} : { supersedesDecisionId: row.supersedes_decision_id }),
+    idempotencyKey: row.idempotency_key,
+    createdAt: row.created_at
+  });
+}
+
+function rowToRoutingExecutionOutcome(row: RoutingOutcomeRow): RoutingExecutionOutcome {
+  return routingExecutionOutcomeSchema.parse({
+    outcomeId: row.outcome_id,
+    decisionId: row.decision_id,
+    executorId: row.executor_id,
+    ...(row.model === null ? {} : { model: row.model }),
+    latencyMs: row.latency_ms,
+    success: row.success === 1,
+    timedOut: row.timed_out === 1,
+    ...(row.verification_result === null ? {} : { verificationResult: row.verification_result }),
+    ...(row.tests_result === null ? {} : { testsResult: row.tests_result }),
+    retryCount: row.retry_count,
+    idempotencyKey: row.idempotency_key,
+    createdAt: row.created_at
+  });
+}
+
 function rowToActorReliability(row: ReliabilityRow): ActorReliability {
   return actorReliabilitySchema.parse({
     actorId: row.actor_id,
@@ -9238,9 +9239,7 @@ function isTerminalStatus(status: WorkItemStatus): boolean {
   return TERMINAL_WORK_ITEM_STATUSES.includes(status);
 }
 
-export function resultPayloadHash(
-  input: Omit<StoredExecutionResult, "resultId" | "payloadHash" | "createdAt">
-): string {
+export function resultPayloadHash(input: Omit<StoredExecutionResult, "resultId" | "payloadHash" | "createdAt">): string {
   return stableHash({
     domain: "acs.execution-result",
     workItemId: input.workItemId,
@@ -9503,6 +9502,15 @@ function assertTestOnlyStoreApiAllowed(apiName: string, nodeEnv = process.env.NO
   if (nodeEnv === "production") {
     throw new ControlStackError("test_only_api_disabled_in_production", `${apiName} is disabled in production`);
   }
+}
+
+function isSqliteBusy(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const sqliteError = error as NodeJS.ErrnoException & { errstr?: string };
+  return (
+    sqliteError.code === "ERR_SQLITE_ERROR" &&
+    /SQLITE_BUSY|database is locked/i.test(`${sqliteError.message} ${sqliteError.errstr ?? ""}`)
+  );
 }
 
 function requirePrivilegedTransition(options: PrivilegedTransitionOptions | undefined, transition: string): void {

@@ -34,18 +34,22 @@ Documentation is not automatically authoritative when it conflicts with executab
 
 This is a TypeScript and Node.js monorepo.
 
-* `apps/gateway/`: HTTP, SSE, dashboard, and external control-plane entry points.
-* `apps/control-ui/`: operator-facing control and work-item views.
-* `apps/worker/`: bounded worker execution entry points.
-* `packages/shared/`: shared schemas, identifiers, errors, redaction, and common contracts.
-* `packages/work-items/`: work-item lifecycle and persistence behavior.
-* `packages/policy-gate/`: authorization, policy evaluation, and approval enforcement.
-* `packages/audit-log/`: append-only audit and replay behavior.
-* `packages/eval-harness/`: controlled evaluation and test-agent execution.
-* `packages/temporal-memory/`: time-aware memory and retained execution context.
-* `packages/sandbox/`: execution isolation and process-environment controls.
+* `apps/gateway/`: HTTP, SSE, MCP, dashboard, and external control-plane entry points.
+* `apps/control-ui/`: Mission Control, the operator-facing server-rendered UI.
+* `apps/worker/`, `apps/scheduler/`, `apps/runtime/` (`acs` CLI runtime), `apps/cli/`: bounded execution and operator entry points.
+* `apps/mcp/`, `apps/evidence-mcp/`, `apps/vercel-mcp-ingress/`, `apps/vercel-bridge-worker/`, `apps/dc-relay/`, `apps/dc-mcp-gateway/`: MCP, ingress, and Desktop Commander bridge surfaces.
+* `apps/chatgpt-widget/`, `apps/public-site/`: ChatGPT dashboard widget and the static public site.
+* `packages/shared/`: shared schemas, identifiers, errors, hashing, redaction, migrations, and common contracts.
+* `packages/work-items/`: work-item lifecycle, persistence, audit chain, leases, approvals, and grants.
+* `packages/policy-gate/`: authorization, policy evaluation, execution mode, and approval enforcement.
+* `packages/execution-admission/`, `packages/execution-controller/`, `packages/secret-broker/`, `packages/sandbox/`, `packages/workspace-manager/`: capacity, execution control, secrets, isolation, and workspaces.
+* `packages/evidence/`, `packages/verification/`, `packages/result-validation/`, `packages/publication/`, `packages/recovery/`: trace evidence, verification, result checks, PR-only publication, and recovery.
+* `packages/jev-advisor/`: advisory-only Jev observer (ADR 0020). Importable only from the allow-listed files in `eslint.config.js`.
+* `packages/desktop-commander-adapter/`, `packages/dc-tool-manifest/`, `packages/jc-tool-manifest/`, `packages/vercel-bridge-contract/`: Desktop Commander and Jace Commander adapters and manifests.
+* `packages/coding-harness/`, `packages/coding-mission/`, `packages/engine-adapter/`, `packages/acp-adapter/`, `packages/machine-controller/`, `packages/actor-router/`, `packages/moa-orchestrator/`: mission and engine orchestration.
+* `packages/eval-harness/`, `packages/advisory/`, `packages/procedural-learning/`, `packages/temporal-memory/`, `packages/agentos-contracts/`, `packages/release-integrity/`: evals, advisory evidence, learning, memory, contracts, and release checks.
 * `storage/migrations/`: SQLite migrations and persistence schema.
-* `docs/architecture/`: system design and trust boundaries.
+* `docs/architecture.md`, `docs/adr/`: system design, trust boundaries, and decisions.
 * `docs/protocol/`: API, MCP, lifecycle, and approval contracts.
 * `docs/runbooks/`: operational procedures and failure recovery.
 * `docs/security-contracts.md`: security invariants and enforcement requirements.
@@ -78,7 +82,7 @@ Sensitive operations must require the documented approval and authorization chec
 
 Approval is a security boundary, not a user-interface state.
 
-The canonical execution mode is the single `execution_mode_state` row. `strict` is the default and keeps human approval for sensitive actions. `admin` lets ACS record that approval for authenticated managed execution when the executor lease is valid and unambiguous. Admin mode is not break-glass, does not skip capability issuance, and fails closed when authority is missing, corrupt, or conflicted. See `docs/protocol/execution-mode.md`.
+The canonical execution mode is the single `execution_mode_state` row. `strict` is the default and keeps human approval for sensitive actions. `admin` lets ACS record that approval for authenticated managed execution when the executor lease is valid and unambiguous. Admin mode is not break-glass, does not skip capability issuance, and fails closed when authority is missing, corrupt, or conflicted. Enabling it needs the dedicated `acs:execution-mode:admin` scope and a stated reason, and it lapses back to `strict` after `ACS_ADMIN_MODE_TTL_MS` (default one hour). Prefer mission-scoped Autonomous Authority Grants over widening global admin mode. See `docs/protocol/execution-mode.md`.
 
 Any code that consumes an approval must verify all required binding data, including the fields defined by the current approval contract. This may include:
 

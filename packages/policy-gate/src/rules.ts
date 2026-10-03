@@ -318,7 +318,6 @@ function isLongRunning(context: PolicyContext): boolean {
 }
 
 /**
-<<<<<<< Updated upstream
  * Whether the acting principal is the one that requested the work. Jace
  * Commander work items are created with requester "agent" and the real
  * (attested) actor in requesterSubject, so both are compared.
@@ -330,16 +329,6 @@ function isRequestingActor(context: PolicyContext): boolean {
   );
 }
 
-=======
- * An approval that grants execution authority must come from a principal other
- * than the requester: a single actor cannot both request and authorize a write,
- * destructive action, or high/critical-risk action. Separation is enforced on
- * the requesting subject (requesterSubject) when the work item carries one, so a
- * credential cannot authorize its own mutating work by using the same identity
- * under a different coarse requester type; it falls back to the requester type
- * (user|agent|system) otherwise.
- */
->>>>>>> Stashed changes
 function isSelfApproval(context: PolicyContext): boolean {
   if (context.operation !== "approve") {
     return false;

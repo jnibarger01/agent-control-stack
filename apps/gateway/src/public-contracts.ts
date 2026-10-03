@@ -152,6 +152,19 @@ export const cloneBodySchema = z.object({
   risk: workItemRiskSchema.optional()
 });
 
+export const agentRunBodySchema = z
+  .object({
+    agentId: z.string().min(1).max(64),
+    prompt: z.string().min(1).max(32_000),
+    repo: z.string().min(1).max(4_096),
+    mode: z.enum(["edit", "read-only"]),
+    timeoutSec: z.number().int().min(10).max(3_600).optional()
+  })
+  .strict();
+export const agentRunConfirmedBodySchema = agentRunBodySchema
+  .extend({ confirmationHash: z.string().regex(/^[a-f0-9]{64}$/u) })
+  .strict();
+
 export const executionModeBodySchema = z
   .object({
     mode: z.enum(["strict", "admin"]),
@@ -189,14 +202,8 @@ export const dcCapabilityIssueSchema = z
     client_id: z.string().min(1).max(256),
     tool: z.string().min(1).max(128),
     argsSummary: z.string().min(1).max(240_000),
-<<<<<<< Updated upstream
     changeSetPermitId: z.string().min(1).max(256).optional(),
     correlationId: z.string().min(1).max(256).optional()
-=======
-    correlationId: z.string().min(1).max(256).optional(),
-    /** Strands harness hand-off only: bind issuance to exactly this dispatched work item. */
-    workItemId: z.string().min(1).max(128).optional()
->>>>>>> Stashed changes
   })
   .strict();
 
@@ -632,7 +639,6 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
   { method: "get", path: "/work-items/{id}", operationId: "getWorkItem", summary: "Read a governed work item." },
   {
     method: "post",
-<<<<<<< Updated upstream
     path: "/work-items/{id}/change-sets",
     operationId: "submitChangeSet",
     summary: "Submit an immutable mission execution proposal without granting authority.",
@@ -744,7 +750,9 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
         description: "Approval does not match the immutable Change Set or the mission is not awaiting approval."
       }
     }
-=======
+  },
+  {
+    method: "post",
     path: "/harness/dc-invocations",
     operationId: "createHarnessInvocation",
     summary: "Create (idempotently) the governed work item for one Strands harness Desktop Commander call.",
@@ -764,7 +772,6 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/work-items/{id}/execution-result",
     operationId: "getExecutionResult",
     summary: "Read integrity-checked, redacted Desktop Commander output for a successful work item."
->>>>>>> Stashed changes
   },
   {
     method: "post",
@@ -844,6 +851,52 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     summary: "Register an agent.",
     requestSchema: agentBodySchema,
     successStatus: 201
+  },
+  {
+    method: "get",
+    path: "/api/agent-clis",
+    operationId: "listAgentClis",
+    summary: "List the dispatchable CLI agents with install, login and dispatch state."
+  },
+  {
+    method: "post",
+    path: "/api/agent-clis/sync",
+    operationId: "syncAgentClis",
+    summary: "Register the CLI agents in the agent registry (idempotent)."
+  },
+  {
+    method: "post",
+    path: "/api/agent-clis/{id}/test",
+    operationId: "testAgentCli",
+    summary: "Run a harmless prompt to verify a CLI agent is signed in and working."
+  },
+  {
+    method: "post",
+    path: "/api/agent-runs/preview",
+    operationId: "previewAgentRun",
+    summary: "Validate an agent dispatch and return the exact command hash the operator must confirm.",
+    requestSchema: agentRunBodySchema
+  },
+  {
+    method: "post",
+    path: "/api/agent-runs",
+    operationId: "dispatchAgentRun",
+    summary: "Dispatch a confirmed agent run into a fresh git worktree (human operator only).",
+    requestSchema: agentRunConfirmedBodySchema,
+    successStatus: 202
+  },
+  { method: "get", path: "/api/agent-runs", operationId: "listAgentRuns", summary: "List recent agent runs." },
+  {
+    method: "get",
+    path: "/api/agent-runs/{id}",
+    operationId: "getAgentRun",
+    summary: "Read an agent run with its redacted output."
+  },
+  {
+    method: "post",
+    path: "/api/agent-runs/{id}/cancel",
+    operationId: "cancelAgentRun",
+    summary: "Cancel an active agent run."
   },
   { method: "get", path: "/api/agents/{id}", operationId: "getAgent", summary: "Read a registered agent." },
   {

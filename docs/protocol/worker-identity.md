@@ -8,8 +8,6 @@ Bearer tokens that prove the identity also need an independent lifecycle —
 TTL, rotation, and revoke — before real execution.
 
 This document covers the worker credential registry used by the gateway when
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
 authenticating `POST /worker/claim` and `POST /work-items/:id/results`.
 
 ## Claim admission
@@ -23,12 +21,6 @@ does not grant approval. Unassigned approved work remains eligible for ordinary
 workers. Concurrent claims are serialized by the store transaction. No eligible
 work returns `{ "claimed": false }`; a policy/approval rejection returns `409`
 with `worker_claim_blocked`. Assignment cannot change once execution is running.
-=======
-authenticating worker claims and `POST /work-items/:id/results`.
->>>>>>> Stashed changes
-=======
-authenticating worker claims and `POST /work-items/:id/results`.
->>>>>>> Stashed changes
 
 ## Credential lifecycle
 

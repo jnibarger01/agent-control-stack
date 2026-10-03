@@ -20,13 +20,7 @@ Commands:
   status [--json]
   mode status
   mode strict
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
   mode admin (refused; activate through authenticated human operator API)
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
   doctor [--json]
   publication list [--json]
   audit export [--db <path>] [-o <file>]
@@ -46,18 +40,14 @@ export type AcsCommand =
   | { kind: "gateway"; forwarded: string[] }
   | { kind: "status"; json: boolean }
   | { kind: "mode-status" }
-  | { kind: "mode-set"; mode: "strict" }
+  | { kind: "mode-set"; mode: "strict" | "admin" }
   | { kind: "doctor"; json: boolean }
   | { kind: "publication-list"; json: boolean }
   | { kind: "audit-export"; dbPath?: string; outputPath?: string }
   | { kind: "audit-verify"; dbPath?: string; filePath?: string }
-<<<<<<< Updated upstream
   | { kind: "trace-relay"; dbPath?: string; spoolDir?: string }
-  | { kind: "skills"; args: string[] };
-=======
   | { kind: "skills"; args: string[] }
   | { kind: "code"; args: string[] };
->>>>>>> Stashed changes
 
 export class AcsUsageError extends Error {
   readonly usage = true;
@@ -217,11 +207,11 @@ function parseAuditArgs(args: string[]): AcsCommand {
 
 function parseModeArgs(args: string[]): AcsCommand {
   const sub = args[0];
-  if (args.length !== 1 || (sub !== "status" && sub !== "strict")) {
-    throw new AcsUsageError("Usage: acs mode status | acs mode strict");
+  if (args.length !== 1 || (sub !== "status" && sub !== "strict" && sub !== "admin")) {
+    throw new AcsUsageError("Usage: acs mode status | acs mode strict | acs mode admin");
   }
   if (sub === "status") return { kind: "mode-status" };
-  return { kind: "mode-set", mode: "strict" };
+  return { kind: "mode-set", mode: sub };
 }
 
 export function parseAcsArgs(args: string[]): AcsCommand {

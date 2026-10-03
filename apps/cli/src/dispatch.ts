@@ -118,30 +118,16 @@ export function formatExecutionModeStatus(dbPath = defaultDbPath()): { text: str
   }
 }
 
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-=======
->>>>>>> Stashed changes
 export function setExecutionModeFromCli(
   mode: "strict" | "admin",
   dbPath = defaultDbPath()
 ): { text: string; ok: boolean } {
-<<<<<<< Updated upstream
   if (mode === "admin") {
     return {
       text: "Admin activation requires an authenticated human operator through POST /execution-mode.\n",
       ok: false
     };
   }
-=======
-export function setExecutionModeFromCli(mode: "strict", dbPath = defaultDbPath()): { text: string; ok: boolean } {
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
-=======
-export function setExecutionModeFromCli(mode: "strict", dbPath = defaultDbPath()): { text: string; ok: boolean } {
->>>>>>> Stashed changes
   const store = new SqliteWorkItemStore(dbPath, { heartbeatTtlMs: DEFAULT_HEARTBEAT_TTL_MS });
   try {
     store.setExecutionMode({ mode, updatedBy: "acs-cli", reason: `acs mode ${mode}` });

@@ -139,6 +139,123 @@ describe("authenticated worker claims", () => {
     }
   });
 
+  it("routes authenticated production claims through Nimble before issuing a lease", async () => {
+    const priorEnabled = process.env.ACS_NIMBLE_ROUTING_ENABLED;
+    const priorFetch = globalThis.fetch;
+    process.env.ACS_NIMBLE_ROUTING_ENABLED = "1";
+    const directory = mkdtempSync(join(tmpdir(), "acs-worker-claim-nimble-"));
+    directories.push(directory);
+    const dbPath = join(directory, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    const actorId = "actor_system_bootstrap";
+    const observedAt = new Date();
+    try {
+      for (const id of ["alpha", "beta"]) {
+        store.createRegistryAgent({
+          id,
+          name: id,
+          kind: "repository_read",
+          acpRole: "IMPLEMENTATION_AGENT",
+          provider: "local",
+          model: `${id}-model`,
+          status: "AVAILABLE",
+          actorId
+        });
+        store.replaceAgentCapabilities(id, [{ name: "fs.read" }], actorId);
+        store.recordAgentHeartbeat(id, { status: "AVAILABLE", actorId, now: observedAt });
+      }
+      const item = store.create({
+        title: "Routed claim fixture",
+        requester: "user",
+        requesterSubject: "operator",
+        intent: "claim only after the authoritative Nimble decision",
+        target: { cwd: "/repo", services: ["alpha", "beta"] },
+        requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["README.md"] } }],
+        risk: "low"
+      });
+      store.approveWorkItem(item.id, { via: "domain_service" });
+      store.close();
+
+      let calls = 0;
+      globalThis.fetch = async () => {
+        calls += 1;
+        return new Response(
+          JSON.stringify({
+            model: "nimble:latest",
+            answers: {
+              executor: {
+                type: "choice",
+                choice: "beta",
+                confidence: 0.95,
+                probabilities: { alpha: 0.05, beta: 0.95 }
+              }
+            }
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      };
+
+      const identities = new WorkerIdentityRegistry();
+      const alpha = identities.issue({
+        workerId: "alpha",
+        ttlMs: 60_000,
+        token: "alpha-worker-token-012345678901234567890123"
+      });
+      const beta = identities.issue({
+        workerId: "beta",
+        ttlMs: 60_000,
+        token: "beta-worker-token-0123456789012345678901234"
+      });
+      const app = buildGateway({
+        dbPath,
+        logger: false,
+        auth: { token: "unused-static-token", actor: "user", workerIdentities: identities }
+      });
+      try {
+        await app.ready();
+        const wrongWorker = await app.inject({
+          method: "POST",
+          url: "/worker/claim",
+          headers: { authorization: `Bearer ${alpha.token}` },
+          payload: { leaseMs: 10_000 }
+        });
+        expect(wrongWorker.statusCode).toBe(200);
+        expect(wrongWorker.json()).toEqual({ claimed: false });
+
+        const afterRoute = new SqliteWorkItemStore(dbPath);
+        try {
+          expect(afterRoute.getLatestAuthoritativeRoutingEvidence(item.id)).toMatchObject({
+            decision: "route",
+            source: "nimble",
+            selectedActorId: "beta"
+          });
+          expect(afterRoute.get(item.id)?.status).toBe("approved");
+        } finally {
+          afterRoute.close();
+        }
+
+        const selected = await app.inject({
+          method: "POST",
+          url: "/worker/claim",
+          headers: { authorization: `Bearer ${beta.token}` },
+          payload: { leaseMs: 10_000 }
+        });
+        expect(selected.statusCode).toBe(200);
+        expect(selected.json()).toMatchObject({
+          claimed: true,
+          workItem: { id: item.id, workerId: "beta", status: "running" }
+        });
+        expect(calls).toBe(1);
+      } finally {
+        await app.close();
+      }
+    } finally {
+      globalThis.fetch = priorFetch;
+      if (priorEnabled === undefined) delete process.env.ACS_NIMBLE_ROUTING_ENABLED;
+      else process.env.ACS_NIMBLE_ROUTING_ENABLED = priorEnabled;
+    }
+  });
+
   it("serializes concurrent authenticated polls to one claim and one attempt", async () => {
     const directory = mkdtempSync(join(tmpdir(), "acs-worker-claim-race-"));
     directories.push(directory);

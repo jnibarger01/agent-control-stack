@@ -1,22 +1,22 @@
 # Session state
 
+Refreshed 2026-10-02. The July 2026 prompt-sequence ledger (Prompts 01 to 15) is archived verbatim at
+`docs/history/STATE-2026-07-prompt-sequence.md`; it no longer describes the live work.
+
 ## Objective
 
-Complete Prompt 01 by reconciling the controlling plan appendix into the live,
-officially sourced platform-facts ledger and proving the result without
-executing any later numbered prompt.
+Keep `main` buildable and the authority boundaries enforceable while concurrent sessions land autonomous-mission,
+Nimble routing, and admin-mode changes. Nothing in this file is authoritative over code or `docs/`; where they
+disagree, the executable behavior wins and the discrepancy gets fixed.
 
 ## Acceptance criteria
 
-- Re-verify every appendix row against live official Claude or Anthropic
-  sources and record `CONFIRMED`, `CHANGED`, or `NOT FOUND` truthfully.
-- Keep every required model, refusal, Claude Code, workflow, routine, Outcomes,
-  and managed-agent row current; every `CONFIRMED` row must cite an official
-  URL and every `NOT FOUND` row must provide a fail-closed fallback.
-- Phrase no unsupported item as fact and state an exact 30-day refresh cadence.
-- Run the platform-facts checker, the file-scoped diff check, manual semantic
-  review, the relevant repository regression gate, and end-session validation.
-- Commit and push Prompt 01 only; do not implement Prompt 02 through Prompt 15.
+- `origin/main` has no conflict markers and `npm run typecheck` is clean before any feature work starts.
+- Authority-bearing changes (execution mode, approvals, grants, Jev) go through a PR from a clean worktree off
+  `origin/main`, with the gate commands recorded in the PR body.
+- Jev stays advisory: the ESLint boundary in `eslint.config.js` and `tests/jev-boundary.test.ts` must pass.
+- Global admin mode stays time-boxed and separately scoped until mission-scoped grants replace it
+  (`docs/superpowers/plans/2026-10-02-retire-global-admin-mode.md`).
 
 ## General rules
 
@@ -24,274 +24,38 @@ executing any later numbered prompt.
 - No platform-feature claim without a citation in `docs/platform-facts.md` or
   an explicit `UNVERIFIED` tag.
 - If blocked, document the block; do not guess or route around it silently.
-
-## Active skills
-
-- `ijfw-workflow` — `/home/jacen/.codex/plugins/cache/ijfw/ijfw/1.6.3/skills/ijfw-workflow/SKILL.md`
-- `firecrawl-deep-research` — `/home/jacen/.agents/skills/firecrawl-deep-research/SKILL.md`
-- `skill-creator` — `/home/jacen/.codex/skills/.system/skill-creator/SKILL.md`
-- `verify-platform-facts` — `.codex/skills/verify-platform-facts/SKILL.md`
-- `eval-baseline` — `skills/eval-baseline/SKILL.md`
-- `independent-verification` — `skills/independent-verification/SKILL.md`
-- `bounded-orchestration` — `skills/bounded-orchestration/SKILL.md`
+- Several sessions push `feat/*` and `recovery/*` branches at once. Fetch and ancestry-check before pushing; never
+  force-push `main`; never commit with unresolved conflict markers (`git grep -nE '^(<<<<<<<|>>>>>>>)'`).
 
 ## Build sequence
 
-| Prompt | Status | Deliverables | Acceptance evidence | Commit SHA | Resume pointer |
-| --- | --- | --- | --- | --- | --- |
-| 01 | `PASS` | `docs/platform-facts.md` | 15/15 rows and 9/9 appendix seeds passed live semantic review; checker, mutations, hashes, cadence, and regressions passed. | `e2ac9aaf00b7db98bd1d63df81c887ee6f39f24b` | No action. |
-| 02 | `PASS` | Scaffold, `STATE.md`, session scripts | `bash scripts/bootstrap-acceptance.test.sh` passed; clean bootstrap commit inspected. | `3c925504109328cb7844b4299f170892bde37711` | No action. |
-| 03 | `NOT_STARTED` | `docs/architecture.md` compound-stack map | Live audit found no four-layer diagram, prompt/path map, or arrow traceability. | — | This is the next numbered prompt after Prompt 01 passes. |
-| 04 | `NOT_STARTED` | Routing policy and cost model | Historical artifacts exist; acceptance was not re-proven past the Prompt 03 gate. | — | Resume only after Prompt 03 passes. |
-| 05 | `NOT_STARTED` | Eval corpus, graders, two baselines | Historical artifacts exist; acceptance was not re-proven past the Prompt 03 gate. | — | Resume only after prior prompts pass. |
-| 06 | `NOT_STARTED` | Maker-verifier primitive and traces | Historical artifacts exist; acceptance was not re-proven past the Prompt 03 gate. | — | Resume only after prior prompts pass. |
-| 07 | `NOT_STARTED` | Goal-loop templates and run | Historical artifacts exist; acceptance was not re-proven past the Prompt 03 gate. | — | Resume only after prior prompts pass. |
-| 08 | `NOT_STARTED` | Three bounded orchestration patterns | Historical artifacts exist; acceptance was not re-proven past the Prompt 03 gate. | — | Resume only after prior prompts pass. |
-| 09 | `NOT_STARTED` | Worktree-isolation conventions and proof | Not evaluated because Prompt 03 is the next sequential gate. | — | Resume only after prior prompts pass. |
-| 10 | `NOT_STARTED` | Routine configs and unattended-run proof | Not evaluated because Prompt 03 is the next sequential gate. | — | Resume only after prior prompts pass. |
-| 11 | `NOT_STARTED` | Failure-to-rule loop and enforcement proof | Not evaluated because Prompt 03 is the next sequential gate. | — | Resume only after prior prompts pass. |
-| 12 | `NOT_STARTED` | Skill-memory workflow and comparison traces | Not evaluated because Prompt 03 is the next sequential gate. | — | Resume only after prior prompts pass. |
-| 13 | `NOT_STARTED` | Vision self-verification proof | Not evaluated because Prompt 03 is the next sequential gate. | — | Resume only after prior prompts pass. |
-| 14 | `NOT_STARTED` | Refusal fallback and halt proof | Not evaluated because Prompt 03 is the next sequential gate. | — | Resume only after prior prompts pass. |
-| 15 | `NOT_STARTED` | Capstone audit and SOP | Not evaluated because Prompt 03 is the next sequential gate. | — | Resume only after prior prompts pass. |
+Superseded by the plans under `docs/superpowers/plans/`. The old Prompt 01 to 15 table is in the archive file.
 
 ## Verified facts
 
-- Prompt 01 was selected because the restored controlling appendix made the
-  old "appendix absent" ledger statement false; no later prompt was executed.
-- `fable5-build-prompts-v2.md` is now the tracked controlling plan. Its SHA-256
-  is `9b1c4b9bea826a51f008669f71dc6e0e7aeac41307c529fddea8e522487570e8`,
-  and all nine appendix seed rows map explicitly into the 15-row ledger.
-- The 2026-07-10 semantic review covers 15/15 rows: 11 `CONFIRMED`, 3
-  `CHANGED`, and 1 `NOT FOUND`. It checked the current model, pricing,
-  lifecycle, Fable availability/retention/refusal, Claude Code, workflows,
-  Routines, Outcomes, and Claude Managed Agents sources. The current
-  first-party inventory remains 11 callable models, and the Mythos Preview
-  conflict remains resolved in favor of the lifecycle-specific retirement
-  source.
-- All 30 unique official links returned HTTP 200 after redirects. Every row is
-  dated 2026-07-10; the next due date is 2026-08-09, exactly 30 days later.
-- The Fable availability row now records the appendix's previously missing
-  30-day retention/no-ZDR contract and the current paid-plan usage-credit
-  access. The refusal row now records the documented fallback-credit scope.
-- `bash .codex/skills/verify-platform-facts/scripts/check-platform-facts.sh`
-  passed. Mutation probes proved that it rejects both the stale appendix claim
-  and an incorrect due date. `git diff --check -- docs/platform-facts.md`
-  passed.
-- The updated repo-local `verify-platform-facts` skill passed
-  `quick_validate.py` and now requires the controlling appendix to be re-read
-  before any inherited absence limitation is accepted.
-- `runs/2026-07-10-prompt-01-platform-facts-verification.json` passed its `jq`
-  schema and source-hash checks and binds the plan and facts files to the
-  semantic receipt.
-- The post-change repository regression passed `npm run check`: 33 test files
-  and 276 tests passed. `scripts/bootstrap-acceptance.test.sh` also remains
-  green.
-- Prompt 02 was independently re-proven with the live bootstrap acceptance
-  script and clean bootstrap commit
-  `3c925504109328cb7844b4299f170892bde37711`.
-- Prompt 03 is the next sequential gate. A read-only audit proved that its
-  current architecture document lacks the required four-layer diagram,
-  prompt/path mapping, build dependencies, and arrow traceability; it was not
-  implemented in this session.
-- `docs/platform-facts.md` exists and contains every feature family explicitly
-  named in the supplied objective.
-- The 2026-07-09 manual semantic review used the AEO Foundations Architect, AI
-  Engineer, Agentic Search Optimizer, Backend Architect, and AI Data Remediation
-  Engineer lanes. Final row counts are 11 `CONFIRMED`, 3 `CHANGED`, and 1
-  `NOT FOUND`.
-- The current first-party model inventory audit covers 11 callable models with
-  IDs, context/output limits, and input/output MTok rates; the row evidence is
-  cited in `docs/platform-facts.md`. The Mythos Preview conflict was resolved in
-  favor of the lifecycle-specific retirement source and is recorded as
-  `CHANGED`.
-- All 29 unique external links in `docs/platform-facts.md` returned HTTP 200
-  after redirects on 2026-07-09.
-- Every `CONFIRMED` row has an official URL, and the sole `NOT FOUND` row has a
-  fail-closed ACS fallback.
-- `bash .codex/skills/verify-platform-facts/scripts/check-platform-facts.sh`
-  passed.
-- `git diff --check -- docs/platform-facts.md` passed.
-- The repo-local `verify-platform-facts` skill passed `quick_validate.py`.
-- A 2026-07-09 resume audit reloaded every active skill, rescanned the live
-  worktree (including hidden and untracked repository files), and found no
-  appendix or attachment. The platform-facts checker and diff check passed
-  again; `quick_validate.py` also passed under `/usr/bin/python3` after the
-  unavailable `python` shim returned exit 127.
-- The final 2026-07-09 blocked audit searched repository content, filenames,
-  and all Git history for the appendix or an attachment. It found only the
-  existing limitation notices and platform-facts artifacts. The acceptance
-  checker still passed, including live-link checks, and `git diff --check`
-  reported no errors.
-- The supplied full objective was read from the Codex attachment and reconciled
-  against the live tree. The phase-1 bootstrap acceptance script passed; it
-  verifies the required tree, executable session scripts, contract and state
-  output, empty-`Last session` refusal, eval-stub receipt, and large-run-artifact
-  ignore rule. The TypeScript scaffolds passed a no-emit type check.
-- The pre-change repository baseline passed `npm run check`: 16 test files and
-  183 tests passed.
-- Phase 4 now has seven deterministic task classes, exact model IDs,
-  two-verifier-failure and disagreement escalation, structured refusal
-  fallback, three-agreement-run de-escalation, explicit Mythos availability,
-  dated Sonnet pricing, and direct/routed cost estimates. Its focused routing
-  and cost suite passed 24 tests.
-- The additive Claude CLI provider records requested and exact models, token
-  usage, stop reason, refusals, duration, and actual cost without changing the
-  existing MoA `ModelCaller` port. Its seven focused tests passed, and live
-  structured-output probes succeeded with tools disabled and no session
-  persistence.
-- The fixed eval corpus contains 10 tasks across all seven routing classes and
-  39 binary criteria. Corpus hash on both baselines was
-  `7a1f3122f1c7aaab099595659e8c2f33f276aa788bc8e87e0ab5c73e8ae0f83c`.
-- Live baseline 1 is `runs/2026-07-09-eval-baseline-1.json`: 31/39 criteria,
-  score `0.7948717949`, predicted cost `$0.066500`, actual cost `$0.440955`.
-- Live baseline 2 is `runs/2026-07-09-eval-baseline-2.json`: 32/39 criteria,
-  score `0.8205128205`, predicted cost `$0.066500`, actual cost `$0.479861`.
-  Absolute score delta is `0.0256410256`, within the documented `0.10`
-  expected grader-variance bound. Both runs record Fable 5, Opus 4.8, Sonnet
-  5, and dated Haiku 4.5 model IDs.
-- The integrated post-eval repository gate passed `npm run check`: 23 test
-  files and 225 tests passed. The `eval-baseline` skill passed validation and
-  an independent forward test accepted the two-run evidence pair.
-- Phase 6 provides a reusable `makerVerifier(task, rubric, maxIters)` with
-  isolated maker/verifier provider calls, structured-only retry failures,
-  stable criterion-ID schemas, duplicate-failure escalation through `route()`,
-  fail-closed parsing, and full model/cost/token/timing traces. Nine focused
-  primitive tests and four evidence tests passed. Each evidence envelope now
-  includes the eval-task SHA-256 and rubric snapshot; the validator rereads and
-  parses the source task, recomputes its raw SHA-256, requires exact task ID and
-  rubric equality, reconciles criterion failures and receipt aggregates, and
-  checks each reported duration against its enclosing wall-clock timestamps.
-- Three committed maker-verifier traces cover `audit-replay-invariant`,
-  `redaction-repair`, and `work-item-lifecycle`. Their total live cost is
-  `$0.1009503`; live calls used dated Haiku 4.5 and Sonnet 5. The lifecycle
-  trace explicitly labels its first maker response as a seeded fixture and
-  proves `selfAssessment.pass=true` while the fresh live verifier fails the
-  same iteration, followed by a verified live retry.
-- Phase 7 documents the official `/goal` contract, three repository templates,
-  and the `/goal`/`/loop`/Stop-hook/auto/routine decision table. The Outcomes
-  adapter emits the documented `user.define_outcome` event through an injected
-  transport with an inline Markdown rubric and a 1-20 iteration bound.
-- `runs/2026-07-09-goal-policy-action-classification.json` records a real
-  tool-less non-interactive `/goal` run. It surfaced exactly `action: read` and
-  `risk: low` in one turn using dated Haiku 4.5 at `$0.005086`. A same-session
-  `/goal` query then returned `No goal set`; no clear command was issued, so
-  under the cited platform contract the evaluator cleared the condition. The
-  repository trace retains both raw CLI envelopes, platform session IDs, exact
-  argv, CLI version, timestamps, workspace-status hashes, and SHA-256 receipt
-  bindings; tamper tests reject inconsistent session fabrication and changed
-  raw envelopes.
-- Phase 8 implements `fanOutSynthesize`, `adversarial`, and `loopUntilDone`
-  with isolated role payloads, a dedup/conflict/coverage synthesis barrier,
-  output-only adversarial judging, structured verifier failures, and hard
-  token, wall-clock, iteration, and spend checks. Twelve focused pattern tests
-  pass. Each spend receipt includes measured elapsed milliseconds; evidence
-  validation enforces the wall-clock cap and binds completed loop iterations to
-  exactly one maker and one verifier call per iteration. The runtime rechecks
-  one final receipt immediately before returning success, closing the terminal
-  parsing window after the last provider call.
-- Deterministic evidence covers all three orchestration patterns and records a
-  deliberately non-passing loop stopped after two iterations and four calls
-  with `failureCode=iteration_cap`. Separate live headless traces cover all
-  three patterns against fixed eval tasks using dated Haiku 4.5. Their combined
-  predicted cost is `$0.017500`; actual cost is `$0.111717`. Content checks
-  require the fan-out approval result to deny execution, name `abc`/`def`,
-  require new approval, and audit the block; adversarial and loop results must
-  equal the two-line classifier oracle. The critic now declares `refute` or
-  `concede`, and the validator forbids selecting a conceding critic.
-- Claude Code `2.1.205` accepted `ultracode`, but two bounded dynamic-workflow
-  attempts did not complete. The first requested `$0.30` and ended at
-  `$0.390117` after attempting `Write`; the second requested `$0.50`, started
-  two Agent tasks, and ended at `$1.751095`. `ANTHROPIC_API_KEY` was unset.
-  `runs/2026-07-09-dynamic-workflow-attempts.json` records the failures and the
-  explicit headless fallback without claiming dynamic-workflow success.
-- Shared trace redaction now preserves token-accounting fields, distinguishes
-  repeated references from actual cycles, extracts sensitive values from
-  embedded JSON with trailing punctuation, and redacts those values from model
-  prose before persistence. Five focused redaction tests and credential scans
-  over the new evidence passed.
-- The final integrated gate passed `npm run check`: 31 test files and 267 tests
-  passed. The eval corpus hash remains
-  `7a1f3122f1c7aaab099595659e8c2f33f276aa788bc8e87e0ab5c73e8ae0f83c`,
-  with no diff in `evals/tasks/` or either committed baseline JSON.
-- Existing user modifications in `CLAUDE.md`, `package.json`, and
-  `package-lock.json` were not changed by this session.
-- The 2026-07-10 worktree cleanup inspected `main` plus
-  `hermes/agentos-contracts-slice`, `hermes/lease-bound-results`, and
-  `hermes/mcp-transport`. Their dirty files and unique commits were committed
-  and pushed before removal. The non-Git Phase-0 artifact path was classified
-  separately before deletion.
-- AgentOS contract work was preserved at
-  `6633abc552ffae7fe17163948ebd2fd8702b201f` and integrated into `main` as
-  `e38a004c03e5f8881a9499c8c8cd542b9e7146ca`. Lease-result work is preserved
-  at `45c7830388966012d2fd8aadb7d39b5dd1778c88`; the older MCP hardening slice
-  is preserved at `3ef51925b84ef01a93744dc3ef8cb6c7e425e8b5` and was not merged.
-- Preexisting `CLAUDE.md`, `package.json`, and `package-lock.json` changes were
-  preserved on `preserve/main-working-tree-20260710`, whose verified remote tip
-  is `3eb8b6f8a5b2a8b5d6ab5d62813a97ac5e40b6e8`.
-- Before the documentation-only closeout, local `main`, `origin/main`, and the
-  GitHub API all resolved to
-  `e38a004c03e5f8881a9499c8c8cd542b9e7146ca`; divergence was `0 0`, the tree
-  was clean, and GitHub contained all five preservation/archive refs.
-- The integrated `main` gate passed `npm run check` with 33 test files and 276
-  tests, the AgentOS Node suite passed 48 tests, and
-  `scripts/bootstrap-acceptance.test.sh` passed. The AgentOS and lease
-  worktrees also passed their focused tests and TypeScript builds before
-  preservation.
-- The registered worktrees at
-  `/home/jacen/agent-control-stack-agentos-contracts-slice`,
-  `/home/jacen/agent-control-stack-lease-results`, and
-  `/home/jacen/agent-control-stack-mcp-transport` were removed without force
-  after their remote SHA checks. Worktree metadata was pruned; unrelated
-  preexisting worktrees were left untouched.
-- `/home/jacen/agent-control-stack-phase0-artifacts-20260708-0212` was not a
-  Git worktree. Its authored AgentOS source, idea brief, and reviews were pushed
-  to `archive/agentos-phase0-20260708` at
-  `eb58b8d301b9642c49c88364cfce07b6e35be6ef`; the generated ISO, chroot,
-  package caches, boot files, and duplicate documentation archive were then
-  deleted.
-- The complete cleanup acceptance receipt and artifact inventory are recorded
-  in `docs/worktree-cleanup-closeout-2026-07-10.md`.
+As of 2026-10-02, checked in a clean worktree off `origin/main` (`cdb1f2a`):
+
+- Workspace: 14 apps and 31 packages (npm workspaces, no Turborepo/Nx). `npm run lint` is clean.
+- `npm audit --audit-level=high` reports 0 high or critical findings and 7 moderate.
+- Execution mode: `strict` or `admin` in one `execution_mode_state` row. Admin needs `acs:execution-mode:admin`,
+  a reason, and lapses after `ACS_ADMIN_MODE_TTL_MS` (default 1 hour); see `docs/protocol/execution-mode.md`
+  (introduced by the admin-mode scope PR, check it has merged).
+- Mission-scoped Autonomous Authority Grants exist for the Desktop Commander change-set path (migration 047);
+  Jace Commander and ordinary gated tools still use the global admin row.
+- Jev integration is advisory-only per ADR 0020. The deployed runtime is Noul-only, so trace analysis that needs
+  Choice or Score degrades with INCOMPATIBLE_MODEL.
+- Migration numbering is contended: two `039_*` files exist and open work adds more. Coordinate before adding one.
 
 ## Open failures
 
-- **Prompt 11 — Stage: `OPEN_FAILURE`**
-  - Status: `UNRESOLVED`.
-  - Failure: the required independent cross-audit produced no independent
-    verdict. The MCP attempt timed out after 30 seconds; the CLI retry exited 3
-    because the Codex authentication token was stale and Gemini failed under
-    `TERM=dumb`.
-  - Evidence: IJFW reported that neither auditor contributed and that lineage
-    diversity was reduced. “No findings” is therefore not a PASS.
-  - Resume: refresh Codex authentication, run Gemini under a compatible
-    terminal, and rerun the cross-audit against the final closeout range.
-- The preserved `hermes/mcp-transport` branch remains test-red at
-  `3ef51925b84ef01a93744dc3ef8cb6c7e425e8b5`. Its focused run passed 21 tests
-  and failed these two audit-chain tests:
-  `packages/eval-harness/src/replay.test.ts > deterministic replay > replays approved work through SQLite events`
-  and
-  `packages/work-items/src/state-machine.test.ts > work item state machine > writes a verifiable audit hash chain`.
-  The branch is preserved remotely and was not merged into `main`.
-- Two discarded baseline attempts produced no result artifact: the first CLI
-  process exited 1 after task 3 with a `$0.05` per-call cap; the second returned
-  a non-success envelope at task 9 with a `$0.10` cap. The exact remote cause
-  was not retained, so no stronger claim is made. The successful complete runs
-  used `$0.10` and `$0.20` caps respectively.
-- Baseline JSON records task IDs but does not embed the corpus content hash.
-  The current linkage is the matching hash receipt above plus unchanged task
-  files. Embedding the hash in future result schema revisions would make each
-  run independently provenance-complete.
-- The hosted dynamic-workflow path is confirmed available at the command level
-  but remains unverified end to end in this environment. Both bounded attempts
-  terminated with `error_max_budget_usd` after reported actual cost exceeded
-  the requested outer cap, and the generated Node path had no API key. The
-  tested headless Claude CLI fallback is complete; a future hosted retry should
-  wait for an explicit cost policy and a working workflow credential/runtime.
-- The `/goal` evidence is internally bound by raw-envelope and workspace-state
-  SHA-256 hashes and is corroborated on this machine by the captured CLI
-  transcript, but those hashes are self-contained rather than externally
-  signed. A future clone can detect partial tampering but cannot independently
-  authenticate the receipts as platform-originated evidence.
+- Open PR #245 removes the rule that `privileged_exec` stays human-only under admin mode. Undecided.
+- Open PR #235 duplicates the admin-mode authority fix; superseded by the scope-split PR.
+- 20 stashes and about 60 worktrees (many dirty or unmerged `recovery/*`) predate this refresh and have not been
+  triaged individually.
+- `apps/gateway/src/server.ts` is about 5,000 lines and the main source of merge conflicts.
+- Mission Control renders the same markup on the server and again as client-side strings
+  (`apps/control-ui/src/work-item-controls.ts` and similar), so the two can drift.
+- The full `npm run check` gate was not run during this refresh.
 
 ## Lessons learned
 
@@ -363,15 +127,9 @@ executing any later numbered prompt.
 
 ## Last session
 
-On 2026-07-10, the sequential build audit selected and completed Prompt 01 only.
-It tracked the controlling plan, reconciled all nine appendix seeds, refreshed
-all 15 platform rows from live official sources, added the missing Fable
-retention/ZDR and paid-plan access facts, hardened the checker against stale
-appendix and cadence claims, and recorded the result in
-`runs/2026-07-10-prompt-01-platform-facts-verification.json`. The artifact
-commit is `e2ac9aaf00b7db98bd1d63df81c887ee6f39f24b`; the live checker, semantic
-probe matrix, mutation checks, skill validator, bootstrap acceptance, and
-33-file/276-test repository gate passed. Existing unrelated open failures remain
-recorded above. Resume pointer: begin a new session at Prompt 03, read its exact
-contract from `fable5-build-prompts-v2.md`, and build the four-layer architecture
-map; do not reopen Prompt 01 or execute Prompt 04 in that session.
+On 2026-10-02 a review of Jev authority, the monorepo, admin ("YOLO") mode, Mission Control and the OAuth paths
+led to: a dedicated admin scope, required reason, TTL and confirmation dialog (PR #251); an ESLint boundary that
+keeps the Jev adapter out of authority code (PR #252); a plan to retire global admin mode in favour of
+mission-scoped grants (PR #253); and removal of 102 provably merged local branches plus 3 clean worktrees. This file,
+`AGENTS.md` and `INDEPENDENT_REVIEW.md` were refreshed. Resume pointer: merge or revise #251 to #253, decide #245,
+then split `server.ts` and remove the duplicated UI rendering as separate PRs.

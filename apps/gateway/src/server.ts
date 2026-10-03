@@ -10,8 +10,7 @@ import {
   HarnessDispatchQueue,
   harnessCorrelationId,
   harnessDcInvocationSchema,
-  harnessSubject,
-  isHarnessSubject
+  harnessSubject
 } from "./harness-dispatch.js";
 import type { ServerResponse } from "node:http";
 import {
@@ -83,11 +82,14 @@ import {
   type DirectAgentRunner
 } from "@agent-control-stack/machine-controller";
 import {
+  claimNextAuthoritativeWorkItem,
   createPolicyEngine,
   evaluateChangeSetPolicy,
   createWorkItemTools,
   explainPolicy,
+  probeNimbleRouting,
   previewWorkItemPolicy,
+  resolveNimbleRoutingConfig,
   SUPPORTED_ACTION_KINDS,
   workItemToolNames,
   ACS_ADMIN_APPROVER,
@@ -136,6 +138,8 @@ import {
 } from "@agent-control-stack/work-items";
 import { z, ZodError } from "zod";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+import { AgentRunService, agentDispatchConfigFromEnv, type AgentDispatchConfig } from "./agent-runs.js";
+import { registerAgentRoutes } from "./agent-routes.js";
 import {
   authorizeMcpRequest,
   createProtectedResourceMetadata,
@@ -210,18 +214,11 @@ import { gatewayListenConfig } from "./runtime-config.js";
 import { DeviceAuthStore } from "./device-auth-store.js";
 import { registerDeviceAuthRoutes } from "./device-auth.js";
 import { createPortfolioClientFromEnv, type PortfolioClient } from "./portfolio-client.js";
-<<<<<<< Updated upstream
+import { VisualizerProjectionClient, visualizerBaseUrl as normalizeVisualizerBaseUrl, visualizerBaseUrlFromEnv } from "./visualizer-projection.js";
 import { verifyChangeSetResult } from "./change-set-verification.js";
 import { fileReadbackExpectationSchema } from "@agent-control-stack/verification";
 import { changeSetExecutionInput } from "./change-set-execution.js";
 import { dcWorkItemActionKind, resolveChangeSetRuntimePolicy } from "./change-set-runtime-policy.js";
-=======
-import {
-  VisualizerProjectionClient,
-  visualizerBaseUrl as normalizeVisualizerBaseUrl,
-  visualizerBaseUrlFromEnv
-} from "./visualizer-projection.js";
->>>>>>> Stashed changes
 
 const sessionCookieName = "acs_session";
 const sessionCookieMaxAgeSeconds = 8 * 60 * 60;
@@ -303,6 +300,8 @@ export interface GatewayOptions {
   /** Governed ports for autonomous coding missions. Absent ports fail closed. */
   codingMissionPorts?: CodingMissionPorts;
   heartbeatTtlMs?: number;
+  /** Agent CLI dispatch settings. Defaults to the ACS_AGENT_* environment (off unless enabled). */
+  agentDispatch?: AgentDispatchConfig;
   logger?: boolean;
   auth?: GatewayAuthOptions;
   mcpAuth?: McpAuthOptions;
@@ -399,6 +398,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   // Refuse to boot on an invalid ACS_TRACE_INSTANCE / ACS_RELEASE_SHA (trace_config_invalid)
   // rather than discovering it inside an approval transaction (PR #212 B4, ADR 0021).
   resolveTraceProducerConfig();
+  const nimbleRouting = resolveNimbleRoutingConfig();
   const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
   const heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
   const directAgentController = resolveDirectAgentController(options);
@@ -659,8 +659,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     actorId: string;
     toolName: string;
   }): Promise<AdmissionPermit> {
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
     reapAdmissionPermits();
     // Fence any capacity held without a durable reservation, then re-reconcile.
     // This converges the accounting invariant instead of latching on it.
@@ -668,24 +666,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     reconcileAdmissionAccounting();
     if (admissionReconciliationMismatch)
       throw new ControlStackError("admission_recovery_required", "admission recovery requires reconciliation");
-=======
-=======
->>>>>>> Stashed changes
-    workItems.failExpiredLeases();
-    releaseInactiveAdmissionPermits();
-    if (
-      admissionPermits.size !==
-      workItems.countActiveAttemptLeases(new Date(), [DC_BRIDGE_WORKER_ID, JC_BRIDGE_WORKER_ID])
-    ) {
-      throw new ControlStackError(
-        "admission_recovery_required",
-        "managed executor leases do not match recovered admission capacity"
-      );
-    }
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
     const abort = new AbortController();
     const onAbort = () => abort.abort();
     input.request.raw.once("aborted", onAbort);
@@ -710,8 +690,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   }
 
   function claimWithAdmissionPermit(input: {
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
     id: string;
     workerId: string;
     leaseMs: number;
@@ -731,41 +709,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         ...(input.executionModeFence ? { executionModeFence: input.executionModeFence } : {})
       });
       if (!claim?.attemptId || claim.fencingEpoch === undefined || !claim.planHash || !claim.inputHash) return claim;
-=======
-=======
->>>>>>> Stashed changes
-    workItemId: string;
-    workerId: string;
-    leaseMs: number;
-    permit: AdmissionPermit;
-    lane: "jc" | "dc";
-    executionClass: "execution" | "wait";
-  }) {
-    // The lease and durable capacity reservation commit together. Scheduler
-    // state is published only after commit, and can be rebuilt after a crash.
-    const claimed = workItems.withTransaction(() => {
-      if (
-        admissionPermits.size !==
-        workItems.countActiveAttemptLeases(new Date(), [DC_BRIDGE_WORKER_ID, JC_BRIDGE_WORKER_ID])
-      ) {
-        throw new ControlStackError(
-          "admission_recovery_required",
-          "managed executor leases changed before admission claim"
-        );
-      }
-      const claim = tools.claim_approved_work_item_by_id({
-        id: input.workItemId,
-        workerId: input.workerId,
-        leaseMs: input.leaseMs
-      });
-      if (!claim?.attemptId) return claim;
-      if (claim.fencingEpoch === undefined || !claim.planHash || !claim.inputHash) {
-        throw new ControlStackError("admission_permit_binding_mismatch", "claim lacks canonical attempt authority");
-      }
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
       workItems.bindAdmissionPermit({
         attemptId: claim.attemptId,
         workItemId: claim.id,
@@ -776,15 +719,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         planHash: claim.planHash,
         inputHash: claim.inputHash,
         lane: input.lane,
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
         executionClass
-=======
-        executionClass: input.executionClass
->>>>>>> Stashed changes
-=======
-        executionClass: input.executionClass
->>>>>>> Stashed changes
       });
       return claim;
     });
@@ -792,15 +727,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       admissionPermits.set(claimed.attemptId, {
         permit: input.permit,
         lane: input.lane,
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
         executionClass,
-=======
-        executionClass: input.executionClass,
->>>>>>> Stashed changes
-=======
-        executionClass: input.executionClass,
->>>>>>> Stashed changes
         workItemId: claimed.id,
         leaseId: claimed.leaseId,
         workerId: input.workerId,
@@ -879,58 +806,23 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   function releaseAdmissionPermit(attemptId: string, force = false): boolean {
     const binding = admissionPermits.get(attemptId);
     if (!binding) return false;
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
     if (!force) {
       const lease = workItems.getActiveLeaseForAttempt(attemptId);
       if (lease?.status === "active" && Date.parse(lease.expiresAt) > Date.now()) return false;
     }
-=======
-    workItems.releaseAdmissionPermit(attemptId);
->>>>>>> Stashed changes
-=======
-    workItems.releaseAdmissionPermit(attemptId);
->>>>>>> Stashed changes
     admissionPermits.delete(attemptId);
     binding.permit.release();
+    workItems.releaseAdmissionPermit(attemptId);
     refreshAdmissionMetrics();
     return true;
   }
 
-  function releaseInactiveAdmissionPermits(): void {
-    for (const [attemptId, binding] of admissionPermits) {
-      const lease = workItems.getActiveLeaseForAttempt(attemptId);
-      if (
-        !lease ||
-        Date.parse(lease.expiresAt) <= Date.now() ||
-        lease.leaseId !== binding.leaseId ||
-        lease.fencingEpoch !== binding.fencingEpoch
-      ) {
-        releaseAdmissionPermit(attemptId);
-      }
-    }
-  }
-
   let admissionReconciliationMismatch = false;
   function reconcileAdmissionAccounting(): void {
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
     const activeLeaseCount = workItems.countActiveAttemptLeases(new Date(), [JC_BRIDGE_WORKER_ID, DC_BRIDGE_WORKER_ID]);
     const mismatch =
       admissionPermits.size !== activeLeaseCount ||
       workItems.listAdmissionPermits().length !== admissionPermits.size ||
-=======
-    releaseInactiveAdmissionPermits();
-    const activeLeaseCount = workItems.countActiveAttemptLeases(new Date(), [DC_BRIDGE_WORKER_ID, JC_BRIDGE_WORKER_ID]);
-    const mismatch =
-      admissionPermits.size !== activeLeaseCount ||
->>>>>>> Stashed changes
-=======
-    releaseInactiveAdmissionPermits();
-    const activeLeaseCount = workItems.countActiveAttemptLeases(new Date(), [DC_BRIDGE_WORKER_ID, JC_BRIDGE_WORKER_ID]);
-    const mismatch =
-      admissionPermits.size !== activeLeaseCount ||
->>>>>>> Stashed changes
       [...admissionPermits.entries()].some(([attemptId, binding]) => {
         const lease = workItems.getActiveLeaseForAttempt(attemptId);
         return !lease || lease.leaseId !== binding.leaseId || lease.workerId !== binding.workerId;
@@ -953,6 +845,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     admissionReconciliationMismatch = mismatch;
   }
 
+  const harnessDispatch = new HarnessDispatchQueue();
   const portfolioClient = options.portfolioClient ?? createPortfolioClientFromEnv();
   const visualizerBaseUrl =
     options.visualizerBaseUrl === false
@@ -970,7 +863,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const capabilitySigningConfig = resolveCapabilitySigningConfig(options.desktopCommanderCapability, dbPath);
   const capabilityIssuanceRegistry = new SqliteDesktopCommanderRuntimeRegistry(dbPath);
   const dcContainment = resolveDcContainment(options.desktopCommanderContainment);
-<<<<<<< Updated upstream
   const jcSigningConfig = resolveJaceCommanderSigningConfig(options.jaceCommanderCapability);
   const jcContainment = resolveJcContainment(options.jaceCommanderContainment);
   const jcIssuanceRegistry = new SqliteJaceCommanderIssuanceRegistry(dbPath);
@@ -1041,12 +933,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     ];
   };
 
-=======
-  const harnessDispatch = new HarnessDispatchQueue();
-  const ownsDcScheduler = options.desktopCommanderScheduler === undefined;
-  const dcScheduler =
-    options.desktopCommanderScheduler ?? new ExecutionScheduler(desktopCommanderSchedulerConfigFromEnv());
->>>>>>> Stashed changes
   /** Lease-authorized canonical execution evidence (Phases 6-8 authority). */
   function recordLeaseAuthorizedExecutionEvent(
     authority: { workItemId: string; attemptId: string; leaseId: string; workerId: string; fencingEpoch?: number },
@@ -1206,7 +1092,21 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         checks: { ...health.checks, executionAdmission: { ok: false, code: "admission_recovery_required" } }
       });
     }
-    return reply.code(health.ok ? 200 : 503).send({ ...health, execution: executionView });
+    const nimbleCheck = nimbleRouting.enabled ? await probeNimbleRouting(nimbleRouting) : undefined;
+    const nimbleOk = nimbleCheck === undefined || nimbleCheck.ok;
+    return reply.code(health.ok && nimbleOk ? 200 : 503).send({
+      ...health,
+      ok: health.ok && nimbleOk,
+      checks: nimbleCheck
+        ? {
+            ...health.checks,
+            nimble: nimbleCheck.ok
+              ? { ok: true, latencyMs: nimbleCheck.latencyMs, model: nimbleCheck.model }
+              : { ok: false, code: nimbleCheck.code, latencyMs: nimbleCheck.latencyMs }
+          }
+        : health.checks,
+      execution: executionView
+    });
   };
 
   const deepHealth = async (_request: FastifyRequest, reply: FastifyReply) => {
@@ -1272,7 +1172,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       detail: observation.detail
     };
   };
-<<<<<<< Updated upstream
   app.get(
     "/execution-mode",
     { preHandler: requireRead, config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
@@ -1288,15 +1187,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
     async (request, reply) => {
       try {
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-        const actor = requireHumanApprovalActor(request, reply, auth);
-=======
         const actor = requireHumanOperatorActor(request, reply, auth);
->>>>>>> Stashed changes
-=======
-        const actor = requireHumanOperatorActor(request, reply, auth);
->>>>>>> Stashed changes
         if (!actor) return;
         const body = executionModeBodySchema.parse(requestObject(request.body));
         workItems.setExecutionMode({
@@ -1308,25 +1199,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       } catch (error) {
         return sendError(reply, error);
       }
-=======
-  app.get("/execution-mode", { preHandler: requireRead }, async () => executionModeView());
-  app.get("/authority", { preHandler: requireRead }, async () => executionModeView());
-  app.post("/execution-mode", async (request, reply) => {
-    try {
-      // Changing the execution mode changes who approves (admin = ACS
-      // auto-approval), so it needs the approver scope, not just acs:write.
-      const actor = requireMutationActor(request, reply, auth, "acs:approve");
-      if (!actor) return;
-      const body = executionModeBodySchema.parse(requestObject(request.body));
-      workItems.setExecutionMode({
-        mode: body.mode,
-        updatedBy: actor,
-        reason: body.reason ?? `operator set ${body.mode}`
-      });
-      return executionModeView();
-    } catch (error) {
-      return sendError(reply, error);
->>>>>>> Stashed changes
     }
   );
   app.get("/metrics", { preHandler: requireRead }, async (_request, reply) => {
@@ -1502,7 +1374,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.get("/", { preHandler: requireRead }, async (request, reply) => {
     try {
-<<<<<<< Updated upstream
       reply.type("text/html").send(renderDashboard(missionControlViewModel(request)));
     } catch (error) {
       return sendError(reply, error);
@@ -1554,37 +1425,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         events: workItems.readEvents({
           limit: Math.min(limit ?? DASHBOARD_EVENT_PAGE, MAX_EVENT_LIMIT),
           ...(beforeSequence === undefined ? {} : { beforeSequence })
-=======
-      const workItemList = workItems.list();
-      const events = workItems.readEvents(eventReadOptions(request.query));
-      reply.type("text/html").send(
-        renderDashboard({
-          workItems: workItemList,
-          events,
-          registeredAgents: workItems.listRegistryAgents(),
-          approvalActionsByWorkItem: approvalActionsByWorkItem(
-            policy,
-            workItemList,
-            gatewayCredentialForRequest(request, auth)?.actor
-          ),
-          executionAttemptsByWorkItem: Object.fromEntries(
-            workItemList.map((workItem) => [workItem.id, executionReads.listExecutionAttempts(workItem.id)])
-          ),
-          attemptLeasesByWorkItem: Object.fromEntries(
-            workItemList.map((workItem) => [
-              workItem.id,
-              executionReads.listAttemptLeases(workItem.id).map(toMissionControlAttemptLease)
-            ])
-          ),
-          executionBackend: reportedExecutionBackend(),
-          operatorDisplayName: gatewayCredentialForRequest(request, auth)?.actor,
-          executionMode: workItems.getExecutionMode().mode ?? undefined,
-          executionModeProblem: workItems.getExecutionMode().mode
-            ? undefined
-            : workItems.getExecutionMode().raw
-              ? "corrupt"
-              : "missing"
->>>>>>> Stashed changes
         })
       };
     } catch (error) {
@@ -1931,6 +1771,20 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
+  const agentRuns = new AgentRunService(workItems, options.agentDispatch ?? agentDispatchConfigFromEnv());
+  agentRuns.reconcile();
+  registerAgentRoutes({
+    app,
+    store: workItems,
+    service: agentRuns,
+    requireRead,
+    requireHumanActor: (request, reply) => requireHumanApprovalActor(request, reply, auth),
+    requireRegistryActor: (request, reply) =>
+      requireMutationActor(request, reply, auth) ? requireBoundActorId(request, reply, auth) : undefined,
+    sendError
+  });
+  app.addHook("onClose", async () => agentRuns.shutdown());
+
   app.get<{ Params: { id: string } }>("/api/agents/:id", { preHandler: requireRead }, async (request, reply) => {
     try {
       const agent = workItems.getRegistryAgent(request.params.id);
@@ -2111,7 +1965,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
-<<<<<<< Updated upstream
   app.post<{ Params: { id: string } }>("/work-items/:id/change-sets", async (request, reply) => {
     try {
       const actor = requireMutationActor(request, reply, auth);
@@ -2472,64 +2325,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           );
         });
         return reply.code(201).send(permit);
-=======
-  // Strands harness hand-off (see harness-dispatch.ts). The harness holds only
-  // an ACS mutation credential: it can request, observe and dispatch its own
-  // invocations, but only the managed bridge can obtain a capability.
-  app.post(
-    "/harness/dc-invocations",
-    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
-    async (request, reply) => {
-      try {
-        const actor = requireMutationActor(request, reply, auth);
-        if (!actor) return;
-        const body = harnessDcInvocationSchema.parse(requestObject(request.body));
-        if (!capabilitySigningConfig || !dcContainment) {
-          return reply
-            .code(503)
-            .send({ error: "capability issuance not configured", code: "capability_issuance_unconfigured" });
-        }
-        const dcPolicy = HARNESS_DC_TOOLS.has(body.tool) ? desktopCommanderToolPolicy(body.tool) : undefined;
-        if (!dcPolicy) return reply.code(403).send({ decision: "deny", code: "harness_tool_not_allowed" });
-        let invocation: DcInvocation;
-        try {
-          invocation = normalizeInvocation(body.tool, body.arguments, dcContainment);
-        } catch (error) {
-          return reply.code(400).send({
-            decision: "deny",
-            code: error instanceof ControlStackError ? error.code : "desktop_commander_argument_invalid"
-          });
-        }
-        const subject = harnessSubject(actor, body.sessionId, body.invocationId);
-        const correlationId = harnessCorrelationId(body.sessionId, body.invocationId);
-        const binding = dcInvocationBinding(body.tool, invocation, subject, capabilitySigningConfig, dcContainment);
-        // Idempotent: one logical invocation maps to exactly one work item, so an
-        // ambiguous transport failure can be retried without a second action.
-        const prior = workItems.list().find((candidate) => candidate.requesterSubject === subject);
-        if (prior) {
-          const params = prior.requestedActions[0]?.params as Record<string, unknown> | undefined;
-          if (params?.tool !== body.tool || params?.bindingHash !== binding.bindingHash) {
-            return reply.code(409).send({ error: "invocation binding mismatch", code: "invocation_binding_mismatch" });
-          }
-          return reply.code(200).send(harnessInvocationView(prior));
-        }
-        if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
-          return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
-        }
-        const workItem = tools.create_work_item(
-          createWorkItemSchema.parse(
-            dcWorkItemInput(body.tool, dcPolicy, invocation, binding, subject, capabilitySigningConfig, correlationId)
-          )
-        );
-        return reply.code(201).send(harnessInvocationView(workItem));
->>>>>>> Stashed changes
       } catch (error) {
         return sendError(reply, error);
       }
     }
   );
 
-<<<<<<< Updated upstream
   function changeSetPermitWorkItem(
     permitId: string,
     runtime: "desktop_commander" | "jace_commander",
@@ -2667,99 +2468,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               throw error;
             return { approval, active: false, code: error.code };
           }
-=======
-  app.post<{ Params: { id: string } }>(
-    "/harness/dc-invocations/:id/dispatch",
-    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
-    async (request, reply) => {
-      try {
-        const actor = requireMutationActor(request, reply, auth);
-        if (!actor) return;
-        const body = harnessDcInvocationSchema.parse(requestObject(request.body));
-        if (!capabilitySigningConfig || !dcContainment) {
-          return reply
-            .code(503)
-            .send({ error: "capability issuance not configured", code: "capability_issuance_unconfigured" });
-        }
-        const workItem = workItems.get(request.params.id);
-        const subject = harnessSubject(actor, body.sessionId, body.invocationId);
-        if (!workItem || workItem.requesterSubject !== subject) {
-          return reply.code(404).send({ error: "work item not found", code: "work_item_not_found" });
-        }
-        let invocation: DcInvocation;
-        try {
-          invocation = normalizeInvocation(body.tool, body.arguments, dcContainment);
-        } catch {
-          return reply.code(409).send({ error: "invocation binding mismatch", code: "invocation_binding_mismatch" });
-        }
-        const binding = dcInvocationBinding(body.tool, invocation, subject, capabilitySigningConfig, dcContainment);
-        const params = workItem.requestedActions[0]?.params as Record<string, unknown> | undefined;
-        if (params?.tool !== body.tool || params?.bindingHash !== binding.bindingHash) {
-          return reply.code(409).send({ error: "invocation binding mismatch", code: "invocation_binding_mismatch" });
-        }
-        const mode = readExecutionModeValue(workItems.getExecutionMode().raw);
-        const adminMode = mode.state === "ok" && mode.mode === "admin";
-        // Admin mode auto-authorizes at issuance under the executor-lease gate;
-        // strict mode dispatches only an item a human has already approved.
-        const dispatchable = workItem.status === "approved" || (adminMode && workItem.status === "needs_approval");
-        if (!dispatchable) {
-          const code = workItem.status === "needs_approval" ? "require_approval" : "not_dispatchable";
-          return reply.code(409).send({ code, ...harnessInvocationView(workItem) });
-        }
-        if (
-          harnessDispatch.enqueue({
-            workItemId: workItem.id,
-            actor: subject,
-            tool: body.tool,
-            arguments: body.arguments
-          }) === "full"
-        ) {
-          return reply.code(429).send({ error: "harness dispatch queue is full", code: "dispatch_queue_full" });
-        }
-        workItems.recordSystemEvent({
-          name: "harness.dispatch_queued",
-          body: {
-            workItemId: workItem.id,
-            tool: body.tool,
-            correlationId: harnessCorrelationId(body.sessionId, body.invocationId)
-          },
-          attributes: { "work_item.id": workItem.id }
-        });
-        return reply.code(202).send(harnessInvocationView(workItem));
-      } catch (error) {
-        return sendError(reply, error);
-      }
-    }
-  );
-
-  app.post(
-    "/dc/harness/next",
-    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
-    async (request, reply) => {
-      try {
-        const workerId = requireWorkerIdentity(request, reply, auth);
-        if (!workerId) return;
-        if (workerId !== DC_BRIDGE_WORKER_ID) {
-          return reply.code(403).send({
-            error: "dedicated Desktop Commander bridge identity is required",
-            code: "dc_bridge_identity_required"
-          });
-        }
-        const entry = harnessDispatch.takeNext((candidate) => {
-          const item = workItems.get(candidate.workItemId);
-          return (
-            item !== undefined &&
-            item.requesterSubject === candidate.actor &&
-            (item.status === "approved" || item.status === "needs_approval")
-          );
-        });
-        if (!entry) return reply.code(204).send();
-        return reply.code(200).send({
-          workItemId: entry.workItemId,
-          actor: entry.actor,
-          tool: entry.tool,
-          arguments: entry.arguments
->>>>>>> Stashed changes
         });
       } catch (error) {
         return sendError(reply, error);
@@ -2767,7 +2475,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   );
 
-<<<<<<< Updated upstream
   app.post<{ Params: { id: string; approvalId: string } }>(
     "/work-items/:id/change-set-approvals/:approvalId/revoke",
     async (request, reply) => {
@@ -2903,8 +2610,159 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
-=======
->>>>>>> Stashed changes
+  // Strands harness hand-off (see harness-dispatch.ts). The harness holds only
+  // an ACS mutation credential: it can request, observe and dispatch its own
+  // invocations, but only the managed bridge can obtain a capability.
+  app.post(
+    "/harness/dc-invocations",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      try {
+        const actor = requireMutationActor(request, reply, auth);
+        if (!actor) return;
+        const body = harnessDcInvocationSchema.parse(requestObject(request.body));
+        if (!capabilitySigningConfig || !dcContainment) {
+          return reply
+            .code(503)
+            .send({ error: "capability issuance not configured", code: "capability_issuance_unconfigured" });
+        }
+        const dcPolicy = HARNESS_DC_TOOLS.has(body.tool) ? desktopCommanderToolPolicy(body.tool) : undefined;
+        if (!dcPolicy) return reply.code(403).send({ decision: "deny", code: "harness_tool_not_allowed" });
+        let invocation: DcInvocation;
+        try {
+          invocation = normalizeInvocation(body.tool, body.arguments, dcContainment);
+        } catch (error) {
+          return reply.code(400).send({
+            decision: "deny",
+            code: error instanceof ControlStackError ? error.code : "desktop_commander_argument_invalid"
+          });
+        }
+        const subject = harnessSubject(actor, body.sessionId, body.invocationId);
+        const correlationId = harnessCorrelationId(body.sessionId, body.invocationId);
+        const binding = dcInvocationBinding(body.tool, invocation, subject, capabilitySigningConfig, dcContainment);
+        // Idempotent: one logical invocation maps to exactly one work item, so an
+        // ambiguous transport failure can be retried without a second action.
+        const prior = workItems.list().find((candidate) => candidate.requesterSubject === subject);
+        if (prior) {
+          const params = prior.requestedActions[0]?.params as Record<string, unknown> | undefined;
+          if (params?.tool !== body.tool || params?.bindingHash !== binding.bindingHash) {
+            return reply.code(409).send({ error: "invocation binding mismatch", code: "invocation_binding_mismatch" });
+          }
+          return reply.code(200).send(harnessInvocationView(prior));
+        }
+        if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
+          return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
+        }
+        const workItem = tools.create_work_item(
+          createWorkItemSchema.parse(
+            dcWorkItemInput(body.tool, dcPolicy, invocation, binding, subject, capabilitySigningConfig, correlationId)
+          )
+        );
+        return reply.code(201).send(harnessInvocationView(workItem));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/harness/dc-invocations/:id/dispatch",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      try {
+        const actor = requireMutationActor(request, reply, auth);
+        if (!actor) return;
+        const body = harnessDcInvocationSchema.parse(requestObject(request.body));
+        if (!capabilitySigningConfig || !dcContainment) {
+          return reply
+            .code(503)
+            .send({ error: "capability issuance not configured", code: "capability_issuance_unconfigured" });
+        }
+        const workItem = workItems.get(request.params.id);
+        const subject = harnessSubject(actor, body.sessionId, body.invocationId);
+        if (!workItem || workItem.requesterSubject !== subject) {
+          return reply.code(404).send({ error: "work item not found", code: "work_item_not_found" });
+        }
+        let invocation: DcInvocation;
+        try {
+          invocation = normalizeInvocation(body.tool, body.arguments, dcContainment);
+        } catch {
+          return reply.code(409).send({ error: "invocation binding mismatch", code: "invocation_binding_mismatch" });
+        }
+        const binding = dcInvocationBinding(body.tool, invocation, subject, capabilitySigningConfig, dcContainment);
+        const params = workItem.requestedActions[0]?.params as Record<string, unknown> | undefined;
+        if (params?.tool !== body.tool || params?.bindingHash !== binding.bindingHash) {
+          return reply.code(409).send({ error: "invocation binding mismatch", code: "invocation_binding_mismatch" });
+        }
+        const mode = readExecutionModeValue(workItems.getExecutionMode().raw);
+        const adminMode = mode.state === "ok" && mode.mode === "admin";
+        // Admin mode auto-authorizes at issuance under the executor-lease gate;
+        // strict mode dispatches only an item a human has already approved.
+        const dispatchable = workItem.status === "approved" || (adminMode && workItem.status === "needs_approval");
+        if (!dispatchable) {
+          const code = workItem.status === "needs_approval" ? "require_approval" : "not_dispatchable";
+          return reply.code(409).send({ code, ...harnessInvocationView(workItem) });
+        }
+        if (
+          harnessDispatch.enqueue({
+            workItemId: workItem.id,
+            actor: subject,
+            tool: body.tool,
+            arguments: body.arguments
+          }) === "full"
+        ) {
+          return reply.code(429).send({ error: "harness dispatch queue is full", code: "dispatch_queue_full" });
+        }
+        workItems.recordSystemEvent({
+          name: "harness.dispatch_queued",
+          body: {
+            workItemId: workItem.id,
+            tool: body.tool,
+            correlationId: harnessCorrelationId(body.sessionId, body.invocationId)
+          },
+          attributes: { "work_item.id": workItem.id }
+        });
+        return reply.code(202).send(harnessInvocationView(workItem));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.post(
+    "/dc/harness/next",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      try {
+        const workerId = requireWorkerIdentity(request, reply, auth);
+        if (!workerId) return;
+        if (workerId !== DC_BRIDGE_WORKER_ID) {
+          return reply.code(403).send({
+            error: "dedicated Desktop Commander bridge identity is required",
+            code: "dc_bridge_identity_required"
+          });
+        }
+        const entry = harnessDispatch.takeNext((candidate) => {
+          const item = workItems.get(candidate.workItemId);
+          return (
+            item !== undefined &&
+            item.requesterSubject === candidate.actor &&
+            (item.status === "approved" || item.status === "needs_approval")
+          );
+        });
+        if (!entry) return reply.code(204).send();
+        return reply.code(200).send({
+          workItemId: entry.workItemId,
+          actor: entry.actor,
+          tool: entry.tool,
+          arguments: entry.arguments
+        });
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
   // External webhook ingest: Hermes (or any upstream) -> ACS control plane.
   // The webhook is a DETERMINISTIC RECEIVER boundary. It does NOT call the
   // downstream system directly. It authenticates the caller (same fail-closed
@@ -3080,9 +2938,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         }
 
         const binding = dcInvocationBinding(body.tool, invocation, dcActor, capabilitySigningConfig, dcContainment);
+        const { invocationHash, bindingHash } = binding;
 
         const modeBeforeLookup = readExecutionModeValue(workItems.getExecutionMode().raw);
-<<<<<<< Updated upstream
         const existing = body.changeSetPermitId
           ? changeSetPermitWorkItem(
               body.changeSetPermitId,
@@ -3108,39 +2966,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                 );
               })
               .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-=======
-        const reusable = (candidate: WorkItem): boolean => {
-          const params = candidate.requestedActions[0]?.params as Record<string, unknown> | undefined;
-          return (
-            candidate.requesterSubject === dcActor &&
-            params?.tool === body.tool &&
-            params?.bindingHash === binding.bindingHash &&
-            ["needs_approval", "approved"].includes(candidate.status) &&
-            (modeBeforeLookup.state === "ok" && modeBeforeLookup.mode === "admin"
-              ? true
-              : !workItems.hasGrantedApprovalBy(candidate.id, ACS_ADMIN_APPROVER))
-          );
-        };
-        let existing: WorkItem | undefined;
-        if (isHarnessSubject(dcActor) || body.workItemId !== undefined) {
-          // Strands harness hand-off: bind to exactly the dispatched work item.
-          // A harness subject can never create a new DC work item here, and a
-          // non-harness caller can never target an item by id.
-          const candidate = body.workItemId === undefined ? undefined : workItems.get(body.workItemId);
-          if (!isHarnessSubject(dcActor) || !candidate || !reusable(candidate)) {
-            recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", candidate?.id);
-            return reply
-              .code(409)
-              .send({ decision: "deny", reason: "harness_binding_mismatch", code: "harness_binding_mismatch" });
-          }
-          existing = candidate;
-        } else {
-          existing = workItems
-            .list()
-            .filter(reusable)
-            .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-        }
->>>>>>> Stashed changes
 
         if (!existing && !hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
           return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
@@ -3283,8 +3108,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         let admissionBound = false;
         try {
           const claimed = claimWithAdmissionPermit({
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
             id: workItem.id,
             workerId,
             leaseMs: DC_BRIDGE_LEASE_MS,
@@ -3308,26 +3131,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           });
           admissionBound =
             !!claimed?.attemptId && claimed.fencingEpoch !== undefined && !!claimed.planHash && !!claimed.inputHash;
-=======
-            workItemId: workItem.id,
-            workerId,
-            leaseMs: DC_BRIDGE_LEASE_MS,
-            permit: admissionPermit,
-            lane: "dc",
-            executionClass: classifyAdmissionTool("dc", body.tool)
-          });
-          admissionBound = Boolean(claimed?.attemptId);
->>>>>>> Stashed changes
-=======
-            workItemId: workItem.id,
-            workerId,
-            leaseMs: DC_BRIDGE_LEASE_MS,
-            permit: admissionPermit,
-            lane: "dc",
-            executionClass: classifyAdmissionTool("dc", body.tool)
-          });
-          admissionBound = Boolean(claimed?.attemptId);
->>>>>>> Stashed changes
           if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
             recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
             return reply.code(409).send({
@@ -3492,13 +3295,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
           const capability = signPreparedDesktopCommanderCapability(payload, capabilitySigningConfig);
           recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "issued", workItem.id);
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
 
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
           return {
             decision: "allow",
             capability,
@@ -3722,8 +3519,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         });
         let admissionBound = false;
         try {
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
           const adminApprovalWouldBeConsumed =
             workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER) ||
             workItems.hasGrantedExecutionPlanApprovalBy(workItem.id, ACS_ADMIN_APPROVER);
@@ -3773,28 +3568,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           });
           admissionBound =
             !!claimed?.attemptId && claimed.fencingEpoch !== undefined && !!claimed.planHash && !!claimed.inputHash;
-=======
-          const claimed = claimWithAdmissionPermit({
-            workItemId: workItem.id,
-            workerId,
-            leaseMs: JC_BRIDGE_LEASE_MS,
-            permit: admissionPermit,
-            lane: "jc",
-            executionClass: classifyAdmissionTool("jc", invocation.toolName)
-          });
-          admissionBound = Boolean(claimed?.attemptId);
->>>>>>> Stashed changes
-=======
-          const claimed = claimWithAdmissionPermit({
-            workItemId: workItem.id,
-            workerId,
-            leaseMs: JC_BRIDGE_LEASE_MS,
-            permit: admissionPermit,
-            lane: "jc",
-            executionClass: classifyAdmissionTool("jc", invocation.toolName)
-          });
-          admissionBound = Boolean(claimed?.attemptId);
->>>>>>> Stashed changes
           if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
             recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
             return reply.code(409).send({
@@ -3926,13 +3699,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
           const capability = signPreparedJaceCommanderCapability(payload, jcSigningConfig);
           recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "issued", workItem.id);
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
 
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
           return {
             decision: "allow",
             capability,
@@ -4134,8 +3901,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
   app.get<{ Params: { id: string } }>(
     "/work-items/:id/change-set-review",
     { preHandler: requireRead },
@@ -4195,32 +3960,25 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         .object({ leaseMs: z.number().int().positive().max(3_600_000).optional() })
         .strict()
         .parse(requestObject(request.body));
-      const claimed = tools.claim_next_approved_work_item({ workerId, ...body });
+      let claimed;
+      if (nimbleRouting.enabled) {
+        const routed = await claimNextAuthoritativeWorkItem({
+          store: workItems,
+          policy,
+          workerId,
+          config: nimbleRouting,
+          ...body
+        });
+        claimed = routed.claimed ? routed.running : undefined;
+      } else {
+        claimed = tools.claim_next_approved_work_item({ workerId, ...body });
+      }
       if (claimed && claimed.status !== "running") {
         return reply
           .code(409)
           .send({ error: "claim was rejected by policy or approval binding", code: "worker_claim_blocked" });
       }
       return claimed ? { claimed: true, workItem: claimed } : { claimed: false };
-=======
-=======
->>>>>>> Stashed changes
-  app.post("/worker/claim", async (request, reply) => {
-    reply.header("cache-control", "no-store");
-    try {
-      const workerId = requireWorkerIdentity(request, reply, auth);
-      if (!workerId) return;
-      const body = z.object({ leaseMs: z.number().int().positive().optional() }).strict().parse(request.body ?? {});
-      const claim = tools.claim_next_approved_work_item({ workerId, ...(body.leaseMs ? { leaseMs: body.leaseMs } : {}) });
-      if (!claim) return { claimed: false };
-      if (claim.status === "blocked") {
-        return reply.code(409).send({ claimed: false, workItemId: claim.id, status: claim.status });
-      }
-      return { claimed: true, workItem: claim };
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
     } catch (error) {
       return sendError(reply, error);
     }
@@ -4387,20 +4145,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.addHook("onClose", async () => {
     executionAdmission.shutdown();
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
     // Active durable reservations survive shutdown and are restored by the next gateway.
-=======
-=======
->>>>>>> Stashed changes
     // Shutdown stops this scheduler; it does not revoke already issued leases.
     // Keep their durable reservations for the next gateway process to recover.
     for (const binding of admissionPermits.values()) binding.permit.release();
     admissionPermits.clear();
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
     await observationWorker?.stop();
     await acpAdapter?.stop();
     executionReads.close();
@@ -4546,7 +4295,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     countActiveLeases: () => workItems.countActiveAttemptLeases(),
     failExpiredLeases: () => {
       workItems.failExpiredLeases();
-      releaseInactiveAdmissionPermits();
+      reapAdmissionPermits();
     },
     recordDrainStart: (details: DrainStartInfo) => recordShutdownDrain("start", details),
     recordDrainFinish: (details: DrainFinishInfo) =>
@@ -5245,16 +4994,11 @@ function isRateLimitedRoute(url: string): boolean {
     path === "/oauth/device/code" ||
     path === "/oauth/token" ||
     path === "/work-items" ||
-<<<<<<< Updated upstream
     // Worker claim polling is deliberately rate limited. It is authenticated, but an
     // unbounded poll loop from a leaked worker credential is still a workload
     // amplifier. The limiter keys by method, route and credential, so each worker
     // identity gets its own budget rather than sharing a global one.
     path === "/worker/claim" ||
-=======
-    path === "/api/visualizer/projection" ||
-    path === "/api/visualizer/status" ||
->>>>>>> Stashed changes
     path === "/dc/capability/issue" ||
     path === "/jc/capability/issue" ||
     path === "/dc/runtime/bootstrap" ||
@@ -5268,15 +5012,8 @@ function isRateLimitedRoute(url: string): boolean {
 
 function isRateLimitedGetRoute(url: string): boolean {
   // /device/verify rate limiting is enforced in-handler (see registerDeviceAuthRoutes).
-<<<<<<< Updated upstream
   const path = url.split("?", 1)[0];
   return path === "/execution-mode" || path === "/authority";
-=======
-  // Visualizer projection fans out into bounded loopback graph reads, so it is
-  // intentionally rate limited even though it is read-only.
-  const path = url.split("?", 1)[0];
-  return path === "/api/visualizer/projection" || path === "/api/visualizer/status";
->>>>>>> Stashed changes
 }
 
 function rateLimitKey(request: FastifyRequest, auth: GatewayAuthOptions | undefined): string {

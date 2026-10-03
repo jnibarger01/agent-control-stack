@@ -2,12 +2,8 @@ import { spawn } from "node:child_process";
 import { ControlStackError, redactValue } from "@agent-control-stack/shared";
 import { z } from "zod";
 import type { MachineControllerConfig } from "./config.js";
-<<<<<<< Updated upstream
-import { resolveSafePath } from "./path.js";
-import { classifyReadonlyCommand } from "./readonly-rules.js";
-=======
 import { isInside, resolveSafePath } from "./path.js";
->>>>>>> Stashed changes
+import { classifyReadonlyCommand } from "./readonly-rules.js";
 
 export const riskLevelSchema = z.enum(["read_only", "safe_mutation", "requires_approval", "destructive", "forbidden"]);
 export type RiskLevel = z.infer<typeof riskLevelSchema>;
@@ -100,7 +96,7 @@ function classifyProjectCommand(
     isExistingProjectPath(config, projectsRoot, args[1] ?? "", cwd)
   ) {
     const gitArgs = args.slice(2);
-    if (isKnownReadonly("git", gitArgs)) return "read_only";
+    if (classifyReadonlyCommand(config, cwd, "git", gitArgs).ok) return "read_only";
     if (isMutation("git", gitArgs)) return "requires_approval";
     return undefined;
   }
@@ -305,22 +301,6 @@ function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
-<<<<<<< Updated upstream
-=======
-function isKnownReadonly(command: string, args: string[]): boolean {
-  return (
-    (command === "git" &&
-      (["status", "diff", "log", "show"].includes(args[0] ?? "") || (args[0] === "worktree" && args[1] === "list"))) ||
-    (command === "bun" && args[0] === "--version") ||
-    (command === "node" && ["--version", "-v"].includes(args[0] ?? "")) ||
-    (command === "python3" && ["--version", "-V"].includes(args[0] ?? "")) ||
-    (command === "docker" && args[0] === "ps") ||
-    (command === "df" && ["", "-h"].includes(args[0] ?? "")) ||
-    (command === "free" && ["", "-h"].includes(args[0] ?? ""))
-  );
-}
-
->>>>>>> Stashed changes
 function isMutation(command: string, args: string[]): boolean {
   return (
     (command === "npm" && (args[0] === "test" || args[0] === "run")) ||

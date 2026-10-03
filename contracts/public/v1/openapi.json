@@ -142,7 +142,7 @@
                       "expiresAt": {
                         "type": "string",
                         "format": "date-time",
-                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
                       },
                       "manifestHash": {
                         "type": "string",
@@ -578,7 +578,7 @@
                   "expiresAt": {
                     "type": "string",
                     "format": "date-time",
-                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
                   }
                 },
                 "required": [
@@ -1292,16 +1292,10 @@
                   },
                   "id": {
                     "default": null,
-                    "anyOf": [
-                      {
-                        "type": "string"
-                      },
-                      {
-                        "type": "number"
-                      },
-                      {
-                        "type": "null"
-                      }
+                    "type": [
+                      "string",
+                      "number",
+                      "null"
                     ]
                   },
                   "method": {
@@ -1830,7 +1824,6 @@
         }
       }
     },
-<<<<<<< Updated upstream
     "/work-items/{id}/change-sets": {
       "post": {
         "operationId": "submitChangeSet",
@@ -1846,12 +1839,6 @@
             }
           }
         ],
-=======
-    "/harness/dc-invocations": {
-      "post": {
-        "operationId": "createHarnessInvocation",
-        "summary": "Create (idempotently) the governed work item for one Strands harness Desktop Commander call.",
->>>>>>> Stashed changes
         "requestBody": {
           "required": true,
           "content": {
@@ -1860,7 +1847,6 @@
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "properties": {
-<<<<<<< Updated upstream
                   "definition": {
                     "type": "object",
                     "properties": {
@@ -1949,7 +1935,7 @@
                         "type": "string",
                         "maxLength": 64,
                         "format": "date-time",
-                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
                       },
                       "constraints": {
                         "type": "object",
@@ -2684,22 +2670,10 @@
                 "type": "object",
                 "properties": {
                   "missionId": {
-=======
-                  "sessionId": {
-                    "type": "string",
-                    "pattern": "^[A-Za-z0-9_-]{1,128}$"
-                  },
-                  "invocationId": {
-                    "type": "string",
-                    "pattern": "^[A-Za-z0-9_-]{1,128}$"
-                  },
-                  "tool": {
->>>>>>> Stashed changes
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 128
                   },
-<<<<<<< Updated upstream
                   "repository": {
                     "type": "string",
                     "minLength": 1,
@@ -2726,21 +2700,6 @@
                   "baseRef",
                   "baseSha",
                   "summary"
-=======
-                  "arguments": {
-                    "type": "object",
-                    "propertyNames": {
-                      "type": "string"
-                    },
-                    "additionalProperties": {}
-                  }
-                },
-                "required": [
-                  "sessionId",
-                  "invocationId",
-                  "tool",
-                  "arguments"
->>>>>>> Stashed changes
                 ],
                 "additionalProperties": false
               }
@@ -2759,7 +2718,6 @@
           },
           "403": {
             "description": "The authenticated principal is not authorized."
-<<<<<<< Updated upstream
           },
           "409": {
             "description": "Mission identity, plan, or persisted state conflict."
@@ -2787,13 +2745,10 @@
           },
           "503": {
             "description": "Coding mission ports are not configured."
-=======
->>>>>>> Stashed changes
           }
         }
       }
     },
-<<<<<<< Updated upstream
     "/coding-missions/{id}": {
       "get": {
         "operationId": "getCodingMission",
@@ -2835,12 +2790,6 @@
       "post": {
         "operationId": "approveCodingChangeSet",
         "summary": "Approve one immutable coding Change Set and continue governed execution without another confirmation.",
-=======
-    "/harness/dc-invocations/{id}/dispatch": {
-      "post": {
-        "operationId": "dispatchHarnessInvocation",
-        "summary": "Hand an approved harness invocation to the managed Desktop Commander bridge.",
->>>>>>> Stashed changes
         "parameters": [
           {
             "name": "id",
@@ -2860,7 +2809,6 @@
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "properties": {
-<<<<<<< Updated upstream
                   "expectedChangeSetHash": {
                     "type": "string",
                     "pattern": "^[a-f0-9]{64}$"
@@ -2868,7 +2816,46 @@
                 },
                 "required": [
                   "expectedChangeSetHash"
-=======
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "409": {
+            "description": "Approval does not match the immutable Change Set or the mission is not awaiting approval."
+          },
+          "503": {
+            "description": "Coding mission ports are not configured."
+          }
+        }
+      }
+    },
+    "/harness/dc-invocations": {
+      "post": {
+        "operationId": "createHarnessInvocation",
+        "summary": "Create (idempotently) the governed work item for one Strands harness Desktop Commander call.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
                   "sessionId": {
                     "type": "string",
                     "pattern": "^[A-Za-z0-9_-]{1,128}$"
@@ -2895,7 +2882,6 @@
                   "invocationId",
                   "tool",
                   "arguments"
->>>>>>> Stashed changes
                 ],
                 "additionalProperties": false
               }
@@ -2903,8 +2889,77 @@
           }
         },
         "responses": {
-<<<<<<< Updated upstream
-=======
+          "201": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/harness/dc-invocations/{id}/dispatch": {
+      "post": {
+        "operationId": "dispatchHarnessInvocation",
+        "summary": "Hand an approved harness invocation to the managed Desktop Commander bridge.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "sessionId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,128}$"
+                  },
+                  "invocationId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,128}$"
+                  },
+                  "tool": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "arguments": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {}
+                  }
+                },
+                "required": [
+                  "sessionId",
+                  "invocationId",
+                  "tool",
+                  "arguments"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
           "202": {
             "description": "Successful response."
           },
@@ -2936,7 +2991,6 @@
           }
         ],
         "responses": {
->>>>>>> Stashed changes
           "200": {
             "description": "Successful response."
           },
@@ -2948,15 +3002,6 @@
           },
           "403": {
             "description": "The authenticated principal is not authorized."
-<<<<<<< Updated upstream
-          },
-          "409": {
-            "description": "Approval does not match the immutable Change Set or the mission is not awaiting approval."
-          },
-          "503": {
-            "description": "Coding mission ports are not configured."
-=======
->>>>>>> Stashed changes
           }
         }
       }
@@ -3242,13 +3287,13 @@
                     "type": "string",
                     "maxLength": 64,
                     "format": "date-time",
-                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
                   },
                   "finishedAt": {
                     "type": "string",
                     "maxLength": 64,
                     "format": "date-time",
-                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
                   },
                   "exitCode": {
                     "anyOf": [
@@ -3956,6 +4001,296 @@
         },
         "responses": {
           "201": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/api/agent-clis": {
+      "get": {
+        "operationId": "listAgentClis",
+        "summary": "List the dispatchable CLI agents with install, login and dispatch state.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/api/agent-clis/sync": {
+      "post": {
+        "operationId": "syncAgentClis",
+        "summary": "Register the CLI agents in the agent registry (idempotent).",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/api/agent-clis/{id}/test": {
+      "post": {
+        "operationId": "testAgentCli",
+        "summary": "Run a harmless prompt to verify a CLI agent is signed in and working.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/api/agent-runs/preview": {
+      "post": {
+        "operationId": "previewAgentRun",
+        "summary": "Validate an agent dispatch and return the exact command hash the operator must confirm.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "agentId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32000
+                  },
+                  "repo": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "edit",
+                      "read-only"
+                    ]
+                  },
+                  "timeoutSec": {
+                    "type": "integer",
+                    "minimum": 10,
+                    "maximum": 3600
+                  }
+                },
+                "required": [
+                  "agentId",
+                  "prompt",
+                  "repo",
+                  "mode"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/api/agent-runs": {
+      "post": {
+        "operationId": "dispatchAgentRun",
+        "summary": "Dispatch a confirmed agent run into a fresh git worktree (human operator only).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "agentId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32000
+                  },
+                  "repo": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "edit",
+                      "read-only"
+                    ]
+                  },
+                  "timeoutSec": {
+                    "type": "integer",
+                    "minimum": 10,
+                    "maximum": 3600
+                  },
+                  "confirmationHash": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "agentId",
+                  "prompt",
+                  "repo",
+                  "mode",
+                  "confirmationHash"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      },
+      "get": {
+        "operationId": "listAgentRuns",
+        "summary": "List recent agent runs.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/api/agent-runs/{id}": {
+      "get": {
+        "operationId": "getAgentRun",
+        "summary": "Read an agent run with its redacted output.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/api/agent-runs/{id}/cancel": {
+      "post": {
+        "operationId": "cancelAgentRun",
+        "summary": "Cancel an active agent run.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
             "description": "Successful response."
           },
           "400": {

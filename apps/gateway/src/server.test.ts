@@ -45,32 +45,7 @@ function resolveHermesRuntimeLauncher(executable: string): string {
 
 function hermesE2eEnvironment(home: string, hermesHome: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
   for (const key of ["PATH", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"]) {
-=======
-=======
->>>>>>> Stashed changes
-  for (const key of [
-    "PATH",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TZ",
-    "TERM",
-    "NO_COLOR",
-    "FORCE_COLOR",
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "ALL_PROXY",
-    "NO_PROXY"
-  ]) {
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
   return {
@@ -229,7 +204,6 @@ describe("mission control gateway", () => {
     }
   });
 
-<<<<<<< Updated upstream
   it("rejects unregistered agent.prompt targets before preview or persistence", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-agent-target-validation-"));
     const app = buildTestGateway({ dbPath: join(dir, "control.db"), logger: false });
@@ -382,59 +356,12 @@ describe("mission control gateway", () => {
       const olderEvents = older.json().events as Array<{ sequence: number }>;
       expect(olderEvents).toHaveLength(5);
       expect(Math.max(...olderEvents.map((event) => event.sequence))).toBeLessThan(latestEvents[0]!.sequence);
-=======
-  it("protects the same-origin Visualizer projection route and reports unconfigured state", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "acs-visualizer-unconfigured-"));
-    const app = buildGateway({
-      dbPath: join(dir, "control.db"),
-      logger: false,
-      auth: testAuth,
-      visualizerBaseUrl: false
-    });
-
-    try {
-      const anonymous = await app.inject({
-        method: "GET",
-        url: "/api/visualizer/projection"
-      });
-      const authenticated = await app.inject({
-        method: "GET",
-        url: "/api/visualizer/projection",
-        headers: { authorization: "Bearer t" }
-      });
-      const anonymousStatus = await app.inject({
-        method: "GET",
-        url: "/api/visualizer/status"
-      });
-      const authenticatedStatus = await app.inject({
-        method: "GET",
-        url: "/api/visualizer/status",
-        headers: { authorization: "Bearer t" }
-      });
-
-      expect(anonymous.statusCode).toBe(401);
-      expect(anonymousStatus.statusCode).toBe(401);
-      expect(authenticated.statusCode).toBe(200);
-      expect(authenticated.json()).toMatchObject({
-        schemaVersion: 1,
-        configured: false,
-        items: []
-      });
-      expect(authenticatedStatus.statusCode).toBe(200);
-      expect(authenticatedStatus.json()).toMatchObject({
-        schemaVersion: 1,
-        configured: false,
-        reachable: false,
-        state: "not_configured"
-      });
->>>>>>> Stashed changes
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-<<<<<<< Updated upstream
   it("serves live dashboard fragments from the same view model as the page", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-mission-control-fragments-"));
     const app = buildTestGateway({ dbPath: join(dir, "control.db"), logger: false });
@@ -484,136 +411,6 @@ describe("mission control gateway", () => {
       expect(fragments.executionModeState).toBe("strict");
       const page = await app.inject({ method: "GET", url: "/" });
       expect(page.body).toContain(`<div class="queue" id="queue-list">${fragments.queueList}</div>`);
-=======
-  it("serves Visualizer operational status through the authenticated read-only boundary", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "acs-visualizer-status-"));
-    const calls: Array<{ url: string; method?: string }> = [];
-    const visualizerFetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      calls.push({ url: String(input), method: init?.method });
-      return new Response(
-        JSON.stringify({
-          schemaVersion: 1,
-          generatedAt: "2026-09-23T16:20:00.000Z",
-          status: "healthy",
-          eventStreams: { activeClients: 1 },
-          executions: { activeCount: 2, queueDepth: 0 },
-          runtimes: [
-            { runtime: "codex", status: "healthy" },
-            { runtime: "hermes", status: "healthy" },
-            { runtime: "openclaw", status: "healthy" },
-            { runtime: "opencode", status: "healthy" },
-            { runtime: "claude", status: "healthy" },
-            { runtime: "pi", status: "healthy" }
-          ],
-          database: { availability: "available" },
-          approvals: { pendingCount: 0 }
-        }),
-        { status: 200, headers: { "content-type": "application/json" } }
-      );
-    }) as typeof fetch;
-    const app = buildTestGateway({
-      dbPath: join(dir, "control.db"),
-      logger: false,
-      visualizerBaseUrl: "http://127.0.0.1:4317",
-      visualizerFetch
-    });
-
-    try {
-      const status = await app.inject({
-        method: "GET",
-        url: "/api/visualizer/status"
-      });
-      expect(status.statusCode).toBe(200);
-      expect(status.headers["cache-control"]).toBe("no-store");
-      expect(status.headers["x-content-type-options"]).toBe("nosniff");
-      expect(status.headers["x-ratelimit-remaining"]).toBeDefined();
-      expect(status.json()).toMatchObject({
-        configured: true,
-        reachable: true,
-        state: "healthy",
-        database: "available",
-        activeExecutions: 2,
-        queueDepth: 0
-      });
-      expect(calls).toEqual([
-        {
-          url: "http://127.0.0.1:4317/api/v1/system-status",
-          method: "GET"
-        }
-      ]);
-
-      const mutation = await app.inject({
-        method: "POST",
-        url: "/api/visualizer/status",
-        payload: { action: "restart" }
-      });
-      expect(mutation.statusCode).toBe(404);
-      expect(calls).toHaveLength(1);
-    } finally {
-      await app.close();
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("serves Visualizer projection through bounded read-only loopback GETs", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "acs-visualizer-projection-"));
-    const calls: Array<{ url: string; method?: string }> = [];
-    const visualizerFetch = (async (input: string | URL | Request, init?: RequestInit) => {
-      calls.push({ url: String(input), method: init?.method });
-      return new Response("{}", { status: 404 });
-    }) as typeof fetch;
-    const app = buildTestGateway({
-      dbPath: join(dir, "control.db"),
-      logger: false,
-      visualizerBaseUrl: "http://127.0.0.1:4174",
-      visualizerFetch
-    });
-
-    try {
-      const created = await app.inject({
-        method: "POST",
-        url: "/work-items",
-        payload: {
-          title: "Project me",
-          intent: "verify visualizer gateway projection",
-          target: {},
-          risk: "low"
-        }
-      });
-      expect(created.statusCode).toBe(201);
-
-      const projection = await app.inject({
-        method: "GET",
-        url: "/api/visualizer/projection?limit=1"
-      });
-
-      expect(projection.statusCode).toBe(200);
-      expect(projection.headers["cache-control"]).toBe("no-store");
-      expect(projection.headers["x-content-type-options"]).toBe("nosniff");
-      expect(projection.headers["x-ratelimit-remaining"]).toBeDefined();
-      expect(projection.json()).toMatchObject({
-        schemaVersion: 1,
-        configured: true,
-        items: [
-          {
-            workItemId: created.json().id,
-            title: "Project me",
-            state: "not_projected"
-          }
-        ]
-      });
-      expect(calls).toHaveLength(1);
-      expect(calls[0]?.url).toMatch(/^http:\/\/127\.0\.0\.1:4174\/api\/v1\/executions\/[0-9a-f-]+\/graph$/);
-      expect(calls[0]?.method).toBe("GET");
-
-      const mutation = await app.inject({
-        method: "POST",
-        url: "/api/visualizer/projection",
-        payload: { action: "approve" }
-      });
-      expect(mutation.statusCode).toBe(404);
-      expect(calls).toHaveLength(1);
->>>>>>> Stashed changes
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
@@ -1913,7 +1710,11 @@ describe("gateway MCP transport", () => {
       const configPath = join(dir, "machine-controller.json");
       const dbPath = join(dir, "control.db");
       const opencodeConfigPath = join(dir, "opencode.json");
+      const isolatedConfigHome = join(dir, "config");
+      const isolatedDataHome = join(dir, "data");
       mkdirSync(allowed);
+      mkdirSync(isolatedConfigHome);
+      mkdirSync(isolatedDataHome);
       writeFileSync(
         configPath,
         JSON.stringify({
@@ -1948,6 +1749,11 @@ describe("gateway MCP transport", () => {
           );
           response.writeHead(200, { "content-type": "text/event-stream" });
           if (hasToolResult) {
+            const toolText = JSON.stringify(messages);
+            const content =
+              toolText.includes("fixture-response:") || toolText.includes("completed through the gateway")
+                ? "OpenCode fixture invocation completed"
+                : "OpenCode fixture tool failed";
             response.end(
               `data: ${JSON.stringify({
                 id: "fixture-completion-2",
@@ -1955,7 +1761,7 @@ describe("gateway MCP transport", () => {
                 choices: [
                   {
                     index: 0,
-                    delta: { role: "assistant", content: "OpenCode fixture invocation completed" },
+                    delta: { role: "assistant", content },
                     finish_reason: null
                   }
                 ]
@@ -2077,7 +1883,7 @@ describe("gateway MCP transport", () => {
         writeFileSync(opencodeConfigPath, JSON.stringify(config));
         opencodeProcess = spawn(
           opencodeExecutable!,
-          ["run", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
+          ["run", "--pure", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
           {
             cwd: allowed,
             env: opencodeE2eEnvironment(dir, opencodeConfigPath),
@@ -2105,7 +1911,7 @@ describe("gateway MCP transport", () => {
         writeFileSync(opencodeConfigPath, JSON.stringify(invalidConfig));
         invalidRun = spawn(
           opencodeExecutable!,
-          ["run", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
+          ["run", "--pure", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
           {
             cwd: allowed,
             env: opencodeE2eEnvironment(dir, opencodeConfigPath),
@@ -2160,6 +1966,7 @@ describe("gateway MCP transport", () => {
         rmSync(dir, { recursive: true, force: true });
       }
     },
+    // Two real OpenCode processes. Idle is about 3s; the 5s default trips when vitest saturates the machine.
     30_000
   );
 
@@ -2176,23 +1983,7 @@ describe("gateway MCP transport", () => {
       if (!hermesExecutable) throw new Error("Hermes executable unavailable");
       const hermesRuntimeLauncher = resolveHermesRuntimeLauncher(hermesExecutable);
       const installedHermesLauncher = readFileSync(hermesRuntimeLauncher);
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
       const hermesFixture = prepareHermesSourceFixture(hermesRuntimeLauncher, dir, hermesHome);
-=======
-=======
->>>>>>> Stashed changes
-      let hermesFixture: ReturnType<typeof prepareHermesSourceFixture>;
-      try {
-        hermesFixture = prepareHermesSourceFixture(hermesRuntimeLauncher, dir, hermesHome);
-      } catch (error) {
-        rmSync(dir, { recursive: true, force: true });
-        throw error;
-      }
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
       writeFileSync(
         configPath,
         JSON.stringify({
@@ -2214,7 +2005,8 @@ describe("gateway MCP transport", () => {
         advertisedTools: string[];
         emitted: { name: string; arguments: Record<string, unknown> } | undefined;
       }> = [];
-      const toolResponseTrace: Array<{ name: unknown; content: string }> = [];
+      // Hermes tool results carry tool_call_id and omit the tool name.
+      const callsById = new Map<string, string>();
       const modelServer = createServer((request, response) => {
         if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
           response.writeHead(404).end();
@@ -2239,8 +2031,6 @@ describe("gateway MCP transport", () => {
             (message) => message && typeof message === "object" && (message as Record<string, unknown>).role === "tool"
           );
           const lastTool = toolResults.at(-1) as Record<string, unknown> | undefined;
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
           const lastToolName =
             typeof lastTool?.name === "string"
               ? lastTool.name
@@ -2263,21 +2053,6 @@ describe("gateway MCP transport", () => {
                     });
                   })
                   .at(-1);
-=======
-=======
->>>>>>> Stashed changes
-          const lastToolCall = messages
-            .flatMap((message) => {
-              if (!message || typeof message !== "object") return [];
-              const calls = (message as Record<string, unknown>).tool_calls;
-              return Array.isArray(calls) ? calls : [];
-            })
-            .find((call) => call && typeof call === "object" && call.id === lastTool?.tool_call_id);
-          const lastToolName = typeof lastTool?.name === "string" ? lastTool.name : lastToolCall?.function?.name;
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
           const resultText =
             lastTool && typeof lastTool.content === "string"
               ? String(lastTool.content)
@@ -2286,7 +2061,6 @@ describe("gateway MCP transport", () => {
                 : lastTool
                   ? JSON.stringify(lastTool)
                   : "";
-          if (lastTool) toolResponseTrace.push({ name: lastToolName, content: resultText.slice(0, 4_000) });
           const jsonStart = resultText.indexOf("{");
           const jsonEnd = resultText.lastIndexOf("}");
           const result =
@@ -2356,20 +2130,28 @@ describe("gateway MCP transport", () => {
             }) ?? searchHits.find((item) => typeof item.name === "string");
 
           let call: { name: string; args: Record<string, unknown> } | undefined;
+          const lastToolCallId = typeof lastTool?.tool_call_id === "string" ? lastTool.tool_call_id : "";
+          const resolvedToolName =
+            (typeof lastTool?.name === "string" && lastTool.name) || callsById.get(lastToolCallId) || "";
           if (tools.length === 0) {
             // Hermes performs a provider capability/metadata probe before the
             // first tool-bearing turn. It is not the model-facing smoke path.
           } else if (toolResults.length === 0) {
             call = emit("tool_search", { queries: ["ACS test agent run", "test.agent.run"], limit: 5 });
-          } else if (lastToolName === "tool_search" && namedHit && typeof namedHit.name === "string") {
+          } else if (
+            (resolvedToolName || lastToolName) === "tool_search" &&
+            namedHit &&
+            typeof namedHit.name === "string"
+          ) {
             call = emit("tool_describe", { names: [namedHit.name] });
-          } else if (lastToolName === "tool_describe") {
+          } else if ((resolvedToolName || lastToolName) === "tool_describe") {
             const describedName =
               (typeof result?.name === "string" && result.name) ||
               (namedHit && typeof namedHit.name === "string" ? namedHit.name : "mcp__acs_gateway__test_agent_run");
             call = emit("tool_call", {
               name: describedName,
               arguments: {
+                // The MCP schema enum is directAgentNames. Hermes rejects other ids before the call.
                 agent: "codex",
                 prompt: "Hermes deterministic interoperability check",
                 cwd: allowed,
@@ -2382,6 +2164,8 @@ describe("gateway MCP transport", () => {
           response.writeHead(200, { "content-type": "text/event-stream" });
           const id = `hermes-fixture-${modelTrace.length}`;
           if (call) {
+            const callId = `hermes-call-${modelTrace.length}`;
+            callsById.set(callId, call.name);
             response.end(
               `data: ${JSON.stringify({
                 id,
@@ -2394,7 +2178,7 @@ describe("gateway MCP transport", () => {
                       tool_calls: [
                         {
                           index: 0,
-                          id: `hermes-call-${modelTrace.length}`,
+                          id: callId,
                           type: "function",
                           function: { name: call.name, arguments: JSON.stringify(call.args) }
                         }
@@ -2457,21 +2241,7 @@ describe("gateway MCP transport", () => {
           ],
           {
             cwd: allowed,
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
             env: { ...hermesE2eEnvironment(dir, hermesHome), HERMES_RUNTIME_DIR: hermesFixture.runtimeDirectory },
-=======
-=======
->>>>>>> Stashed changes
-            env: {
-              ...hermesE2eEnvironment(dir, hermesHome),
-              HERMES_RUNTIME_DIR: hermesFixture.runtimeDirectory,
-              HERMES_INSTALL_ROOT: hermesFixture.sourceRoot
-            },
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
             stdio: ["ignore", "pipe", "pipe"]
           }
         );
@@ -2494,10 +2264,7 @@ describe("gateway MCP transport", () => {
         const events = new SqliteWorkItemStore(dbPath);
         try {
           const storedEvents = events.readEvents();
-          expect(
-            storedEvents.map((event) => event.name),
-            JSON.stringify(toolResponseTrace)
-          ).toEqual(
+          expect(storedEvents.map((event) => event.name)).toEqual(
             expect.arrayContaining([
               "local_agent.authorization",
               "local_agent.dispatch.started",

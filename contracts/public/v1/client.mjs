@@ -124,7 +124,6 @@ const operations = {
     "method": "GET",
     "path": "/work-items/{id}"
   },
-<<<<<<< Updated upstream
   "submitChangeSet": {
     "method": "POST",
     "path": "/work-items/{id}/change-sets"
@@ -168,7 +167,7 @@ const operations = {
   "approveCodingChangeSet": {
     "method": "POST",
     "path": "/coding-missions/{id}/approve"
-=======
+  },
   "createHarnessInvocation": {
     "method": "POST",
     "path": "/harness/dc-invocations"
@@ -180,7 +179,6 @@ const operations = {
   "getExecutionResult": {
     "method": "GET",
     "path": "/work-items/{id}/execution-result"
->>>>>>> Stashed changes
   },
   "approveWorkItem": {
     "method": "POST",
@@ -233,6 +231,38 @@ const operations = {
   "registerAgent": {
     "method": "POST",
     "path": "/api/agents"
+  },
+  "listAgentClis": {
+    "method": "GET",
+    "path": "/api/agent-clis"
+  },
+  "syncAgentClis": {
+    "method": "POST",
+    "path": "/api/agent-clis/sync"
+  },
+  "testAgentCli": {
+    "method": "POST",
+    "path": "/api/agent-clis/{id}/test"
+  },
+  "previewAgentRun": {
+    "method": "POST",
+    "path": "/api/agent-runs/preview"
+  },
+  "dispatchAgentRun": {
+    "method": "POST",
+    "path": "/api/agent-runs"
+  },
+  "listAgentRuns": {
+    "method": "GET",
+    "path": "/api/agent-runs"
+  },
+  "getAgentRun": {
+    "method": "GET",
+    "path": "/api/agent-runs/{id}"
+  },
+  "cancelAgentRun": {
+    "method": "POST",
+    "path": "/api/agent-runs/{id}/cancel"
   },
   "getAgent": {
     "method": "GET",

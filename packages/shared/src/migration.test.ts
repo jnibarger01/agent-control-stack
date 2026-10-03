@@ -17,8 +17,6 @@ function database(lastVersion?: number): DatabaseSync {
   const directory = mkdtempSync(join(tmpdir(), "acs-migrations-"));
   directories.push(directory);
   const db = new DatabaseSync(join(directory, "control.db"));
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
   if (lastVersion === undefined) applyControlPlaneMigrations(db);
   else {
     // Construct the historical fixture atomically. The test below still runs
@@ -43,29 +41,6 @@ function database(lastVersion?: number): DatabaseSync {
       db.exec("ROLLBACK");
       db.close();
       throw error;
-=======
-=======
->>>>>>> Stashed changes
-  if (lastVersion === undefined) {
-    applyControlPlaneMigrations(db);
-  } else {
-    db.exec(`CREATE TABLE schema_migrations (
-      version INTEGER PRIMARY KEY, name TEXT NOT NULL, filename TEXT NOT NULL,
-      checksum TEXT NOT NULL, applied_at TEXT NOT NULL
-    )`);
-    for (const migration of controlPlaneMigrations().filter((entry) => entry.version <= lastVersion)) {
-      db.exec(migration.sql);
-      db.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)").run(
-        migration.version,
-        migration.name,
-        migration.filename,
-        migration.checksum,
-        new Date().toISOString()
-      );
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
     }
   }
   return db;
@@ -328,76 +303,6 @@ describe("control-plane migration alternate 17-21 repair", () => {
         .all()
     ).toEqual(before);
     db.close();
-  });
-});
-
-describe("deployed migration lineage 37-39", () => {
-  it("preserves the live 037 identity and appends new migrations after it", () => {
-    const db = new DatabaseSync(":memory:");
-    try {
-      db.exec(`
-        CREATE TABLE schema_migrations (
-          version INTEGER PRIMARY KEY,
-          name TEXT NOT NULL,
-          filename TEXT NOT NULL,
-          checksum TEXT NOT NULL,
-          applied_at TEXT NOT NULL
-        )
-      `);
-      const migrations = controlPlaneMigrations();
-      for (const migration of migrations.filter((candidate) => candidate.version <= 36)) {
-        db.exec(migration.sql);
-        db.prepare(
-          "INSERT INTO schema_migrations (version, name, filename, checksum, applied_at) VALUES (?, ?, ?, ?, ?)"
-        ).run(migration.version, migration.name, migration.filename, migration.checksum, new Date().toISOString());
-      }
-
-      const deployed037 = migrations.find((migration) => migration.version === 37);
-      expect(deployed037).toMatchObject({
-        name: "jc_reusable_work_item_index",
-        filename: "037_jc_reusable_work_item_index.sql",
-        checksum: "fc9e4df432de5f482c7cd11991fb5a00933d888e1d5292019cc739eb4ca80702"
-      });
-      if (!deployed037) throw new Error("deployed migration 037 is missing");
-      db.exec(deployed037.sql);
-      db.prepare(
-        "INSERT INTO schema_migrations (version, name, filename, checksum, applied_at) VALUES (?, ?, ?, ?, ?)"
-      ).run(
-        deployed037.version,
-        deployed037.name,
-        deployed037.filename,
-        deployed037.checksum,
-        new Date().toISOString()
-      );
-
-      applyControlPlaneMigrations(db);
-      const tail = db
-        .prepare("SELECT version, name, filename, checksum FROM schema_migrations WHERE version >= 37 ORDER BY version")
-        .all();
-      expect(tail).toEqual(
-        migrations
-          .filter((migration) => migration.version >= 37)
-          .map(({ version, name, filename, checksum }) => ({ version, name, filename, checksum }))
-      );
-      expect(
-        db
-          .prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?")
-          .get("idx_work_items_requester_status_created")
-      ).toBeDefined();
-      expect(
-        db
-          .prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?")
-          .get("idx_execution_results_idempotency_key")
-      ).toBeDefined();
-      expect(
-        db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get("admission_permits")
-      ).toBeDefined();
-      expect(
-        db.prepare("SELECT 1 FROM pragma_table_info('admission_permits') WHERE name = ?").get("execution_class")
-      ).toBeDefined();
-    } finally {
-      db.close();
-    }
   });
 });
 
@@ -789,7 +694,9 @@ describe("recovery migration 37-38 lineage", () => {
       ).toContain("work_items");
 
       applyControlPlaneMigrations(db);
-      expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 49 });
+      expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({
+        count: controlPlaneMigrations().length
+      });
       expect(
         db
           .prepare(

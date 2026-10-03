@@ -1,12 +1,6 @@
 export * from "./attempt.js";
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
 export * from "./change-set.js";
 export * from "./change-set-approval.js";
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
 export * from "./assignment.js";
 export * from "./contracts.js";
 export * from "./execution-plan.js";

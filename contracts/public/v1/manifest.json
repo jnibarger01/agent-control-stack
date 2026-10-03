@@ -13,16 +13,9 @@
     "apps/gateway/src/server.ts"
   ],
   "hashes": {
-<<<<<<< Updated upstream
-    "openapi.json": "sha256:ee687ac0b3d32536bedc4b553dd73914eee1ff0084913c6c8df791490b33d7af",
+    "openapi.json": "sha256:4800c27bced0e78c2e31b1f2262caae1422ac849d822ffba2e3ea8b3300b19f5",
     "mcp-tools.json": "sha256:336eb595c990d8583d378e2d995c677278ef2f1f5b593c15462635afa926118a",
     "examples.json": "sha256:cf25f904859bbdfc4ff57f017a87abefb3f7216aad5278f27f58ef1a7f9ceea3",
-    "client.mjs": "sha256:012d669289f2d6082db36af3ae5970cb2dbbcc79641551ab2718d156811fd6cb"
-=======
-    "openapi.json": "sha256:d430c2befd084a6d585a50c344f589739833f605cad03d7bf4670767a9f11225",
-    "mcp-tools.json": "sha256:336eb595c990d8583d378e2d995c677278ef2f1f5b593c15462635afa926118a",
-    "examples.json": "sha256:cf25f904859bbdfc4ff57f017a87abefb3f7216aad5278f27f58ef1a7f9ceea3",
-    "client.mjs": "sha256:4fecf928819c5b4de0b97032e8f32b4c0d9be6691051b0008735783bad455d56"
->>>>>>> Stashed changes
+    "client.mjs": "sha256:dbd7425b6958ae5e572ffb0a3d2af846ac964806f562617898e8bca1929a5d27"
   }
 }

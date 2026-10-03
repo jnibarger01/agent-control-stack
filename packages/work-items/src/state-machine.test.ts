@@ -971,8 +971,6 @@ describe("work item state machine", () => {
           name: "execution_results_idempotency_unique",
           filename: "038_execution_results_idempotency_unique.sql"
         },
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
         { version: 39, name: "jace_commander_admin_approvals", filename: "039_jace_commander_admin_approvals.sql" },
         { version: 40, name: "admission_permits", filename: "040_admission_permits.sql" },
         { version: 41, name: "admission_permit_execution_class", filename: "041_admission_permit_execution_class.sql" },
@@ -983,18 +981,8 @@ describe("work item state machine", () => {
         { version: 46, name: "change_set_operation_permits", filename: "046_change_set_operation_permits.sql" },
         { version: 47, name: "autonomous_authority", filename: "047_autonomous_authority.sql" },
         { version: 48, name: "operation_permit_grant_authority", filename: "048_operation_permit_grant_authority.sql" },
-        { version: 49, name: "coding_missions", filename: "049_coding_missions.sql" }
-=======
-=======
->>>>>>> Stashed changes
-        { version: 39, name: "admission_permits", filename: "039_admission_permits.sql" },
-        { version: 40, name: "admission_permit_execution_class", filename: "040_admission_permit_execution_class.sql" },
-        { version: 41, name: "change_sets", filename: "041_change_sets.sql" },
-        { version: 42, name: "work_item_assignments", filename: "042_work_item_assignments.sql" }
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
+        { version: 49, name: "coding_missions", filename: "049_coding_missions.sql" },
+        { version: 50, name: "authoritative_routing", filename: "050_authoritative_routing.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
@@ -1093,56 +1081,9 @@ describe("work item state machine", () => {
       expect(() => db.prepare(`UPDATE work_items SET target_json = 'not-json' WHERE id = ?`).run(workItem.id)).toThrow(
         "work_items: target_json must be valid JSON"
       );
-<<<<<<< Updated upstream
       expect(db.prepare(`SELECT version FROM schema_migrations ORDER BY version`).all()).toEqual(
         controlPlaneMigrations().map(({ version }) => ({ version }))
       );
-=======
-      expect(db.prepare(`SELECT version FROM schema_migrations ORDER BY version`).all()).toEqual([
-        { version: 1 },
-        { version: 2 },
-        { version: 3 },
-        { version: 4 },
-        { version: 5 },
-        { version: 6 },
-        { version: 7 },
-        { version: 8 },
-        { version: 9 },
-        { version: 10 },
-        { version: 11 },
-        { version: 12 },
-        { version: 13 },
-        { version: 14 },
-        { version: 15 },
-        { version: 16 },
-        { version: 17 },
-        { version: 18 },
-        { version: 19 },
-        { version: 20 },
-        { version: 21 },
-        { version: 22 },
-        { version: 23 },
-        { version: 24 },
-        { version: 25 },
-        { version: 26 },
-        { version: 27 },
-        { version: 28 },
-        { version: 29 },
-        { version: 30 },
-        { version: 31 },
-        { version: 32 },
-        { version: 33 },
-        { version: 34 },
-        { version: 35 },
-        { version: 36 },
-        { version: 37 },
-        { version: 38 },
-        { version: 39 },
-        { version: 40 },
-        { version: 41 },
-        { version: 42 }
-      ]);
->>>>>>> Stashed changes
     } finally {
       db.close();
       rmSync(dir, { recursive: true, force: true });
@@ -1249,16 +1190,9 @@ describe("work item state machine", () => {
 
     const store = new SqliteWorkItemStore(copiedPath);
     try {
-<<<<<<< Updated upstream
       expect(migrationRows(copiedPath).map((row) => row.version)).toEqual(
         controlPlaneMigrations().map((migration) => migration.version)
       );
-=======
-      expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
-        31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42
-      ]);
->>>>>>> Stashed changes
       expect(store.verifyAuditChain()).toMatchObject({ ok: true });
     } finally {
       store.close();
@@ -1331,16 +1265,9 @@ describe("work item state machine", () => {
     const store = new SqliteWorkItemStore(dbPath);
     try {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
-<<<<<<< Updated upstream
       expect(migrationRows(dbPath).map((row) => row.version)).toEqual(
         controlPlaneMigrations().map((migration) => migration.version)
       );
-=======
-      expect(migrationRows(dbPath).map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
-        31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42
-      ]);
->>>>>>> Stashed changes
       expect(store.listRegistryAgents()).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ id: "codex-cli", acpRole: "IMPLEMENTATION_AGENT" }),
