@@ -438,6 +438,81 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
       workspace
     ));
 
+  // Authoritative Nimble routing demands persisted routing evidence before any claim. JC capability items are never
+  // routed, so in strict mode the claim is refused. Admin mode is the temporary authority override.
+  describe("with authoritative Nimble routing enforced", () => {
+    async function withRouting(run: () => Promise<void>): Promise<void> {
+      const prior = process.env.ACS_NIMBLE_ROUTING_ENABLED;
+      process.env.ACS_NIMBLE_ROUTING_ENABLED = "1";
+      try {
+        await run();
+      } finally {
+        if (prior === undefined) delete process.env.ACS_NIMBLE_ROUTING_ENABLED;
+        else process.env.ACS_NIMBLE_ROUTING_ENABLED = prior;
+      }
+    }
+
+    function routingOverrides(ctx: Ctx): number {
+      const db = new DatabaseSync(ctx.dbPath);
+      try {
+        return Number(
+          (
+            db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE name = 'execution_mode.routing_override'").get() as {
+              n: number;
+            }
+          ).n
+        );
+      } finally {
+        db.close();
+      }
+    }
+
+    it("admin mode issues every gated tool through the full claim path without routing evidence", () =>
+      withRouting(() =>
+        withGateway(
+          async (ctx) => {
+            const switched = await ctx.app.inject({
+              method: "POST",
+              url: "/execution-mode",
+              headers: { authorization: `Bearer ${OP_TOKEN}` },
+              payload: { mode: "admin", reason: "jc admin routing override test" }
+            });
+            expect(switched.statusCode).toBe(200);
+
+            const fixtures = argsFor(ctx.root);
+            for (const tool of GATED) {
+              const response = await issue(ctx, tool, fixtures[tool]!.args);
+              expect(response.statusCode, `${tool}: ${response.body}`).toBe(200);
+              expect(response.json().decision).toBe("allow");
+              expect(typeof response.json().capability.payload.approvalId).toBe("string");
+            }
+            expect(routingOverrides(ctx)).toBe(GATED.length);
+          },
+          true,
+          workspace
+        )
+      ));
+
+    it("strict mode still enforces routing: an approved item is not claimed and nothing is signed", () =>
+      withRouting(() =>
+        withGateway(
+          async (ctx) => {
+            const args = argsFor(ctx.root).start_process!.args;
+            const first = await issue(ctx, "start_process", args);
+            expect(first.statusCode).toBe(409);
+            const approval = await approve(ctx, first.json().workItemId, first.json().actionHash);
+            expect(approval.statusCode).toBe(200);
+            const retry = await issue(ctx, "start_process", args);
+            expect(retry.statusCode).toBe(409);
+            expect(retry.json().capability).toBeUndefined();
+            expect(routingOverrides(ctx)).toBe(0);
+          },
+          true,
+          workspace
+        )
+      ));
+  });
+
   it("records an auto-authorization audit event for an admin-approved JC request", () =>
     withGateway(
       async (ctx) => {
