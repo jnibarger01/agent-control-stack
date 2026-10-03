@@ -34,6 +34,12 @@ while [[ $# -gt 0 ]]; do
 done
 [[ "$LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "invalid --label" >&2; exit 2; }
 
+# One deploy at a time. Two concurrent runs with the same label raced on the publish step: the loser's mv nested
+# its stage inside the winner's release, which then failed its own pre-start integrity check.
+mkdir -p "${ACS_RELEASES_DIR:-$HOME/releases}"
+exec 9>"${ACS_RELEASES_DIR:-$HOME/releases}/.deploy-gateway.lock"
+flock -n 9 || { echo "another deploy is already running (lock: ${ACS_RELEASES_DIR:-$HOME/releases}/.deploy-gateway.lock)" >&2; exit 1; }
+
 REPO="$(git rev-parse --show-toplevel)"
 RELEASES="${ACS_RELEASES_DIR:-$HOME/releases}"
 NODE_BIN_DIR="${ACS_RELEASE_NODE_DIR:-$RELEASES/_node/v24.18.0/bin}"
@@ -148,7 +154,8 @@ fi
 if [[ "$RESUME" -eq 0 ]]; then
   log "publish $FINAL"
   mkdir -p "$RELEASES/acs"
-  mv "$STAGE" "$FINAL"
+  [[ ! -e "$FINAL" ]] || { echo "refusing to publish: $FINAL appeared while this deploy was running" >&2; exit 1; }
+  mv -T "$STAGE" "$FINAL"
 fi
 node "$FINAL/scripts/release-integrity.mjs" verify "$FINAL"
 
@@ -157,6 +164,9 @@ BACKUP_DB=""
 if [[ "$RESUME" -eq 0 ]]; then
   BACKUP_DB="$LIVE_DB.pre-$SHORT-$STAMP"
   sqlite3 "$LIVE_DB" ".backup '$BACKUP_DB'"
+  # Rollback-journal mode: the restore tool verifies the backup first, and opening a WAL-mode file leaves -wal/-shm
+  # sidecars that the tool's own sidecar check then rejects.
+  sqlite3 "$BACKUP_DB" "pragma journal_mode=delete" >/dev/null
   chmod 600 "$BACKUP_DB"
 else
   echo "--resume: no new database backup (the database may already be migrated; keep the earlier pre-$SHORT backup)"
@@ -186,10 +196,20 @@ rollback() {
     echo "NOT rolling back: --resume has no pre-activation backup, and the previous release cannot read a migrated database." >&2
     return 0
   fi
-  echo "ROLLING BACK. The failed release may already have migrated the database, which the previous release cannot read," >&2
+  echo "ROLLING BACK. If the failed release got far enough to migrate the database, the previous release cannot read it," >&2
   echo "so the database is restored from $BACKUP_DB (writes since that backup are lost)." >&2
   systemctl --user stop "$UNIT" || true
-  node "$FINAL/scripts/db-ops.mjs" restore "$BACKUP_DB" "$LIVE_DB" --replace --writers-stopped
+  # Restore with the PREVIOUS release's tool: it verifies the backup against the numbering that release wrote.
+  # The new release's tool rejects a pre-migration backup as migration_missing.
+  local prev_dir=""
+  if [[ -f "$RELEASE_DROPIN.pre-$SHORT-$STAMP" ]]; then
+    prev_dir="$(sed -n 's/^WorkingDirectory=//p' "$RELEASE_DROPIN.pre-$SHORT-$STAMP" | head -1)"
+  fi
+  [[ -n "$prev_dir" && -f "$prev_dir/scripts/db-ops.mjs" ]] || prev_dir="$FINAL"
+  if ! node "$prev_dir/scripts/db-ops.mjs" restore "$BACKUP_DB" "$LIVE_DB" --replace --writers-stopped; then
+    echo "DATABASE RESTORE FAILED (backup: $BACKUP_DB). Continuing to restore the drop-ins; if the new release migrated the" >&2
+    echo "database the previous release will not start - restore it manually from the backup." >&2
+  fi
   if [[ -f "$RELEASE_DROPIN.pre-$SHORT-$STAMP" ]]; then cp -p "$RELEASE_DROPIN.pre-$SHORT-$STAMP" "$RELEASE_DROPIN"; fi
   if [[ -f "$DISPATCH_DROPIN.pre-$SHORT-$STAMP" ]]; then cp -p "$DISPATCH_DROPIN.pre-$SHORT-$STAMP" "$DISPATCH_DROPIN"; else rm -f "$DISPATCH_DROPIN"; fi
   systemctl --user daemon-reload

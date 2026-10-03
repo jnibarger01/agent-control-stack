@@ -57,7 +57,7 @@ EOF
   cat >"$nodebin/node" <<EOF
 #!/usr/bin/env bash
 case "\$1" in
-  *db-ops.mjs) echo "db-ops \$*" >>"\$SANDBOX/calls.log"; [[ "\$2" == restore ]] && cp "\$3" "\$4"; exit 0 ;;
+  *db-ops.mjs) echo "db-ops \$*" >>"\$SANDBOX/calls.log"; [[ "\${SHIM_DBOPS_FAIL:-0}" == 1 ]] && exit 1; [[ "\$2" == restore ]] && cp "\$3" "\$4"; exit 0 ;;
   *release-integrity.mjs) echo "integrity \$*" >>"\$SANDBOX/calls.log"; exit 0 ;;
 esac
 exec "$REAL_NODE" "\$@"
@@ -78,7 +78,9 @@ setup() {
   make_stubs "$SANDBOX/shims" "$HOME/releases/_node/v24.18.0/bin"
   sqlite3 "$SANDBOX/store/control.db" "pragma journal_mode=wal; create table schema_migrations(version integer); insert into schema_migrations values (47);" >/dev/null
   printf 'ACS_DB_PATH=%s\nPORT=3000\nACS_GATEWAY_TOKEN=test\n' "$SANDBOX/store/control.db" >"$HOME/.config/agent-control-stack/gateway.env"
-  printf '[Service]\n# OLD-RELEASE\n' >"$HOME/.config/systemd/user/acs-gateway.service.d/40-immutable-release.conf"
+  PREV="$HOME/releases/acs/prev-release"; export PREV
+  mkdir -p "$PREV/scripts"; touch "$PREV/scripts/db-ops.mjs"
+  printf '[Service]\n# OLD-RELEASE\nWorkingDirectory=%s\n' "$PREV" >"$HOME/.config/systemd/user/acs-gateway.service.d/40-immutable-release.conf"
   touch "$SANDBOX/stage/scripts/release-integrity.mjs" "$SANDBOX/stage/scripts/db-ops.mjs"
   FINAL="$HOME/releases/acs/$SHORT-test"
   DROPINS="$HOME/.config/systemd/user/acs-gateway.service.d"
@@ -116,6 +118,8 @@ expect "exit 1" test "$(exit_code)" -eq 1
 expect "unit stopped before the restore" bash -c 'awk "/systemctl --user stop/{s=NR} /db-ops.mjs restore/{r=NR} END{exit !(s&&r&&s<r)}" "$SANDBOX/calls.log"'
 expect "database restored from the pre-activation backup" grep -qE "db-ops .*db-ops.mjs restore .*control.db.pre-$SHORT-.* .*control.db --replace --writers-stopped|db-ops .*restore .*control.db.pre-$SHORT-" "$SANDBOX/calls.log"
 expect "backup file exists" bash -c 'ls "$SANDBOX"/store/control.db.pre-* >/dev/null'
+expect "restore used the PREVIOUS release's tool" grep -q "db-ops $PREV/scripts/db-ops.mjs restore" "$SANDBOX/calls.log"
+expect "backup is in rollback-journal mode (no WAL sidecars for the tool to trip on)" bash -c '[ "$(sqlite3 "$(ls "$SANDBOX"/store/control.db.pre-* | head -1)" "pragma journal_mode")" = delete ]'
 expect "previous release drop-in restored" grep -q "OLD-RELEASE" "$DROPINS/40-immutable-release.conf"
 expect "dispatch drop-in removed" test ! -e "$DROPINS/50-agent-dispatch.conf"
 expect "unit started again after restore" bash -c 'awk "/db-ops.mjs restore/{r=NR} /systemctl --user start/{s=NR} END{exit !(r&&s&&r<s)}" "$SANDBOX/calls.log"'
@@ -142,6 +146,35 @@ expect "explains why it did not roll back" grep -q "NOT rolling back" "$SANDBOX/
 expect "resume refuses a release that was never published" bash -c '
   rm -rf "$FINAL"; ( cd "$ROOT" && PATH="$SANDBOX/shims:$PATH" ACS_RELEASE_NODE_DIR="$HOME/releases/_node/v24.18.0/bin" \
     scripts/deploy-gateway-release.sh --ref HEAD --label test --resume ) >/dev/null 2>&1; [ $? -ne 0 ]'
+
+# --- B2: a failed DB restore must not strand the unit on the new drop-in -------------------------------------
+echo "B2: failed database restore still restores the drop-ins and starts the unit"
+setup B2
+SHIM_NEW_BROKEN=1 SHIM_DBOPS_FAIL=1 ACS_DEPLOY_WAIT_SEC=4 run_deploy
+expect "exit 1" test "$(exit_code)" -eq 1
+expect "warns that the database restore failed" grep -q "DATABASE RESTORE FAILED" "$SANDBOX/out.log"
+expect "previous release drop-in still restored" grep -q "OLD-RELEASE" "$DROPINS/40-immutable-release.conf"
+expect "unit still started" bash -c 'awk "/db-ops.mjs restore/{r=NR} /systemctl --user start/{s=NR} END{exit !(r&&s&&r<s)}" "$SANDBOX/calls.log"'
+
+# --- F: concurrent deploys are refused, existing releases are never overwritten ----------------------------
+echo "F: a second deploy is refused while one holds the lock"
+setup F
+flock "$HOME/releases/.deploy-gateway.lock" -c "sleep 8" &
+holder=$!
+sleep 1
+ACS_DEPLOY_WAIT_SEC=4 run_deploy
+wait "$holder" 2>/dev/null
+expect "exit non-zero" test "$(exit_code)" -ne 0
+expect "says another deploy is running" grep -q "another deploy is already running" "$SANDBOX/out.log"
+expect "changed nothing" bash -c '! grep -q "systemctl" "$SANDBOX/calls.log"'
+
+echo "F2: an existing release directory is never published over"
+setup F2
+mkdir -p "$FINAL/keep"; touch "$FINAL/keep/me"
+ACS_DEPLOY_WAIT_SEC=4 run_deploy
+expect "exit non-zero" test "$(exit_code)" -ne 0
+expect "existing release untouched" test -f "$FINAL/keep/me"
+expect "no nested stage inside it" bash -c '[ "$(ls "$FINAL" | wc -l)" -eq 1 ]'
 
 # --- E: the build must not inherit the gateway's NODE_ENV=production -------------------------------------
 echo "E: build step is immune to the gateway env file"
