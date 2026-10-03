@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { LOCAL_BINARY_CAPABILITY, observeCapability } from "./contracts/capability.js";
-import { classifyJev } from "./index.js";
+import { classifyJev, noul } from "./index.js";
 import { runJevIntake } from "./intake.js";
 
 const INTAKE = {
@@ -25,8 +25,7 @@ function answerBody(probabilities: Record<string, number>) {
 }
 
 function mockFetch(body: unknown, status = 200): typeof fetch {
-  return async () =>
-    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  return async () => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
 describe("decision responses do not invent capability flags", () => {
@@ -45,7 +44,7 @@ describe("decision responses do not invent capability flags", () => {
   it("accepts a systemone body that only has model, answers, and usage", async () => {
     const result = await classifyJev(
       "state",
-      { actionable: "q?" },
+      { actionable: noul("q?") },
       { fetchImpl: mockFetch(answerBody({ actionable: 0.9 })), enabled: true }
     );
     expect(result.degraded).toBe(false);
@@ -56,7 +55,7 @@ describe("decision responses do not invent capability flags", () => {
   it("rejects an explicit noul:false advertisement without treating omission as false", async () => {
     const result = await classifyJev(
       "state",
-      { actionable: "q?" },
+      { actionable: noul("q?") },
       {
         fetchImpl: mockFetch({ ...answerBody({ actionable: 0.9 }), supportsNoul: false }),
         enabled: true
@@ -124,7 +123,7 @@ describe("shadow intake failure modes do not change the supplied classifier snap
 
   it("INCOMPATIBLE_MODEL", async () => {
     const { before, intake } = await shadow(mockFetch(answerBody({ actionable: 0.2 })), {
-      capabilityProfile: { ...LOCAL_BINARY_CAPABILITY, promptVersion: "choice" }
+      capabilityProfile: { ...LOCAL_BINARY_CAPABILITY, supportsNoul: false }
     });
     expect(intake.status).toBe("INCOMPATIBLE_MODEL");
     expect(intake.classifier).toBe(before);
@@ -135,7 +134,6 @@ describe("shadow intake failure modes do not change the supplied classifier snap
     const probabilities = Object.fromEntries(
       Object.keys({
         actionable: 1,
-        duplicate_like: 1,
         needs_code: 1,
         needs_shell: 1,
         needs_browser: 1,
@@ -150,6 +148,8 @@ describe("shadow intake failure modes do not change the supplied classifier snap
     const { before, intake } = await shadow(mockFetch(answerBody(probabilities)));
     expect(intake.status).toBe("ok");
     expect(intake.model).toBe("jevos-q4_k_m");
+    expect(intake.questionSetVersion).toBe("jev-intake@2");
+    expect(intake.promptVersion).toBe("binary");
     expect(intake.probabilities.needsCode).toBe(0.91);
     expect(intake.probabilities.actionable).toBe(0.1);
     expect(intake.classifier).toBe(before);

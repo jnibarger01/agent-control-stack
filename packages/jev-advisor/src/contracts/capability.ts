@@ -78,7 +78,13 @@ export function checkObservedCapability(
   return { ok: true, capability: observed };
 }
 
-/** Health/metadata object that is supposed to be a complete capability profile. */
+export type JevPrimitive = "noul" | "choice" | "score";
+
+/**
+ * Convert trusted health/metadata into a complete capability profile.
+ * Missing support flags stay unknown: an incomplete source returns null rather
+ * than silently turning an absent field into `false`.
+ */
 export function capabilityFromMetadata(metadata: {
   promptVersion?: string;
   fingerprint?: string;
@@ -86,15 +92,30 @@ export function capabilityFromMetadata(metadata: {
   supportsNoul?: boolean;
   supportsChoice?: boolean;
   supportsScore?: boolean;
-}): JevCapability {
+}): JevCapability | null {
+  if (
+    typeof metadata.promptVersion !== "string" ||
+    metadata.promptVersion.length === 0 ||
+    typeof metadata.supportsNoul !== "boolean" ||
+    typeof metadata.supportsChoice !== "boolean" ||
+    typeof metadata.supportsScore !== "boolean"
+  ) {
+    return null;
+  }
   return {
-    promptVersion: metadata.promptVersion ?? "unknown",
-    supportsNoul: metadata.supportsNoul === true,
-    supportsChoice: metadata.supportsChoice === true,
-    supportsScore: metadata.supportsScore === true,
-    fingerprint: metadata.fingerprint ?? "",
+    promptVersion: metadata.promptVersion,
+    supportsNoul: metadata.supportsNoul,
+    supportsChoice: metadata.supportsChoice,
+    supportsScore: metadata.supportsScore,
+    fingerprint: typeof metadata.fingerprint === "string" ? metadata.fingerprint : "",
     ...(metadata.ggufRevision !== undefined ? { ggufRevision: metadata.ggufRevision } : {})
   };
+}
+
+export function supportsPrimitive(capability: JevCapability, primitive: JevPrimitive): boolean {
+  if (primitive === "noul") return capability.supportsNoul;
+  if (primitive === "choice") return capability.supportsChoice;
+  return capability.supportsScore;
 }
 
 /** Pull only advertised capability fields from a decision or model object. */
@@ -103,11 +124,14 @@ export function observeCapability(source: unknown): JevCapabilityObservation {
   const record = source as Record<string, unknown>;
   const nested = record.model;
   const modelRecord =
-    nested !== null && typeof nested === "object" && !Array.isArray(nested)
-      ? (nested as Record<string, unknown>)
-      : {};
+    nested !== null && typeof nested === "object" && !Array.isArray(nested) ? (nested as Record<string, unknown>) : {};
   const observed: JevCapabilityObservation = {};
-  const promptVersion = firstString(record.promptVersion, record.prompt_version, modelRecord.promptVersion, modelRecord.prompt_version);
+  const promptVersion = firstString(
+    record.promptVersion,
+    record.prompt_version,
+    modelRecord.promptVersion,
+    modelRecord.prompt_version
+  );
   if (promptVersion !== undefined) observed.promptVersion = promptVersion;
   assignBoolean(observed, "supportsNoul", record.supportsNoul, modelRecord.supportsNoul);
   assignBoolean(observed, "supportsChoice", record.supportsChoice, modelRecord.supportsChoice);

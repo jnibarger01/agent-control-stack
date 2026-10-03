@@ -13,7 +13,7 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { classifyJev, deriveJevDecision, isJevEnabled } from "./index.js";
+import { classifyJev, deriveJevDecision, isJevEnabled, noul } from "./index.js";
 import { formatJevTelemetry, buildJevTelemetryEvent } from "./telemetry.js";
 
 type CliArgs = {
@@ -78,12 +78,17 @@ export async function runCli(argv: readonly string[]): Promise<number> {
 
   if (!args.stateFile) throw new Error("at least one --state-file path is required");
   const state = await readFile(args.stateFile, "utf8");
-  const result = await classifyJev(state, args.signals);
+  const questions = Object.fromEntries(
+    Object.entries(args.signals).map(([id, instructions]) => [id, noul(instructions)])
+  );
+  const result = await classifyJev(state, questions);
   // The decision field is machine-readable: consumers must never infer
   // behavior from prose or telemetry fields.
   process.stdout.write(`${JSON.stringify({ ...result, decision: deriveJevDecision(result) })}\n`);
   if (result.degraded) {
-    process.stdout.write(`${formatJevTelemetry(buildJevTelemetryEvent({ result, consumer: "acs-jev-cli" }))}\n`);
+    process.stdout.write(
+      `${formatJevTelemetry(buildJevTelemetryEvent({ result, consumer: "acs-jev-cli", questionSetVersion: "adhoc-cli@1" }))}\n`
+    );
   }
   if (!isJevEnabled()) {
     process.stderr.write("note: ACS_JEV_ENABLED is not 1; adapter is inert and degraded\n");
