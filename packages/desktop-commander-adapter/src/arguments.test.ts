@@ -41,63 +41,6 @@ describe("normalizeInvocation", () => {
     );
   });
 
-  // `origin` is a legitimate optional Desktop Commander MCP schema field
-  // (telemetry attribution, not authorization-relevant). It must be accepted,
-  // carried into validatedArguments, and bound by the invocation fingerprint.
-  describe("origin argument contract", () => {
-    it("list_directory without origin is allowed", () => {
-      const norm = normalizeInvocation("list_directory", { path: join(root, "pkg") }, config);
-      expect(norm.toolName).toBe("list_directory");
-      expect(norm.validatedArguments.origin).toBeUndefined();
-    });
-
-    it("list_directory with origin:'llm' is allowed and fingerprint-bound", () => {
-      const norm = normalizeInvocation("list_directory", { path: join(root, "pkg"), origin: "llm" }, config);
-      expect(norm.validatedArguments.origin).toBe("llm");
-      const withoutOrigin = normalizeInvocation("list_directory", { path: join(root, "pkg") }, config);
-      expect(desktopCommanderInvocationFingerprint(norm)).not.toBe(desktopCommanderInvocationFingerprint(withoutOrigin));
-    });
-
-    it("list_directory with origin:'ui' is allowed", () => {
-      const norm = normalizeInvocation("list_directory", { path: join(root, "pkg"), origin: "ui" }, config);
-      expect(norm.validatedArguments.origin).toBe("ui");
-    });
-
-    it("an invalid origin value fails closed", () => {
-      for (const bad of ["agent", "CLI", 1, null]) {
-        expect(() =>
-          normalizeInvocation("list_directory", { path: join(root, "pkg"), origin: bad }, config)
-        ).toThrow(/invalid arguments/);
-      }
-    });
-
-    it("a genuinely unknown argument still fails closed", () => {
-      expect(() =>
-        normalizeInvocation("list_directory", { path: join(root, "pkg"), rogueField: "x" }, config)
-      ).toThrow(/invalid arguments/);
-    });
-
-    it("get_config / get_file_info / read_file / write_file / start_process accept origin", () => {
-      expect(normalizeInvocation("get_config", { origin: "llm" }, config).validatedArguments.origin).toBe("llm");
-      expect(
-        normalizeInvocation("get_file_info", { path: join(root, "pkg", "a.txt"), origin: "ui" }, config)
-          .validatedArguments.origin
-      ).toBe("ui");
-      expect(
-        normalizeInvocation("read_file", { path: join(root, "pkg", "a.txt"), origin: "llm" }, config)
-          .validatedArguments.origin
-      ).toBe("llm");
-      expect(
-        normalizeInvocation("write_file", { path: join(root, "pkg", "b.txt"), content: "x", origin: "llm" }, config)
-          .validatedArguments.origin
-      ).toBe("llm");
-      expect(
-        normalizeInvocation("start_process", { command: "git status", timeout_ms: 1000, cwd: root, origin: "llm" }, config)
-          .validatedArguments.origin
-      ).toBe("llm");
-    });
-  });
-
   it("rejects a path outside the allow root", () => {
     expect(() => normalizeInvocation("read_file", { path: "/etc/passwd" }, config)).toThrow(/outside every allow root/);
   });
@@ -170,49 +113,6 @@ describe("normalizeInvocation", () => {
       config
     );
     expect(desktopCommanderInvocationFingerprint(a)).toBe(desktopCommanderInvocationFingerprint(b));
-  });
-});
-
-describe("project-scoped start_process ACS rules", () => {
-  // A self-contained containment/projects root so this suite runs identically
-  // on any host instead of depending on a personal checkout location.
-  let projectsRepo: string;
-  let projectContainment: ContainmentConfig;
-  let insideTestFile: string;
-  beforeAll(() => {
-    projectsRepo = realpathSync(mkdtempSync(join(tmpdir(), "dc-projects-")));
-    projectContainment = { allowedRoots: [projectsRepo], deniedRoots: [] };
-    insideTestFile = join(projectsRepo, "packages/machine-controller/src/command.test.ts");
-    mkdirSync(join(projectsRepo, "packages/machine-controller/src"), { recursive: true });
-    writeFileSync(insideTestFile, "");
-  });
-  afterAll(() => rmSync(projectsRepo, { recursive: true, force: true }));
-
-  it.each([
-    () => `git -C ${projectsRepo} worktree list`,
-    () => `git -C ${projectsRepo} worktree add ${join(projectsRepo, "new-worktree")} feature/test`,
-    () => `npm --prefix ${projectsRepo} run check`,
-    () => `npx --prefix ${projectsRepo} tsc -b`,
-    () => `node ${insideTestFile}`
-  ])("normalizes project process command for approval: %s", (commandLine) => {
-    const invocation = normalizeInvocation(
-      "start_process",
-      { command: commandLine(), timeout_ms: 1000, cwd: projectsRepo },
-      projectContainment
-    );
-
-    expect(invocation.policy.requiresApproval).toBe(true);
-    expect(invocation.validatedArguments.command).toMatch(/^\/(usr\/)?bin\/(git|npm|npx|node) /);
-  });
-
-  it("keeps git project paths inside the ACS projects root", () => {
-    expect(() =>
-      normalizeInvocation(
-        "start_process",
-        { command: "git -C /tmp status", timeout_ms: 1000, cwd: projectsRepo },
-        projectContainment
-      )
-    ).toThrow(/forbidden|outside every allow root/);
   });
 });
 

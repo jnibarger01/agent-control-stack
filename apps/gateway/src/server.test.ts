@@ -19,10 +19,6 @@ import { buildGateway, type GatewayAuthOptions, type GatewayCredential } from ".
 import { prepareHermesSourceFixture } from "./hermes-source-fixture.js";
 
 const testAuth = { token: "t", actor: "user", actorId: "user" } as const;
-// ACS policy denies an actor authorizing its own mutating work, so approval
-// tests authenticate as a principal distinct from the requester.
-const approverToken = "t-approver";
-const approverAuth = { token: approverToken, actor: "user", actorId: "approver" } as const;
 const oauthIssuer = "https://auth.example.test";
 const oauthResource = "https://acs.example.test/mcp";
 
@@ -97,29 +93,12 @@ function buildTestGateway(options: NonNullable<Parameters<typeof buildGateway>[0
   if (options.dbPath) {
     seedActor(options.dbPath, testAuth.actorId, `local_bearer:local-dev`);
   }
-  const app = buildGateway({
-    ...options,
-    auth: {
-      ...testAuth,
-      credentials: [
-        {
-          id: "approver",
-          token: approverAuth.token,
-          actor: approverAuth.actor,
-          actorId: approverAuth.actorId,
-          roles: ["operator"],
-          scopes: ["acs:read", "acs:write", "acs:approve"]
-        }
-      ]
-    }
-  });
+  const app = buildGateway({ ...options, auth: testAuth });
   app.addHook("onRequest", async (request) => {
     request.headers.authorization ??= `Bearer ${testAuth.token}`;
   });
   return app;
 }
-
-const approverHeaders = { authorization: `Bearer ${approverToken}` } as const;
 
 function seedActor(dbPath: string, id: string, externalRef?: string): void {
   const store = new SqliteWorkItemStore(dbPath);
@@ -4889,7 +4868,6 @@ describe("gateway work-item routes", () => {
       const approved = await app.inject({
         method: "POST",
         url: `/work-items/${workItem.id}/approve`,
-        headers: approverHeaders,
         payload: { reason: "approve exact write", actionHash: approvalActionHash(workItem) }
       });
 
@@ -4906,7 +4884,7 @@ describe("gateway work-item routes", () => {
         expect(approvals).toHaveLength(1);
         expect(approvals[0]?.body).toMatchObject({
           workItemId: workItem.id,
-          approvedBy: "approver",
+          approvedBy: "user",
           reason: "approve exact write"
         });
         expect(JSON.stringify(approvals)).not.toContain("approvalToken");
@@ -4944,7 +4922,6 @@ describe("gateway work-item routes", () => {
       const approved = await app.inject({
         method: "POST",
         url: `/work-items/${id}/approve`,
-        headers: approverHeaders,
         payload: { reason: "ok", actionHash: approvalActionHash(workItem) }
       });
       expect(approved.statusCode).toBe(200);
@@ -4961,7 +4938,6 @@ describe("gateway work-item routes", () => {
         const replay = await app.inject({
           method: "POST",
           url: `/work-items/${id}/approve`,
-          headers: approverHeaders,
           payload: { reason: "again", actionHash }
         });
 
@@ -5065,7 +5041,6 @@ describe("gateway work-item routes", () => {
       const approved = await app.inject({
         method: "POST",
         url: `/work-items/${workItem.id}/approve`,
-        headers: approverHeaders,
         payload: { reason: "approve without token", actionHash: approvalActionHash(workItem) }
       });
 
@@ -5118,7 +5093,6 @@ describe("gateway work-item routes", () => {
       const approved = await app.inject({
         method: "POST",
         url: `/work-items/${first.json().id}/approve`,
-        headers: approverHeaders,
         payload: { id: second.json().id, reason: "path id must win", actionHash: approvalActionHash(first.json()) }
       });
 
@@ -5219,7 +5193,6 @@ describe("gateway work-item routes", () => {
       const rejected = await app.inject({
         method: "POST",
         url: `/work-items/${created.json().id}/approve`,
-        headers: approverHeaders,
         payload: { approvedBy: "test", reason: "wrong hash", actionHash: "missing" }
       });
 
@@ -5256,7 +5229,6 @@ describe("gateway work-item routes", () => {
       const rejected = await app.inject({
         method: "POST",
         url: `/work-items/${created.json().id}/approve`,
-        headers: approverHeaders,
         payload: { reason: "stale hash", actionHash: staleHash }
       });
 

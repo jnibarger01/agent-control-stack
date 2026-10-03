@@ -82,13 +82,10 @@ describe("MoA ACS adapter", () => {
       source: "moa_aggregator"
     });
     const workItem = store.list({ status: "needs_approval" })[0]!;
-    // ACS policy denies an actor approving its own mutating work, so approval
-    // comes from a distinct principal.
-    const approver = "approver";
-    const actionHash = createPolicyEngine().evaluateWorkItem(workItem, approver, "approve")[0]!.actionHash;
+    const actionHash = createPolicyEngine().evaluateWorkItem(workItem, actor, "approve")[0]!.actionHash;
     createWorkItemTools(store, createPolicyEngine()).approve_work_item({
       id: workItem.id,
-      approvedBy: approver,
+      approvedBy: actor,
       reason: "approve exact MoA action",
       actionHash
     });

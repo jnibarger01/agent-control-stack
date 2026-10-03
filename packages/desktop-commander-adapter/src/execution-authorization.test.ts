@@ -140,21 +140,11 @@ describe("authorizeDesktopCommanderExecution", () => {
       workerId: "worker_1",
       containment: config,
       requestId: "req_3",
-      approvalActionHash: "a".repeat(64),
       now: new Date("2026-08-30T00:00:05.000Z")
     });
     expect(auth.approvalId).toBe("appr_1");
     expect(auth.requiresApproval).toBe(true);
   });
-
-  it("rejects a lease approval without its action hash binding", () => {
-    const workItem = makeWorkItem(root, {
-      requestedActions: [{ kind: "write_file", description: "write a file", params: { tool: "write_file", arguments: { path: `${root}/pkg/a.txt`, content: "x" } } }]
-    });
-    const claimed = makeClaimed(workItem);
-    expect(() => authorizeDesktopCommanderExecution({ claimed, trustedWorkItem: workItem, lease: makeLease(claimed, { approvalId: "appr_1" }), workerId: "worker_1", containment: config, requestId: "req_5", now: new Date("2026-08-30T00:00:05.000Z") })).toThrow(/missing its action hash binding/);
-  });
-
 
   it("rejects a path that escapes the allow root at authorization time", () => {
     const workItem = makeWorkItem(root, {

@@ -20,10 +20,6 @@ paths:
     - /home/jacen/.config
     - /etc
     - /var
-  # Root holding ACS-managed project checkouts. Project-scoped process forms
-  # (git -C <project>, npm --prefix <project>, ...) are only recognized inside
-  # this root; omit it to treat those forms as forbidden (fail closed).
-  projects_root: /home/jacen/projects
 
 commands:
   allow_readonly:

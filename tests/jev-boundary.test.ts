@@ -58,6 +58,24 @@ describe("Jev authority boundary (ADR 0020)", () => {
     ).toEqual([]);
   });
 
+  it("refuses a deep import of the shadow module even in the gateway MCP observation path", async () => {
+    const messages = await boundaryMessages(
+      "apps/gateway/src/mcp.ts",
+      'import { maybeRunJevShadowAdvisory } from "../../../packages/policy-gate/src/jev-shadow.js";\nvoid maybeRunJevShadowAdvisory;\n'
+    );
+    expect(messages.join(" ")).toContain("deep import");
+  });
+
+  it("refuses the Jev adapter in authority scripts and JavaScript modules", async () => {
+    for (const file of ["scripts/authority.mjs", "apps/gateway/src/helper.js"]) {
+      const messages = await boundaryMessages(
+        file,
+        'import { classifyJev } from "@agent-control-stack/jev-advisor";\nvoid classifyJev;\n'
+      );
+      expect(messages.join(" ")).toContain("advisory-only");
+    }
+  });
+
   it.each(["packages/policy-gate/src/jev-shadow.ts", "packages/evidence/src/observation-worker.ts"])(
     "allows the adapter in %s",
     async (file) => {

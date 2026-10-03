@@ -109,22 +109,6 @@ const mechanics: readonly DesktopCommanderToolMechanics[] = [
     maxResultBytes: 128 * 1024
   },
   {
-    // Runtime identity discovery. Read-only metadata (runtime id, version,
-    // redacted device-auth state; no tokens or credentials per the DC tool
-    // contract). Governed like every other tool so the managed child's
-    // capability gate, ACS audit and lease/result accounting all agree.
-    name: "get_runtime_identity",
-    mutating: false,
-    network: false,
-    destructive: false,
-    pathArgs: [],
-    multiPathArgs: [],
-    cwdArgs: [],
-    commandArgs: [],
-    timeoutMs: 30_000,
-    maxResultBytes: 32 * 1024
-  },
-  {
     name: "get_file_info",
     mutating: false,
     network: false,

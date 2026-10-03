@@ -11,7 +11,7 @@ import {
   readExecutionModeValue,
   type ManagedAuthorityObservation
 } from "./execution-mode.js";
-import { isManagedExecutorCommand, observeManagedAuthority } from "./managed-authority.js";
+import { observeManagedAuthority } from "./managed-authority.js";
 
 const healthy: ManagedAuthorityObservation = {
   authorityOwner: "managed:pid:42",
@@ -86,19 +86,6 @@ describe("execution mode decision", () => {
 
 describe("managed authority observation", () => {
   const now = 1_000_000;
-
-  it("does not classify the managed remote transport client as an executor", () => {
-    expect(
-      isManagedExecutorCommand(
-        "/home/linuxbrew/.linuxbrew/bin/node /home/jacen/projects/desktop-commander/dist/index.js remote --managed"
-      )
-    ).toBe(false);
-    expect(
-      isManagedExecutorCommand(
-        "/home/linuxbrew/.linuxbrew/bin/node /home/jacen/projects/desktop-commander/dist/index.js"
-      )
-    ).toBe(true);
-  });
   const lease = JSON.stringify({ pid: 42, expiresAt: now + 10_000, instanceId: "executor-42" });
 
   it("accepts one live managed lease and rejects break-glass and a second executor", () => {

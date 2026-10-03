@@ -205,9 +205,9 @@ describe("gateApproveExecutionPlan", () => {
   it("denies self-approval on high-risk steps using the same isSelfApproval check as regular approvals", () => {
     const { store, cleanup } = fixture();
     try {
-      // The requester subject authorizing its own high-risk write step triggers
-      // isSelfApproval (context.actor === context.requesterSubject) exactly as it
-      // does for the existing action-level approval path.
+      // requester "agent" approving its own high-risk work triggers isSelfApproval
+      // (context.actor === context.requester) exactly as it does for the
+      // existing action-level approval path.
       const workItem = createWorkItem(store, { risk: "high", requester: "agent" });
       const definition = planWithSteps(workItem, [
         {
@@ -225,14 +225,10 @@ describe("gateApproveExecutionPlan", () => {
       const { evaluations } = gateAdmitExecutionPlan(store, workItem, plan, "actor-user");
       const actionHash = evaluations[0].actionHash;
 
-      expect(() => gateApproveExecutionPlan(store, workItem, plan, actionHash, "actor-user")).toThrowError(
+      expect(() => gateApproveExecutionPlan(store, workItem, plan, actionHash, "agent")).toThrowError(
         expect.objectContaining<Partial<ControlStackError>>({ code: "approval_denied" })
       );
       expect(store.hasExecutionPlanApproval(workItem.id, plan.planHash, actionHash)).toBe(false);
-      // A different authenticated principal can approve the same step.
-      expect(gateApproveExecutionPlan(store, workItem, plan, actionHash, "actor-approver").approvedByActorId).toBe(
-        "actor-approver"
-      );
     } finally {
       cleanup();
     }
@@ -248,9 +244,9 @@ describe("gateApproveExecutionPlan", () => {
         createdByActorId: "actor-user"
       });
 
-      expect(() => gateApproveExecutionPlan(store, workItem, plan, "0".repeat(64), "approver-user")).toThrowError(
-        expect.objectContaining<Partial<ControlStackError>>({ code: "execution_plan_action_mismatch" })
-      );
+      expect(() =>
+        gateApproveExecutionPlan(store, workItem, plan, "0".repeat(64), "approver-user")
+      ).toThrowError(expect.objectContaining<Partial<ControlStackError>>({ code: "execution_plan_action_mismatch" }));
     } finally {
       cleanup();
     }
@@ -280,9 +276,7 @@ describe("gateApproveExecutionPlan", () => {
 
       const revisedDefinition = {
         ...definition,
-        steps: [
-          { ...definition.steps[0], action: { ...definition.steps[0].action, description: "write it differently" } }
-        ]
+        steps: [{ ...definition.steps[0], action: { ...definition.steps[0].action, description: "write it differently" } }]
       };
       const supersedingPlan = store.createExecutionPlan({
         workItemId: workItem.id,

@@ -50,24 +50,6 @@ A matching active lease is still required after identity authentication. Identit
 without a lease is not authority; a lease without a live identity is not
 authority either.
 
-## Worker pull claims
-
-Workers poll `POST /worker/claim` with a bearer worker credential. The request
-body accepts only an optional `leaseMs`; it does not accept a worker ID. ACS
-derives the lease worker ID from the authenticated credential using the same
-`requireWorkerIdentity` resolver used for result submission. Unknown, expired,
-revoked, or non-worker credentials are rejected before claim processing.
-
-ACS re-evaluates policy and approvals during the claim. A persisted work-item
-assignment is a routing constraint, not a lease: only the assigned worker may
-claim it. Legacy items without an assignment remain available to any
-authenticated worker. Assignment matching is also enforced inside the store's
-atomic claim transaction, so a race or direct claim-helper call cannot bypass
-the check. A denied or mismatched claim creates no lease or execution attempt.
-
-Current execution backends remain process-wide. The claim protocol does not
-select a different backend per worker.
-
 ## Acceptance
 
 - An **expired** worker identity cannot complete a claimed item.

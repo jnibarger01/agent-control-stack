@@ -138,7 +138,10 @@ function booleanValue(value: unknown): boolean | undefined {
 
 const NAMED_RESOURCE_PATH_KEYS = ["sourcePath", "destinationPath", "targetPath", "outputPath", "templatePath"] as const;
 
-function unionResourcePaths(params: Record<string, unknown>, fallback: string[] | undefined): string[] | undefined {
+function unionResourcePaths(
+  params: Record<string, unknown>,
+  fallback: string[] | undefined
+): string[] | undefined {
   const explicit = stringArray(params.paths) ?? [];
   const named = NAMED_RESOURCE_PATH_KEYS.map((key) => stringValue(params[key])).filter(
     (value): value is string => typeof value === "string"

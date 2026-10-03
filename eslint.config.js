@@ -15,7 +15,7 @@ export default tseslint.config(
   {
     // ADR 0020: Jev is advisory evidence only. Only the shadow hook and the observation worker
     // may touch the adapter; everything else (authority packages, apps) must not import it.
-    files: ["**/*.ts"],
+    files: ["**/*.{ts,tsx,js,mjs,cjs}"],
     rules: {
       "no-restricted-imports": [
         "error",
@@ -53,7 +53,7 @@ export default tseslint.config(
       "packages/jev-advisor/**/*.ts",
       "packages/policy-gate/src/jev-shadow.ts",
       "packages/evidence/src/observation-worker.ts",
-      "**/*.test.ts"
+      "**/*.test.{ts,mjs}"
     ],
     rules: { "no-restricted-imports": "off" }
   },
@@ -69,6 +69,14 @@ export default tseslint.config(
             {
               group: ["@agent-control-stack/jev-advisor", "@agent-control-stack/jev-advisor/*", "**/jev-advisor/**"],
               message: "Jev is advisory-only (ADR 0020). Use the policy-gate shadow hook from this observation path."
+            },
+            {
+              group: [
+                "@agent-control-stack/policy-gate/*jev-shadow*",
+                "**/policy-gate/src/jev-shadow.js",
+                "**/policy-gate/src/jev-shadow.ts"
+              ],
+              message: "Jev shadow hooks are advisory-only (ADR 0020). Use the policy-gate barrel, not a deep import."
             }
           ]
         }

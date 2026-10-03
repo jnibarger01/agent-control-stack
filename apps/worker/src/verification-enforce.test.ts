@@ -100,7 +100,6 @@ function seedWrite(): string {
     const workItem = tools.create_work_item({
       title: "write for verification",
       requester: "user",
-      requesterSubject: "requester",
       intent: "mutating governed execution",
       target: { cwd: "/repo" },
       requestedActions: [
@@ -118,9 +117,9 @@ function seedWrite(): string {
     });
     tools.approve_work_item({
       id: workItem.id,
-      approvedBy: "approver",
+      approvedBy: "user",
       reason: "approved write",
-      actionHash: approvalActionHash(workItem, "approver")
+      actionHash: approvalActionHash(workItem, "user")
     });
     return workItem.id;
   } finally {

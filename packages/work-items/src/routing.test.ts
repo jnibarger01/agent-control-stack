@@ -57,34 +57,6 @@ describe("actor routing persistence", () => {
     expect(result).toMatchObject({ actorId: "codex-cli", successCount: 1, failureCount: 1 });
     expect(f.store.getActorReliability("codex-cli")).toEqual(result);
   });
-
-  it("persists worker assignments and prevents a different worker from claiming", () => {
-    const f = fixture(); directory = f.directory;
-    f.store.createRegistryAgent({
-      id: "agent-b",
-      name: "Agent B",
-      kind: "coding",
-      acpRole: "IMPLEMENTATION_AGENT",
-      status: "AVAILABLE",
-      actorId: "actor_system_bootstrap"
-    });
-    f.store.approveWorkItem(f.workItem.id, { via: "domain_service" });
-    const assignment = f.store.assignWorkItem({
-      workItemId: f.workItem.id,
-      selectedWorkerId: "worker-b",
-      selectedAgentId: "agent-b",
-      assignedByActorId: "router"
-    }, { via: "domain_service", actorId: "router" });
-
-    expect(f.store.getWorkItemAssignment(f.workItem.id)).toEqual(assignment);
-    expect(f.store.findNextApprovedWorkItemForWorker("worker-a")).toBeUndefined();
-    expect(f.store.findNextApprovedWorkItemForWorker("worker-b")?.id).toBe(f.workItem.id);
-    expect(f.store.claimApprovedWorkItemById(f.workItem.id, "invalid-hash", "worker-a", {
-      allowLegacyClaimForTests: true
-    })).toBeUndefined();
-    expect(f.store.get(f.workItem.id)?.status).toBe("approved");
-    expect(f.store.readEvents().filter((event) => event.name === "work_item.assigned")).toHaveLength(1);
-  });
 });
 
 const via = { via: "domain_service" } as const;

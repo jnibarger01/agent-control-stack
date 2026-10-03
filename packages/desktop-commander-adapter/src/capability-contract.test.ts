@@ -26,7 +26,6 @@ function authorizationFor(toolName: "read_file" | "write_file") {
     workerId: "worker_1",
     containment: config,
     requestId: "request_1",
-    ...(toolName === "write_file" ? { approvalActionHash: "a".repeat(64) } : {}),
     now: new Date("2026-01-01T00:00:00.000Z")
   });
 }

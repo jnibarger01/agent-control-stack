@@ -69,7 +69,6 @@ export interface AuthorizeExecutionInput {
   workerId: string;
   containment: ContainmentConfig;
   requestId: string;
-  approvalActionHash?: string;
   /**
    * Prevalidated current request. Capability issuance supplies this so raw
    * arguments never need to be persisted in the work item.
@@ -168,12 +167,6 @@ export function authorizeDesktopCommanderExecution(input: AuthorizeExecutionInpu
       `tool ${invocation.toolName} requires approval but the lease carries no approval reference`
     );
   }
-  if (lease.approvalId !== undefined && input.approvalActionHash === undefined) {
-    throw new ControlStackError(
-      "desktop_commander_approval_binding_missing",
-      `approval ${lease.approvalId} is missing its action hash binding`
-    );
-  }
 
   return Object.freeze({
     [AUTHORIZATION_BRAND]: true as const,
@@ -189,7 +182,7 @@ export function authorizeDesktopCommanderExecution(input: AuthorizeExecutionInpu
     requestHash: executionPlanApprovalRequestHash({
       workItemId: trustedWorkItem.id,
       planHash: claimed.planHash,
-      actionHash: input.approvalActionHash ?? recomputedActionHash
+      actionHash: recomputedActionHash
     }),
     invocationFingerprint,
     toolName: invocation.toolName,
@@ -198,7 +191,6 @@ export function authorizeDesktopCommanderExecution(input: AuthorizeExecutionInpu
     risk: invocation.policy.riskClass,
     requiresApproval: invocation.policy.requiresApproval,
     approvalId: lease.approvalId,
-    ...(input.approvalActionHash ? { approvalActionHash: input.approvalActionHash } : {}),
     policyVersion: lease.policyVersion,
     policyDecisionHash: lease.policyDecisionHash,
     authorizedAt: now.toISOString()

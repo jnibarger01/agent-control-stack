@@ -1,4 +1,3 @@
-import { harnessDcInvocationSchema } from "./harness-dispatch.js";
 import { directAgentNames } from "@agent-control-stack/machine-controller";
 import { explainPolicyInputSchema, workItemToolNames } from "@agent-control-stack/policy-gate";
 import {
@@ -750,28 +749,6 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
         description: "Approval does not match the immutable Change Set or the mission is not awaiting approval."
       }
     }
-  },
-  {
-    method: "post",
-    path: "/harness/dc-invocations",
-    operationId: "createHarnessInvocation",
-    summary: "Create (idempotently) the governed work item for one Strands harness Desktop Commander call.",
-    requestSchema: harnessDcInvocationSchema,
-    successStatus: 201
-  },
-  {
-    method: "post",
-    path: "/harness/dc-invocations/{id}/dispatch",
-    operationId: "dispatchHarnessInvocation",
-    summary: "Hand an approved harness invocation to the managed Desktop Commander bridge.",
-    requestSchema: harnessDcInvocationSchema,
-    successStatus: 202
-  },
-  {
-    method: "get",
-    path: "/work-items/{id}/execution-result",
-    operationId: "getExecutionResult",
-    summary: "Read integrity-checked, redacted Desktop Commander output for a successful work item."
   },
   {
     method: "post",

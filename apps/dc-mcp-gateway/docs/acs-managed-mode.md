@@ -36,42 +36,20 @@ Status: implemented on the gateway side against the contract in
 
 ## Required ACS endpoints (issuer side; contract)
 
-The gateway is transport-only and uses the implemented ACS routes:
+The gateway is transport-only and depends on these ACS gateway endpoints
+(NOT yet implemented — tracked as the remaining blocker):
 
-- `POST /dc/capability/issue` — body
-  `{client_id, tool, argsSummary, correlationId}`, with the dedicated worker
-  credential and `x-dc-actor` attribution header. ACS evaluates policy,
-  approval, normalized invocation, runtime registration, and containment,
-  claims the attempt with a lease and fence, commits issuance evidence, and
-  returns `{decision:"allow", capability, workItemId, attemptId, leaseId, ...}`
-  or a structured refusal. The edge forwards only the signed arguments.
-- `POST /dc/runtime/bootstrap` — body
-  `{runtimeId, identityConfigFingerprint, scopes}`; issues a short-lived
-  challenge to the dedicated DC bridge.
-- `POST /dc/runtime/bootstrap/complete` — the same binding plus `challenge`
-  and the child's exact `runtimeIdentity` proof. Success is HTTP 204. Missing,
-  mismatched, expired, consumed, revoked, or drifted bindings fail closed.
-
-### Release identity binding
-
-For an immutable DC release, configure `ACS_DC_RELEASE_DIR` on both bridge
-and edge. `dcRuntimeIdentityFromState` verifies `RELEASE.json`, the full file
-manifest, runtime inputs, installed dependencies, and pinned Node identity.
-It sends that verified `runtimeIdentityDigest` as `identityConfigFingerprint`,
-matching ACS's registered release identity. `ACS_DC_ENTRYPOINT`, when set,
-must equal `<release>/dist/index.js`; the bridge derives it from its actual
-child command. The child state supplies the runtime ID, not authority.
-
-A configured invalid release returns no identity and cannot fall back to
-entrypoint hashing. Unpackaged development without `ACS_DC_RELEASE_DIR`
-retains the entrypoint hash contract. Do not use that development identity
-for a registry bound to an immutable release digest. Deploy the verifier
-and helper together in a new release; do not edit a published release or
-change registry fingerprints to accommodate an inconsistent bridge.
-
-The verifier lives in `@agent-control-stack/release-integrity`; standalone
-gateway packaging must install that package inside the release. See the
-[release integrity runbook](../../../docs/runbooks/release-integrity.md).
+- `POST /desktop-commander/capability/issue` — body
+  `{toolName, arguments, identity:{subject, clientId}, requestId, strippedMetaKeys}`.
+  ACS re-checks policy, normalized invocation, attempt/lease/fencing, runtime
+  identity, scopes, and approval binding (exactly as
+  `MachineDesktopCommanderExecutor.issueCapability` does today), persists the
+  issuance, audits it, and returns `{ok:true, capability:{payload, signature, keyId}}`
+  or `{ok:false, code}`. Capability lifetime must not exceed 30 seconds.
+- `POST /desktop-commander/runtime/bootstrap` — issues the §7 bootstrap
+  challenge for the managed runtime identity handshake.
+- `POST /desktop-commander/runtime/attest` — registers the DC
+  `acsRuntimeIdentity` echo (runtime registration/attestation).
 
 The ACS signing path MUST reuse the existing in-repo implementation
 (`prepareDesktopCommanderCapability` / `signPreparedDesktopCommanderCapability`

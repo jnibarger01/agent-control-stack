@@ -23,12 +23,7 @@ describe("acs mode", () => {
           this.chunks += chunk;
         }
       },
-      stderr: {
-        chunks: "",
-        write(chunk: string) {
-          this.chunks += chunk;
-        }
-      }
+      stderr: { write() {} }
     };
     try {
       expect(await runAcsCli(["mode", "status"], io)).toBe(0);

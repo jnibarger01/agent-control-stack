@@ -14,7 +14,6 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { runWorkerOnce } from "@agent-control-stack/worker";
-import { runManagedCodingCli, parseCodingCliArgs } from "@agent-control-stack/coding-harness";
 import { listAvailableActors } from "./available-actors.js";
 import { discoverLocalActors as runLocalActorDiscovery } from "./discover-actors.js";
 import { ACS_CLI_VERSION, ACS_HELP, AcsUsageError, parseAcsArgs, type AcsCommand } from "./parse.js";
@@ -271,30 +270,6 @@ async function executeCommand(command: AcsCommand, io: AcsIo, adapters: AcsAdapt
     }
     case "skills":
       return runSkillsCommand(command.args, io);
-    case "code": {
-      const approver = process.env.ACS_CODE_APPROVER;
-      const requesterSubject = process.env.ACS_CODE_REQUESTER;
-      const dbPath = process.env.ACS_DB_PATH;
-      if (!approver || !requesterSubject || !dbPath) {
-        io.stderr.write("acs code requires ACS_CODE_APPROVER, ACS_CODE_REQUESTER, and ACS_DB_PATH\n");
-        return 2;
-      }
-      if (requesterSubject === approver) {
-        io.stderr.write("acs code requires ACS_CODE_REQUESTER to differ from ACS_CODE_APPROVER\n");
-        return 2;
-      }
-      return runManagedCodingCli(
-        {
-          ...parseCodingCliArgs(command.args),
-          approver,
-          requesterSubject,
-          dbPath,
-          ...(process.env.ACS_CODE_WORKER_ID ? { workerId: process.env.ACS_CODE_WORKER_ID } : {}),
-          ...(process.env.ACS_CODE_WORKTREE_ROOT ? { worktreeRoot: process.env.ACS_CODE_WORKTREE_ROOT } : {})
-        },
-        io.stdout
-      );
-    }
     default: {
       const _exhaustive: never = command;
       throw new Error(`unhandled command ${JSON.stringify(_exhaustive)}`);

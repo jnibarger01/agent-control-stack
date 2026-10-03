@@ -4,14 +4,6 @@ import {
   type CodingMissionPorts
 } from "@agent-control-stack/coding-mission";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { harnessExecutionResult } from "./harness-result.js";
-import {
-  HARNESS_DC_TOOLS,
-  HarnessDispatchQueue,
-  harnessCorrelationId,
-  harnessDcInvocationSchema,
-  harnessSubject
-} from "./harness-dispatch.js";
 import type { ServerResponse } from "node:http";
 import {
   acpAdapterConfigFromEnv,
@@ -214,7 +206,6 @@ import { gatewayListenConfig } from "./runtime-config.js";
 import { DeviceAuthStore } from "./device-auth-store.js";
 import { registerDeviceAuthRoutes } from "./device-auth.js";
 import { createPortfolioClientFromEnv, type PortfolioClient } from "./portfolio-client.js";
-import { VisualizerProjectionClient, visualizerBaseUrl as normalizeVisualizerBaseUrl, visualizerBaseUrlFromEnv } from "./visualizer-projection.js";
 import { verifyChangeSetResult } from "./change-set-verification.js";
 import { fileReadbackExpectationSchema } from "@agent-control-stack/verification";
 import { changeSetExecutionInput } from "./change-set-execution.js";
@@ -254,11 +245,6 @@ const gatewayCredentialSchema = z.object({
   expiresAt: z.string().datetime({ offset: true }).optional(),
   status: z.enum(["active", "revoked"]).optional()
 });
-const visualizerProjectionQuerySchema = z
-  .object({
-    limit: z.coerce.number().int().min(1).max(20).default(20)
-  })
-  .strict();
 export type GatewayCredential = z.infer<typeof gatewayCredentialSchema>;
 export interface GatewayAuthOptions {
   token: string;
@@ -323,10 +309,6 @@ export interface GatewayOptions {
   maxSseClients?: number;
   maxSseClientsPerPrincipal?: number;
   portfolioClient?: PortfolioClient;
-  /** Optional read-only Visualizer loopback origin. false disables env discovery. */
-  visualizerBaseUrl?: string | false;
-  /** Test seam for the server-side read-only Visualizer client. */
-  visualizerFetch?: typeof fetch;
   /**
    * Optional /readyz sandbox prerequisite probe (bwrap / systemd-run / cgroup v2).
    * Default off via ACS_READYZ_SANDBOX_PROBE; enable on real-execution hosts only.
@@ -575,9 +557,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     const admission = lease && workItems.getExecutionPlanAdmission(lease.admissionId);
     const workItem = workItems.get(perm.workItemId);
     const valid =
-      (perm.executionClass === "execution" || perm.executionClass === "wait") &&
-      ((perm.lane === "dc" && perm.workerId === DC_BRIDGE_WORKER_ID) ||
-        (perm.lane === "jc" && perm.workerId === JC_BRIDGE_WORKER_ID)) &&
       lease?.status === "active" &&
       Date.parse(lease.expiresAt) > Date.now() &&
       lease.leaseId === perm.leaseId &&
@@ -845,21 +824,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     admissionReconciliationMismatch = mismatch;
   }
 
-  const harnessDispatch = new HarnessDispatchQueue();
   const portfolioClient = options.portfolioClient ?? createPortfolioClientFromEnv();
-  const visualizerBaseUrl =
-    options.visualizerBaseUrl === false
-      ? null
-      : options.visualizerBaseUrl === undefined
-        ? visualizerBaseUrlFromEnv()
-        : normalizeVisualizerBaseUrl(options.visualizerBaseUrl);
-  const visualizerProjectionClient =
-    visualizerBaseUrl === null
-      ? null
-      : new VisualizerProjectionClient({
-          baseUrl: visualizerBaseUrl,
-          ...(options.visualizerFetch === undefined ? {} : { fetchImpl: options.visualizerFetch })
-        });
   const capabilitySigningConfig = resolveCapabilitySigningConfig(options.desktopCommanderCapability, dbPath);
   const capabilityIssuanceRegistry = new SqliteDesktopCommanderRuntimeRegistry(dbPath);
   const dcContainment = resolveDcContainment(options.desktopCommanderContainment);
@@ -1187,7 +1152,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
     async (request, reply) => {
       try {
-        const actor = requireHumanOperatorActor(request, reply, auth);
+        const actor = requireHumanApprovalActor(request, reply, auth);
         if (!actor) return;
         const body = executionModeBodySchema.parse(requestObject(request.body));
         workItems.setExecutionMode({
@@ -1429,57 +1394,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       };
     } catch (error) {
       return sendError(reply, error);
-    }
-  });
-
-  app.get("/api/visualizer/status", { preHandler: requireRead }, async (_request, reply) => {
-    reply.header("cache-control", "no-store");
-    reply.header("x-content-type-options", "nosniff");
-    if (visualizerProjectionClient === null) {
-      return {
-        schemaVersion: 1,
-        configured: false,
-        reachable: false,
-        state: "not_configured",
-        sampledAt: new Date().toISOString(),
-        sourceGeneratedAt: null,
-        database: null,
-        activeExecutions: null,
-        queueDepth: null,
-        pendingApprovals: null,
-        eventStreamClients: null,
-        runtimes: []
-      };
-    }
-    return visualizerProjectionClient.status();
-  });
-
-  app.get("/api/visualizer/projection", { preHandler: requireRead }, async (request, reply) => {
-    reply.header("cache-control", "no-store");
-    reply.header("x-content-type-options", "nosniff");
-    try {
-      const query = visualizerProjectionQuerySchema.parse(request.query);
-      if (visualizerProjectionClient === null) {
-        return {
-          schemaVersion: 1,
-          configured: false,
-          generatedAt: new Date().toISOString(),
-          items: []
-        };
-      }
-      return await visualizerProjectionClient.read(workItems.list(), query.limit);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        return reply.code(400).send({
-          error: "invalid visualizer projection query",
-          code: "visualizer_projection_invalid_query"
-        });
-      }
-      request.log.warn({ err: error }, "visualizer projection read failed");
-      return reply.code(503).send({
-        error: "visualizer projection unavailable",
-        code: "visualizer_projection_unavailable"
-      });
     }
   });
 
@@ -1926,18 +1840,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       return sendError(reply, error);
     }
   });
-
-  app.get<{ Params: { id: string } }>(
-    "/work-items/:id/execution-result",
-    { preHandler: requireRead },
-    async (request, reply) => {
-      try {
-        return harnessExecutionResult(workItems, request.params.id);
-      } catch (error) {
-        return sendError(reply, error);
-      }
-    }
-  );
 
   app.post("/work-items", async (request, reply) => {
     try {
@@ -2610,159 +2512,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
-  // Strands harness hand-off (see harness-dispatch.ts). The harness holds only
-  // an ACS mutation credential: it can request, observe and dispatch its own
-  // invocations, but only the managed bridge can obtain a capability.
-  app.post(
-    "/harness/dc-invocations",
-    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
-    async (request, reply) => {
-      try {
-        const actor = requireMutationActor(request, reply, auth);
-        if (!actor) return;
-        const body = harnessDcInvocationSchema.parse(requestObject(request.body));
-        if (!capabilitySigningConfig || !dcContainment) {
-          return reply
-            .code(503)
-            .send({ error: "capability issuance not configured", code: "capability_issuance_unconfigured" });
-        }
-        const dcPolicy = HARNESS_DC_TOOLS.has(body.tool) ? desktopCommanderToolPolicy(body.tool) : undefined;
-        if (!dcPolicy) return reply.code(403).send({ decision: "deny", code: "harness_tool_not_allowed" });
-        let invocation: DcInvocation;
-        try {
-          invocation = normalizeInvocation(body.tool, body.arguments, dcContainment);
-        } catch (error) {
-          return reply.code(400).send({
-            decision: "deny",
-            code: error instanceof ControlStackError ? error.code : "desktop_commander_argument_invalid"
-          });
-        }
-        const subject = harnessSubject(actor, body.sessionId, body.invocationId);
-        const correlationId = harnessCorrelationId(body.sessionId, body.invocationId);
-        const binding = dcInvocationBinding(body.tool, invocation, subject, capabilitySigningConfig, dcContainment);
-        // Idempotent: one logical invocation maps to exactly one work item, so an
-        // ambiguous transport failure can be retried without a second action.
-        const prior = workItems.list().find((candidate) => candidate.requesterSubject === subject);
-        if (prior) {
-          const params = prior.requestedActions[0]?.params as Record<string, unknown> | undefined;
-          if (params?.tool !== body.tool || params?.bindingHash !== binding.bindingHash) {
-            return reply.code(409).send({ error: "invocation binding mismatch", code: "invocation_binding_mismatch" });
-          }
-          return reply.code(200).send(harnessInvocationView(prior));
-        }
-        if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
-          return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
-        }
-        const workItem = tools.create_work_item(
-          createWorkItemSchema.parse(
-            dcWorkItemInput(body.tool, dcPolicy, invocation, binding, subject, capabilitySigningConfig, correlationId)
-          )
-        );
-        return reply.code(201).send(harnessInvocationView(workItem));
-      } catch (error) {
-        return sendError(reply, error);
-      }
-    }
-  );
-
-  app.post<{ Params: { id: string } }>(
-    "/harness/dc-invocations/:id/dispatch",
-    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
-    async (request, reply) => {
-      try {
-        const actor = requireMutationActor(request, reply, auth);
-        if (!actor) return;
-        const body = harnessDcInvocationSchema.parse(requestObject(request.body));
-        if (!capabilitySigningConfig || !dcContainment) {
-          return reply
-            .code(503)
-            .send({ error: "capability issuance not configured", code: "capability_issuance_unconfigured" });
-        }
-        const workItem = workItems.get(request.params.id);
-        const subject = harnessSubject(actor, body.sessionId, body.invocationId);
-        if (!workItem || workItem.requesterSubject !== subject) {
-          return reply.code(404).send({ error: "work item not found", code: "work_item_not_found" });
-        }
-        let invocation: DcInvocation;
-        try {
-          invocation = normalizeInvocation(body.tool, body.arguments, dcContainment);
-        } catch {
-          return reply.code(409).send({ error: "invocation binding mismatch", code: "invocation_binding_mismatch" });
-        }
-        const binding = dcInvocationBinding(body.tool, invocation, subject, capabilitySigningConfig, dcContainment);
-        const params = workItem.requestedActions[0]?.params as Record<string, unknown> | undefined;
-        if (params?.tool !== body.tool || params?.bindingHash !== binding.bindingHash) {
-          return reply.code(409).send({ error: "invocation binding mismatch", code: "invocation_binding_mismatch" });
-        }
-        const mode = readExecutionModeValue(workItems.getExecutionMode().raw);
-        const adminMode = mode.state === "ok" && mode.mode === "admin";
-        // Admin mode auto-authorizes at issuance under the executor-lease gate;
-        // strict mode dispatches only an item a human has already approved.
-        const dispatchable = workItem.status === "approved" || (adminMode && workItem.status === "needs_approval");
-        if (!dispatchable) {
-          const code = workItem.status === "needs_approval" ? "require_approval" : "not_dispatchable";
-          return reply.code(409).send({ code, ...harnessInvocationView(workItem) });
-        }
-        if (
-          harnessDispatch.enqueue({
-            workItemId: workItem.id,
-            actor: subject,
-            tool: body.tool,
-            arguments: body.arguments
-          }) === "full"
-        ) {
-          return reply.code(429).send({ error: "harness dispatch queue is full", code: "dispatch_queue_full" });
-        }
-        workItems.recordSystemEvent({
-          name: "harness.dispatch_queued",
-          body: {
-            workItemId: workItem.id,
-            tool: body.tool,
-            correlationId: harnessCorrelationId(body.sessionId, body.invocationId)
-          },
-          attributes: { "work_item.id": workItem.id }
-        });
-        return reply.code(202).send(harnessInvocationView(workItem));
-      } catch (error) {
-        return sendError(reply, error);
-      }
-    }
-  );
-
-  app.post(
-    "/dc/harness/next",
-    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
-    async (request, reply) => {
-      try {
-        const workerId = requireWorkerIdentity(request, reply, auth);
-        if (!workerId) return;
-        if (workerId !== DC_BRIDGE_WORKER_ID) {
-          return reply.code(403).send({
-            error: "dedicated Desktop Commander bridge identity is required",
-            code: "dc_bridge_identity_required"
-          });
-        }
-        const entry = harnessDispatch.takeNext((candidate) => {
-          const item = workItems.get(candidate.workItemId);
-          return (
-            item !== undefined &&
-            item.requesterSubject === candidate.actor &&
-            (item.status === "approved" || item.status === "needs_approval")
-          );
-        });
-        if (!entry) return reply.code(204).send();
-        return reply.code(200).send({
-          workItemId: entry.workItemId,
-          actor: entry.actor,
-          tool: entry.tool,
-          arguments: entry.arguments
-        });
-      } catch (error) {
-        return sendError(reply, error);
-      }
-    }
-  );
-
   // External webhook ingest: Hermes (or any upstream) -> ACS control plane.
   // The webhook is a DETERMINISTIC RECEIVER boundary. It does NOT call the
   // downstream system directly. It authenticates the caller (same fail-closed
@@ -2937,8 +2686,27 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           });
         }
 
-        const binding = dcInvocationBinding(body.tool, invocation, dcActor, capabilitySigningConfig, dcContainment);
-        const { invocationHash, bindingHash } = binding;
+        const invocationHash = desktopCommanderInvocationFingerprint(invocation);
+        const requiredScopes = desktopCommanderRequiredScopes(body.tool);
+        const targetCwd =
+          typeof invocation.validatedArguments.cwd === "string"
+            ? invocation.validatedArguments.cwd
+            : (containmentRootForPaths(dcContainment, invocation.canonicalPaths) ?? process.cwd());
+        const policyPaths = invocation.canonicalPaths.length > 0 ? invocation.canonicalPaths : [targetCwd];
+        const riskByClass: Record<typeof dcPolicy.riskClass, "low" | "medium" | "high" | "critical"> = {
+          read_only: "low",
+          safe_mutation: "medium",
+          requires_approval: "high",
+          destructive: "critical"
+        };
+        const bindingHash = stableHash({
+          tool: body.tool,
+          invocationHash,
+          runtimeId: capabilitySigningConfig.runtimeId,
+          identityConfigFingerprint: capabilitySigningConfig.identityConfigFingerprint,
+          requiredScopes,
+          requesterSubject: dcActor
+        });
 
         const modeBeforeLookup = readExecutionModeValue(workItems.getExecutionMode().raw);
         const existing = body.changeSetPermitId
@@ -2971,20 +2739,44 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
         }
 
+        const approvalSummary = dcApprovalSummary(body.tool, invocation.validatedArguments, invocationHash);
+
         let workItem =
           existing ??
           tools.create_work_item(
-            createWorkItemSchema.parse(
-              dcWorkItemInput(
-                body.tool,
-                dcPolicy,
-                invocation,
-                binding,
-                dcActor,
-                capabilitySigningConfig,
-                body.correlationId
-              )
-            )
+            createWorkItemSchema.parse({
+              title: `Desktop Commander capability: ${body.tool}`,
+              intent: `ACS-issued capability for Desktop Commander tool ${body.tool} requested by ${dcActor}`,
+              requester: "agent",
+              requesterSubject: dcActor,
+              target: {
+                cwd: targetCwd,
+                files: policyPaths
+              },
+              requestedActions: [
+                {
+                  kind: dcWorkItemActionKind(dcPolicy),
+                  description: `Desktop Commander tool ${body.tool}`,
+                  params: {
+                    tool: body.tool,
+                    invocationHash,
+                    bindingHash,
+                    runtimeId: capabilitySigningConfig.runtimeId,
+                    identityConfigFingerprint: capabilitySigningConfig.identityConfigFingerprint,
+                    requiredScopes,
+                    requesterSubject: dcActor,
+                    approvalSummary,
+                    write: dcPolicy.mutating,
+                    network: dcPolicy.network,
+                    destructive: dcPolicy.destructive,
+                    cwd: targetCwd,
+                    paths: policyPaths
+                  }
+                }
+              ],
+              risk: riskByClass[dcPolicy.riskClass],
+              ...(body.correlationId ? { metadata: { correlationId: body.correlationId } } : {})
+            })
           );
 
         const evaluations = policy.evaluateWorkItem(workItem, workerId, "approve");
@@ -3150,9 +2942,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               .send({ error: "canonical execution authority unavailable", code: "execution_authority_unavailable" });
           }
 
-          // The adapter binds the approved action hash into the authorization
-          // request hash, so resolve the lease's approval before authorizing.
-          const leaseApproval = lease.approvalId ? workItems.getExecutionPlanApprovalById(lease.approvalId) : undefined;
           let authorization: ExecutionAuthorization;
           try {
             authorization = authorizeDesktopCommanderExecution({
@@ -3162,8 +2951,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               workerId,
               containment: dcContainment,
               requestId: request.id,
-              invocation,
-              ...(leaseApproval ? { approvalActionHash: leaseApproval.actionHash } : {})
+              invocation
             });
           } catch (error) {
             const code = error instanceof ControlStackError ? error.code : "authorization_failed";
@@ -4146,10 +3934,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.addHook("onClose", async () => {
     executionAdmission.shutdown();
     // Active durable reservations survive shutdown and are restored by the next gateway.
-    // Shutdown stops this scheduler; it does not revoke already issued leases.
-    // Keep their durable reservations for the next gateway process to recover.
-    for (const binding of admissionPermits.values()) binding.permit.release();
-    admissionPermits.clear();
     await observationWorker?.stop();
     await acpAdapter?.stop();
     executionReads.close();
@@ -4295,7 +4079,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     countActiveLeases: () => workItems.countActiveAttemptLeases(),
     failExpiredLeases: () => {
       workItems.failExpiredLeases();
-      reapAdmissionPermits();
     },
     recordDrainStart: (details: DrainStartInfo) => recordShutdownDrain("start", details),
     recordDrainFinish: (details: DrainFinishInfo) =>
@@ -4324,7 +4107,7 @@ function sendError(reply: FastifyReply, error: unknown) {
     if (error.code === "admission_recovery_required")
       return reply.code(503).send({ error: "admission recovery requires reconciliation", code: error.code });
     const status =
-      error.code === GATEWAY_SHUTTING_DOWN_CODE || error.code === "admission_recovery_required"
+      error.code === GATEWAY_SHUTTING_DOWN_CODE
         ? 503
         : error.code === "work_item_not_found" || error.code === "agent_not_found"
           ? 404
@@ -4503,104 +4286,6 @@ function resolveDcContainment(override: ContainmentConfig | undefined): Containm
     // cannot run the Phase 6-8 re-authorization, so no capability is issued.
     return undefined;
   }
-}
-
-function harnessInvocationView(workItem: WorkItem) {
-  return {
-    workItemId: workItem.id,
-    status: workItem.status,
-    correlationId: typeof workItem.metadata?.correlationId === "string" ? workItem.metadata.correlationId : null
-  };
-}
-
-type DcToolPolicy = NonNullable<ReturnType<typeof desktopCommanderToolPolicy>>;
-type DcInvocation = ReturnType<typeof normalizeInvocation>;
-interface DcInvocationBinding {
-  invocationHash: string;
-  requiredScopes: ReturnType<typeof desktopCommanderRequiredScopes>;
-  targetCwd: string;
-  policyPaths: string[];
-  bindingHash: string;
-}
-
-/**
- * Single source of the DC work-item binding. Shared by the managed bridge's
- * capability issuance and the Strands harness hand-off so a harness-created
- * item is resumed by issuance -- never duplicated -- after approval.
- */
-function dcInvocationBinding(
-  tool: string,
-  invocation: DcInvocation,
-  dcActor: string,
-  signing: DcCapabilitySigningConfig,
-  containment: ContainmentConfig
-): DcInvocationBinding {
-  const invocationHash = desktopCommanderInvocationFingerprint(invocation);
-  const requiredScopes = desktopCommanderRequiredScopes(tool);
-  const targetCwd =
-    typeof invocation.validatedArguments.cwd === "string"
-      ? invocation.validatedArguments.cwd
-      : (containmentRootForPaths(containment, invocation.canonicalPaths) ?? process.cwd());
-  const policyPaths = invocation.canonicalPaths.length > 0 ? [...invocation.canonicalPaths] : [targetCwd];
-  const bindingHash = stableHash({
-    tool,
-    invocationHash,
-    runtimeId: signing.runtimeId,
-    identityConfigFingerprint: signing.identityConfigFingerprint,
-    requiredScopes,
-    requesterSubject: dcActor
-  });
-  return { invocationHash, requiredScopes, targetCwd, policyPaths, bindingHash };
-}
-
-function dcWorkItemInput(
-  tool: string,
-  dcPolicy: DcToolPolicy,
-  invocation: DcInvocation,
-  binding: DcInvocationBinding,
-  dcActor: string,
-  signing: DcCapabilitySigningConfig,
-  correlationId: string | undefined
-): Record<string, unknown> {
-  const riskByClass: Record<DcToolPolicy["riskClass"], "low" | "medium" | "high" | "critical"> = {
-    read_only: "low",
-    safe_mutation: "medium",
-    requires_approval: "high",
-    destructive: "critical"
-  };
-  return {
-    title: `Desktop Commander capability: ${tool}`,
-    intent: `ACS-issued capability for Desktop Commander tool ${tool} requested by ${dcActor}`,
-    requester: "agent",
-    requesterSubject: dcActor,
-    target: {
-      cwd: binding.targetCwd,
-      files: binding.policyPaths
-    },
-    requestedActions: [
-      {
-        kind: dcWorkItemActionKind(dcPolicy),
-        description: `Desktop Commander tool ${tool}`,
-        params: {
-          tool,
-          invocationHash: binding.invocationHash,
-          bindingHash: binding.bindingHash,
-          runtimeId: signing.runtimeId,
-          identityConfigFingerprint: signing.identityConfigFingerprint,
-          requiredScopes: binding.requiredScopes,
-          requesterSubject: dcActor,
-          approvalSummary: dcApprovalSummary(tool, invocation.validatedArguments, binding.invocationHash),
-          write: dcPolicy.mutating,
-          network: dcPolicy.network,
-          destructive: dcPolicy.destructive,
-          cwd: binding.targetCwd,
-          paths: binding.policyPaths
-        }
-      }
-    ],
-    risk: riskByClass[dcPolicy.riskClass],
-    ...(correlationId ? { metadata: { correlationId } } : {})
-  };
 }
 
 function requireApprovalActionHash(input: Record<string, unknown>): void {
@@ -4987,7 +4672,6 @@ function isRateLimitedRoute(url: string): boolean {
   const path = url.split("?", 1)[0];
   return (
     path === "/mcp" ||
-    path === "/worker/claim" ||
     path === "/execution-mode" ||
     path === "/authority" ||
     path === "/session/login" ||
@@ -5169,41 +4853,6 @@ function requireMutationActor(
   }
   if (!credential.scopes.includes(requiredScope)) {
     reply.code(403).send({ error: `${requiredScope} scope is required`, code: "insufficient_gateway_scope" });
-    return undefined;
-  }
-  return mutationActorForCredential(credential);
-}
-
-/**
- * Global execution-policy changes can remove human approval from eligible
- * work, so they require an explicitly approval-scoped, human-classified
- * operator credential. Worker and service credentials cannot change mode.
- */
-function requireHumanOperatorActor(
-  request: FastifyRequest,
-  reply: FastifyReply,
-  auth: GatewayAuthOptions | undefined
-): string | undefined {
-  if (!auth) {
-    reply.code(503).send({ error: "mutation auth is not configured" });
-    return undefined;
-  }
-  const credential = gatewayCredentialForRequest(request, auth);
-  if (!credential) {
-    reply.code(401).send({ error: "unauthorized" });
-    return undefined;
-  }
-  if (
-    credential.actor !== "user" ||
-    !credential.roles.includes("operator") ||
-    credential.roles.includes("service") ||
-    credential.roles.includes("worker")
-  ) {
-    reply.code(403).send({ error: "human operator credential is required", code: "human_operator_required" });
-    return undefined;
-  }
-  if (!credential.scopes.includes("acs:approve")) {
-    reply.code(403).send({ error: "acs:approve scope is required", code: "insufficient_gateway_scope" });
     return undefined;
   }
   return mutationActorForCredential(credential);

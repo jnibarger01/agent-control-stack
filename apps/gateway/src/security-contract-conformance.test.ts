@@ -13,11 +13,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildGateway, type GatewayAuthOptions } from "./server.js";
 
 const operatorAuth = { token: "operator-token", actor: "user", actorId: "operator" } as const;
-// Approvals must come from a principal other than the requester (ACS policy
-// denies self-approval of mutating work), so the operator authenticates a
-// distinct approver credential to grant approval.
-const approverAuth = { token: "approver-token", actor: "user", actorId: "approver" } as const;
-const approverHeaders = { authorization: `Bearer ${approverAuth.token}` };
 const workerAuth: GatewayAuthOptions = { token: "worker-token", actor: "agent", actorId: "worker-a" };
 const mcpHeaders = { authorization: `Bearer ${operatorAuth.token}` };
 const temporaryDirectories: string[] = [];
@@ -146,7 +141,7 @@ describe("security-contract protocol conformance", () => {
       const response = await fixture.app.inject({
         method: "POST",
         url: `/work-items/${created.id}/approve`,
-        headers: approverHeaders,
+        headers: mcpHeaders,
         payload: { reason: "stale approval", actionHash: staleActionHash }
       });
 
@@ -172,7 +167,7 @@ describe("security-contract protocol conformance", () => {
       const approved = await fixture.app.inject({
         method: "POST",
         url: `/work-items/${created.id}/approve`,
-        headers: approverHeaders,
+        headers: mcpHeaders,
         payload: { reason: "one execution only", actionHash }
       });
       expect(approved.statusCode).toBe(200);
@@ -189,7 +184,7 @@ describe("security-contract protocol conformance", () => {
       const replay = await fixture.app.inject({
         method: "POST",
         url: `/work-items/${created.id}/approve`,
-        headers: approverHeaders,
+        headers: mcpHeaders,
         payload: { reason: "try to reuse", actionHash }
       });
 
@@ -304,30 +299,13 @@ function createGatewayFixture(auth: GatewayAuthOptions = operatorAuth) {
   const dbPath = join(directory, "control.db");
   if (auth === operatorAuth) {
     seedOperator(dbPath);
-    seedApprover(dbPath);
   }
   return {
     app: buildGateway({
       dbPath,
       logger: false,
-      auth: {
-        ...auth,
-        credentials: [
-          {
-            id: "approver",
-            token: approverAuth.token,
-            actor: approverAuth.actor,
-            actorId: approverAuth.actorId,
-            roles: ["operator"],
-            scopes: ["acs:read", "acs:write", "acs:approve"]
-          }
-        ]
-      },
-      ...(auth === operatorAuth
-        ? {
-            mcpAuth: { localBearerToken: operatorAuth.token }
-          }
-        : {})
+      auth,
+      ...(auth === operatorAuth ? { mcpAuth: { localBearerToken: operatorAuth.token } } : {})
     }),
     dbPath
   };
@@ -347,19 +325,6 @@ function seedOperator(dbPath: string): void {
       actorType: "HUMAN",
       displayName: "Conformance Operator",
       externalRef: "local_bearer:local-dev"
-    });
-  } finally {
-    store.close();
-  }
-}
-
-function seedApprover(dbPath: string): void {
-  const store = new SqliteWorkItemStore(dbPath);
-  try {
-    store.registerActor({
-      id: approverAuth.actorId,
-      actorType: "HUMAN",
-      displayName: "Conformance Approver"
     });
   } finally {
     store.close();

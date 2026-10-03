@@ -9239,7 +9239,7 @@ function isTerminalStatus(status: WorkItemStatus): boolean {
   return TERMINAL_WORK_ITEM_STATUSES.includes(status);
 }
 
-export function resultPayloadHash(input: Omit<StoredExecutionResult, "resultId" | "payloadHash" | "createdAt">): string {
+function resultPayloadHash(input: PersistedResultInput): string {
   return stableHash({
     domain: "acs.execution-result",
     workItemId: input.workItemId,
