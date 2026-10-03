@@ -180,6 +180,186 @@ describe("discoverLocalActors", () => {
     }
   });
 
+  it("clears a stale error once a probe succeeds, so a recovered agent does not show it", async () => {
+    const { directory, store } = tempDb();
+    try {
+      // The agent went offline and was marked expired (or was missing), leaving a sticky error behind.
+      await discoverLocalActors({
+        store,
+        resolveExecutable: () => undefined,
+        probe: async () => ({ ok: true }),
+        now: new Date("2026-08-17T18:00:00.000Z")
+      });
+      expect(store.getRegistryAgent("codex-cli")?.lastError).toBe("executable_not_found");
+
+      await discoverLocalActors({
+        store,
+        resolveExecutable: (name) => `/fixed/${name}`,
+        probe: async () => ({ ok: true }),
+        now: new Date("2026-08-17T18:01:00.000Z")
+      });
+      const agent = store.getRegistryAgent("codex-cli");
+      expect(agent?.status).toBe("AVAILABLE");
+      expect(agent?.lastError ?? undefined).toBeUndefined();
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  describe("which errors a successful probe may clear", () => {
+    const T0 = new Date("2026-08-17T18:00:00.000Z");
+    const ok = { resolveExecutable: (name: string) => `/fixed/${name}`, probe: async () => ({ ok: true }) };
+
+    it("keeps an operational error that another actor reported, across repeated passes", async () => {
+      const { directory, store } = tempDb();
+      try {
+        store.registerActor({ id: "user", actorType: "HUMAN", displayName: "Jace" });
+        store.recordAgentHeartbeat("codex-cli", {
+          actorId: "user",
+          status: "DEGRADED",
+          lastError: "runtime exploded",
+          now: T0
+        });
+        await discoverLocalActors({ store, ...ok, now: new Date(T0.getTime() + 60_000) });
+        expect(store.getRegistryAgent("codex-cli")?.lastError).toBe("runtime exploded");
+        // Discovery's own heartbeat must not launder the error's provenance on the next pass.
+        await discoverLocalActors({ store, ...ok, now: new Date(T0.getTime() + 120_000) });
+        expect(store.getRegistryAgent("codex-cli")?.lastError).toBe("runtime exploded");
+      } finally {
+        store.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps an error an operator set through the agent update path after discovery recorded one", async () => {
+      const { directory, store } = tempDb();
+      try {
+        store.registerActor({ id: "user", actorType: "HUMAN", displayName: "Jace" });
+        await discoverLocalActors({
+          store,
+          resolveExecutable: () => undefined,
+          probe: async () => ({ ok: true }),
+          now: T0
+        });
+        expect(store.getRegistryAgent("codex-cli")?.lastError).toBe("executable_not_found");
+        // PATCH /api/agents/:id writes only the agents row, so the latest error-bearing heartbeat is still discovery's.
+        store.updateRegistryAgent("codex-cli", {
+          lastError: "quarantined by operator",
+          actorId: "user",
+          now: new Date(T0.getTime() + 30_000)
+        });
+        await discoverLocalActors({ store, ...ok, now: new Date(T0.getTime() + 60_000) });
+        expect(store.getRegistryAgent("codex-cli")?.lastError).toBe("quarantined by operator");
+      } finally {
+        store.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+
+    it("clears the liveness-expiry error that reconciliation recorded", async () => {
+      const { directory, store } = tempDb();
+      try {
+        await discoverLocalActors({ store, ...ok, now: T0 });
+        store.reconcileStaleAgents({ now: new Date(T0.getTime() + 60 * 60_000) });
+        expect(store.getRegistryAgent("codex-cli")).toMatchObject({
+          status: "OFFLINE",
+          lastError: "heartbeat expired"
+        });
+        await discoverLocalActors({ store, ...ok, now: new Date(T0.getTime() + 61 * 60_000) });
+        const agent = store.getRegistryAgent("codex-cli");
+        expect(agent?.status).toBe("AVAILABLE");
+        expect(agent?.lastError ?? undefined).toBeUndefined();
+      } finally {
+        store.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+
+    it("records in the audit event whether a heartbeat erased an error", async () => {
+      const { directory, store } = tempDb();
+      try {
+        await discoverLocalActors({
+          store,
+          resolveExecutable: () => undefined,
+          probe: async () => ({ ok: true }),
+          now: T0
+        });
+        await discoverLocalActors({ store, ...ok, now: new Date(T0.getTime() + 60_000) });
+        await discoverLocalActors({ store, ...ok, now: new Date(T0.getTime() + 120_000) });
+        const bodies = store
+          .readEvents({ name: "agent.heartbeat", limit: 500 })
+          .map(
+            (event) => event.body as { agentId?: string; lastErrorCleared?: boolean; agentLastError?: string | null }
+          )
+          .filter((body) => body.agentId === "codex-cli");
+        expect(bodies.map((body) => body.lastErrorCleared)).toEqual([false, true, false]);
+        expect(bodies[1]?.agentLastError ?? null).toBeNull();
+        expect(bodies[0]?.agentLastError).toBe("executable_not_found");
+      } finally {
+        store.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("probes the CLIs concurrently so slow or hung ones do not delay the rest", async () => {
+    const { directory, store } = tempDb();
+    try {
+      let inFlight = 0;
+      let peak = 0;
+      const probe = async () => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        inFlight -= 1;
+        return { ok: true };
+      };
+      const started = Date.now();
+      const results = await discoverLocalActors({
+        store,
+        resolveExecutable: (name) => `/fixed/${name}`,
+        probe,
+        now: new Date("2026-08-17T18:00:00.000Z")
+      });
+      const elapsed = Date.now() - started;
+      // Nine serial 200ms probes would take ~1.8s; a hung CLI must cost one timeout, not one per CLI after it.
+      expect(elapsed).toBeLessThan(1000);
+      expect(peak).toBeGreaterThan(1);
+      // Results and writes stay in registry order.
+      expect(results.map((result) => result.id)).toEqual(CANONICAL_DISCOVERY_TARGETS.map((target) => target.id));
+      expect(results.every((result) => result.outcome === "available")).toBe(true);
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("applies each result when its own probe finishes, so a slow probe cannot overwrite a newer heartbeat", async () => {
+    const { directory, store } = tempDb();
+    try {
+      store.registerActor({ id: "user", actorType: "HUMAN", displayName: "Jace" });
+      // codex answers immediately; every other CLI takes 300ms. An API heartbeat for codex lands at ~100ms.
+      const probe = async (path: string) => {
+        if (!path.endsWith("/codex")) await new Promise((resolve) => setTimeout(resolve, 300));
+        return { ok: true };
+      };
+      const sweep = discoverLocalActors({ store, resolveExecutable: (name) => `/fixed/${name}`, probe });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const apiAt = new Date();
+      store.recordAgentHeartbeat("codex-cli", { actorId: "user", status: "BUSY", currentTask: "working", now: apiAt });
+      await sweep;
+      const agent = store.getRegistryAgent("codex-cli");
+      // The sweep's write for codex happened at ~0ms, before the API heartbeat, so the API heartbeat stays latest.
+      expect(agent?.status).toBe("BUSY");
+      expect(agent?.latestHeartbeat?.currentTask).toBe("working");
+      expect(agent?.lastHeartbeatAt).toBe(apiAt.toISOString());
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("does not create arbitrary agents and sanitizes probe errors", async () => {
     const { directory, store } = tempDb();
     const before = store.listRegistryAgents().map((agent) => agent.id);

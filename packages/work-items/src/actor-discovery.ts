@@ -7,7 +7,8 @@ import type { SqliteWorkItemStore } from "./store.js";
 const execFileAsync = promisify(execFile);
 
 export const SYSTEM_BOOTSTRAP_ACTOR_ID = "actor_system_bootstrap";
-export const DISCOVERY_PROBE_TIMEOUT_MS = 3_000;
+// Cold starts are slow (hermes --version took 6.5s cold, 0.2s warm); a short timeout makes the roster flap.
+export const DISCOVERY_PROBE_TIMEOUT_MS = 10_000;
 export const DISCOVERY_ERROR_MAX_LENGTH = 200;
 
 const EXECUTABLE_NAME = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
@@ -115,47 +116,50 @@ export async function probeExecutableVersion(executablePath: string, args: reado
 export async function discoverLocalActors(options: DiscoverLocalActorsOptions): Promise<DiscoveryResult[]> {
   const resolveExecutable = options.resolveExecutable ?? resolveExecutableOnPath;
   const probe = options.probe ?? probeExecutableVersion;
-  const now = options.now ?? new Date();
-  const results: DiscoveryResult[] = [];
+  const results: DiscoveryResult[] = new Array<DiscoveryResult>(CANONICAL_DISCOVERY_TARGETS.length);
 
-  for (const target of CANONICAL_DISCOVERY_TARGETS) {
-    const existing = options.store.getRegistryAgent(target.id);
-    if (!existing) {
-      results.push({ id: target.id, outcome: "skipped" });
-      continue;
-    }
+  // Probe every CLI concurrently so one hung or slow executable costs one probe timeout for the whole sweep, not one per
+  // CLI queued behind it. Each result is applied the moment its own probe finishes, stamped with that time: holding a
+  // fast result until the slowest probe returned would let it overwrite (with an older timestamp) a newer heartbeat that
+  // an API or ACP caller sent in the meantime. Writes are synchronous, so there is no gap between reading the clock and
+  // recording the heartbeat. `results` stays in registry order regardless of completion order.
+  await Promise.all(
+    CANONICAL_DISCOVERY_TARGETS.map(async (target, index) => {
+      if (!options.store.getRegistryAgent(target.id)) {
+        results[index] = { id: target.id, outcome: "skipped" };
+        return;
+      }
+      const resolved = resolveExecutable(target.executable);
+      const probed = resolved ? await probe(resolved, target.probeArgs) : undefined;
+      const now = options.now ?? new Date();
 
-    const resolved = resolveExecutable(target.executable);
-    if (!resolved) {
-      options.store.recordAgentHeartbeat(target.id, {
-        status: "OFFLINE",
-        lastError: "executable_not_found",
-        actorId: SYSTEM_BOOTSTRAP_ACTOR_ID,
-        now
-      });
-      results.push({ id: target.id, outcome: "missing" });
-      continue;
-    }
-
-    const probed = await probe(resolved, target.probeArgs);
-    if (probed.ok) {
-      options.store.recordAgentHeartbeat(target.id, {
-        status: "AVAILABLE",
-        actorId: SYSTEM_BOOTSTRAP_ACTOR_ID,
-        now
-      });
-      results.push({ id: target.id, outcome: "available" });
-      continue;
-    }
-
-    options.store.recordAgentHeartbeat(target.id, {
-      status: "ERROR",
-      lastError: probed.timedOut ? "probe_timeout" : sanitizeDiscoveryError(probed.error ?? "probe_failed"),
-      actorId: SYSTEM_BOOTSTRAP_ACTOR_ID,
-      now
-    });
-    results.push({ id: target.id, outcome: "error" });
-  }
+      if (!resolved) {
+        options.store.recordAgentHeartbeat(target.id, {
+          status: "OFFLINE",
+          lastError: "executable_not_found",
+          actorId: SYSTEM_BOOTSTRAP_ACTOR_ID,
+          now
+        });
+        results[index] = { id: target.id, outcome: "missing" };
+      } else if (probed?.ok) {
+        options.store.recordAgentHeartbeat(target.id, {
+          status: "AVAILABLE",
+          clearLastError: true,
+          actorId: SYSTEM_BOOTSTRAP_ACTOR_ID,
+          now
+        });
+        results[index] = { id: target.id, outcome: "available" };
+      } else {
+        options.store.recordAgentHeartbeat(target.id, {
+          status: "ERROR",
+          lastError: probed?.timedOut ? "probe_timeout" : sanitizeDiscoveryError(probed?.error ?? "probe_failed"),
+          actorId: SYSTEM_BOOTSTRAP_ACTOR_ID,
+          now
+        });
+        results[index] = { id: target.id, outcome: "error" };
+      }
+    })
+  );
 
   return results;
 }

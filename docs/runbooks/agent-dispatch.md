@@ -25,6 +25,35 @@ directories that hold them (for example `~/.local/bin` and the Homebrew `bin`) t
 If a CLI is missing from the gateway's `PATH`, the roster shows `executable_not_found` and Dispatch shows it as
 not installed.
 
+## Deploying a gateway release
+
+`scripts/deploy-gateway-release.sh [--label <name>]` builds the committed HEAD, seals and smoke-tests it against a copy
+of the live database, then activates it for the `acs-gateway.service` user unit. Run it from one terminal, with nothing
+else touching the service.
+
+- **One at a time.** Locks keyed by the unit and by the database (canonical path), in the account's own `/run/user/<uid>`, refuse a second deploy, whatever
+  `ACS_RELEASES_DIR`, `TMPDIR` or `XDG_RUNTIME_DIR` it uses.
+- **`ACS_DB_PATH` must be absolute.** The gateway resolves a relative path against its systemd working directory, which a
+  deploy changes; the script refuses a relative path before touching anything.
+- **Backup first.** Activation backs up the live database and the current drop-ins before changing anything.
+- **Automatic rollback restores the database.** If the new release is not live within `ACS_DEPLOY_WAIT_SEC` (default
+  180s), or the unit crash-loops, the script stops the unit, restores the pre-activation backup over the live database
+  with the previous release's `db-ops`, restores the previous drop-ins (or removes the ones it installed, on a first deployment where none existed) and starts the previous release. The new release
+  may already have migrated the database, which the previous release cannot read, so the restore is not optional.
+  **Writes made between the backup and the rollback are lost.** The output prints the backup path. Before restoring it
+  fails closed: the unit must really be stopped and no other process (a worker, scheduler, CLI or another gateway) may
+  have the database open, because `--writers-stopped` is an attestation the script has to earn. If either check fails, or
+  the restore itself fails, it restores nothing, starts nothing, puts the previous drop-ins back and leaves the unit for
+  you: the previous release would still answer `/livez` against a possibly migrated database and could mutate it. Stop
+  whatever holds the database, restore from the printed backup by hand, then start the unit. After a successful restore
+  the script waits for `/readyz`, not just `/livez`. Crash-loop detection counts restarts since the activation began, so
+  restarts from an earlier incident do not trigger a rollback. On a first deployment, or when no dispatch drop-in
+  existed, rollback removes the drop-ins this run installed instead of restoring copies.
+- **`--resume`** activates an already published release (same `--ref` and `--label`) without rebuilding and without a
+  new backup. It never restores a database: use it only to go forward after an interrupted activation.
+- The sandbox test (`npm run test:deploy-script`, also part of `npm test`) exercises the wait, rollback, `--resume` and
+  lock paths against stubs and cannot reach the real service.
+
 ## Roster heartbeats
 
 The gateway re-probes each CLI (`<cli> --version`) every 60 s and refreshes its heartbeat, so the roster stays
