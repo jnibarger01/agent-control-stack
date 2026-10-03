@@ -182,7 +182,7 @@ describe("agent dispatch", () => {
 
   it("refuses a dispatch that differs from what was confirmed, a repo outside the allow-list, and blocked CLIs", async () => {
     fake("claude", "exit 0");
-    fake("gemini", "exit 0");
+    fake("openclaw", "exit 0");
     const app = makeGateway(config());
     const payload = { ...request, repo };
     const preview = (
@@ -216,7 +216,7 @@ describe("agent dispatch", () => {
       method: "POST",
       url: "/api/agent-runs/preview",
       headers: bearer(OP),
-      payload: { ...payload, agentId: "gemini" }
+      payload: { ...payload, agentId: "openclaw" }
     });
     expect(blocked.statusCode).toBe(409);
     expect(blocked.json().code).toBe("agent_dispatch_blocked");
@@ -294,14 +294,14 @@ describe("agent dispatch", () => {
 
   it("lists all nine CLIs and registers them idempotently", async () => {
     fake("claude", 'echo "2.1.284 (Claude Code)"');
-    fake("gemini", 'echo "0.46.0"');
+    fake("openclaw", 'echo "2026.9.7"');
     const app = makeGateway(config());
     const view = (await app.inject({ method: "GET", url: "/api/agent-clis", headers: bearer(READER) })).json();
     expect(view.agents).toHaveLength(9);
     const by = Object.fromEntries(view.agents.map((a: { id: string }) => [a.id, a]));
     expect(by.claude).toMatchObject({ installed: true, dispatchable: true, registered: false });
-    expect(by.gemini).toMatchObject({ installed: true, dispatchable: false });
-    expect(by.gemini.unavailableReason).toMatch(/no longer supported/);
+    expect(by.openclaw).toMatchObject({ installed: true, dispatchable: false });
+    expect(by.openclaw.unavailableReason).toMatch(/Gateway owns its state directory/);
 
     const seed = new SqliteWorkItemStore(join(root, "control.db"));
     seed.registerActor({ id: "user", actorType: "HUMAN", displayName: "user" });
@@ -317,7 +317,7 @@ describe("agent dispatch", () => {
     const agents = (await app.inject({ method: "GET", url: "/api/agents", headers: bearer(READER) })).json()
       .agents as Array<{ id: string; status: string }>;
     expect(agents.find((a) => a.id === "cli-claude")?.status).toBe("AVAILABLE");
-    expect(agents.find((a) => a.id === "cli-gemini")?.status).toBe("DEGRADED");
+    expect(agents.find((a) => a.id === "cli-openclaw")?.status).toBe("DEGRADED");
     expect(agents.find((a) => a.id === "cli-cline")?.status).toBe("OFFLINE");
   });
 });

@@ -95,6 +95,8 @@ async function dispatchJson(url, init) {
   return body;
 }
 
+const CLI_TEST_KIND_LABELS = { usage_limit: 'usage limit', auth: 'sign-in needed', ineligible: 'account not eligible', timeout: 'timed out', cancelled: 'cancelled', no_reply: 'no reply', error: 'error' };
+
 function dispatchStatusPill(agent) {
   if (!agent.installed) return '<span class="pill missing">not installed</span>';
   if (agent.dispatchBlockedReason) return '<span class="pill blocked">blocked</span>';
@@ -114,7 +116,7 @@ function renderCliAgents() {
   if (!dispatchState.agents.length) { grid.innerHTML = '<p class="muted">No CLI agents known.</p>'; return; }
   grid.innerHTML = dispatchState.agents.map(function (agent) {
     const test = agent.lastTest
-      ? '<p>Last test ' + escapeClient(formatClientTime(agent.lastTest.at)) + ': ' + (agent.lastTest.ok ? 'passed' : 'failed — ' + escapeClient(redactClient(agent.lastTest.detail).slice(0, 140))) + '</p>'
+      ? '<p>Last test ' + escapeClient(formatClientTime(agent.lastTest.at)) + ': ' + (agent.lastTest.ok ? 'passed' : 'failed' + (CLI_TEST_KIND_LABELS[agent.lastTest.kind] ? ' (' + CLI_TEST_KIND_LABELS[agent.lastTest.kind] + ')' : '') + ' — ' + escapeClient(redactClient(agent.lastTest.detail).slice(0, 200))) + '</p>'
       : '<p>Not tested yet.</p>';
     const reason = agent.unavailableReason ? '<p class="cli-reason">' + escapeClient(agent.unavailableReason) + '</p>' : '';
     const meta = [
@@ -332,7 +334,10 @@ document.addEventListener('click', async function (event) {
     test.disabled = true;
     const label = test.textContent;
     test.textContent = 'Testing…';
-    try { await dispatchJson('/api/agent-clis/' + encodeURIComponent(test.dataset.cliTest) + '/test', { method: 'POST' }); }
+    try {
+      const result = await dispatchJson('/api/agent-clis/' + encodeURIComponent(test.dataset.cliTest) + '/test', { method: 'POST' });
+      announce(result.ok ? 'Connection test passed' : 'Connection test failed: ' + redactClient(result.detail || result.outcome));
+    }
     catch (error) { announce('Test rejected: ' + redactClient(error.message)); }
     test.textContent = label;
     await loadCliAgents();
