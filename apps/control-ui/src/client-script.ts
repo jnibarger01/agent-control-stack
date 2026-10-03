@@ -1,3 +1,4 @@
+import { MCP_CLIENT_EVENT_NAMES, mcpClientsClientSource } from "./mcp-clients.js";
 import { AGENT_DISPATCH_EVENT_NAMES, agentDispatchClientSource } from "./agent-dispatch.js";
 import { codingMissionPanelSource } from "./coding-mission-panel.js";
 import { operationsClientSource } from "./operations-client.js";
@@ -30,6 +31,8 @@ let leaseWarningRoot = null;
 // clock backwards by the delay.
 const SERVER_CLOCK_MAX_RTT_MS = 10000;
 const sseEventNames = [
+${MCP_CLIENT_EVENT_NAMES.map((name) => `  '${name}',`).join("\n")}
+  'connector.requested',
 ${AGENT_DISPATCH_EVENT_NAMES.map((name) => `  '${name}',`).join("\n")}
   'work_item.created',
   'work_item.pending_policy',
@@ -121,6 +124,7 @@ function connectSse() {
       if (selectedAgentId) loadAgentDetail(selectedAgentId);
       if (selectedExecutorId) loadExecutorDetail(selectedExecutorId);
       if (selectedConnectorId) loadConnectorDetail(selectedConnectorId);
+      loadMcpClients();
       announce('Live stream reconnected');
       if (selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
     }
@@ -158,6 +162,7 @@ function appendAuditEvent(event) {
   if (data.name === 'work_item.needs_approval') notifyApprovalNeeded(data);
   const eventName = String(data.name || event.type || '');
   onLiveAuditEvent(eventName, data);
+  onMcpClientAuditEvent(eventName);
   onDispatchAuditEvent(eventName);
   if (eventName.startsWith('agent.') || eventName.startsWith('acp.')) {
     refreshAgentRoster();
@@ -1311,6 +1316,7 @@ document.addEventListener('click', async (event) => {
 
 
 ${composerClientSource()}
+${mcpClientsClientSource()}
 ${agentDispatchClientSource()}
 
 const viewAliases = {

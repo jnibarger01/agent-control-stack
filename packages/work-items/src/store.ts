@@ -747,6 +747,14 @@ export interface ConnectorRequestRecord {
   authTunnelId?: string;
   authSessionId?: string;
   authScopes?: string[];
+  /** OAuth client_id verified by the edge. Attribution for operators; never an authority. */
+  mcpClientId?: string;
+  /** Which edge lane carried the call: Jace Commander (`jc`) or Desktop Commander (`dc`). */
+  mcpLane?: string;
+  /** Self-declared by the MCP client (`initialize.clientInfo`, User-Agent). Unverified. */
+  mcpClientName?: string;
+  mcpClientVersion?: string;
+  mcpUserAgent?: string;
 }
 
 /**
@@ -6355,6 +6363,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
       if (input.authConnectorId) attributes["auth.connector_id"] = input.authConnectorId;
       if (input.authTunnelId) attributes["auth.tunnel_id"] = input.authTunnelId;
       if (input.authSessionId) attributes["auth.session_id"] = input.authSessionId;
+      if (input.mcpClientId) attributes["mcp.client_id"] = input.mcpClientId;
+      if (input.mcpLane) attributes["mcp.lane"] = input.mcpLane;
       const event = this.appendAuditEvent(createEvent("connector.requested", { ...input }, attributes));
       return { value: event, events: [event] };
     });
