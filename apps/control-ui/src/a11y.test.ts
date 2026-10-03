@@ -51,6 +51,10 @@ async function runAxe(html: string): Promise<AxeViolation[]> {
     window as unknown as { axe: { run: (ctx: unknown, opts: unknown) => Promise<{ violations: AxeViolation[] }> } }
   ).axe;
   const result = await axe.run(window.document, {
+    // Only violations are read below. Skipping node details (selectors, HTML
+    // snippets) for passes/incomplete/inapplicable results does ~12% less work
+    // and returns the same violations and targets.
+    resultTypes: ["violations"],
     runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "best-practice"] },
     rules: {
       // jsdom lacks layout/paint; contrast checks are unreliable here.
@@ -62,7 +66,13 @@ async function runAxe(html: string): Promise<AxeViolation[]> {
   return result.violations.filter((violation) => violation.impact === "critical" || violation.impact === "serious");
 }
 
-// axe-core over the full dashboard takes under a second locally but several seconds on a loaded CI runner.
+// jsdom + axe over the full dashboard is CPU-bound with no single hot spot:
+// jsdom resolves computed style for ~920 elements against the dashboard
+// stylesheet and axe runs 86 rules. Measured on CI it takes ~2.0-2.3s plain
+// and ~3.5-4.3s under `vitest --coverage` (about 0.7s / 1.4s locally), which
+// is 70-85% of vitest's default 5s, so ordinary runner variance exceeded it.
+// The explicit budget applies to the two axe tests only and leaves headroom
+// so that only a real hang fails.
 const AXE_TEST_TIMEOUT_MS = 30_000;
 
 describe("mission-control a11y + mobile smoke", () => {
