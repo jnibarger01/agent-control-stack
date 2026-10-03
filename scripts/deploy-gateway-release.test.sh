@@ -211,9 +211,34 @@ expect "touched no service" bash -c '! grep -q "systemctl" "$SANDBOX/calls.log"'
 
 # --- H: the lock directory cannot be steered by caller environment ----------------------------------------
 echo "H: lock directory is derived from the account"
-expect "no TMPDIR in the lock path" bash -c '! sed -n "/^LOCK_DIR=\|^if \[\[ \"\${ACS_DEPLOY_TEST_MODE/,/^LOCK_FILE=/p" "$ROOT/scripts/deploy-gateway-release.sh" | grep -q TMPDIR'
-expect "XDG_RUNTIME_DIR is only used in test mode" bash -c 'grep -B1 "LOCK_DIR=\"\$XDG_RUNTIME_DIR\"" "$ROOT/scripts/deploy-gateway-release.sh" | grep -q "ACS_DEPLOY_TEST_MODE"'
-expect "falls back to the account runtime dir" grep -q 'LOCK_DIR="/run/user/\$(id -u)"' "$ROOT/scripts/deploy-gateway-release.sh"
+expect "no TMPDIR in the lock path (code, not comments)" bash -c '! sed -n "/^IN_SANDBOX=0/,/^exec 9>/p" "$ROOT/scripts/deploy-gateway-release.sh" | grep -v "^[[:space:]]*#" | grep -q TMPDIR'
+expect "XDG_RUNTIME_DIR is only used inside the sandbox" bash -c 'grep -B1 "LOCK_DIR=\"\$XDG_RUNTIME_DIR\"" "$ROOT/scripts/deploy-gateway-release.sh" | grep -q "IN_SANDBOX"'
+expect "falls back to the account runtime dir" grep -q 'choose_lock_dir "/run/user/\$(id -u)"' "$ROOT/scripts/deploy-gateway-release.sh"
+
+# --- I: lock directory hardening (pure helper, temp directories only) --------------------------------------
+echo "I: lock directory is private to the account"
+# shellcheck source=lib/deploy-lock.sh
+source "$ROOT/scripts/lib/deploy-lock.sh"
+# bash -c subshells below must see the helpers, or a negated call would pass vacuously ("command not found").
+export -f choose_lock_dir lock_dir_is_secure
+LD="$TMP_ROOT/lockdirs"; mkdir -p "$LD"
+pick() { choose_lock_dir "$1" "$2" 2>/dev/null; }
+
+mkdir -m 700 "$LD/run-ok"
+expect "uses a private runtime directory" test "$(pick "$LD/run-ok" "$LD/fb-unused")" = "$LD/run-ok"
+expect "(control) the helper is visible to subshells and accepts a private dir" bash -c 'choose_lock_dir "$0" "$1" >/dev/null 2>&1' "$LD/run-ok" "$LD/fb-unused"
+mkdir -m 755 "$LD/run-open"
+expect "refuses a runtime directory that is not mode 700" bash -c '! choose_lock_dir "$0" "$1" >/dev/null 2>&1' "$LD/run-open" "$LD/fb-unused"
+expect "creates a missing fallback with mode 700" bash -c 'out="$(choose_lock_dir "$0" "$1" 2>/dev/null)" && [ "$out" = "$1" ] && [ "$(stat -c %a "$1")" = 700 ]' "$LD/no-run" "$LD/fb-new"
+mkdir -m 777 "$LD/fb-planted"
+expect "refuses a pre-existing fallback with loose permissions (never repairs it)" bash -c '! choose_lock_dir "$0" "$1" >/dev/null 2>&1 && [ "$(stat -c %a "$1")" = 777 ]' "$LD/no-run" "$LD/fb-planted"
+mkdir -m 700 "$LD/real-target"; ln -s "$LD/real-target" "$LD/fb-link"
+expect "refuses a symlinked fallback directory" bash -c '! choose_lock_dir "$0" "$1" >/dev/null 2>&1' "$LD/no-run" "$LD/fb-link"
+expect "the deploy script refuses a symlinked lock file" grep -q 'is a symlink' "$ROOT/scripts/deploy-gateway-release.sh"
+expect "test-mode relocation requires the sandbox identity (non-account HOME), not just the flag" bash -c '
+  grep -q "IN_SANDBOX=1" "$ROOT/scripts/deploy-gateway-release.sh" &&
+  grep -q "\"\$HOME\" != \"\$real_home\"" "$ROOT/scripts/deploy-gateway-release.sh" &&
+  grep -q "\"\$IN_SANDBOX\" -eq 1 && -n \"\${XDG_RUNTIME_DIR" "$ROOT/scripts/deploy-gateway-release.sh"'
 
 # --- E: the build must not inherit the gateway's NODE_ENV=production -------------------------------------
 echo "E: build step is immune to the gateway env file"

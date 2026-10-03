@@ -117,17 +117,25 @@ export async function discoverLocalActors(options: DiscoverLocalActorsOptions): 
   const resolveExecutable = options.resolveExecutable ?? resolveExecutableOnPath;
   const probe = options.probe ?? probeExecutableVersion;
   const now = options.now ?? new Date();
+
+  // Probe every CLI concurrently. A hung or slow executable then costs one probe timeout for the whole sweep, not one
+  // per CLI queued behind it (serial probing let two hung CLIs starve the rest of the catalog).
+  const observed = await Promise.all(
+    CANONICAL_DISCOVERY_TARGETS.map(async (target) => {
+      if (!options.store.getRegistryAgent(target.id)) return { target, kind: "skipped" as const };
+      const resolved = resolveExecutable(target.executable);
+      if (!resolved) return { target, kind: "missing" as const };
+      return { target, kind: "probed" as const, probed: await probe(resolved, target.probeArgs) };
+    })
+  );
+
+  // Record in registry order so writes and results are deterministic.
   const results: DiscoveryResult[] = [];
-
-  for (const target of CANONICAL_DISCOVERY_TARGETS) {
-    const existing = options.store.getRegistryAgent(target.id);
-    if (!existing) {
+  for (const entry of observed) {
+    const { target } = entry;
+    if (entry.kind === "skipped") {
       results.push({ id: target.id, outcome: "skipped" });
-      continue;
-    }
-
-    const resolved = resolveExecutable(target.executable);
-    if (!resolved) {
+    } else if (entry.kind === "missing") {
       options.store.recordAgentHeartbeat(target.id, {
         status: "OFFLINE",
         lastError: "executable_not_found",
@@ -135,11 +143,7 @@ export async function discoverLocalActors(options: DiscoverLocalActorsOptions): 
         now
       });
       results.push({ id: target.id, outcome: "missing" });
-      continue;
-    }
-
-    const probed = await probe(resolved, target.probeArgs);
-    if (probed.ok) {
+    } else if (entry.probed.ok) {
       options.store.recordAgentHeartbeat(target.id, {
         status: "AVAILABLE",
         clearLastError: true,
@@ -147,16 +151,17 @@ export async function discoverLocalActors(options: DiscoverLocalActorsOptions): 
         now
       });
       results.push({ id: target.id, outcome: "available" });
-      continue;
+    } else {
+      options.store.recordAgentHeartbeat(target.id, {
+        status: "ERROR",
+        lastError: entry.probed.timedOut
+          ? "probe_timeout"
+          : sanitizeDiscoveryError(entry.probed.error ?? "probe_failed"),
+        actorId: SYSTEM_BOOTSTRAP_ACTOR_ID,
+        now
+      });
+      results.push({ id: target.id, outcome: "error" });
     }
-
-    options.store.recordAgentHeartbeat(target.id, {
-      status: "ERROR",
-      lastError: probed.timedOut ? "probe_timeout" : sanitizeDiscoveryError(probed.error ?? "probe_failed"),
-      actorId: SYSTEM_BOOTSTRAP_ACTOR_ID,
-      now
-    });
-    results.push({ id: target.id, outcome: "error" });
   }
 
   return results;

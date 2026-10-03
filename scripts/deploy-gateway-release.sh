@@ -16,7 +16,7 @@
 #               the release + dispatch drop-ins, restart, health-check; roll the drop-ins back on failure
 #
 # Only committed content is built. Safety behavior to know before running it:
-#   - One deploy at a time per service unit (lock file under /run/user/<uid>, keyed by the unit name).
+#   - One deploy at a time per service unit (lock file in the account's private /run/user/<uid>, keyed by the unit name).
 #   - The live database is backed up before activation. If activation fails, rollback AUTOMATICALLY restores that
 #     backup over the live database (using the previous release's db-ops, which understands the old schema),
 #     because the failed release may already have migrated it and the previous release cannot read a migrated
@@ -42,15 +42,17 @@ while [[ $# -gt 0 ]]; do
 done
 [[ "$LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "invalid --label" >&2; exit 2; }
 
-# ACS_DEPLOY_PREBUILT_STAGE skips the build, seal and smoke-test phases and publishes the given directory as is, so it
-# is a test hook only: it is honored solely with ACS_DEPLOY_TEST_MODE=1 and a HOME that is not the real account home.
-# A real operator environment (real HOME) can never take this path, even if the variable leaks into it.
-if [[ -n "${ACS_DEPLOY_PREBUILT_STAGE:-}" ]]; then
-  real_home="$(getent passwd "$(id -u)" | cut -d: -f6)"
-  if [[ "${ACS_DEPLOY_TEST_MODE:-}" != "1" || "$HOME" == "$real_home" ]]; then
-    echo "ACS_DEPLOY_PREBUILT_STAGE is only honored by the sandbox test (ACS_DEPLOY_TEST_MODE=1 and a non-account HOME); refusing" >&2
-    exit 2
-  fi
+# The sandbox test is the only caller allowed to relocate state (lock directory) or skip phases (prebuilt stage). It must
+# say so (ACS_DEPLOY_TEST_MODE=1) AND run under a HOME that is not the real account home, so neither can happen in a real
+# operator environment even if the variables leak into it.
+real_home="$(getent passwd "$(id -u)" | cut -d: -f6)"
+IN_SANDBOX=0
+if [[ "${ACS_DEPLOY_TEST_MODE:-}" == "1" && "$HOME" != "$real_home" ]]; then IN_SANDBOX=1; fi
+
+# ACS_DEPLOY_PREBUILT_STAGE skips the build, seal and smoke-test phases and publishes the given directory as is.
+if [[ -n "${ACS_DEPLOY_PREBUILT_STAGE:-}" && "$IN_SANDBOX" -ne 1 ]]; then
+  echo "ACS_DEPLOY_PREBUILT_STAGE is only honored by the sandbox test (ACS_DEPLOY_TEST_MODE=1 and a non-account HOME); refusing" >&2
+  exit 2
 fi
 
 REPO="$(git rev-parse --show-toplevel)"
@@ -67,20 +69,20 @@ SMOKE_PORT="${ACS_SMOKE_PORT:-3999}"
 AGENT_PATH="$HOME/.local/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 
-# One deploy at a time per service unit. The lock is keyed by the unit and lives in the per-user runtime directory,
+# One deploy at a time per service unit. The lock is keyed by the unit and lives in the account's private runtime directory,
 # NOT under the (configurable) releases directory: two invocations with different ACS_RELEASES_DIR still target the same
 # unit, drop-ins and database and must exclude each other. Two same-label runs once raced on the publish step.
-# The directory is derived from the account, never from caller-controlled environment (TMPDIR, XDG_RUNTIME_DIR), or two
-# invocations could pick different locks for the same unit. Only the sandbox test (ACS_DEPLOY_TEST_MODE=1) may relocate it.
-if [[ "${ACS_DEPLOY_TEST_MODE:-}" == "1" && -n "${XDG_RUNTIME_DIR:-}" ]]; then
+# The directory is derived from the account, never from caller-controlled environment (TMPDIR, XDG_RUNTIME_DIR). Only the
+# sandbox may relocate it, and an existing directory that is not private to this account is refused (see lib/deploy-lock.sh).
+# shellcheck source=lib/deploy-lock.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/deploy-lock.sh"
+if [[ "$IN_SANDBOX" -eq 1 && -n "${XDG_RUNTIME_DIR:-}" ]]; then
   LOCK_DIR="$XDG_RUNTIME_DIR"
-elif [[ -d "/run/user/$(id -u)" && -w "/run/user/$(id -u)" ]]; then
-  LOCK_DIR="/run/user/$(id -u)"
 else
-  LOCK_DIR="/tmp/acs-deploy-$(id -u)"
-  mkdir -p -m 700 "$LOCK_DIR"
+  LOCK_DIR="$(choose_lock_dir "/run/user/$(id -u)" "/tmp/acs-deploy-$(id -u)")" || exit 1
 fi
 LOCK_FILE="$LOCK_DIR/acs-deploy-$UNIT.lock"
+[[ ! -L "$LOCK_FILE" ]] || { echo "refusing to lock: $LOCK_FILE is a symlink" >&2; exit 1; }
 exec 9>"$LOCK_FILE"
 flock -n 9 || { echo "another deploy of $UNIT is already running (lock: $LOCK_FILE)" >&2; exit 1; }
 
@@ -154,9 +156,10 @@ for _ in $(seq 1 60); do curl -fsS -m 2 "$base/livez" >/dev/null 2>&1 && break; 
 curl -fsS -m 5 "$base/livez" >/dev/null || { echo "smoke gateway did not come up:" >&2; tail -30 "$SMOKE_DIR/gateway.log" >&2; exit 1; }
 auth=(-H "authorization: Bearer $SMOKE_TOKEN")
 
-# Heartbeats: the in-process loop must bring CLIs online without anything else running.
+# Heartbeats: the in-process loop must bring CLIs online without anything else running. Discovery probes the CLIs
+# concurrently, so one sweep is bounded by a single probe timeout (10s); allow several sweeps' worth of headroom.
 online=0
-for _ in $(seq 1 20); do
+for _ in $(seq 1 "${ACS_SMOKE_ROSTER_WAIT_SEC:-45}"); do
   online="$(curl -fsS -m 5 "${auth[@]}" "$base/api/agents" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const a=JSON.parse(s).agents??[];console.log(a.filter(x=>x.status==="AVAILABLE").length)})')"
   [[ "$online" -gt 0 ]] && break
   sleep 1

@@ -278,6 +278,38 @@ describe("discoverLocalActors", () => {
     });
   });
 
+  it("probes the CLIs concurrently so slow or hung ones do not delay the rest", async () => {
+    const { directory, store } = tempDb();
+    try {
+      let inFlight = 0;
+      let peak = 0;
+      const probe = async () => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        inFlight -= 1;
+        return { ok: true };
+      };
+      const started = Date.now();
+      const results = await discoverLocalActors({
+        store,
+        resolveExecutable: (name) => `/fixed/${name}`,
+        probe,
+        now: new Date("2026-08-17T18:00:00.000Z")
+      });
+      const elapsed = Date.now() - started;
+      // Nine serial 200ms probes would take ~1.8s; a hung CLI must cost one timeout, not one per CLI after it.
+      expect(elapsed).toBeLessThan(1000);
+      expect(peak).toBeGreaterThan(1);
+      // Results and writes stay in registry order.
+      expect(results.map((result) => result.id)).toEqual(CANONICAL_DISCOVERY_TARGETS.map((target) => target.id));
+      expect(results.every((result) => result.outcome === "available")).toBe(true);
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("does not create arbitrary agents and sanitizes probe errors", async () => {
     const { directory, store } = tempDb();
     const before = store.listRegistryAgents().map((agent) => agent.id);

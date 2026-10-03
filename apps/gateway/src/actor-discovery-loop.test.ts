@@ -92,7 +92,10 @@ describe("gateway actor discovery loop", () => {
     await app.ready();
     await new Promise((resolve) => setTimeout(resolve, 150));
     await app.close();
-    expect(maxInFlight).toBe(1);
+    // One sweep probes every canonical CLI concurrently (9). If a second sweep started while the first was still
+    // running (interval 5ms, probe 60ms) the peak would reach 18.
+    expect(maxInFlight).toBeLessThanOrEqual(9);
+    expect(maxInFlight).toBeGreaterThan(1);
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(inFlight).toBe(0);
   });
