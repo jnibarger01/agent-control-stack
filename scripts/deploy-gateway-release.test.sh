@@ -123,6 +123,7 @@ expect "backup is in rollback-journal mode (no WAL sidecars for the tool to trip
 expect "previous release drop-in restored" grep -q "OLD-RELEASE" "$DROPINS/40-immutable-release.conf"
 expect "dispatch drop-in removed" test ! -e "$DROPINS/50-agent-dispatch.conf"
 expect "unit started again after restore" bash -c 'awk "/db-ops.mjs restore/{r=NR} /systemctl --user start/{s=NR} END{exit !(r&&s&&r<s)}" "$SANDBOX/calls.log"'
+expect "checked readiness of the restored release, not just liveness" grep -q "readyz mode=old" "$SANDBOX/calls.log"
 expect "tells the operator writes since the backup are lost" grep -q "writes since that backup are lost" "$SANDBOX/out.log"
 
 # --- C: crash loop is detected without burning the whole wait -----------------------------------------------
@@ -147,14 +148,16 @@ expect "resume refuses a release that was never published" bash -c '
   rm -rf "$FINAL"; ( cd "$ROOT" && PATH="$SANDBOX/shims:$PATH" ACS_RELEASE_NODE_DIR="$HOME/releases/_node/v24.18.0/bin" \
     scripts/deploy-gateway-release.sh --ref HEAD --label test --resume ) >/dev/null 2>&1; [ $? -ne 0 ]'
 
-# --- B2: a failed DB restore must not strand the unit on the new drop-in -------------------------------------
-echo "B2: failed database restore still restores the drop-ins and starts the unit"
+# --- B2: a failed DB restore must fail closed: previous drop-ins back, unit LEFT STOPPED ------------------
+echo "B2: failed database restore leaves the unit stopped"
 setup B2
 SHIM_NEW_BROKEN=1 SHIM_DBOPS_FAIL=1 ACS_DEPLOY_WAIT_SEC=4 run_deploy
 expect "exit 1" test "$(exit_code)" -eq 1
-expect "warns that the database restore failed" grep -q "DATABASE RESTORE FAILED" "$SANDBOX/out.log"
-expect "previous release drop-in still restored" grep -q "OLD-RELEASE" "$DROPINS/40-immutable-release.conf"
-expect "unit still started" bash -c 'awk "/db-ops.mjs restore/{r=NR} /systemctl --user start/{s=NR} END{exit !(r&&s&&r<s)}" "$SANDBOX/calls.log"'
+expect "warns that the database restore failed and the unit is left stopped" grep -q "DATABASE RESTORE FAILED.*STOPPED" "$SANDBOX/out.log"
+expect "previous release drop-in still restored for a manual start" grep -q "OLD-RELEASE" "$DROPINS/40-immutable-release.conf"
+expect "the unit was stopped" grep -q "systemctl --user stop" "$SANDBOX/calls.log"
+expect "the previous release was NOT started against the unrestored database" bash -c '! grep -q "systemctl --user start" "$SANDBOX/calls.log"'
+expect "tells the operator how to recover" grep -q "systemctl --user start acs-gateway.service" "$SANDBOX/out.log"
 
 # --- F: concurrent deploys are refused, existing releases are never overwritten ----------------------------
 echo "F: a second deploy is refused while one holds the lock"
@@ -205,6 +208,12 @@ expect "says it is test-only" grep -q "only honored by the sandbox test" "$SANDB
 guarded "$HOME" ""
 expect "refused in a sandbox HOME without test mode" test "$(exit_code)" -eq 2
 expect "touched no service" bash -c '! grep -q "systemctl" "$SANDBOX/calls.log"'
+
+# --- H: the lock directory cannot be steered by caller environment ----------------------------------------
+echo "H: lock directory is derived from the account"
+expect "no TMPDIR in the lock path" bash -c '! sed -n "/^LOCK_DIR=\|^if \[\[ \"\${ACS_DEPLOY_TEST_MODE/,/^LOCK_FILE=/p" "$ROOT/scripts/deploy-gateway-release.sh" | grep -q TMPDIR'
+expect "XDG_RUNTIME_DIR is only used in test mode" bash -c 'grep -B1 "LOCK_DIR=\"\$XDG_RUNTIME_DIR\"" "$ROOT/scripts/deploy-gateway-release.sh" | grep -q "ACS_DEPLOY_TEST_MODE"'
+expect "falls back to the account runtime dir" grep -q 'LOCK_DIR="/run/user/\$(id -u)"' "$ROOT/scripts/deploy-gateway-release.sh"
 
 # --- E: the build must not inherit the gateway's NODE_ENV=production -------------------------------------
 echo "E: build step is immune to the gateway env file"

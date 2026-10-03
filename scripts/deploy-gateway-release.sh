@@ -16,13 +16,15 @@
 #               the release + dispatch drop-ins, restart, health-check; roll the drop-ins back on failure
 #
 # Only committed content is built. Safety behavior to know before running it:
-#   - One deploy at a time per service unit (lock file under $XDG_RUNTIME_DIR, keyed by the unit name).
+#   - One deploy at a time per service unit (lock file under /run/user/<uid>, keyed by the unit name).
 #   - The live database is backed up before activation. If activation fails, rollback AUTOMATICALLY restores that
 #     backup over the live database (using the previous release's db-ops, which understands the old schema),
 #     because the failed release may already have migrated it and the previous release cannot read a migrated
 #     database. Any write made between the backup and the rollback is LOST; the output names the backup.
 #     With --resume there is no new backup and nothing is restored: only the drop-ins and unit are left as they are.
-#   - Rollback also puts the previous release drop-in back and removes the dispatch drop-in.
+#   - Rollback also puts the previous release drop-in back and removes the dispatch drop-in. If the database restore
+#     itself fails, the unit is LEFT STOPPED (starting the previous release against a possibly migrated database would
+#     serve and could mutate it); restore the database by hand, then start the unit.
 set -euo pipefail
 
 REF="HEAD"
@@ -68,9 +70,17 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 # One deploy at a time per service unit. The lock is keyed by the unit and lives in the per-user runtime directory,
 # NOT under the (configurable) releases directory: two invocations with different ACS_RELEASES_DIR still target the same
 # unit, drop-ins and database and must exclude each other. Two same-label runs once raced on the publish step.
-LOCK_DIR="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
+# The directory is derived from the account, never from caller-controlled environment (TMPDIR, XDG_RUNTIME_DIR), or two
+# invocations could pick different locks for the same unit. Only the sandbox test (ACS_DEPLOY_TEST_MODE=1) may relocate it.
+if [[ "${ACS_DEPLOY_TEST_MODE:-}" == "1" && -n "${XDG_RUNTIME_DIR:-}" ]]; then
+  LOCK_DIR="$XDG_RUNTIME_DIR"
+elif [[ -d "/run/user/$(id -u)" && -w "/run/user/$(id -u)" ]]; then
+  LOCK_DIR="/run/user/$(id -u)"
+else
+  LOCK_DIR="/tmp/acs-deploy-$(id -u)"
+  mkdir -p -m 700 "$LOCK_DIR"
+fi
 LOCK_FILE="$LOCK_DIR/acs-deploy-$UNIT.lock"
-mkdir -p "$LOCK_DIR"
 exec 9>"$LOCK_FILE"
 flock -n 9 || { echo "another deploy of $UNIT is already running (lock: $LOCK_FILE)" >&2; exit 1; }
 
@@ -210,6 +220,18 @@ wait_live() {
   done
 }
 
+# Same wait, but on /readyz: a previous release started against a schema it cannot read still answers /livez and only
+# reports the problem through readiness.
+wait_ready() {
+  local deadline=$((SECONDS + ${ACS_DEPLOY_WAIT_SEC:-180})) restarts
+  until curl -fsS -m 3 "$BASE_URL/readyz" >/dev/null 2>&1; do
+    restarts="$(systemctl --user show -p NRestarts --value "$UNIT" 2>/dev/null || echo 0)"
+    if (( restarts >= 3 )); then echo "unit is crash-looping (NRestarts=$restarts)" >&2; return 1; fi
+    if (( SECONDS > deadline )); then echo "timed out waiting for $BASE_URL/readyz" >&2; return 1; fi
+    sleep 2
+  done
+}
+
 rollback() {
   journalctl --user -u "$UNIT" --since "-3min" --no-pager 2>/dev/null | tail -25 >&2 || true
   if [[ -z "$BACKUP_DB" ]]; then
@@ -226,15 +248,20 @@ rollback() {
     prev_dir="$(sed -n 's/^WorkingDirectory=//p' "$RELEASE_DROPIN.pre-$SHORT-$STAMP" | head -1)"
   fi
   [[ -n "$prev_dir" && -f "$prev_dir/scripts/db-ops.mjs" ]] || prev_dir="$FINAL"
-  if ! node "$prev_dir/scripts/db-ops.mjs" restore "$BACKUP_DB" "$LIVE_DB" --replace --writers-stopped; then
-    echo "DATABASE RESTORE FAILED (backup: $BACKUP_DB). Continuing to restore the drop-ins; if the new release migrated the" >&2
-    echo "database the previous release will not start - restore it manually from the backup." >&2
-  fi
+  local restored=1
+  if ! node "$prev_dir/scripts/db-ops.mjs" restore "$BACKUP_DB" "$LIVE_DB" --replace --writers-stopped; then restored=0; fi
   if [[ -f "$RELEASE_DROPIN.pre-$SHORT-$STAMP" ]]; then cp -p "$RELEASE_DROPIN.pre-$SHORT-$STAMP" "$RELEASE_DROPIN"; fi
   if [[ -f "$DISPATCH_DROPIN.pre-$SHORT-$STAMP" ]]; then cp -p "$DISPATCH_DROPIN.pre-$SHORT-$STAMP" "$DISPATCH_DROPIN"; else rm -f "$DISPATCH_DROPIN"; fi
   systemctl --user daemon-reload
+  if [[ "$restored" -eq 0 ]]; then
+    # Fail closed: the previous release cannot safely run against a database the failed release may have migrated. It
+    # would still answer /livez and could mutate that database. Leave the unit stopped for an operator.
+    echo "DATABASE RESTORE FAILED (backup: $BACKUP_DB). Leaving $UNIT STOPPED. The previous drop-ins are back in place." >&2
+    echo "Restore the database by hand, then: systemctl --user start $UNIT" >&2
+    return 0
+  fi
   systemctl --user start "$UNIT" || true
-  wait_live || echo "previous release did not come back either; inspect: journalctl --user -u $UNIT" >&2
+  wait_ready || echo "previous release did not become ready; inspect: journalctl --user -u $UNIT" >&2
 }
 
 log "install drop-ins"

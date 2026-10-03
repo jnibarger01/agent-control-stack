@@ -31,15 +31,18 @@ not installed.
 of the live database, then activates it for the `acs-gateway.service` user unit. Run it from one terminal, with nothing
 else touching the service.
 
-- **One at a time.** A lock keyed by the unit (under `$XDG_RUNTIME_DIR`) refuses a second deploy, whatever
-  `ACS_RELEASES_DIR` it uses.
+- **One at a time.** A lock keyed by the unit, in the account's own `/run/user/<uid>`, refuses a second deploy, whatever
+  `ACS_RELEASES_DIR`, `TMPDIR` or `XDG_RUNTIME_DIR` it uses.
 - **Backup first.** Activation backs up the live database and the current drop-ins before changing anything.
 - **Automatic rollback restores the database.** If the new release is not live within `ACS_DEPLOY_WAIT_SEC` (default
   180s), or the unit crash-loops, the script stops the unit, restores the pre-activation backup over the live database
   with the previous release's `db-ops`, restores the previous drop-ins and starts the previous release. The new release
   may already have migrated the database, which the previous release cannot read, so the restore is not optional.
   **Writes made between the backup and the rollback are lost.** The output prints the backup path. If the restore
-  itself fails, the script still restores the drop-ins and starts the unit, and tells you to restore by hand.
+  itself fails, the script fails closed: it puts the previous drop-ins back but **leaves the unit stopped**, because
+  the previous release would still answer `/livez` against a possibly migrated database and could mutate it. Restore
+  the database by hand from the printed backup, then start the unit. After a successful restore the script waits for
+  `/readyz`, not just `/livez`.
 - **`--resume`** activates an already published release (same `--ref` and `--label`) without rebuilding and without a
   new backup. It never restores a database: use it only to go forward after an interrupted activation.
 - The sandbox test (`npm run test:deploy-script`, also part of `npm test`) exercises the wait, rollback, `--resume` and
