@@ -1,3 +1,4 @@
+import { mcpClientsStyles } from "./mcp-clients.js";
 import { agentDispatchStyles } from "./agent-dispatch.js";
 import { premiumStyles } from "./premium-styles.js";
 export function styles(): string {
@@ -437,6 +438,7 @@ body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
 .system-probes dt { color: var(--muted); }
 .system-probes dd { margin: 0; }
 ${premiumStyles()}
+${mcpClientsStyles()}
 ${agentDispatchStyles()}
 `;
 }
