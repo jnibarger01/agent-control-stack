@@ -89,7 +89,7 @@ setup() {
 
 run_deploy() {
   [[ "$(PATH="$SANDBOX/shims:$PATH" command -v systemctl)" == "$SANDBOX/shims/systemctl" ]] || { echo "refusing to run: systemctl stub is not first on PATH" >&2; exit 2; }
-  ( cd "$ROOT" && PATH="$SANDBOX/shims:$PATH" ACS_DEPLOY_PREBUILT_STAGE="$SANDBOX/stage" \
+  ( cd "$ROOT" && PATH="$SANDBOX/shims:$PATH" ACS_DEPLOY_PREBUILT_STAGE="$SANDBOX/stage" ACS_DEPLOY_TEST_MODE=1 \
       ACS_RELEASE_NODE_DIR="$HOME/releases/_node/v24.18.0/bin" ACS_AGENT_REPO_ROOTS="$HOME" \
       scripts/deploy-gateway-release.sh --ref HEAD --label test "$@" ) >"$SANDBOX/out.log" 2>&1
   echo $? >"$SANDBOX/exit"
@@ -159,13 +159,14 @@ expect "unit still started" bash -c 'awk "/db-ops.mjs restore/{r=NR} /systemctl 
 # --- F: concurrent deploys are refused, existing releases are never overwritten ----------------------------
 echo "F: a second deploy is refused while one holds the lock"
 setup F
-flock "$HOME/releases/.deploy-gateway.lock" -c "sleep 8" &
+LOCK="$XDG_RUNTIME_DIR/acs-deploy-acs-gateway.service.lock"
+flock "$LOCK" -c "sleep 8" &
 holder=$!
 sleep 1
 ACS_DEPLOY_WAIT_SEC=4 run_deploy
 wait "$holder" 2>/dev/null
 expect "exit non-zero" test "$(exit_code)" -ne 0
-expect "says another deploy is running" grep -q "another deploy is already running" "$SANDBOX/out.log"
+expect "says another deploy is running" grep -q "another deploy of acs-gateway.service is already running" "$SANDBOX/out.log"
 expect "changed nothing" bash -c '! grep -q "systemctl" "$SANDBOX/calls.log"'
 
 echo "F2: an existing release directory is never published over"
@@ -175,6 +176,35 @@ ACS_DEPLOY_WAIT_SEC=4 run_deploy
 expect "exit non-zero" test "$(exit_code)" -ne 0
 expect "existing release untouched" test -f "$FINAL/keep/me"
 expect "no nested stage inside it" bash -c '[ "$(ls "$FINAL" | wc -l)" -eq 1 ]'
+
+echo "F3: the lock does not depend on ACS_RELEASES_DIR"
+setup F3
+LOCK="$XDG_RUNTIME_DIR/acs-deploy-acs-gateway.service.lock"
+flock "$LOCK" -c "sleep 8" &
+holder=$!
+sleep 1
+ACS_RELEASES_DIR="$SANDBOX/a-different-releases-dir" ACS_DEPLOY_WAIT_SEC=4 run_deploy
+wait "$holder" 2>/dev/null
+expect "refused although the releases directory differs" grep -q "already running" "$SANDBOX/out.log"
+expect "changed nothing" bash -c '! grep -q "systemctl" "$SANDBOX/calls.log"'
+
+# --- G: the prebuilt-stage hook cannot be used outside the sandbox test ----------------------------------
+echo "G: ACS_DEPLOY_PREBUILT_STAGE is refused in a real operator environment"
+setup G
+REAL_HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"
+# Even if the guard were broken, this cannot reach production: fake unit, sandboxed releases/runtime dirs, stub tools.
+guarded() {
+  ( cd "$ROOT" && env HOME="$1" PATH="$SANDBOX/shims:$PATH" XDG_RUNTIME_DIR="$SANDBOX/xdg" ACS_RELEASES_DIR="$SANDBOX/rel" \
+      ACS_GATEWAY_UNIT=acs-sandbox-test.service ACS_DEPLOY_PREBUILT_STAGE="$SANDBOX/stage" ${2:+ACS_DEPLOY_TEST_MODE=1} \
+      scripts/deploy-gateway-release.sh --ref HEAD --label test ) >"$SANDBOX/out.log" 2>&1
+  echo $? >"$SANDBOX/exit"
+}
+guarded "$REAL_HOME" with-test-mode
+expect "refused with the real account HOME even in test mode" test "$(exit_code)" -eq 2
+expect "says it is test-only" grep -q "only honored by the sandbox test" "$SANDBOX/out.log"
+guarded "$HOME" ""
+expect "refused in a sandbox HOME without test mode" test "$(exit_code)" -eq 2
+expect "touched no service" bash -c '! grep -q "systemctl" "$SANDBOX/calls.log"'
 
 # --- E: the build must not inherit the gateway's NODE_ENV=production -------------------------------------
 echo "E: build step is immune to the gateway env file"

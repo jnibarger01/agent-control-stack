@@ -15,8 +15,14 @@
 #   4. activate publish to releases/acs/<sha7>-<label>, back up the database and the current drop-in, install
 #               the release + dispatch drop-ins, restart, health-check; roll the drop-ins back on failure
 #
-# Only committed content is built. The live database is backed up before activation and never restored
-# automatically (a newer schema may already have been applied); the rollback message names the backup.
+# Only committed content is built. Safety behavior to know before running it:
+#   - One deploy at a time per service unit (lock file under $XDG_RUNTIME_DIR, keyed by the unit name).
+#   - The live database is backed up before activation. If activation fails, rollback AUTOMATICALLY restores that
+#     backup over the live database (using the previous release's db-ops, which understands the old schema),
+#     because the failed release may already have migrated it and the previous release cannot read a migrated
+#     database. Any write made between the backup and the rollback is LOST; the output names the backup.
+#     With --resume there is no new backup and nothing is restored: only the drop-ins and unit are left as they are.
+#   - Rollback also puts the previous release drop-in back and removes the dispatch drop-in.
 set -euo pipefail
 
 REF="HEAD"
@@ -34,11 +40,16 @@ while [[ $# -gt 0 ]]; do
 done
 [[ "$LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "invalid --label" >&2; exit 2; }
 
-# One deploy at a time. Two concurrent runs with the same label raced on the publish step: the loser's mv nested
-# its stage inside the winner's release, which then failed its own pre-start integrity check.
-mkdir -p "${ACS_RELEASES_DIR:-$HOME/releases}"
-exec 9>"${ACS_RELEASES_DIR:-$HOME/releases}/.deploy-gateway.lock"
-flock -n 9 || { echo "another deploy is already running (lock: ${ACS_RELEASES_DIR:-$HOME/releases}/.deploy-gateway.lock)" >&2; exit 1; }
+# ACS_DEPLOY_PREBUILT_STAGE skips the build, seal and smoke-test phases and publishes the given directory as is, so it
+# is a test hook only: it is honored solely with ACS_DEPLOY_TEST_MODE=1 and a HOME that is not the real account home.
+# A real operator environment (real HOME) can never take this path, even if the variable leaks into it.
+if [[ -n "${ACS_DEPLOY_PREBUILT_STAGE:-}" ]]; then
+  real_home="$(getent passwd "$(id -u)" | cut -d: -f6)"
+  if [[ "${ACS_DEPLOY_TEST_MODE:-}" != "1" || "$HOME" == "$real_home" ]]; then
+    echo "ACS_DEPLOY_PREBUILT_STAGE is only honored by the sandbox test (ACS_DEPLOY_TEST_MODE=1 and a non-account HOME); refusing" >&2
+    exit 2
+  fi
+fi
 
 REPO="$(git rev-parse --show-toplevel)"
 RELEASES="${ACS_RELEASES_DIR:-$HOME/releases}"
@@ -53,6 +64,15 @@ SMOKE_PORT="${ACS_SMOKE_PORT:-3999}"
 # Defined here, not in the build block, because --resume installs the drop-in without building.
 AGENT_PATH="$HOME/.local/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+
+# One deploy at a time per service unit. The lock is keyed by the unit and lives in the per-user runtime directory,
+# NOT under the (configurable) releases directory: two invocations with different ACS_RELEASES_DIR still target the same
+# unit, drop-ins and database and must exclude each other. Two same-label runs once raced on the publish step.
+LOCK_DIR="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}"
+LOCK_FILE="$LOCK_DIR/acs-deploy-$UNIT.lock"
+mkdir -p "$LOCK_DIR"
+exec 9>"$LOCK_FILE"
+flock -n 9 || { echo "another deploy of $UNIT is already running (lock: $LOCK_FILE)" >&2; exit 1; }
 
 SHA="$(git -C "$REPO" rev-parse --verify "$REF^{commit}")"
 SHORT="${SHA:0:7}"

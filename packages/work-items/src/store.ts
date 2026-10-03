@@ -930,9 +930,10 @@ export interface RegistryHeartbeatInput {
   currentTask?: string;
   lastError?: string;
   /**
-   * Drop the stored last error when this heartbeat carries none. Off by default: a plain heartbeat keeps the last
-   * error as history. Local discovery sets it after a successful probe so a recovered agent does not keep showing
-   * the error discovery itself recorded.
+   * When this heartbeat carries no error, also drop the stored last error, but only one this same actor recorded
+   * (or the liveness-expiry marker reconciliation writes). Off by default: a plain heartbeat keeps the last error as
+   * history, and an operational error another actor reported is never erased by a probe that merely shows the binary
+   * launches. Local discovery sets it after a successful probe so a recovered agent stops showing its own earlier error.
    */
   clearLastError?: boolean;
   actorId: string;
@@ -6109,11 +6110,23 @@ export class SqliteWorkItemStore implements WorkItemStore {
            VALUES (?, ?, ?, ?, ?, ?)`
         )
         .run(agentId, input.status, optionalString(input.currentTask), lastError, observedAt, input.actorId);
+      const errorBefore =
+        (this.db.prepare(`SELECT last_error FROM agents WHERE id = ?`).get(agentId) as { last_error: string | null })
+          .last_error ?? null;
       this.db
         .prepare(
           `UPDATE agents
            SET status = ?, last_heartbeat_at = ?,
-               last_error = CASE WHEN ? IS NOT NULL THEN ? WHEN ? = 1 THEN NULL ELSE last_error END,
+               last_error = CASE
+                 WHEN ? IS NOT NULL THEN ?
+                 WHEN ? = 1 AND (
+                   last_error = 'heartbeat expired'
+                   OR (SELECT h.actor_id FROM heartbeats h
+                       WHERE h.agent_id = ? AND h.last_error IS NOT NULL
+                       ORDER BY h.id DESC LIMIT 1) = ?
+                 ) THEN NULL
+                 ELSE last_error
+               END,
                updated_at = ?, updated_by_actor_id = ?
            WHERE id = ?`
         )
@@ -6123,6 +6136,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
           lastError,
           lastError,
           input.clearLastError ? 1 : 0,
+          agentId,
+          input.actorId,
           observedAt,
           input.actorId,
           agentId
@@ -6134,7 +6149,15 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const event = this.appendAuditEvent(
         createEvent(
           "agent.heartbeat",
-          { agentId, heartbeat, status: agent.status, lastHeartbeatAt: agent.lastHeartbeatAt },
+          {
+            agentId,
+            heartbeat,
+            status: agent.status,
+            lastHeartbeatAt: agent.lastHeartbeatAt,
+            // Lets replay tell a heartbeat that preserved the previous error from one that erased it.
+            lastErrorCleared: errorBefore !== null && (agent.lastError ?? null) === null,
+            agentLastError: agent.lastError ?? null
+          },
           { "agent.id": agentId, "agent.status": agent.status, "actor.id": input.actorId }
         )
       );

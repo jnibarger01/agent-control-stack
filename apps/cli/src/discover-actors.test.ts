@@ -207,6 +207,77 @@ describe("discoverLocalActors", () => {
     }
   });
 
+  describe("which errors a successful probe may clear", () => {
+    const T0 = new Date("2026-08-17T18:00:00.000Z");
+    const ok = { resolveExecutable: (name: string) => `/fixed/${name}`, probe: async () => ({ ok: true }) };
+
+    it("keeps an operational error that another actor reported, across repeated passes", async () => {
+      const { directory, store } = tempDb();
+      try {
+        store.registerActor({ id: "user", actorType: "HUMAN", displayName: "Jace" });
+        store.recordAgentHeartbeat("codex-cli", {
+          actorId: "user",
+          status: "DEGRADED",
+          lastError: "runtime exploded",
+          now: T0
+        });
+        await discoverLocalActors({ store, ...ok, now: new Date(T0.getTime() + 60_000) });
+        expect(store.getRegistryAgent("codex-cli")?.lastError).toBe("runtime exploded");
+        // Discovery's own heartbeat must not launder the error's provenance on the next pass.
+        await discoverLocalActors({ store, ...ok, now: new Date(T0.getTime() + 120_000) });
+        expect(store.getRegistryAgent("codex-cli")?.lastError).toBe("runtime exploded");
+      } finally {
+        store.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+
+    it("clears the liveness-expiry error that reconciliation recorded", async () => {
+      const { directory, store } = tempDb();
+      try {
+        await discoverLocalActors({ store, ...ok, now: T0 });
+        store.reconcileStaleAgents({ now: new Date(T0.getTime() + 60 * 60_000) });
+        expect(store.getRegistryAgent("codex-cli")).toMatchObject({
+          status: "OFFLINE",
+          lastError: "heartbeat expired"
+        });
+        await discoverLocalActors({ store, ...ok, now: new Date(T0.getTime() + 61 * 60_000) });
+        const agent = store.getRegistryAgent("codex-cli");
+        expect(agent?.status).toBe("AVAILABLE");
+        expect(agent?.lastError ?? undefined).toBeUndefined();
+      } finally {
+        store.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+
+    it("records in the audit event whether a heartbeat erased an error", async () => {
+      const { directory, store } = tempDb();
+      try {
+        await discoverLocalActors({
+          store,
+          resolveExecutable: () => undefined,
+          probe: async () => ({ ok: true }),
+          now: T0
+        });
+        await discoverLocalActors({ store, ...ok, now: new Date(T0.getTime() + 60_000) });
+        await discoverLocalActors({ store, ...ok, now: new Date(T0.getTime() + 120_000) });
+        const bodies = store
+          .readEvents({ name: "agent.heartbeat", limit: 500 })
+          .map(
+            (event) => event.body as { agentId?: string; lastErrorCleared?: boolean; agentLastError?: string | null }
+          )
+          .filter((body) => body.agentId === "codex-cli");
+        expect(bodies.map((body) => body.lastErrorCleared)).toEqual([false, true, false]);
+        expect(bodies[1]?.agentLastError ?? null).toBeNull();
+        expect(bodies[0]?.agentLastError).toBe("executable_not_found");
+      } finally {
+        store.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+  });
+
   it("does not create arbitrary agents and sanitizes probe errors", async () => {
     const { directory, store } = tempDb();
     const before = store.listRegistryAgents().map((agent) => agent.id);
