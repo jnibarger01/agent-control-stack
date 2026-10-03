@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Build, seal, smoke-test and activate an immutable ACS gateway release for the local systemd user service.
 #
-#   scripts/deploy-gateway-release.sh [--ref <git-ref>] [--label <name>] [--no-activate]
+#   scripts/deploy-gateway-release.sh [--ref <git-ref>] [--label <name>] [--no-activate] [--resume]
+#
+#   --resume  activate an already published release (same --ref/--label) without rebuilding. Use it after an
+#             activation was interrupted once the database may already be migrated: the previous release can no
+#             longer read that database, so the only way is forward.
 #
 # Phases (see docs/runbooks/release-integrity.md for the sealing rules):
 #   1. stage    git archive of the exact commit -> releases/_staging, npm ci + build with the pinned Node
@@ -18,11 +22,13 @@ set -euo pipefail
 REF="HEAD"
 LABEL="heartbeat-dispatch"
 ACTIVATE=1
+RESUME=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --ref) REF="$2"; shift 2 ;;
     --label) LABEL="$2"; shift 2 ;;
     --no-activate) ACTIVATE=0; shift ;;
+    --resume) RESUME=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -55,10 +61,21 @@ cleanup() {
 trap cleanup EXIT
 
 [[ -x "$NODE_BIN_DIR/node" ]] || { echo "pinned node not found: $NODE_BIN_DIR/node" >&2; exit 1; }
-[[ ! -e "$FINAL" ]] || { echo "release already exists: $FINAL (pick another --label)" >&2; exit 1; }
+if [[ "$RESUME" -eq 1 ]]; then
+  [[ -d "$FINAL" ]] || { echo "--resume: no published release at $FINAL" >&2; exit 1; }
+else
+  [[ ! -e "$FINAL" ]] || { echo "release already exists: $FINAL (pick another --label, or use --resume)" >&2; exit 1; }
+fi
 [[ -f "$ENV_FILE" ]] || { echo "gateway env file not found: $ENV_FILE" >&2; exit 1; }
 export PATH="$NODE_BIN_DIR:$PATH"
 
+set -a
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+set +a
+LIVE_DB="${ACS_DB_PATH:?ACS_DB_PATH missing from $ENV_FILE}"
+
+if [[ "$RESUME" -eq 0 ]]; then
 log "stage $RELEASE_NAME from $SHA"
 mkdir -p "$STAGE"
 git -C "$REPO" archive "$SHA" | tar -x -C "$STAGE"
@@ -71,11 +88,6 @@ log "seal"
 
 # ---- smoke ----------------------------------------------------------------------------------------------
 log "smoke test on 127.0.0.1:$SMOKE_PORT against a copy of the live database"
-set -a
-# shellcheck disable=SC1090
-source "$ENV_FILE"
-set +a
-LIVE_DB="${ACS_DB_PATH:?ACS_DB_PATH missing from $ENV_FILE}"
 SMOKE_DIR="$(mktemp -d)"
 sqlite3 "$LIVE_DB" ".backup '$SMOKE_DIR/control.db'"
 
@@ -124,27 +136,59 @@ if [[ "$ACTIVATE" -eq 0 ]]; then
   exit 0
 fi
 
+fi
+
 # ---- activate -------------------------------------------------------------------------------------------
-log "publish $FINAL"
-mkdir -p "$RELEASES/acs"
-mv "$STAGE" "$FINAL"
+if [[ "$RESUME" -eq 0 ]]; then
+  log "publish $FINAL"
+  mkdir -p "$RELEASES/acs"
+  mv "$STAGE" "$FINAL"
+fi
 node "$FINAL/scripts/release-integrity.mjs" verify "$FINAL"
 
 log "back up database and drop-ins"
-BACKUP_DB="$LIVE_DB.pre-$SHORT-$STAMP"
-sqlite3 "$LIVE_DB" ".backup '$BACKUP_DB'"
-chmod 600 "$BACKUP_DB"
+BACKUP_DB=""
+if [[ "$RESUME" -eq 0 ]]; then
+  BACKUP_DB="$LIVE_DB.pre-$SHORT-$STAMP"
+  sqlite3 "$LIVE_DB" ".backup '$BACKUP_DB'"
+  chmod 600 "$BACKUP_DB"
+else
+  echo "--resume: no new database backup (the database may already be migrated; keep the earlier pre-$SHORT backup)"
+fi
 RELEASE_DROPIN="$DROPIN_DIR/40-immutable-release.conf"
 DISPATCH_DROPIN="$DROPIN_DIR/50-agent-dispatch.conf"
 [[ -f "$RELEASE_DROPIN" ]] && cp -p "$RELEASE_DROPIN" "$RELEASE_DROPIN.pre-$SHORT-$STAMP"
 [[ -f "$DISPATCH_DROPIN" ]] && cp -p "$DISPATCH_DROPIN" "$DISPATCH_DROPIN.pre-$SHORT-$STAMP"
 
+BASE_URL="http://127.0.0.1:${PORT:-3000}"
+
+# Wait for the unit to start listening. Startup verifies the release, migrates the database and boots, so
+# /livez is not reachable the moment systemctl returns. Give up early if systemd is crash-looping the unit.
+wait_live() {
+  local deadline=$((SECONDS + ${ACS_DEPLOY_WAIT_SEC:-180})) restarts
+  until curl -fsS -m 3 "$BASE_URL/livez" >/dev/null 2>&1; do
+    restarts="$(systemctl --user show -p NRestarts --value "$UNIT" 2>/dev/null || echo 0)"
+    if (( restarts >= 3 )); then echo "unit is crash-looping (NRestarts=$restarts)" >&2; return 1; fi
+    if (( SECONDS > deadline )); then echo "timed out waiting for $BASE_URL/livez" >&2; return 1; fi
+    sleep 2
+  done
+}
+
 rollback() {
-  echo "ROLLING BACK drop-ins; database backup (not restored automatically): $BACKUP_DB" >&2
+  journalctl --user -u "$UNIT" --since "-3min" --no-pager 2>/dev/null | tail -25 >&2 || true
+  if [[ -z "$BACKUP_DB" ]]; then
+    echo "NOT rolling back: --resume has no pre-activation backup, and the previous release cannot read a migrated database." >&2
+    return 0
+  fi
+  echo "ROLLING BACK. The failed release may already have migrated the database, which the previous release cannot read," >&2
+  echo "so the database is restored from $BACKUP_DB (writes since that backup are lost)." >&2
+  systemctl --user stop "$UNIT" || true
+  node "$FINAL/scripts/db-ops.mjs" restore "$BACKUP_DB" "$LIVE_DB" --replace --writers-stopped
   if [[ -f "$RELEASE_DROPIN.pre-$SHORT-$STAMP" ]]; then cp -p "$RELEASE_DROPIN.pre-$SHORT-$STAMP" "$RELEASE_DROPIN"; fi
   if [[ -f "$DISPATCH_DROPIN.pre-$SHORT-$STAMP" ]]; then cp -p "$DISPATCH_DROPIN.pre-$SHORT-$STAMP" "$DISPATCH_DROPIN"; else rm -f "$DISPATCH_DROPIN"; fi
   systemctl --user daemon-reload
-  systemctl --user restart "$UNIT" || true
+  systemctl --user start "$UNIT" || true
+  wait_live || echo "previous release did not come back either; inspect: journalctl --user -u $UNIT" >&2
 }
 
 log "install drop-ins"
@@ -166,14 +210,14 @@ EOF
 
 log "restart $UNIT"
 systemctl --user daemon-reload
-if ! systemctl --user restart "$UNIT" || ! "$REPO/scripts/gateway-post-deploy-healthcheck.sh" "http://127.0.0.1:${PORT:-3000}"; then
+if ! systemctl --user restart "$UNIT" || ! wait_live || ! "$REPO/scripts/gateway-post-deploy-healthcheck.sh" "$BASE_URL"; then
   rollback
   exit 1
 fi
 
 log "verify live roster"
 sleep 5
-live_online="$(curl -fsS -m 5 -H "authorization: Bearer ${ACS_GATEWAY_TOKEN:-}" "http://127.0.0.1:${PORT:-3000}/api/agents" \
+live_online="$(curl -fsS -m 5 -H "authorization: Bearer ${ACS_GATEWAY_TOKEN:-}" "$BASE_URL/api/agents" \
   | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const a=JSON.parse(s).agents??[];console.log(a.filter(x=>x.status==="AVAILABLE").length)})' || echo 0)"
 echo "live gateway: $live_online agent(s) AVAILABLE"
 echo
