@@ -928,6 +928,12 @@ export interface RegistryHeartbeatInput {
   status: RegistryStatus;
   currentTask?: string;
   lastError?: string;
+  /**
+   * Drop the stored last error when this heartbeat carries none. Off by default: a plain heartbeat keeps the last
+   * error as history. Local discovery sets it after a successful probe so a recovered agent does not keep showing
+   * the error discovery itself recorded.
+   */
+  clearLastError?: boolean;
   actorId: string;
   now?: Date;
 }
@@ -6100,11 +6106,20 @@ export class SqliteWorkItemStore implements WorkItemStore {
         .prepare(
           `UPDATE agents
            SET status = ?, last_heartbeat_at = ?,
-               last_error = CASE WHEN ? IS NULL THEN last_error ELSE ? END,
+               last_error = CASE WHEN ? IS NOT NULL THEN ? WHEN ? = 1 THEN NULL ELSE last_error END,
                updated_at = ?, updated_by_actor_id = ?
            WHERE id = ?`
         )
-        .run(input.status, observedAt, lastError, lastError, observedAt, input.actorId, agentId);
+        .run(
+          input.status,
+          observedAt,
+          lastError,
+          lastError,
+          input.clearLastError ? 1 : 0,
+          observedAt,
+          input.actorId,
+          agentId
+        );
       const heartbeat = rowToHeartbeat(
         this.db.prepare(`SELECT * FROM heartbeats WHERE id = ?`).get(result.lastInsertRowid) as unknown as HeartbeatRow
       );

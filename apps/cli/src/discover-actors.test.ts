@@ -180,6 +180,33 @@ describe("discoverLocalActors", () => {
     }
   });
 
+  it("clears a stale error once a probe succeeds, so a recovered agent does not show it", async () => {
+    const { directory, store } = tempDb();
+    try {
+      // The agent went offline and was marked expired (or was missing), leaving a sticky error behind.
+      await discoverLocalActors({
+        store,
+        resolveExecutable: () => undefined,
+        probe: async () => ({ ok: true }),
+        now: new Date("2026-08-17T18:00:00.000Z")
+      });
+      expect(store.getRegistryAgent("codex-cli")?.lastError).toBe("executable_not_found");
+
+      await discoverLocalActors({
+        store,
+        resolveExecutable: (name) => `/fixed/${name}`,
+        probe: async () => ({ ok: true }),
+        now: new Date("2026-08-17T18:01:00.000Z")
+      });
+      const agent = store.getRegistryAgent("codex-cli");
+      expect(agent?.status).toBe("AVAILABLE");
+      expect(agent?.lastError ?? undefined).toBeUndefined();
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("does not create arbitrary agents and sanitizes probe errors", async () => {
     const { directory, store } = tempDb();
     const before = store.listRegistryAgents().map((agent) => agent.id);

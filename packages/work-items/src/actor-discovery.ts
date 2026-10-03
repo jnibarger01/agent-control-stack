@@ -142,6 +142,7 @@ export async function discoverLocalActors(options: DiscoverLocalActorsOptions): 
     if (probed.ok) {
       options.store.recordAgentHeartbeat(target.id, {
         status: "AVAILABLE",
+        clearLastError: true,
         actorId: SYSTEM_BOOTSTRAP_ACTOR_ID,
         now
       });
