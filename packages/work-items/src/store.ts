@@ -931,7 +931,8 @@ export interface RegistryHeartbeatInput {
   lastError?: string;
   /**
    * When this heartbeat carries no error, also drop the stored last error, but only one this same actor recorded
-   * (or the liveness-expiry marker reconciliation writes). Off by default: a plain heartbeat keeps the last error as
+   * (its latest error-bearing heartbeat, and the stored error is still that text) or the liveness-expiry marker
+   * reconciliation writes. Off by default: a plain heartbeat keeps the last error as
    * history, and an operational error another actor reported is never erased by a probe that merely shows the binary
    * launches. Local discovery sets it after a successful probe so a recovered agent stops showing its own earlier error.
    */
@@ -6121,9 +6122,16 @@ export class SqliteWorkItemStore implements WorkItemStore {
                  WHEN ? IS NOT NULL THEN ?
                  WHEN ? = 1 AND (
                    last_error = 'heartbeat expired'
-                   OR (SELECT h.actor_id FROM heartbeats h
+                   OR EXISTS (
+                     SELECT 1 FROM (
+                       SELECT h.actor_id, h.last_error FROM heartbeats h
                        WHERE h.agent_id = ? AND h.last_error IS NOT NULL
-                       ORDER BY h.id DESC LIMIT 1) = ?
+                       ORDER BY h.id DESC LIMIT 1
+                     ) latest
+                     -- The stored error must still be the one this actor reported: PATCH /api/agents/:id rewrites
+                     -- only the agents row, so a different current error was not written by that heartbeat.
+                     WHERE latest.actor_id = ? AND latest.last_error = agents.last_error
+                   )
                  ) THEN NULL
                  ELSE last_error
                END,

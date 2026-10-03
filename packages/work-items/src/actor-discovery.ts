@@ -116,53 +116,50 @@ export async function probeExecutableVersion(executablePath: string, args: reado
 export async function discoverLocalActors(options: DiscoverLocalActorsOptions): Promise<DiscoveryResult[]> {
   const resolveExecutable = options.resolveExecutable ?? resolveExecutableOnPath;
   const probe = options.probe ?? probeExecutableVersion;
-  const now = options.now ?? new Date();
+  const results: DiscoveryResult[] = new Array<DiscoveryResult>(CANONICAL_DISCOVERY_TARGETS.length);
 
-  // Probe every CLI concurrently. A hung or slow executable then costs one probe timeout for the whole sweep, not one
-  // per CLI queued behind it (serial probing let two hung CLIs starve the rest of the catalog).
-  const observed = await Promise.all(
-    CANONICAL_DISCOVERY_TARGETS.map(async (target) => {
-      if (!options.store.getRegistryAgent(target.id)) return { target, kind: "skipped" as const };
+  // Probe every CLI concurrently so one hung or slow executable costs one probe timeout for the whole sweep, not one per
+  // CLI queued behind it. Each result is applied the moment its own probe finishes, stamped with that time: holding a
+  // fast result until the slowest probe returned would let it overwrite (with an older timestamp) a newer heartbeat that
+  // an API or ACP caller sent in the meantime. Writes are synchronous, so there is no gap between reading the clock and
+  // recording the heartbeat. `results` stays in registry order regardless of completion order.
+  await Promise.all(
+    CANONICAL_DISCOVERY_TARGETS.map(async (target, index) => {
+      if (!options.store.getRegistryAgent(target.id)) {
+        results[index] = { id: target.id, outcome: "skipped" };
+        return;
+      }
       const resolved = resolveExecutable(target.executable);
-      if (!resolved) return { target, kind: "missing" as const };
-      return { target, kind: "probed" as const, probed: await probe(resolved, target.probeArgs) };
+      const probed = resolved ? await probe(resolved, target.probeArgs) : undefined;
+      const now = options.now ?? new Date();
+
+      if (!resolved) {
+        options.store.recordAgentHeartbeat(target.id, {
+          status: "OFFLINE",
+          lastError: "executable_not_found",
+          actorId: SYSTEM_BOOTSTRAP_ACTOR_ID,
+          now
+        });
+        results[index] = { id: target.id, outcome: "missing" };
+      } else if (probed?.ok) {
+        options.store.recordAgentHeartbeat(target.id, {
+          status: "AVAILABLE",
+          clearLastError: true,
+          actorId: SYSTEM_BOOTSTRAP_ACTOR_ID,
+          now
+        });
+        results[index] = { id: target.id, outcome: "available" };
+      } else {
+        options.store.recordAgentHeartbeat(target.id, {
+          status: "ERROR",
+          lastError: probed?.timedOut ? "probe_timeout" : sanitizeDiscoveryError(probed?.error ?? "probe_failed"),
+          actorId: SYSTEM_BOOTSTRAP_ACTOR_ID,
+          now
+        });
+        results[index] = { id: target.id, outcome: "error" };
+      }
     })
   );
-
-  // Record in registry order so writes and results are deterministic.
-  const results: DiscoveryResult[] = [];
-  for (const entry of observed) {
-    const { target } = entry;
-    if (entry.kind === "skipped") {
-      results.push({ id: target.id, outcome: "skipped" });
-    } else if (entry.kind === "missing") {
-      options.store.recordAgentHeartbeat(target.id, {
-        status: "OFFLINE",
-        lastError: "executable_not_found",
-        actorId: SYSTEM_BOOTSTRAP_ACTOR_ID,
-        now
-      });
-      results.push({ id: target.id, outcome: "missing" });
-    } else if (entry.probed.ok) {
-      options.store.recordAgentHeartbeat(target.id, {
-        status: "AVAILABLE",
-        clearLastError: true,
-        actorId: SYSTEM_BOOTSTRAP_ACTOR_ID,
-        now
-      });
-      results.push({ id: target.id, outcome: "available" });
-    } else {
-      options.store.recordAgentHeartbeat(target.id, {
-        status: "ERROR",
-        lastError: entry.probed.timedOut
-          ? "probe_timeout"
-          : sanitizeDiscoveryError(entry.probed.error ?? "probe_failed"),
-        actorId: SYSTEM_BOOTSTRAP_ACTOR_ID,
-        now
-      });
-      results.push({ id: target.id, outcome: "error" });
-    }
-  }
 
   return results;
 }

@@ -16,7 +16,8 @@
 #               the release + dispatch drop-ins, restart, health-check; roll the drop-ins back on failure
 #
 # Only committed content is built. Safety behavior to know before running it:
-#   - One deploy at a time per service unit (lock file in the account's private /run/user/<uid>, keyed by the unit name).
+#   - One deploy at a time per service unit AND per database (lock files in the account's private /run/user/<uid>,
+#     keyed by the unit name and by the database's canonical path).
 #   - The live database is backed up before activation. If activation fails, rollback AUTOMATICALLY restores that
 #     backup over the live database (using the previous release's db-ops, which understands the old schema),
 #     because the failed release may already have migrated it and the previous release cannot read a migrated
@@ -118,6 +119,14 @@ set -a
 source "$ENV_FILE"
 set +a
 LIVE_DB="${ACS_DB_PATH:?ACS_DB_PATH missing from $ENV_FILE}"
+
+# Second lock, keyed by the database itself. Two different units (or env files) can point at one database; each would
+# take its own unit lock, yet both back up, migrate and possibly restore that database. Key it by the canonical path.
+DB_KEY="$(printf '%s' "$(realpath -m "$LIVE_DB")" | sha256sum | cut -c1-16)"
+DB_LOCK_FILE="$LOCK_DIR/acs-deploy-db-$DB_KEY.lock"
+[[ ! -L "$DB_LOCK_FILE" ]] || { echo "refusing to lock: $DB_LOCK_FILE is a symlink" >&2; exit 1; }
+exec 8>"$DB_LOCK_FILE"
+flock -n 8 || { echo "another deploy using database $LIVE_DB is already running (lock: $DB_LOCK_FILE)" >&2; exit 1; }
 
 if [[ "$RESUME" -eq 0 && -z "${ACS_DEPLOY_PREBUILT_STAGE:-}" ]]; then
 log "stage $RELEASE_NAME from $SHA"

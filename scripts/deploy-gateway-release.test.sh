@@ -191,6 +191,17 @@ wait "$holder" 2>/dev/null
 expect "refused although the releases directory differs" grep -q "already running" "$SANDBOX/out.log"
 expect "changed nothing" bash -c '! grep -q "systemctl" "$SANDBOX/calls.log"'
 
+echo "F4: two units sharing one database exclude each other"
+setup F4
+DBKEY="$(printf '%s' "$(realpath -m "$SANDBOX/store/control.db")" | sha256sum | cut -c1-16)"
+flock "$XDG_RUNTIME_DIR/acs-deploy-db-$DBKEY.lock" -c "sleep 8" &
+holder=$!
+sleep 1
+ACS_GATEWAY_UNIT=acs-other-gateway.service ACS_DEPLOY_WAIT_SEC=4 run_deploy
+wait "$holder" 2>/dev/null
+expect "refused although the unit differs" grep -q "another deploy using database" "$SANDBOX/out.log"
+expect "changed nothing" bash -c '! grep -q "systemctl" "$SANDBOX/calls.log"'
+
 # --- G: the prebuilt-stage hook cannot be used outside the sandbox test ----------------------------------
 echo "G: ACS_DEPLOY_PREBUILT_STAGE is refused in a real operator environment"
 setup G

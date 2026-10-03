@@ -31,7 +31,7 @@ not installed.
 of the live database, then activates it for the `acs-gateway.service` user unit. Run it from one terminal, with nothing
 else touching the service.
 
-- **One at a time.** A lock keyed by the unit, in the account's own `/run/user/<uid>`, refuses a second deploy, whatever
+- **One at a time.** Locks keyed by the unit and by the database (canonical path), in the account's own `/run/user/<uid>`, refuse a second deploy, whatever
   `ACS_RELEASES_DIR`, `TMPDIR` or `XDG_RUNTIME_DIR` it uses.
 - **Backup first.** Activation backs up the live database and the current drop-ins before changing anything.
 - **Automatic rollback restores the database.** If the new release is not live within `ACS_DEPLOY_WAIT_SEC` (default
