@@ -264,6 +264,10 @@ const operations = {
     "method": "GET",
     "path": "/api/agent-runs/{id}"
   },
+  "reviewAgentRun": {
+    "method": "POST",
+    "path": "/api/agent-runs/{id}/review"
+  },
   "cancelAgentRun": {
     "method": "POST",
     "path": "/api/agent-runs/{id}/cancel"

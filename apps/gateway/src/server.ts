@@ -287,6 +287,8 @@ export interface GatewayOptions {
   mcpClientPolicy?: McpClientPolicy;
   /** Agent CLI dispatch settings. Defaults to the ACS_AGENT_* environment (off unless enabled). */
   agentDispatch?: AgentDispatchConfig;
+  /** Test seam: clock for agent confirmation expiry. */
+  agentRunNow?: () => number;
   /** Admin execution mode lasts this long before reverting to strict. Env: ACS_ADMIN_MODE_TTL_MS. */
   adminModeTtlMs?: number;
   logger?: boolean;
@@ -1787,7 +1789,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       workerId === JC_BRIDGE_WORKER_ID ? "jc" : workerId === DC_BRIDGE_WORKER_ID ? "dc" : undefined,
     sendError
   });
-  const agentRuns = new AgentRunService(workItems, options.agentDispatch ?? agentDispatchConfigFromEnv());
+  const agentRuns = new AgentRunService(
+    workItems,
+    options.agentDispatch ?? agentDispatchConfigFromEnv(),
+    options.agentRunNow ? { now: options.agentRunNow } : {}
+  );
   agentRuns.reconcile();
   registerAgentRoutes({
     app,
