@@ -271,6 +271,39 @@ describe("Dispatch page", () => {
 });
 
 describe("governed mission dispatch UI", () => {
+  it("renders mission progress even when an entry has no progress, no operations, or is malformed", async () => {
+    const ctx = boot({
+      "GET /api/mission-dispatch": () => ({
+        body: {
+          enabled: true,
+          dispatches: [
+            { missionId: "m-no-progress" },
+            { missionId: "m-no-ops", progress: {} },
+            { missionId: "m-done", progress: { completion: { at: "x" } } },
+            { missionId: "m-ops", progress: { operations: [{ operationId: "op1", status: "done" }, null] } },
+            { missionId: "m-observed", observation: { code: "observation_failed" } },
+            null
+          ]
+        }
+      })
+    });
+    try {
+      ctx.connect();
+      (ctx.document.getElementById("mission-dispatch-refresh") as HTMLButtonElement).click();
+      await ctx.settle();
+      const text = ctx.document.getElementById("mission-dispatch-progress")!.textContent!;
+      expect(text).not.toContain("Could not load");
+      expect(text).toContain("m-no-progress: no progress reported");
+      expect(text).toContain("m-no-ops: no operations reported");
+      expect(text).toContain("m-done: completed");
+      expect(text).toContain("m-ops: op1 done, ? unknown");
+      expect(text).toContain("m-observed: observation_failed");
+      expect(text).toContain("unknown mission: no progress reported");
+    } finally {
+      ctx.dom.window.close();
+    }
+  });
+
   it("reviews a snapshot, invalidates edited confirmation, and schedules only after a separate click", async () => {
     const hash = "a".repeat(64);
     const ctx = boot({

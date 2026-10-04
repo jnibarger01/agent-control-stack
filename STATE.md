@@ -33,10 +33,10 @@ Superseded by the plans under `docs/superpowers/plans/`. The old Prompt 01 to 15
 
 ## Verified facts
 
-As of 2026-10-02, checked in a clean worktree off `origin/main` (`cdb1f2a`):
+As of 2026-10-04, re-checked in an isolated worktree on `fix/review-reconciliation` (`origin/main` `03bb336` plus this branch):
 
-- Workspace: 14 apps and 31 packages (npm workspaces, no Turborepo/Nx). `npm run lint` is clean.
-- `npm audit --audit-level=high` reports 0 high or critical findings and 7 moderate.
+- Workspace: 14 apps and 32 packages (npm workspaces, no Turborepo/Nx). `npm run lint` is clean.
+- `npm audit --audit-level=high` reports 0 high or critical findings and 7 moderate (re-run 2026-10-04; the moderates are all `fast-uri` via `ajv`/`fast-json-stringify`).
 - Execution mode: `strict` or `admin` in one `execution_mode_state` row. Admin needs `acs:execution-mode:admin`,
   an explicit operator action, and a reason. Admin is sticky by default and stays enabled until an operator
   explicitly disables it; a bounded elevation remains available via `adminModeTtlMs`. See
@@ -45,7 +45,7 @@ As of 2026-10-02, checked in a clean worktree off `origin/main` (`cdb1f2a`):
   Jace Commander and ordinary gated tools still use the global admin row.
 - Jev integration is advisory-only per ADR 0020. The deployed runtime is Noul-only, so trace analysis that needs
   Choice or Score degrades with INCOMPATIBLE_MODEL.
-- Migration numbering is contended: two `039_*` files exist and open work adds more. Coordinate before adding one.
+- Migration numbering is contended: two `038_*` files exist (`038_admission_permits.sql` is a non-canonical fixture, pinned by a test) and open work adds more. Coordinate before adding one.
 
 ## Open failures
 

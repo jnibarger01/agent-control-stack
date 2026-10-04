@@ -17,6 +17,8 @@ export interface ManagedAuthorityObservation {
   breakGlassAmbiguous: boolean;
   multipleAuthoritativeExecutors: boolean;
   managedRuntime: boolean;
+  /** False when no managed executor process was found, so the lease holder could not be verified. */
+  managedExecutorDiscovered?: boolean;
   detail: string;
 }
 
