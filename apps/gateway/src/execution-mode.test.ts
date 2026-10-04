@@ -212,7 +212,11 @@ describe("canonical execution mode", () => {
         payload: { mode: "admin", reason: "scoped maintenance window" }
       });
       expect(enabled.statusCode).toBe(200);
-      expect(typeof enabled.json().expiresAt).toBe("string");
+      // Admin mode is sticky by default: there is no implicit expiry timestamp, so it
+      // cannot silently revert to strict and reintroduce human approval. The entry
+      // safeguards (dedicated scope, stated reason, audit, visible state) still apply.
+      expect(enabled.json().expiresAt).toBeNull();
+      expect(enabled.json()).toMatchObject({ executionMode: "admin", updatedBy: "user" });
 
       const back = await ctx.app.inject({
         method: "POST",

@@ -38,8 +38,9 @@ As of 2026-10-02, checked in a clean worktree off `origin/main` (`cdb1f2a`):
 - Workspace: 14 apps and 31 packages (npm workspaces, no Turborepo/Nx). `npm run lint` is clean.
 - `npm audit --audit-level=high` reports 0 high or critical findings and 7 moderate.
 - Execution mode: `strict` or `admin` in one `execution_mode_state` row. Admin needs `acs:execution-mode:admin`,
-  a reason, and lapses after `ACS_ADMIN_MODE_TTL_MS` (default 1 hour); see `docs/protocol/execution-mode.md`
-  (introduced by the admin-mode scope PR, check it has merged).
+  an explicit operator action, and a reason. Admin is sticky by default and stays enabled until an operator
+  explicitly disables it; a bounded elevation remains available via `adminModeTtlMs`. See
+  `docs/protocol/execution-mode.md`.
 - Mission-scoped Autonomous Authority Grants exist for the Desktop Commander change-set path (migration 047);
   Jace Commander and ordinary gated tools still use the global admin row.
 - Jev integration is advisory-only per ADR 0020. The deployed runtime is Noul-only, so trace analysis that needs
