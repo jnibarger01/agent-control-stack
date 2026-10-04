@@ -452,6 +452,21 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       return approval !== undefined && approval.approvedByActorId !== ACS_ADMIN_APPROVER;
     });
   };
+  const hasCompleteCurrentAdminPlanApproval = (candidate: WorkItem): boolean => {
+    const required = policy
+      .evaluateWorkItem(candidate, ACS_ADMIN_APPROVER, "approve")
+      .filter((evaluation) => evaluation.decision.decision === "require_approval");
+    if (required.length === 0) return true;
+    const plan = workItems.getCurrentExecutionPlan(candidate.id);
+    return (
+      !!plan &&
+      required.every(
+        (evaluation) =>
+          workItems.getExecutionPlanApproval(candidate.id, plan.planHash, evaluation.actionHash)?.approvedByActorId ===
+          ACS_ADMIN_APPROVER
+      )
+    );
+  };
 
   const resolvedAuth = resolveAuth(options);
   const auth = resolvedAuth
@@ -2884,7 +2899,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                   params?.bindingHash === bindingHash &&
                   ["needs_approval", "approved"].includes(candidate.status) &&
                   (modeBeforeLookup.state === "ok" && modeBeforeLookup.mode === "admin"
-                    ? !hasCurrentHumanPlanApproval(candidate, workerId)
+                    ? candidate.status !== "approved" ||
+                      (!hasCurrentHumanPlanApproval(candidate, workerId) &&
+                        hasCompleteCurrentAdminPlanApproval(candidate))
                     : !workItems.hasGrantedApprovalBy(candidate.id, ACS_ADMIN_APPROVER))
                 );
               })
@@ -3211,6 +3228,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             });
           }
           let admissionBound = false;
+          let claimAuthorityDenial: { code: string; detail: string } | undefined;
           try {
             // Approval-backed and approval-free admin calls share the JC lane's claim-time fence.
             // Re-check canonical mode and managed authority inside the transaction in either case.
@@ -3231,6 +3249,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               if (!adminApprovalWouldBeConsumed && !adminAuthorizedWithoutApproval) return;
               const claimMode = readExecutionModeValue(workItems.getExecutionMode().raw);
               if (claimMode.state !== "ok" || claimMode.mode !== "admin") {
+                claimAuthorityDenial = {
+                  code: "execution_mode_fence_mismatch",
+                  detail: "execution mode changed before the DC claim committed"
+                };
                 workItems.recordSystemEvent({
                   name: "execution_mode.admin_approval_claim_denied",
                   body: { workItemId: workItem.id, code: "execution_mode_fence_mismatch" },
@@ -3243,6 +3265,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               }
               const claimGate = adminExecutionGate(readAuthority(), true);
               if (!claimGate.ok) {
+                claimAuthorityDenial = { code: claimGate.code, detail: claimGate.detail };
                 workItems.recordSystemEvent({
                   name: "execution_mode.admin_approval_claim_denied",
                   body: { workItemId: workItem.id, code: claimGate.code },
@@ -3251,20 +3274,45 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                 throw new ControlStackError(claimGate.code, claimGate.detail);
               }
             };
-            const claimed = claimWithAdmissionPermit({
-              id: workItem.id,
-              workerId,
-              leaseMs: DC_BRIDGE_LEASE_MS,
-              lane: "dc",
-              toolName: body.tool,
-              permit: admissionPermit,
-              ...(body.changeSetPermitId || adminApprovalWouldBeConsumed || adminAuthorizedWithoutApproval
-                ? { validateAuthority: validateDcAuthority }
-                : {}),
-              ...(adminApprovalWouldBeConsumed || adminAuthorizedWithoutApproval
-                ? { executionModeFence: "admin" as const }
-                : {})
-            });
+            let claimed: ReturnType<typeof tools.claim_approved_work_item_by_id>;
+            try {
+              claimed = claimWithAdmissionPermit({
+                id: workItem.id,
+                workerId,
+                leaseMs: DC_BRIDGE_LEASE_MS,
+                lane: "dc",
+                toolName: body.tool,
+                permit: admissionPermit,
+                ...(body.changeSetPermitId || adminApprovalWouldBeConsumed || adminAuthorizedWithoutApproval
+                  ? { validateAuthority: validateDcAuthority }
+                  : {}),
+                ...(adminApprovalWouldBeConsumed || adminAuthorizedWithoutApproval
+                  ? { executionModeFence: "admin" as const }
+                  : {})
+              });
+            } catch (error) {
+              if (claimAuthorityDenial) {
+                try {
+                  workItems.recordSystemEvent({
+                    name: "execution_mode.admin_approval_claim_denied",
+                    body: {
+                      workItemId: workItem.id,
+                      code: claimAuthorityDenial.code,
+                      detail: claimAuthorityDenial.detail
+                    },
+                    attributes: { "work_item.id": workItem.id, "execution_mode.mode": "admin" }
+                  });
+                } catch {
+                  // Preserve the original fail-closed claim error if durable audit storage is unavailable.
+                }
+                try {
+                  recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+                } catch {
+                  // Preserve the original fail-closed claim error if connector audit storage is unavailable.
+                }
+              }
+              throw error;
+            }
             admissionBound =
               !!claimed?.attemptId && claimed.fencingEpoch !== undefined && !!claimed.planHash && !!claimed.inputHash;
             if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {

@@ -2,9 +2,10 @@ import { createPrivateKey, createPublicKey, generateKeyPairSync, verify } from "
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { strictCanonicalJsonV1 } from "@agent-control-stack/shared";
 import { ACS_ADMIN_APPROVER, type ManagedAuthorityObservation } from "@agent-control-stack/policy-gate";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildGateway, findIncompatibleHumanApprovalCredentials, type GatewayCredential } from "./server.js";
 
 const testAuth = { token: "op-token", actor: "user", actorId: "user" } as const;
@@ -113,8 +114,9 @@ async function gateway(
 ) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "acs-admin-mode-")));
   const signing = keys();
+  const dbPath = join(root, "control.db");
   const app = buildGateway({
-    dbPath: join(root, "control.db"),
+    dbPath,
     logger: false,
     auth: { token: "", actor: "user", actorId: testAuth.actorId, credentials },
     desktopCommanderCapability: {
@@ -129,7 +131,7 @@ async function gateway(
     readManagedAuthority: typeof authority === "function" ? authority : () => authority,
     ...(rateLimit ? { rateLimit } : {})
   });
-  return { root, signing, app };
+  return { root, dbPath, signing, app };
 }
 
 async function attest(app: Awaited<ReturnType<typeof gateway>>["app"]) {
@@ -578,6 +580,71 @@ describe("canonical execution mode", () => {
           expect(response.json().code).toBe("executor_ambiguous");
           expect(response.json().capability).toBeUndefined();
         } finally {
+          await ctx.app.close();
+          rmSync(ctx.root, { recursive: true, force: true });
+        }
+      }));
+
+    it("retries expired admin approvals with durable claim-denial audit", () =>
+      withRouting(async () => {
+        let failClaimAuthority = false;
+        let authorityReads = 0;
+        const ctx = await gateway(() => {
+          if (failClaimAuthority && ++authorityReads === 3)
+            return { ...healthyAuthority, leaseAmbiguous: true, detail: "authority expired at claim" };
+          return healthyAuthority;
+        });
+        try {
+          await attest(ctx.app);
+          const mode = await ctx.app.inject({
+            method: "POST",
+            url: "/execution-mode",
+            headers: AUTH,
+            payload: { mode: "admin", reason: "admin approval expiry regression" }
+          });
+          expect(mode.statusCode).toBe(200);
+          const args = { path: join(ctx.root, "expired-admin-approval") };
+          failClaimAuthority = true;
+          authorityReads = 0;
+          const interrupted = await issue(ctx.app, "create_directory", args);
+          expect(authorityReads).toBe(3);
+          expect(interrupted.statusCode, interrupted.body).toBe(409);
+          expect(interrupted.json().code).toBe("executor_ambiguous");
+          const lookup = new DatabaseSync(ctx.dbPath, { readOnly: true });
+          let staleId: string;
+          try {
+            const rows = lookup
+              .prepare("SELECT id FROM work_items WHERE title = ? ORDER BY created_at DESC LIMIT 1")
+              .all("Desktop Commander capability: create_directory") as Array<{ id: string }>;
+            expect(rows).toHaveLength(1);
+            staleId = rows[0]!.id;
+          } finally {
+            lookup.close();
+          }
+          const detail = await ctx.app.inject({ method: "GET", url: `/work-items/${staleId}`, headers: AUTH });
+          expect(detail.json().events.map((event: { name: string }) => event.name)).toContain(
+            "execution_mode.admin_approval_claim_denied"
+          );
+          const approvals = new DatabaseSync(ctx.dbPath, { readOnly: true });
+          let expiresAt: string;
+          try {
+            const rows = approvals
+              .prepare("SELECT expires_at FROM execution_plan_approvals WHERE work_item_id = ? AND status = 'granted'")
+              .all(staleId) as Array<{ expires_at: string }>;
+            expect(rows.length).toBeGreaterThan(0);
+            expiresAt = rows[0]!.expires_at;
+          } finally {
+            approvals.close();
+          }
+          vi.useFakeTimers({ toFake: ["Date"] });
+          vi.setSystemTime(new Date(Date.parse(expiresAt) + 1));
+          failClaimAuthority = false;
+          const recovered = await issue(ctx.app, "create_directory", args);
+          expect(recovered.statusCode, recovered.body).toBe(200);
+          expect(recovered.json().workItemId).not.toBe(staleId);
+          expect(recovered.json().capability.payload.workItemId).not.toBe(staleId);
+        } finally {
+          vi.useRealTimers();
           await ctx.app.close();
           rmSync(ctx.root, { recursive: true, force: true });
         }
