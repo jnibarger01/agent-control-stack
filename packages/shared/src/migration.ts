@@ -331,10 +331,11 @@ function repairExactDeployedThirtyNineFortySevenLayout(db: SqliteLike): void {
     if (db.prepare("SELECT version FROM schema_migrations WHERE version > ?").all(last).length > 0) {
       fail("has a gap or unexpected later metadata");
     }
-    if (!hasTable(db, "admission_permits")) fail("schema validation failed");
-    if (last >= 41 && !(hasTable(db, "change_set_revisions") && hasTable(db, "change_set_heads"))) {
-      fail("schema validation failed");
-    }
+    // Metadata is only a claim about the schema. Before any row is renumbered, prove structurally that every
+    // object each recorded migration creates is present, and that no object of an unrecorded one already exists
+    // (a partial layout would make the ordinary loop collide on its CREATE statements after the rewrite).
+    const schemaProblem = deployedLayoutSchemaProblem(db, last);
+    if (schemaProblem) fail(`schema validation failed: ${schemaProblem}`);
     // Highest first so each UPDATE lands on a free primary key.
     for (const { from, to } of [...matched].reverse()) {
       db.prepare(`UPDATE schema_migrations SET version = ?, filename = ?, checksum = ? WHERE version = ?`).run(
@@ -353,6 +354,187 @@ function repairExactDeployedThirtyNineFortySevenLayout(db: SqliteLike): void {
     }
     throw error;
   }
+}
+
+interface DeployedSchemaExpectation {
+  columns?: Record<string, readonly string[]>;
+  triggers?: readonly string[];
+  indexes?: readonly string[];
+}
+
+const APPEND_ONLY = (table: string) => [`${table}_no_update`, `${table}_no_delete`];
+
+/** What each deployed migration (keyed by its deployed version) must have created. */
+const DEPLOYED_SCHEMA: Record<number, DeployedSchemaExpectation> = {
+  39: {
+    columns: {
+      admission_permits: [
+        "attempt_id",
+        "work_item_id",
+        "lease_id",
+        "worker_id",
+        "fencing_epoch",
+        "action_hash",
+        "plan_hash",
+        "input_hash",
+        "lane",
+        "created_at"
+      ]
+    },
+    indexes: ["idx_admission_permits_lease", "idx_admission_permits_work_item"]
+  },
+  40: { columns: { admission_permits: ["execution_class"] } },
+  41: {
+    columns: {
+      change_set_revisions: [
+        "mission_id",
+        "revision",
+        "submission_id",
+        "manifest_hash",
+        "audit_event_id",
+        "parent_manifest_hash",
+        "snapshot_json",
+        "created_by_actor_id",
+        "created_at"
+      ],
+      change_set_heads: ["mission_id", "revision", "manifest_hash"]
+    },
+    triggers: APPEND_ONLY("change_set_revisions")
+  },
+  42: {
+    columns: {
+      work_item_assignments: [
+        "work_item_id",
+        "selected_worker_id",
+        "selected_agent_id",
+        "routing_decision_id",
+        "assigned_by_actor_id",
+        "assigned_at"
+      ]
+    },
+    indexes: ["work_item_assignments_worker_idx"]
+  },
+  43: {},
+  44: {
+    columns: {
+      change_set_approvals: [
+        "approval_id",
+        "mission_id",
+        "revision",
+        "manifest_hash",
+        "request_id",
+        "record_json",
+        "approval_hash",
+        "audit_event_id"
+      ],
+      change_set_approval_revocations: ["approval_id", "revoked_by_actor_id", "reason", "audit_event_id"]
+    },
+    triggers: [...APPEND_ONLY("change_set_approvals"), ...APPEND_ONLY("change_set_approval_revocations")]
+  },
+  45: {
+    columns: {
+      change_set_operation_permits: [
+        "permit_id",
+        "mission_id",
+        "revision",
+        "manifest_hash",
+        "operation_id",
+        "approval_id",
+        "execution_work_item_id",
+        "record_json",
+        "permit_hash",
+        "audit_event_id"
+      ]
+    },
+    triggers: APPEND_ONLY("change_set_operation_permits")
+  },
+  46: {
+    columns: {
+      autonomous_authority_grants: [
+        "grant_id",
+        "mission_id",
+        "request_id",
+        "record_json",
+        "grant_hash",
+        "audit_event_id"
+      ],
+      autonomous_authority_revocations: ["grant_id", "actor_id", "reason", "audit_event_id"],
+      change_set_grant_authorizations: [
+        "authorization_id",
+        "grant_id",
+        "mission_id",
+        "revision",
+        "manifest_hash",
+        "record_json",
+        "authorization_hash",
+        "audit_event_id"
+      ]
+    },
+    triggers: [
+      ...APPEND_ONLY("autonomous_authority_grants"),
+      ...APPEND_ONLY("autonomous_authority_revocations"),
+      ...APPEND_ONLY("change_set_grant_authorizations")
+    ]
+  },
+  47: {
+    columns: { change_set_operation_permits: ["authorization_id"] },
+    indexes: ["change_set_operation_permits_authorization"]
+  }
+};
+
+/** Tables and columns that only exist once the named deployed migration has run. */
+const DEPLOYED_INTRODUCES: Record<number, { tables?: readonly string[]; columns?: Record<string, string> }> = {
+  40: { columns: { admission_permits: "execution_class" } },
+  41: { tables: ["change_set_revisions", "change_set_heads"] },
+  42: { tables: ["work_item_assignments"] },
+  44: { tables: ["change_set_approvals", "change_set_approval_revocations"] },
+  45: { tables: ["change_set_operation_permits"] },
+  46: {
+    tables: ["autonomous_authority_grants", "autonomous_authority_revocations", "change_set_grant_authorizations"]
+  },
+  47: { columns: { change_set_operation_permits: "authorization_id" } }
+};
+
+function hasSchemaObject(db: SqliteLike, type: "trigger" | "index", name: string): boolean {
+  return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?").get(type, name));
+}
+
+/**
+ * Returns why the schema does not match a deployed layout whose last recorded version is `last`, or undefined when
+ * every recorded migration's objects are present and no unrecorded migration's objects exist yet.
+ */
+function deployedLayoutSchemaProblem(db: SqliteLike, last: number): string | undefined {
+  for (let version = 39; version <= last; version += 1) {
+    const expected = DEPLOYED_SCHEMA[version];
+    if (!expected) return `no schema expectation for deployed migration ${version}`;
+    for (const [table, columns] of Object.entries(expected.columns ?? {})) {
+      if (!hasTable(db, table)) return `missing table ${table} (deployed migration ${version})`;
+      for (const column of columns) {
+        if (!hasColumn(db, table, column)) return `missing column ${table}.${column} (deployed migration ${version})`;
+      }
+    }
+    for (const trigger of expected.triggers ?? []) {
+      if (!hasSchemaObject(db, "trigger", trigger)) return `missing trigger ${trigger} (deployed migration ${version})`;
+    }
+    for (const index of expected.indexes ?? []) {
+      if (!hasSchemaObject(db, "index", index)) return `missing index ${index} (deployed migration ${version})`;
+    }
+  }
+  for (let version = last + 1; version <= 47; version += 1) {
+    const introduced = DEPLOYED_INTRODUCES[version];
+    for (const table of introduced?.tables ?? []) {
+      if (hasTable(db, table)) return `table ${table} exists but deployed migration ${version} is not recorded`;
+    }
+    for (const [table, column] of Object.entries(introduced?.columns ?? {})) {
+      if (hasTable(db, table) && hasColumn(db, table, column)) {
+        return `column ${table}.${column} exists but deployed migration ${version} is not recorded`;
+      }
+    }
+  }
+  if (hasTable(db, "change_set_operation_permits_previous")) {
+    return "leftover change_set_operation_permits_previous table from an interrupted rebuild";
+  }
+  return undefined;
 }
 
 /** Initialize only an empty database atomically; upgrades retain per-migration recovery. */

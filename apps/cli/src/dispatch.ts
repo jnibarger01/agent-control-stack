@@ -15,7 +15,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { runWorkerOnce } from "@agent-control-stack/worker";
 import { listAvailableActors } from "./available-actors.js";
-import { discoverLocalActors as runLocalActorDiscovery } from "./discover-actors.js";
+import { discoverLocalActors as runLocalActorDiscovery, probeExecutableVersion } from "./discover-actors.js";
 import { ACS_CLI_VERSION, ACS_HELP, AcsUsageError, parseAcsArgs, type AcsCommand } from "./parse.js";
 
 export interface AcsIo {
@@ -63,7 +63,7 @@ export async function discoverConfiguredActors(): Promise<void> {
   const dbPath = process.env.ACS_DB_PATH ?? "storage/local.db";
   const store = new SqliteWorkItemStore(dbPath, { heartbeatTtlMs: DEFAULT_HEARTBEAT_TTL_MS });
   try {
-    await runLocalActorDiscovery({ store });
+    await runLocalActorDiscovery({ store, probe: probeExecutableVersion });
   } finally {
     store.close();
   }

@@ -10,6 +10,7 @@ import {
   planAgentCommand,
   redactLines,
   runAgent,
+  summarizeTestFailure,
   type AgentCliProbe
 } from "@agent-control-stack/agent-cli";
 import { ControlStackError } from "@agent-control-stack/shared";
@@ -35,7 +36,7 @@ export interface AgentCliView extends AgentCliProbe {
   dispatchable: boolean;
   /** Why it cannot be dispatched right now (blocked, not installed, or dispatch is off). */
   unavailableReason?: string;
-  lastTest?: { at: string; ok: boolean; outcome: string; detail: string };
+  lastTest?: { at: string; ok: boolean; outcome: string; detail: string; kind?: string };
 }
 
 export interface AgentRouteDeps {
@@ -59,7 +60,8 @@ function lastTests(events: StoredAuditEvent[]): Map<string, AgentCliView["lastTe
       at: new Date(Math.floor(Number(event.timeUnixNano) / 1e6)).toISOString(),
       ok: body.ok === true,
       outcome: String(body.outcome ?? ""),
-      detail: String(body.detail ?? "")
+      detail: String(body.detail ?? ""),
+      ...(typeof body.kind === "string" ? { kind: body.kind } : {})
     });
   }
   return out;
@@ -144,6 +146,16 @@ export function registerAgentRoutes(deps: AgentRouteDeps): void {
       const views = await agentCliViews(store, service);
       let created = 0;
       let updated = 0;
+      // Preserve historical runs and audit references; retire only the former catalog-owned record.
+      const legacyGemini = store.getRegistryAgent("cli-gemini");
+      if (legacyGemini?.kind === "cli" && legacyGemini.provider === "google" && legacyGemini.status !== "OFFLINE") {
+        store.updateRegistryAgent(legacyGemini.id, {
+          status: "OFFLINE",
+          lastError: "Gemini CLI card retired; use Antigravity (cli-antigravity)",
+          actorId
+        });
+        updated += 1;
+      }
       for (const view of views) {
         const spec = AGENT_CLI_CATALOG[view.id];
         const status: "OFFLINE" | "DEGRADED" | "AVAILABLE" = !view.installed
@@ -221,10 +233,20 @@ export function registerAgentRoutes(deps: AgentRouteDeps): void {
       });
       const result = await runAgent({ command, cwd: wt.worktreePath });
       const ok = result.outcome === "succeeded" && /ACS_OK/u.test(result.output);
-      const detail = redactLines(result.output.trim().split("\n").slice(-3).join(" ⏎ ")).slice(0, 300);
+      const redacted = redactLines(result.output);
+      const failure = ok ? undefined : summarizeTestFailure(redacted, result.outcome);
+      const detail = failure?.summary ?? "";
       const event = store.recordSystemEvent({
         name: AGENT_CLI_TEST_EVENT,
-        body: { agentId: spec.id, ok, outcome: result.outcome, durationMs: result.durationMs, detail, actorId },
+        body: {
+          agentId: spec.id,
+          ok,
+          outcome: result.outcome,
+          durationMs: result.durationMs,
+          detail,
+          ...(failure ? { kind: failure.kind } : {}),
+          actorId
+        },
         attributes: { "agent_cli.id": spec.id }
       });
       return {
@@ -233,6 +255,7 @@ export function registerAgentRoutes(deps: AgentRouteDeps): void {
         outcome: result.outcome,
         durationMs: result.durationMs,
         detail,
+        ...(failure ? { kind: failure.kind } : {}),
         eventId: event.id
       };
     } catch (error) {

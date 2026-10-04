@@ -1,14 +1,8 @@
 import { accessSync, constants } from "node:fs";
-import { execFile } from "node:child_process";
 import { delimiter, join } from "node:path";
-import { promisify } from "node:util";
 import type { SqliteWorkItemStore } from "./store.js";
 
-const execFileAsync = promisify(execFile);
-
 export const SYSTEM_BOOTSTRAP_ACTOR_ID = "actor_system_bootstrap";
-// Cold starts are slow (hermes --version took 6.5s cold, 0.2s warm); a short timeout makes the roster flap.
-export const DISCOVERY_PROBE_TIMEOUT_MS = 10_000;
 export const DISCOVERY_ERROR_MAX_LENGTH = 200;
 
 const EXECUTABLE_NAME = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
@@ -60,7 +54,12 @@ export interface DiscoverLocalActorsDeps {
   now?: Date;
 }
 
-export interface DiscoverLocalActorsOptions extends Partial<DiscoverLocalActorsDeps> {
+/**
+ * `probe` is required: this package never starts processes. Callers inject the executor (see
+ * `probeExecutableVersion` in @agent-control-stack/agent-cli).
+ */
+export interface DiscoverLocalActorsOptions
+  extends Partial<Omit<DiscoverLocalActorsDeps, "probe">>, Pick<DiscoverLocalActorsDeps, "probe"> {
   store: Pick<SqliteWorkItemStore, "getRegistryAgent" | "recordAgentHeartbeat">;
 }
 
@@ -95,27 +94,9 @@ export function resolveExecutableOnPath(name: string, pathEnv = process.env.PATH
   return undefined;
 }
 
-export async function probeExecutableVersion(executablePath: string, args: readonly string[]): Promise<ProbeResult> {
-  try {
-    await execFileAsync(executablePath, [...args], {
-      timeout: DISCOVERY_PROBE_TIMEOUT_MS,
-      encoding: "utf8"
-    });
-    return { ok: true };
-  } catch (error) {
-    const err = error as NodeJS.ErrnoException & { killed?: boolean; signal?: NodeJS.Signals | null };
-    const timedOut = err.killed === true || err.signal === "SIGTERM";
-    return {
-      ok: false,
-      ...(timedOut ? { timedOut: true } : {}),
-      error: sanitizeDiscoveryError(err.message ?? String(error))
-    };
-  }
-}
-
 export async function discoverLocalActors(options: DiscoverLocalActorsOptions): Promise<DiscoveryResult[]> {
   const resolveExecutable = options.resolveExecutable ?? resolveExecutableOnPath;
-  const probe = options.probe ?? probeExecutableVersion;
+  const probe = options.probe;
   const results: DiscoveryResult[] = new Array<DiscoveryResult>(CANONICAL_DISCOVERY_TARGETS.length);
 
   // Probe every CLI concurrently so one hung or slow executable costs one probe timeout for the whole sweep, not one per

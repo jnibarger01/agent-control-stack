@@ -1,11 +1,29 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { spawn } from "node:child_process";
-import { assessResult, foldRuns, processStartTicks, type AgentDispatchConfig } from "./agent-runs.js";
+import {
+  AgentRunService,
+  MAX_GUARDED_CALLS_PER_RUN,
+  assessResult,
+  foldRuns,
+  processGroupId,
+  processStartTicks,
+  type AgentDispatchConfig
+} from "./agent-runs.js";
 import { buildGateway, type GatewayCredential } from "./server.js";
 
 const OP = "operator-credential".padEnd(40, "_");
@@ -183,7 +201,7 @@ describe("agent dispatch", () => {
 
   it("refuses a dispatch that differs from what was confirmed, a repo outside the allow-list, and blocked CLIs", async () => {
     fake("claude", "exit 0");
-    fake("gemini", "exit 0");
+    fake("openclaw", "exit 0");
     const app = makeGateway(config());
     const payload = { ...request, repo };
     const preview = (
@@ -217,7 +235,7 @@ describe("agent dispatch", () => {
       method: "POST",
       url: "/api/agent-runs/preview",
       headers: bearer(OP),
-      payload: { ...payload, agentId: "gemini" }
+      payload: { ...payload, agentId: "openclaw" }
     });
     expect(blocked.statusCode).toBe(409);
     expect(blocked.json().code).toBe("agent_dispatch_blocked");
@@ -295,14 +313,14 @@ describe("agent dispatch", () => {
 
   it("lists all nine CLIs and registers them idempotently", async () => {
     fake("claude", 'echo "2.1.284 (Claude Code)"');
-    fake("gemini", 'echo "0.46.0"');
+    fake("openclaw", 'echo "2026.9.7"');
     const app = makeGateway(config());
     const view = (await app.inject({ method: "GET", url: "/api/agent-clis", headers: bearer(READER) })).json();
     expect(view.agents).toHaveLength(9);
     const by = Object.fromEntries(view.agents.map((a: { id: string }) => [a.id, a]));
     expect(by.claude).toMatchObject({ installed: true, dispatchable: true, registered: false });
-    expect(by.gemini).toMatchObject({ installed: true, dispatchable: false });
-    expect(by.gemini.unavailableReason).toMatch(/no longer supported/);
+    expect(by.openclaw).toMatchObject({ installed: true, dispatchable: false });
+    expect(by.openclaw.unavailableReason).toMatch(/Gateway owns its state directory/);
 
     const seed = new SqliteWorkItemStore(join(root, "control.db"));
     seed.registerActor({ id: "user", actorType: "HUMAN", displayName: "user" });
@@ -318,8 +336,39 @@ describe("agent dispatch", () => {
     const agents = (await app.inject({ method: "GET", url: "/api/agents", headers: bearer(READER) })).json()
       .agents as Array<{ id: string; status: string }>;
     expect(agents.find((a) => a.id === "cli-claude")?.status).toBe("AVAILABLE");
-    expect(agents.find((a) => a.id === "cli-gemini")?.status).toBe("DEGRADED");
+    expect(agents.find((a) => a.id === "cli-openclaw")?.status).toBe("DEGRADED");
     expect(agents.find((a) => a.id === "cli-cline")?.status).toBe("OFFLINE");
+  });
+
+  it("retires the old Gemini CLI record without deleting it or changing unrelated agents", async () => {
+    const seed = new SqliteWorkItemStore(join(root, "control.db"));
+    seed.registerActor({ id: "user", actorType: "HUMAN", displayName: "user" });
+    for (const id of ["cli-gemini", "gemini-cli"]) {
+      if (seed.getRegistryAgent(id)) {
+        seed.updateRegistryAgent(id, { status: "AVAILABLE", actorId: "user" });
+        continue;
+      }
+      seed.createRegistryAgent({
+        id,
+        name: id,
+        kind: "cli",
+        provider: "google",
+        status: "AVAILABLE",
+        acpRole: "LOCAL_CODING_AGENT",
+        actorId: "user"
+      });
+    }
+    seed.close();
+    const app = makeGateway(config());
+    const sync = await app.inject({ method: "POST", url: "/api/agent-clis/sync", headers: bearer(OP) });
+    expect(sync.statusCode, sync.body).toBe(200);
+    expect(sync.json()).toMatchObject({ created: 9, updated: 1 });
+    const agents = (await app.inject({ method: "GET", url: "/api/agents", headers: bearer(READER) })).json().agents;
+    expect(agents.find((a: { id: string }) => a.id === "cli-gemini")).toMatchObject({ status: "OFFLINE" });
+    expect(agents.find((a: { id: string }) => a.id === "gemini-cli")).toMatchObject({ status: "AVAILABLE" });
+    expect(agents.find((a: { id: string }) => a.id === "cli-antigravity")).toBeDefined();
+    const again = await app.inject({ method: "POST", url: "/api/agent-clis/sync", headers: bearer(OP) });
+    expect(again.json()).toMatchObject({ created: 0, updated: 9 });
   });
 
   describe("governed lifecycle", () => {
@@ -349,6 +398,27 @@ describe("agent dispatch", () => {
       const again = await dispatch(app, await preview(app));
       expect(again.json().run.runId).toBe(a.json().run.runId);
       await app.inject({ method: "POST", url: `/api/agent-runs/${a.json().run.runId}/cancel`, headers: bearer(OP) });
+    }, 30_000);
+
+    it("does not start a duplicate run for an already-completed confirmation after a gateway restart", async () => {
+      fake("claude", "echo done > made.txt");
+      const first = makeGateway(config());
+      const done = await dispatch(first, await preview(first));
+      const runId = done.json().run.runId as string;
+      await waitFor(async () => {
+        const r = (await first.inject({ method: "GET", url: `/api/agent-runs/${runId}`, headers: bearer(OP) })).json();
+        return r.run.status === "queued" || r.run.status === "running" ? undefined : r;
+      });
+      await first.close();
+      open.splice(open.indexOf(first), 1);
+
+      // A new process has no in-memory claim; the audit chain must still say this confirmation already ran.
+      const second = makeGateway(config());
+      const again = await dispatch(second, await preview(second));
+      expect(again.statusCode).toBe(202);
+      expect(again.json().run.runId).toBe(runId);
+      const list = (await second.inject({ method: "GET", url: "/api/agent-runs", headers: bearer(OP) })).json();
+      expect(list.runs).toHaveLength(1);
     }, 30_000);
 
     it("refuses a confirmation that was never issued, was issued to someone else, or has expired", async () => {
@@ -582,6 +652,38 @@ describe("restart recovery of agent processes", () => {
     }
   });
 
+  it("signals only the pid, never a group, when the recorded process is not a group leader", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "acs-orphan-")));
+    // Not detached: the child shares this test process's group, so -pid would be ESRCH (or another group).
+    const child = spawn("sleep", ["60"], { stdio: "ignore" });
+    child.unref();
+    try {
+      const pid = child.pid!;
+      expect(processGroupId(pid)).not.toBe(pid);
+      seed(join(root, "c.db"), "run_dddddddddddd", pid, processStartTicks(pid) ?? null);
+      const app = buildGateway({
+        dbPath: join(root, "c.db"),
+        logger: false,
+        agentDispatch: { enabled: true, repoRoots: [root], maxConcurrent: 1, worktreeRoot: root, outputRoot: root },
+        auth: { token: "", actor: "user", actorId: "user", credentials }
+      });
+      const run = (await app.inject({ method: "GET", url: "/api/agent-runs", headers: bearer(OP) })).json().runs[0];
+      expect(run.status).toBe("interrupted");
+      expect(run.error).toMatch(/orphaned agent process was terminated/);
+      await waitFor(async () => (alive(pid) ? undefined : true), 5_000);
+      // The test runner (same group) is still here to assert this.
+      expect(alive(process.pid)).toBe(true);
+      await app.close();
+    } finally {
+      try {
+        process.kill(child.pid!, "SIGKILL");
+      } catch {
+        /* already terminated */
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("never signals a process it cannot prove is the recorded one", async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "acs-orphan-")));
     const child = spawn("sleep", ["60"], { detached: true, stdio: "ignore" });
@@ -693,6 +795,109 @@ for (const call of calls) {
       ).statusCode
     ).toBe(401);
   }, 30_000);
+
+  it("never persists the guard token, even when the agent prints it and puts it in a tool call", async () => {
+    const leakFile = join(root, "leaked-token.txt");
+    const bin2 = join(root, "bin");
+    const path = join(bin2, "claude");
+    writeFileSync(
+      path,
+      `#!${process.execPath}
+const { spawnSync } = require("node:child_process");
+const { readFileSync, writeFileSync } = require("node:fs");
+const args = process.argv.slice(2);
+const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
+const hook = settings.hooks.PreToolUse[0].hooks[0].command;
+const tokenFile = hook.trim().split(/\\s+/).pop().replace(/^['"]|['"]$/g, "");
+const token = readFileSync(tokenFile, "utf8").trim();
+writeFileSync(${JSON.stringify(leakFile)}, token);
+console.log("LEAK " + token);
+const r = spawnSync("sh", ["-c", hook], {
+  input: JSON.stringify({ tool_name: "Bash", tool_input: { command: "echo " + token } }),
+  encoding: "utf8"
+});
+console.log("HOOK " + (r.stdout || "allowed"));
+`
+    );
+    chmodSync(path, 0o755);
+    const cfg = config();
+    const app = makeGateway(cfg);
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    const address = app.server.address();
+    cfg.guardUrl = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+    const payload = { ...request, repo };
+    const hash = (
+      await app.inject({ method: "POST", url: "/api/agent-runs/preview", headers: bearer(OP), payload })
+    ).json().preview.confirmationHash;
+    const runId = (
+      await app.inject({
+        method: "POST",
+        url: "/api/agent-runs",
+        headers: bearer(OP),
+        payload: { ...payload, confirmationHash: hash }
+      })
+    ).json().run.runId as string;
+    const done = await waitFor(async () => {
+      const r = (await app.inject({ method: "GET", url: `/api/agent-runs/${runId}`, headers: bearer(OP) })).json();
+      return r.run.status === "queued" || r.run.status === "running" ? undefined : r;
+    });
+    const token = readFileSync(leakFile, "utf8").trim();
+    expect(token).toMatch(/^[0-9a-f]{48}$/);
+
+    // The agent printed it, so the proof is that nothing durable kept it: run view, output log, run directory,
+    // every audit event, and the raw database files (including the WAL).
+    expect(JSON.stringify(done)).not.toContain(token);
+    const runDir = join(cfg.outputRoot, runId);
+    for (const name of readdirSync(runDir)) {
+      expect(name).not.toBe("guard.token");
+      expect(readFileSync(join(runDir, name), "utf8")).not.toContain(token);
+    }
+    const store = new SqliteWorkItemStore(join(root, "control.db"));
+    try {
+      expect(JSON.stringify(store.readEvents({ limit: 500 }))).not.toContain(token);
+    } finally {
+      store.close();
+    }
+    for (const file of readdirSync(root).filter((name) => name.startsWith("control.db"))) {
+      expect(readFileSync(join(root, file)).includes(token)).toBe(false);
+    }
+  }, 30_000);
+
+  it("stops writing audit events once a run exhausts its tool-call budget", () => {
+    const events: Array<{ name: string; body: Record<string, unknown> }> = [];
+    const service = new AgentRunService(
+      { recordSystemEvent: (event: never) => void events.push(event), readEvents: () => [] } as never,
+      config()
+    );
+    const token = "ab".repeat(24);
+    const runId = "run_aaaaaaaaaaaa";
+    const internals = service as unknown as {
+      active: Map<string, AbortController>;
+      guards: Map<string, unknown>;
+    };
+    internals.active.set(runId, new AbortController());
+    internals.guards.set(runId, {
+      tokenHash: createHash("sha256").update(token).digest(),
+      token,
+      worktree: root,
+      calls: MAX_GUARDED_CALLS_PER_RUN - 1,
+      budgetEventRecorded: false,
+      logPath: join(root, "tool-calls.jsonl")
+    });
+    // The last call inside the budget is decided and recorded (and its summary never carries the token).
+    const inBudget = service.checkTool(runId, token, "Bash", { command: `echo ${token}` });
+    expect(inBudget.decision).toBeDefined();
+    expect(JSON.stringify(events)).not.toContain(token);
+    expect(events).toHaveLength(1);
+
+    // Every call past the budget is denied; only the first records one exhaustion event.
+    for (let i = 0; i < 50; i += 1) {
+      expect(service.checkTool(runId, token, "Bash", { command: "ls" })).toMatchObject({ decision: "deny" });
+    }
+    expect(events).toHaveLength(2);
+    expect(events[1]!.body).toMatchObject({ decision: "deny" });
+    expect(String(events[1]!.body.reason)).toMatch(/budget/);
+  });
 
   it("fails closed when the gateway cannot be reached", async () => {
     const { done } = await runWithGuard("http://127.0.0.1:9");

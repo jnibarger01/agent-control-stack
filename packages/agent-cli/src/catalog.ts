@@ -2,7 +2,7 @@
  * The CLI agents ACS can dispatch from Mission Control.
  *
  * Every invocation below was checked against the installed CLI's own `--help` on 2026-10-02
- * (claude 2.1.284, codex 0.159.2, opencode 1.18.34, gemini 0.46.0, hermes 0.21.5, openclaw 2026.9.7,
+ * (claude 2.1.284, codex 0.159.2, opencode 1.18.34, agy 1.2.13, hermes 0.21.5, openclaw 2026.9.7,
  * cursor-agent 2026.09.28, goose 1.45.0, cline 3.0.61). Flags drift between releases, so the probe
  * reports the installed version and the catalog records the version it was verified against.
  *
@@ -12,7 +12,7 @@ export const AGENT_CLI_IDS = [
   "claude",
   "codex",
   "opencode",
-  "gemini",
+  "antigravity",
   "hermes",
   "openclaw",
   "cursor-agent",
@@ -43,6 +43,8 @@ export interface AgentCliSpec {
   loginPaths: readonly string[];
   /** Environment variable name prefixes passed through so the CLI can reach its provider. */
   envPassthrough: readonly string[];
+  /** Exact names for credentials that must not allow a whole prefix. */
+  envPassthroughNames?: readonly string[];
   /** What the CLI itself enforces in `edit` mode. Shown to the operator in the dispatch dialog. */
   editContainment: string;
   readOnlySupported: boolean;
@@ -117,26 +119,20 @@ export const AGENT_CLI_CATALOG: Readonly<Record<AgentCliId, AgentCliSpec>> = {
       prompt
     ]
   },
-  gemini: {
-    id: "gemini",
-    displayName: "Gemini CLI",
-    binary: "gemini",
+  antigravity: {
+    id: "antigravity",
+    displayName: "Antigravity",
+    binary: "agy",
     provider: "google",
-    verifiedAgainst: "0.46.0",
+    verifiedAgainst: "1.2.13",
     versionArgs: ["--version"],
-    loginPaths: [".gemini"],
-    envPassthrough: ["GEMINI_", "GOOGLE_"],
-    editContainment: "approval-mode auto_edit: edits auto-approved, other tools gated; plan mode is read-only",
+    loginPaths: [".gemini/antigravity-cli"],
+    envPassthrough: ["AGY_", "GOOGLE_"],
+    envPassthroughNames: ["GEMINI_API_KEY"],
+    editContainment:
+      "--mode accept-edits: file edits auto-approved, other tools gated by Antigravity's own permissions; plan mode is read-only",
     readOnlySupported: true,
-    dispatchBlockedReason:
-      "Google rejects this account/client (IneligibleTierError: Gemini Code Assist for individuals is no longer supported). Sign in with a supported account or API key, then re-test.",
-    buildArgs: ({ prompt, mode }) => [
-      "-p",
-      prompt,
-      "--approval-mode",
-      mode === "edit" ? "auto_edit" : "plan",
-      "--skip-trust"
-    ]
+    buildArgs: ({ prompt, mode }) => ["--print", prompt, "--mode", mode === "edit" ? "accept-edits" : "plan"]
   },
   hermes: {
     id: "hermes",
@@ -251,9 +247,9 @@ export const AGENT_GOVERNANCE: Readonly<Record<AgentCliId, { level: AgentGoverna
     level: "host_permissions",
     summary: "Runs with your host permissions under OpenCode's own rules. ACS cannot see or govern its tool calls."
   },
-  gemini: {
+  antigravity: {
     level: "host_permissions",
-    summary: "Runs with your host permissions under Gemini's own rules. ACS cannot see or govern its tool calls."
+    summary: "Runs with your host permissions under Antigravity's own rules. ACS cannot see or govern its tool calls."
   },
   hermes: {
     level: "host_permissions",

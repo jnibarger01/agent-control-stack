@@ -1,3 +1,4 @@
+import { probeExecutableVersion } from "@agent-control-stack/agent-cli";
 import { registerMissionDispatchRoutes } from "./mission-dispatch-routes.js";
 import {
   CodingMissionController,
@@ -300,7 +301,10 @@ export interface GatewayOptions {
   /** Test seam: clock for agent confirmation expiry. */
   agentRunNow?: () => number;
   missionDispatchEnabled?: boolean;
-  /** Admin execution mode lasts this long before reverting to strict. Env: ACS_ADMIN_MODE_TTL_MS. */
+  /**
+   * Optional bounded lifetime for admin execution mode (60000-86400000 ms). Unset means sticky: admin stays on until
+   * an operator disables it, and nothing in this process supplies a default. Env: ACS_ADMIN_MODE_TTL_MS.
+   */
   adminModeTtlMs?: number;
   logger?: boolean;
   auth?: GatewayAuthOptions;
@@ -1170,6 +1174,28 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.get("/health", deepHealth);
 
   const readAuthority = options.readManagedAuthority ?? (() => observeLiveManagedAuthority());
+  // With a managed execution backend configured, finding no managed executor makes authority silently
+  // non-authoritative (the lease holder cannot be verified, so it fails closed). Say so once at startup instead
+  // of leaving operators to discover it as unexplained approval requirements.
+  if (!options.readManagedAuthority && process.env.ACS_EXECUTION_BACKEND?.trim() === "desktop_commander") {
+    try {
+      const startupAuthority = readAuthority();
+      if (startupAuthority.managedExecutorDiscovered === false) {
+        app.log.warn(
+          {
+            event: "managed_executor_not_detected",
+            authoritative: startupAuthority.authoritative,
+            detail: startupAuthority.detail,
+            remediation:
+              "Start the ACS-managed executor (control plane, Jace Commander bridge or remote role) or unset ACS_EXECUTION_BACKEND; until one is detected, execution authority reports non-authoritative and gated actions fail closed."
+          },
+          "ACS_EXECUTION_BACKEND=desktop_commander but no managed executor was detected"
+        );
+      }
+    } catch (error) {
+      app.log.warn({ err: error }, "could not observe managed authority at startup");
+    }
+  }
   const executionModeView = () => {
     workItems.expireAdminModeIfDue();
     const row = workItems.getExecutionMode();
@@ -4548,7 +4574,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (sweeping || closing) return;
       sweeping = true;
       try {
-        await discoverLocalActors({ store: workItems, ...actorDiscoveryConfig });
+        await discoverLocalActors({ store: workItems, probe: probeExecutableVersion, ...actorDiscoveryConfig });
         workItems.reconcileStaleAgents();
       } catch (error) {
         app.log.warn({ err: error }, "actor discovery sweep failed");
