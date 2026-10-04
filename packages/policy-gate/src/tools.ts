@@ -575,13 +575,20 @@ export function authoritativeRouteAllows(store: WorkItemStore, workItemId: strin
 
 /**
  * Admin execution mode is the temporary authority override for authoritative routing. It applies only while the
- * canonical mode is admin (TTL-aware), only to a claim that carries the admin fence (the gateway sets it exactly when
- * it is consuming an ACS admin approval), and only when the approval this claim will consume is ACS admin's. That is
- * resolved exactly as the claim does: for the CURRENT plan, every approval-required action must hold a granted,
- * unexpired plan approval, and each of those approvals must have been granted by ACS admin. A historical admin
- * approval on a superseded plan, or an admin approval for only some of the required actions, never counts. Strict
- * mode, claims without the fence and claim_next keep full routing enforcement; assignment, target and attempt fencing
- * checks are unaffected. Each override is audited once per work item.
+ * canonical mode is admin (TTL-aware), only to a claim that carries the admin fence (the gateway sets it only after it
+ * authorized the call in admin mode), and never when policy denies the work item.
+ *
+ * When policy requires approval, the approval this claim will consume must be ACS admin's. That is resolved exactly as
+ * the claim does: for the CURRENT plan, every approval-required action must hold a granted, unexpired plan approval,
+ * and each of those approvals must have been granted by ACS admin. A historical admin approval on a superseded plan,
+ * or an admin approval for only some of the required actions, never counts.
+ *
+ * When policy already allows every action (for example jc_status or jc_doctor) there is no approval record to
+ * require, and no plan yet: this claim creates it. The fence plus canonical admin mode is the authority; none is
+ * fabricated.
+ *
+ * Strict mode, claims without the fence and claim_next keep full routing enforcement; assignment, target and attempt
+ * fencing checks are unaffected. Each override is audited once per work item.
  */
 function adminRoutingOverride(
   store: WorkItemStore,
@@ -591,13 +598,16 @@ function adminRoutingOverride(
 ): boolean {
   if (parsed.executionModeFence !== "admin") return false;
   if (store.getExecutionMode().mode !== "admin") return false;
-  const plan = store.getCurrentExecutionPlan(workItem.id);
-  if (!plan) return false;
-  const required = approvalRequired(policy.evaluateWorkItem(workItem, parsed.workerId, "claim"));
-  if (required.length === 0) return false;
-  for (const evaluation of required) {
-    const approval = store.getExecutionPlanApproval(workItem.id, plan.planHash, evaluation.actionHash);
-    if (!approval || approval.approvedByActorId !== ACS_ADMIN_APPROVER) return false;
+  const evaluations = policy.evaluateWorkItem(workItem, parsed.workerId, "claim");
+  if (policy.summarize(evaluations).decision === "deny") return false;
+  const required = approvalRequired(evaluations);
+  if (required.length > 0) {
+    const plan = store.getCurrentExecutionPlan(workItem.id);
+    if (!plan) return false;
+    for (const evaluation of required) {
+      const approval = store.getExecutionPlanApproval(workItem.id, plan.planHash, evaluation.actionHash);
+      if (!approval || approval.approvedByActorId !== ACS_ADMIN_APPROVER) return false;
+    }
   }
   store.recordSystemEventOnceForWorkItem({
     name: "execution_mode.routing_override",

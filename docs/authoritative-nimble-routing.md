@@ -50,9 +50,10 @@ Agents whose provider is `admin-only` are eligible only while the canonical exec
 
 **Admin execution mode is the one exception to the persisted-executor requirement, and only for by-id claims.** Capability items issued by `/jc/capability/issue` and `/dc/capability/issue` are never routed, so they carry no routing evidence. While the canonical execution mode is `admin` (TTL-aware), a by-id claim skips the routing-evidence check only when all of the following hold:
 
-- the claim carries the admin fence, which the gateway sets exactly when the claim consumes an ACS admin approval;
+- the claim carries the admin fence, which the gateway sets only after it authorized the call in admin mode, whether that authorization recorded an ACS admin approval or policy already allowed the action;
 - the canonical mode is `admin` at claim time, and managed authority is valid (the gateway re-checks both inside the claim transaction and refuses otherwise);
-- for the item's current plan, every approval-required action holds a granted, unexpired plan approval, and each of those approvals was granted by ACS admin. A historical admin approval on a superseded plan, or an admin approval covering only some required actions, does not count.
+- policy does not deny the item;
+- if policy requires approval, then for the item's current plan every approval-required action holds a granted, unexpired plan approval, and each of those approvals was granted by ACS admin. A historical admin approval on a superseded plan, or an admin approval covering only some required actions, does not count. If policy already allows every action (for example `jc_status` or `jc_doctor`), there is no approval to require and no plan yet (the claim creates it): the fence plus canonical admin mode is the authority, and no approval record is fabricated.
 
 Each override is audited once per work item as `execution_mode.routing_override`. In `strict` mode the routing-evidence requirement applies unchanged to every claim. `claim_next`, durable assignments, registered-agent targets, and attempt fencing are not affected by admin mode.
 
