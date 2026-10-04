@@ -96,6 +96,7 @@ import {
   adminExecutionGate,
   observeLiveManagedAuthority,
   policyContextAuditReceipt,
+  recordDirectLaneRoutingDecision,
   readExecutionModeValue,
   type ManagedAuthorityObservation
 } from "@agent-control-stack/policy-gate";
@@ -3225,6 +3226,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             });
           }
           let admissionBound = false;
+          // DC capability issuance is direct-addressed: the calling bridge IS the
+          // provider. Same reasoning as the JC lane - persist the routing decision
+          // so the authoritative-routing gate is satisfied by real evidence.
+          recordDirectLaneRoutingDecision(workItems, {
+            workItemId: workItem.id,
+            workerId,
+            lane: "dc",
+            toolName: body.tool
+          });
+
           try {
             const claimed = claimWithAdmissionPermit({
               id: workItem.id,
@@ -3844,6 +3855,18 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             detail: jcRecheck.detail
           });
         }
+        // JC capability issuance is direct-addressed: the calling bridge IS the
+        // provider, so the executor is authoritatively known here. Record that
+        // decision so the authoritative-routing gate (enabled with
+        // ACS_NIMBLE_ROUTING_ENABLED=1) is satisfied by persisted, worker-matching
+        // evidence rather than rejecting every direct-lane claim. No model is
+        // consulted and no gate is bypassed.
+        recordDirectLaneRoutingDecision(workItems, {
+          workItemId: workItem.id,
+          workerId,
+          lane: "jc",
+          toolName: invocation.toolName
+        });
         let admissionBound = false;
         try {
           const adminApprovalWouldBeConsumed =
