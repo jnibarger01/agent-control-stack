@@ -142,6 +142,44 @@ describe("claim by id: admin execution mode vs authoritative routing", () => {
     }
   });
 
+  it("an ACS admin approval on only some of the required actions does not unlock the override", () => {
+    const f = fixture("admin");
+    try {
+      const item = f.tools.create_work_item({
+        title: "Two required approvals",
+        requester: "user",
+        intent: "admin approves one required action, a human the other",
+        target: { cwd: "/repo" },
+        requestedActions: [
+          { kind: "fs.write", description: "write one", params: { paths: ["src/one.ts"] } },
+          { kind: "fs.write", description: "write two", params: { paths: ["src/two.ts"] } }
+        ],
+        risk: "high"
+      });
+      const [first, second] = f.policy.evaluateWorkItem(item, ACS_ADMIN_APPROVER, "approve");
+      f.tools.approve_work_item({
+        id: item.id,
+        approvedBy: ACS_ADMIN_APPROVER,
+        reason: ACS_ADMIN_APPROVAL_REASON,
+        actionHash: first!.actionHash
+      });
+      f.tools.approve_work_item({
+        id: item.id,
+        approvedBy: "approver",
+        reason: "human approval",
+        actionHash: second!.actionHash
+      });
+      expect(f.store.get(item.id)?.status).toBe("approved");
+      expect(f.store.hasGrantedApprovalBy(item.id, ACS_ADMIN_APPROVER)).toBe(true);
+      expect(
+        f.tools.claim_approved_work_item_by_id({ id: item.id, workerId: "any-worker", executionModeFence: "admin" })
+      ).toBeUndefined();
+      expect(f.store.readEvents().some((event) => event.name === "execution_mode.routing_override")).toBe(false);
+    } finally {
+      f.store.close();
+    }
+  });
+
   it("claim_next keeps routing enforced even in admin mode", () => {
     const f = fixture("admin");
     try {

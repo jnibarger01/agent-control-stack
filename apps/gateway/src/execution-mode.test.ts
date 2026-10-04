@@ -450,6 +450,85 @@ describe("canonical execution mode", () => {
     }
   });
 
+  // Authoritative Nimble routing demands persisted routing evidence before any claim, and DC capability items are never
+  // routed. Admin mode is the temporary authority override; strict mode keeps routing enforced.
+  describe("with authoritative Nimble routing enforced", () => {
+    async function withRouting(run: () => Promise<void>): Promise<void> {
+      const prior = process.env.ACS_NIMBLE_ROUTING_ENABLED;
+      process.env.ACS_NIMBLE_ROUTING_ENABLED = "1";
+      try {
+        await run();
+      } finally {
+        if (prior === undefined) delete process.env.ACS_NIMBLE_ROUTING_ENABLED;
+        else process.env.ACS_NIMBLE_ROUTING_ENABLED = prior;
+      }
+    }
+
+    it("admin mode still issues a DC capability and audits the routing override", () =>
+      withRouting(async () => {
+        const ctx = await gateway();
+        try {
+          await attest(ctx.app);
+          const switched = await ctx.app.inject({
+            method: "POST",
+            url: "/execution-mode",
+            headers: AUTH,
+            payload: { mode: "admin", reason: "dc admin routing override test" }
+          });
+          expect(switched.statusCode).toBe(200);
+
+          const response = await issue(ctx.app, "create_directory", { path: join(ctx.root, "routed-admin") });
+          expect(response.statusCode, response.body).toBe(200);
+          expect(response.json().decision).toBe("allow");
+          expect(response.json().capability.payload.toolName).toBe("create_directory");
+
+          const detail = await ctx.app.inject({
+            method: "GET",
+            url: `/work-items/${response.json().workItemId}`,
+            headers: AUTH
+          });
+          expect(detail.json().events.map((event: { name: string }) => event.name)).toEqual(
+            expect.arrayContaining(["execution_mode.auto_authorized", "execution_mode.routing_override"])
+          );
+        } finally {
+          await ctx.app.close();
+          rmSync(ctx.root, { recursive: true, force: true });
+        }
+      }));
+
+    it("strict mode keeps routing enforced: a human-approved DC item is not claimed and nothing is signed", () =>
+      withRouting(async () => {
+        const ctx = await gateway();
+        try {
+          await attest(ctx.app);
+          const args = { path: join(ctx.root, "routed-strict") };
+          const first = await issue(ctx.app, "create_directory", args);
+          expect(first.statusCode).toBe(409);
+          const approval = await ctx.app.inject({
+            method: "POST",
+            url: `/work-items/${first.json().workItemId}/approve`,
+            headers: AUTH,
+            payload: { actionHash: first.json().actionHash, reason: "operator approved" }
+          });
+          expect(approval.statusCode).toBe(200);
+          const retry = await issue(ctx.app, "create_directory", args);
+          expect(retry.statusCode).toBe(409);
+          expect(retry.json().capability).toBeUndefined();
+          const detail = await ctx.app.inject({
+            method: "GET",
+            url: `/work-items/${first.json().workItemId}`,
+            headers: AUTH
+          });
+          expect(detail.json().events.map((event: { name: string }) => event.name)).not.toContain(
+            "execution_mode.routing_override"
+          );
+        } finally {
+          await ctx.app.close();
+          rmSync(ctx.root, { recursive: true, force: true });
+        }
+      }));
+  });
+
   it("auto-authorizes an approval-required move in admin, denies invalid leases, and rejects unauthenticated issue", async () => {
     const ctx = await gateway();
     try {

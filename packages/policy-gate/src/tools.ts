@@ -386,7 +386,7 @@ function gateWorkerClaimByIdInTransaction(
   }
   if (
     !authoritativeRouteAllows(store, candidate.id, parsed.workerId) &&
-    !adminRoutingOverride(store, candidate.id, parsed)
+    !adminRoutingOverride(store, policy, candidate, parsed)
   ) {
     return undefined;
   }
@@ -576,28 +576,34 @@ export function authoritativeRouteAllows(store: WorkItemStore, workItemId: strin
 /**
  * Admin execution mode is the temporary authority override for authoritative routing. It applies only while the
  * canonical mode is admin (TTL-aware), only to a claim that carries the admin fence (the gateway sets it exactly when
- * it is consuming an ACS admin approval), and only when that approval really exists on the item. Strict mode, claims
- * without the fence and claim_next keep full routing enforcement; assignment, target and attempt fencing checks are
- * unaffected. Each override is audited once per work item.
+ * it is consuming an ACS admin approval), and only when the approval this claim will consume is ACS admin's. That is
+ * resolved exactly as the claim does: for the CURRENT plan, every approval-required action must hold a granted,
+ * unexpired plan approval, and each of those approvals must have been granted by ACS admin. A historical admin
+ * approval on a superseded plan, or an admin approval for only some of the required actions, never counts. Strict
+ * mode, claims without the fence and claim_next keep full routing enforcement; assignment, target and attempt fencing
+ * checks are unaffected. Each override is audited once per work item.
  */
 function adminRoutingOverride(
   store: WorkItemStore,
-  workItemId: string,
+  policy: PolicyEngine,
+  workItem: WorkItem,
   parsed: z.infer<typeof claimByIdInputSchema>
 ): boolean {
   if (parsed.executionModeFence !== "admin") return false;
   if (store.getExecutionMode().mode !== "admin") return false;
-  if (
-    !store.hasGrantedApprovalBy(workItemId, ACS_ADMIN_APPROVER) &&
-    !store.hasGrantedExecutionPlanApprovalBy(workItemId, ACS_ADMIN_APPROVER)
-  ) {
-    return false;
+  const plan = store.getCurrentExecutionPlan(workItem.id);
+  if (!plan) return false;
+  const required = approvalRequired(policy.evaluateWorkItem(workItem, parsed.workerId, "claim"));
+  if (required.length === 0) return false;
+  for (const evaluation of required) {
+    const approval = store.getExecutionPlanApproval(workItem.id, plan.planHash, evaluation.actionHash);
+    if (!approval || approval.approvedByActorId !== ACS_ADMIN_APPROVER) return false;
   }
   store.recordSystemEventOnceForWorkItem({
     name: "execution_mode.routing_override",
-    workItemId,
-    body: { workItemId, workerId: parsed.workerId, reason: "admin_execution_mode_active" },
-    attributes: { "work_item.id": workItemId, "execution_mode.mode": "admin" }
+    workItemId: workItem.id,
+    body: { workItemId: workItem.id, workerId: parsed.workerId, reason: "admin_execution_mode_active" },
+    attributes: { "work_item.id": workItem.id, "execution_mode.mode": "admin" }
   });
   return true;
 }

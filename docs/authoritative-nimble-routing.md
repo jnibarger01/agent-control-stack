@@ -48,6 +48,14 @@ Nimble Choice requires 2–26 criteria. ACS sends one choice question whose crit
 
 Agents whose provider is `admin-only` are eligible only while the canonical execution mode is `admin`. Claim-time policy still runs after the routing decision and can block dispatch.
 
+**Admin execution mode is the one exception to the persisted-executor requirement, and only for by-id claims.** Capability items issued by `/jc/capability/issue` and `/dc/capability/issue` are never routed, so they carry no routing evidence. While the canonical execution mode is `admin` (TTL-aware), a by-id claim skips the routing-evidence check only when all of the following hold:
+
+- the claim carries the admin fence, which the gateway sets exactly when the claim consumes an ACS admin approval;
+- the canonical mode is `admin` at claim time, and managed authority is valid (the gateway re-checks both inside the claim transaction and refuses otherwise);
+- for the item's current plan, every approval-required action holds a granted, unexpired plan approval, and each of those approvals was granted by ACS admin. A historical admin approval on a superseded plan, or an admin approval covering only some required actions, does not count.
+
+Each override is audited once per work item as `execution_mode.routing_override`. In `strict` mode the routing-evidence requirement applies unchanged to every claim. `claim_next`, durable assignments, registered-agent targets, and attempt fencing are not affected by admin mode.
+
 Evidence is stored in `actor_routing_evidence`. Execution outcomes are stored in `routing_execution_outcomes`. Neither table stores the raw prompt or secrets. Migration `013` decision rows stay append-only and readable.
 
 JEV shadow classification remains telemetry. It is not consulted by this path. `harness/routing.md` is a model cost policy, not this executor router.

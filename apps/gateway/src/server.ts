@@ -3150,6 +3150,46 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           }
           let admissionBound = false;
           try {
+            // Same fenced admin authority as the JC lane: a claim that consumes an ACS admin approval must run in
+            // canonical admin mode with valid managed authority, and carries the admin fence so the claim gate can
+            // apply the admin routing override (and the store can refuse it outside admin mode).
+            const adminApprovalWouldBeConsumed =
+              workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER) ||
+              workItems.hasGrantedExecutionPlanApprovalBy(workItem.id, ACS_ADMIN_APPROVER);
+            const validateDcAuthority = () => {
+              if (body.changeSetPermitId) {
+                changeSetPermitWorkItem(
+                  body.changeSetPermitId,
+                  "desktop_commander",
+                  dcActor,
+                  body.tool,
+                  invocationHash,
+                  bindingHash
+                );
+              }
+              if (!adminApprovalWouldBeConsumed) return;
+              const claimMode = readExecutionModeValue(workItems.getExecutionMode().raw);
+              if (claimMode.state !== "ok" || claimMode.mode !== "admin") {
+                workItems.recordSystemEvent({
+                  name: "execution_mode.admin_approval_claim_denied",
+                  body: { workItemId: workItem.id, code: "execution_mode_fence_mismatch" },
+                  attributes: { "work_item.id": workItem.id }
+                });
+                throw new ControlStackError(
+                  "execution_mode_fence_mismatch",
+                  "ACS admin approval requires canonical admin mode"
+                );
+              }
+              const claimGate = adminExecutionGate(readAuthority(), true);
+              if (!claimGate.ok) {
+                workItems.recordSystemEvent({
+                  name: "execution_mode.admin_approval_claim_denied",
+                  body: { workItemId: workItem.id, code: claimGate.code },
+                  attributes: { "work_item.id": workItem.id, "execution_mode.mode": "admin" }
+                });
+                throw new ControlStackError(claimGate.code, claimGate.detail);
+              }
+            };
             const claimed = claimWithAdmissionPermit({
               id: workItem.id,
               workerId,
@@ -3157,20 +3197,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               lane: "dc",
               toolName: body.tool,
               permit: admissionPermit,
-              ...(body.changeSetPermitId
-                ? {
-                    validateAuthority: () => {
-                      changeSetPermitWorkItem(
-                        body.changeSetPermitId!,
-                        "desktop_commander",
-                        dcActor,
-                        body.tool,
-                        invocationHash,
-                        bindingHash
-                      );
-                    }
-                  }
-                : {})
+              ...(body.changeSetPermitId || adminApprovalWouldBeConsumed
+                ? { validateAuthority: validateDcAuthority }
+                : {}),
+              ...(adminApprovalWouldBeConsumed ? { executionModeFence: "admin" as const } : {})
             });
             admissionBound =
               !!claimed?.attemptId && claimed.fencingEpoch !== undefined && !!claimed.planHash && !!claimed.inputHash;
