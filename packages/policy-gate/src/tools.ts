@@ -262,11 +262,15 @@ function gateWorkerClaimInTransaction(
   policy: PolicyEngine,
   parsed: z.infer<typeof claimInputSchema>
 ): ClaimedWorkItem | undefined {
+<<<<<<< Updated upstream
   const candidate = store
     .list({ status: "approved" })
     .filter((workItem) => store.isWorkItemEligibleForWorker(workItem, parsed.workerId, ACS_ADMIN_APPROVER))
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
     .find((workItem) => authoritativeRouteAllows(store, workItem.id, parsed.workerId));
+=======
+  const candidate = store.findNextApprovedWorkItemForWorker(parsed.workerId);
+>>>>>>> Stashed changes
   if (!candidate) {
     return undefined;
   }
@@ -371,6 +375,7 @@ function gateWorkerClaimByIdInTransaction(
     return undefined;
   }
   const assignment = store.getWorkItemAssignment(candidate.id);
+<<<<<<< Updated upstream
   // A durable assignment is a routing decision, not a hint. A different worker
   // must never claim it, and must never be handed a parallel work item to claim
   // instead, because that would let a bridge bypass routing by retrying. Callers
@@ -386,6 +391,10 @@ function gateWorkerClaimByIdInTransaction(
   }
   if (!authoritativeRouteAllows(store, candidate.id, parsed.workerId)) {
     return undefined;
+=======
+  if (assignment && assignment.selectedWorkerId !== parsed.workerId) {
+    throw new ControlStackError("work_item_assignment_mismatch", "work item is assigned to a different worker");
+>>>>>>> Stashed changes
   }
 
   const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, candidate, parsed.workerId, "claim");

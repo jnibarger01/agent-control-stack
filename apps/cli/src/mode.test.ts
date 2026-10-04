@@ -12,7 +12,11 @@ afterEach(() => {
 });
 
 describe("acs mode", () => {
+<<<<<<< Updated upstream
   it("reports strict and refuses unauthenticated local admin activation", async () => {
+=======
+  it("reports strict by default and can only set strict without an authenticated gateway principal", async () => {
+>>>>>>> Stashed changes
     const dir = mkdtempSync(join(tmpdir(), "acs-mode-cli-"));
     const dbPath = join(dir, "control.db");
     process.env.ACS_DB_PATH = dbPath;
@@ -23,7 +27,12 @@ describe("acs mode", () => {
           this.chunks += chunk;
         }
       },
-      stderr: { write() {} }
+      stderr: {
+        chunks: "",
+        write(chunk: string) {
+          this.chunks += chunk;
+        }
+      }
     };
     try {
       expect(await runAcsCli(["mode", "status"], io)).toBe(0);
@@ -31,9 +40,13 @@ describe("acs mode", () => {
       expect(io.stdout.chunks).toContain("Approval policy: policy");
       io.stdout.chunks = "";
       expect(await runAcsCli(["mode", "admin"], io)).toBe(1);
+<<<<<<< Updated upstream
       io.stdout.chunks = "";
       expect(await runAcsCli(["mode", "status"], io)).toBe(0);
       expect(io.stdout.chunks).toContain("Execution mode: strict");
+=======
+      expect(io.stderr.chunks).toContain("Usage: acs mode status | acs mode strict");
+>>>>>>> Stashed changes
       io.stdout.chunks = "";
       expect(await runAcsCli(["mode", "strict"], io)).toBe(0);
       expect(io.stdout.chunks).toContain("Execution mode: strict");

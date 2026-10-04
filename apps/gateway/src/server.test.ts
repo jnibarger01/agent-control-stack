@@ -41,7 +41,26 @@ function resolveHermesRuntimeLauncher(executable: string): string {
 
 function hermesE2eEnvironment(home: string, hermesHome: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
+<<<<<<< Updated upstream
   for (const key of ["PATH", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"]) {
+=======
+  for (const key of [
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "TERM",
+    "NO_COLOR",
+    "FORCE_COLOR",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY"
+  ]) {
+>>>>>>> Stashed changes
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
   return {
@@ -1962,7 +1981,17 @@ describe("gateway MCP transport", () => {
       if (!hermesExecutable) throw new Error("Hermes executable unavailable");
       const hermesRuntimeLauncher = resolveHermesRuntimeLauncher(hermesExecutable);
       const installedHermesLauncher = readFileSync(hermesRuntimeLauncher);
+<<<<<<< Updated upstream
       const hermesFixture = prepareHermesSourceFixture(hermesRuntimeLauncher, dir, hermesHome);
+=======
+      let hermesFixture: ReturnType<typeof prepareHermesSourceFixture>;
+      try {
+        hermesFixture = prepareHermesSourceFixture(hermesRuntimeLauncher, dir, hermesHome);
+      } catch (error) {
+        rmSync(dir, { recursive: true, force: true });
+        throw error;
+      }
+>>>>>>> Stashed changes
       writeFileSync(
         configPath,
         JSON.stringify({
@@ -1984,8 +2013,12 @@ describe("gateway MCP transport", () => {
         advertisedTools: string[];
         emitted: { name: string; arguments: Record<string, unknown> } | undefined;
       }> = [];
+<<<<<<< Updated upstream
       // Hermes tool results carry tool_call_id and omit the tool name.
       const callsById = new Map<string, string>();
+=======
+      const toolResponseTrace: Array<{ name: unknown; content: string }> = [];
+>>>>>>> Stashed changes
       const modelServer = createServer((request, response) => {
         if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
           response.writeHead(404).end();
@@ -2010,6 +2043,7 @@ describe("gateway MCP transport", () => {
             (message) => message && typeof message === "object" && (message as Record<string, unknown>).role === "tool"
           );
           const lastTool = toolResults.at(-1) as Record<string, unknown> | undefined;
+<<<<<<< Updated upstream
           const lastToolName =
             typeof lastTool?.name === "string"
               ? lastTool.name
@@ -2032,6 +2066,16 @@ describe("gateway MCP transport", () => {
                     });
                   })
                   .at(-1);
+=======
+          const lastToolCall = messages
+            .flatMap((message) => {
+              if (!message || typeof message !== "object") return [];
+              const calls = (message as Record<string, unknown>).tool_calls;
+              return Array.isArray(calls) ? calls : [];
+            })
+            .find((call) => call && typeof call === "object" && call.id === lastTool?.tool_call_id);
+          const lastToolName = typeof lastTool?.name === "string" ? lastTool.name : lastToolCall?.function?.name;
+>>>>>>> Stashed changes
           const resultText =
             lastTool && typeof lastTool.content === "string"
               ? String(lastTool.content)
@@ -2040,6 +2084,7 @@ describe("gateway MCP transport", () => {
                 : lastTool
                   ? JSON.stringify(lastTool)
                   : "";
+          if (lastTool) toolResponseTrace.push({ name: lastToolName, content: resultText.slice(0, 4_000) });
           const jsonStart = resultText.indexOf("{");
           const jsonEnd = resultText.lastIndexOf("}");
           const result =
@@ -2117,6 +2162,7 @@ describe("gateway MCP transport", () => {
             // first tool-bearing turn. It is not the model-facing smoke path.
           } else if (toolResults.length === 0) {
             call = emit("tool_search", { queries: ["ACS test agent run", "test.agent.run"], limit: 5 });
+<<<<<<< Updated upstream
           } else if (
             (resolvedToolName || lastToolName) === "tool_search" &&
             namedHit &&
@@ -2124,13 +2170,21 @@ describe("gateway MCP transport", () => {
           ) {
             call = emit("tool_describe", { names: [namedHit.name] });
           } else if ((resolvedToolName || lastToolName) === "tool_describe") {
+=======
+          } else if (lastToolName === "tool_search" && namedHit && typeof namedHit.name === "string") {
+            call = emit("tool_describe", { names: [namedHit.name] });
+          } else if (lastToolName === "tool_describe") {
+>>>>>>> Stashed changes
             const describedName =
               (typeof result?.name === "string" && result.name) ||
               (namedHit && typeof namedHit.name === "string" ? namedHit.name : "mcp__acs_gateway__test_agent_run");
             call = emit("tool_call", {
               name: describedName,
               arguments: {
+<<<<<<< Updated upstream
                 // The MCP schema enum is directAgentNames. Hermes rejects other ids before the call.
+=======
+>>>>>>> Stashed changes
                 agent: "codex",
                 prompt: "Hermes deterministic interoperability check",
                 cwd: allowed,
@@ -2220,7 +2274,15 @@ describe("gateway MCP transport", () => {
           ],
           {
             cwd: allowed,
+<<<<<<< Updated upstream
             env: { ...hermesE2eEnvironment(dir, hermesHome), HERMES_RUNTIME_DIR: hermesFixture.runtimeDirectory },
+=======
+            env: {
+              ...hermesE2eEnvironment(dir, hermesHome),
+              HERMES_RUNTIME_DIR: hermesFixture.runtimeDirectory,
+              HERMES_INSTALL_ROOT: hermesFixture.sourceRoot
+            },
+>>>>>>> Stashed changes
             stdio: ["ignore", "pipe", "pipe"]
           }
         );
@@ -2243,7 +2305,10 @@ describe("gateway MCP transport", () => {
         const events = new SqliteWorkItemStore(dbPath);
         try {
           const storedEvents = events.readEvents();
-          expect(storedEvents.map((event) => event.name)).toEqual(
+          expect(
+            storedEvents.map((event) => event.name),
+            JSON.stringify(toolResponseTrace)
+          ).toEqual(
             expect.arrayContaining([
               "local_agent.authorization",
               "local_agent.dispatch.started",

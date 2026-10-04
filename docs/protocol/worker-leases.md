@@ -17,16 +17,16 @@ created -> pending_policy -> approved -> claimed -> running -> succeeded
 
 Only approved work can be claimed.
 
-Claim request:
+Worker pull-claim request to `POST /worker/claim` (worker identity comes from
+the authenticated credential, never the JSON body):
 
 ```json
 {
-  "worker_id": "worker_local_1",
-  "capabilities": ["command", "filesystem"]
+  "leaseMs": 300000
 }
 ```
 
-Claim response:
+Claim response (when work is available):
 
 ```json
 {
@@ -43,6 +43,15 @@ Claim response:
   "lease_expires_at": "2026-07-05T18:00:00Z"
 }
 ```
+
+The endpoint returns `{ "claimed": false }` when no item is available to that
+worker. A persisted assignment restricts an item to its selected worker before
+claim; unassigned legacy items remain claimable by any authenticated worker.
+The existing claim-time policy, approval, state, concurrency, and atomic
+lease/attempt checks still apply. See [`worker-identity.md`](worker-identity.md).
+
+The execution backend is currently configured per process, not per worker.
+Claims identify the worker principal but do not switch execution backends.
 
 ## Lease storage
 
@@ -117,6 +126,27 @@ Successful renewal updates `expires_at` / `last_renewed_at` on the attempt lease
 Expiry reaping (`failExpiredLeases`) uses the authoritative attempt-lease clock when present, marks the attempt lease `expired`, emits `attempt_lease.expired`, and records a derived `lease_expired` result so a stale worker cannot complete afterward.
 
 Re-leasing an interrupted attempt revokes any prior active lease first and emits `attempt_lease.stolen` so concurrent workers cannot double-complete under a stale fencing epoch.
+
+## Managed executor admission recovery
+
+For the JC and DC capability routes, the policy-gated claim, attempt lease,
+durable admission reservation, and `execution_admission.bound` audit event commit
+in one database transaction. A reservation records the canonical attempt, lease,
+worker, fence, action, plan, and input hashes, along with its executor lane and
+`execution` or `wait` capacity class. Persistence failure rolls back the claim;
+no capability is returned.
+
+Gateway shutdown stops its scheduler but preserves reservations for active
+leases. A new gateway restores capacity only after checking the current lease,
+attempt, policy admission, and work-item action hash. If active managed leases
+cannot be matched to recovered reservations, new JC/DC admission fails closed
+with `admission_recovery_required` (HTTP 503).
+
+A failure after the claim commits retains capacity while that lease remains
+active, even when capability issuance fails. Canonical terminal results release
+the reservation. Before new admission, ACS reaps expired leases and releases
+reservations whose lease is no longer active or current. This reservation is
+scheduler accounting; it does not grant execution authority.
 
 ## Security rule
 
