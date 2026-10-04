@@ -88,6 +88,26 @@ describe("managed authority observation", () => {
   const now = 1_000_000;
   const lease = JSON.stringify({ pid: 42, expiresAt: now + 10_000, instanceId: "executor-42" });
 
+  it("reports whether any managed executor was discovered, and fails closed when none was", () => {
+    const files = { leaseExists: true, leaseRaw: lease, breakGlassExists: false, breakGlassRaw: null };
+    const base = {
+      nowMs: now,
+      executionBackend: "desktop_commander",
+      launchArgs: [],
+      pidAlive: (pid: number) => pid === 42,
+      holderCommand: "/usr/bin/node /home/jacen/releases/dc/test-release/dist/index.js"
+    };
+    const found = observeManagedAuthority(files, { ...base, managedExecutorPids: [42] });
+    expect(found.managedExecutorDiscovered).toBe(true);
+    expect(found.authoritative).toBe(true);
+
+    const none = observeManagedAuthority(files, { ...base, managedExecutorPids: [] });
+    expect(none.managedExecutorDiscovered).toBe(false);
+    expect(none.authoritative).toBe(false);
+    expect(none.managedRuntime).toBe(false);
+    expect(none.detail).toMatch(/no managed executor discovered/);
+  });
+
   it("accepts one live managed lease and rejects break-glass and a second executor", () => {
     const ok = observeManagedAuthority(
       { leaseExists: true, leaseRaw: lease, breakGlassExists: false, breakGlassRaw: null },

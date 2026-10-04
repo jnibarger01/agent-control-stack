@@ -2,14 +2,13 @@
 export {
   CANONICAL_DISCOVERY_TARGETS,
   DISCOVERY_ERROR_MAX_LENGTH,
-  DISCOVERY_PROBE_TIMEOUT_MS,
   SYSTEM_BOOTSTRAP_ACTOR_ID,
   discoverLocalActors,
   isWorkerCapacityTarget,
-  probeExecutableVersion,
   resolveExecutableOnPath,
   sanitizeDiscoveryError
 } from "@agent-control-stack/work-items";
+export { DISCOVERY_PROBE_TIMEOUT_MS, probeExecutableVersion } from "@agent-control-stack/agent-cli";
 export type {
   CanonicalDiscoveryTarget,
   DiscoverLocalActorsDeps,

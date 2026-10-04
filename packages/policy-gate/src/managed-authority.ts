@@ -182,6 +182,7 @@ export function observeManagedAuthority(files: AuthorityFiles, runtime: Authorit
     breakGlassAmbiguous: breakGlass.ambiguous,
     multipleAuthoritativeExecutors: competing,
     managedRuntime,
+    managedExecutorDiscovered: !undiscovered,
     detail
   };
 }
