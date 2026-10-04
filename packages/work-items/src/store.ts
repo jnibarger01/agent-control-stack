@@ -1066,16 +1066,32 @@ export interface PrivilegedTransitionOptions {
   leaseToken?: string;
 }
 
-/** Admin execution mode reverts to strict this long after it was set. */
-export const DEFAULT_ADMIN_MODE_TTL_MS = 60 * 60 * 1000;
+/**
+ * Admin execution mode is sticky: once explicitly enabled it stays enabled
+ * until an operator explicitly disables it. There is deliberately no implicit
+ * default expiry, because a silent revert to strict reintroduces human approval
+ * on the next call without anyone asking for it.
+ *
+ * The safeguards live at ENTRY instead: enabling requires dedicated
+ * authorization, an explicit operator action, a reason, an audit event, and
+ * visible execution-mode state. A caller that genuinely wants a bounded
+ * elevation may still request one by passing adminModeTtlMs explicitly, which
+ * remains bounded by MIN/MAX_ADMIN_MODE_TTL_MS.
+ */
 export const MIN_ADMIN_MODE_TTL_MS = 60 * 1000;
 export const MAX_ADMIN_MODE_TTL_MS = 24 * 60 * 60 * 1000;
 
+/** Sentinel meaning "no expiry": admin mode persists until explicitly disabled. */
+export const ADMIN_MODE_NO_EXPIRY = 0;
+
 function validateAdminModeTtl(value: number): number {
+  if (value === ADMIN_MODE_NO_EXPIRY) {
+    return value;
+  }
   if (!Number.isInteger(value) || value < MIN_ADMIN_MODE_TTL_MS || value > MAX_ADMIN_MODE_TTL_MS) {
     throw new ControlStackError(
       "admin_mode_ttl_invalid",
-      `admin mode TTL must be an integer between ${MIN_ADMIN_MODE_TTL_MS} and ${MAX_ADMIN_MODE_TTL_MS} ms`
+      `admin mode TTL must be ${ADMIN_MODE_NO_EXPIRY} (no expiry) or an integer between ${MIN_ADMIN_MODE_TTL_MS} and ${MAX_ADMIN_MODE_TTL_MS} ms`
     );
   }
   return value;
@@ -1085,9 +1101,11 @@ export interface SqliteWorkItemStoreOptions {
   leaseMs?: number;
   heartbeatTtlMs?: number;
   /**
-   * How long admin execution mode lasts after it is set, in milliseconds.
+   * Optional bounded lifetime for admin execution mode, in milliseconds.
    * Past that the effective mode reads as strict until an operator re-enables it.
-   * Defaults to DEFAULT_ADMIN_MODE_TTL_MS (1 hour).
+   * Omit it (the default) for sticky admin mode that persists until an operator
+   * explicitly disables it; pass ADMIN_MODE_NO_EXPIRY for the same behavior
+   * explicitly. Bounds still apply to any bounded value.
    */
   adminModeTtlMs?: number;
   onEvent?: (event: StoredAuditEvent) => void;
@@ -1576,7 +1594,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
     this.db = new DatabaseSync(dbPath);
     this.leaseMs = options.leaseMs ?? 5 * 60 * 1000;
     this.heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
-    this.adminModeTtlMs = validateAdminModeTtl(options.adminModeTtlMs ?? DEFAULT_ADMIN_MODE_TTL_MS);
+    // No implicit expiry: admin mode is sticky unless a caller explicitly asks
+    // for a bounded elevation.
+    this.adminModeTtlMs = validateAdminModeTtl(options.adminModeTtlMs ?? ADMIN_MODE_NO_EXPIRY);
     this.onEvent = options.onEvent ?? (() => undefined);
     this.onTraceFailure = options.onTraceFailure ?? defaultTraceFailureReporter;
     this.observationEnabled = options.observationEnabled ?? false;
@@ -7518,9 +7538,14 @@ export class SqliteWorkItemStore implements WorkItemStore {
     const updatedBy = typeof row.updated_by === "string" ? row.updated_by : null;
     const reason = typeof row.reason === "string" ? row.reason : null;
     if (row.mode === "admin") {
-      // Admin is time-boxed. The stored row is never rewritten on read; the effective
-      // mode simply falls back to strict, the fail-safe direction. An unparseable
+      // Sticky by default: with no explicit TTL an admin row stays admin until an
+      // operator explicitly disables it. A caller that asked for a bounded
+      // elevation still gets the fail-safe fallback to strict once that TTL
+      // elapses; the stored row is never rewritten on read, and an unparseable
       // timestamp is treated as already expired.
+      if (this.adminModeTtlMs === ADMIN_MODE_NO_EXPIRY) {
+        return { mode: "admin", raw: "admin", updatedAt, updatedBy, reason, expiresAt: null, expired: false };
+      }
       const setAt = updatedAt === null ? Number.NaN : Date.parse(updatedAt);
       const expiresMs = setAt + this.adminModeTtlMs;
       if (!Number.isFinite(expiresMs) || expiresMs <= now.getTime()) {

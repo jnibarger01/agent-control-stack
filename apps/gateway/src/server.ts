@@ -2945,6 +2945,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           });
         }
 
+        // Set only in the admin-mode case where policy already allows every action and no
+        // approval record exists (see the admin auto-authorization block below).
+        let adminAuthorizedWithoutApproval = false;
         if (mode.mode === "admin" && !body.changeSetPermitId) {
           const gate = adminExecutionGate(readAuthority(), true);
           if (!gate.ok) {
@@ -2966,46 +2969,79 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               workItemId: workItem.id
             });
           }
-          if (workItem.status !== "approved") {
+          // Same rule as the JC lane: when policy asked for no approval record, an
+          // "approved" status carries no approval authority, so admin evaluation must
+          // still run or admin mode falls through to the require_approval gate for an
+          // action policy already allows.
+          const needsAdminAuthorization = workItem.status !== "approved" || required.length === 0;
+          if (needsAdminAuthorization) {
             try {
               const adminEvaluations = policy.evaluateWorkItem(workItem, ACS_ADMIN_APPROVER, "approve");
+              const adminSummary = policy.summarize(adminEvaluations);
+              if (adminSummary.decision === "deny") {
+                recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+                return reply.code(403).send({
+                  decision: "deny",
+                  code: "admin_authorization_failed",
+                  reason: adminSummary.reason,
+                  workItemId: workItem.id
+                });
+              }
               const adminRequired = adminEvaluations.filter(
                 (evaluation) => evaluation.decision.decision === "require_approval"
               );
               const adminActionHash = adminRequired[0]?.actionHash;
-              if (!adminActionHash || policy.summarize(adminEvaluations).decision === "deny") {
+              if (adminSummary.decision === "allow") {
+                // Policy already authorizes every action for the admin approver, so there is
+                // no approval record to create: there is no actionHash to approve and nothing
+                // to approve. Treating that absence as a failure would deny with the allow reason.
+                //
+                // See the JC lane: admin authorization lets the ORDINARY admission path
+                // continue - approved status, normal execution-plan admission with
+                // requiresApproval=false, normal lease + fencing + ownership - with no
+                // approval record fabricated and no parallel admin-only authority model.
+                adminAuthorizedWithoutApproval = true;
+                if (workItem.status !== "approved") {
+                  workItem = workItems.approveWorkItem(workItem.id, { via: "policy_gate" });
+                }
+              } else if (adminActionHash) {
+                const approved = tools.approve_work_item({
+                  id: workItem.id,
+                  actionHash: adminActionHash,
+                  approvedBy: ACS_ADMIN_APPROVER,
+                  reason: ACS_ADMIN_APPROVAL_REASON
+                });
+                if (approved.decision.decision === "deny" || approved.workItem.status !== "approved") {
+                  recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+                  return reply.code(403).send({
+                    decision: "deny",
+                    code: "admin_authorization_failed",
+                    reason: approved.decision.reason,
+                    workItemId: workItem.id
+                  });
+                }
+                workItem = approved.workItem;
+              } else {
+                // require_approval with no approval record to satisfy: fail closed.
                 recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
                 return reply.code(403).send({
                   decision: "deny",
                   code: "admin_authorization_failed",
-                  reason: policy.summarize(adminEvaluations).reason,
+                  reason: adminSummary.reason,
                   workItemId: workItem.id
                 });
               }
-              const approved = tools.approve_work_item({
-                id: workItem.id,
-                actionHash: adminActionHash,
-                approvedBy: ACS_ADMIN_APPROVER,
-                reason: ACS_ADMIN_APPROVAL_REASON
-              });
-              if (approved.decision.decision === "deny" || approved.workItem.status !== "approved") {
-                recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
-                return reply.code(403).send({
-                  decision: "deny",
-                  code: "admin_authorization_failed",
-                  reason: approved.decision.reason,
-                  workItemId: workItem.id
-                });
-              }
-              workItem = approved.workItem;
               workItems.recordSystemEvent({
                 name: "execution_mode.auto_authorized",
                 body: {
                   workItemId: workItem.id,
                   tool: body.tool,
                   correlationId: body.correlationId ?? null,
-                  approvalPolicy: "auto",
-                  approvedBy: ACS_ADMIN_APPROVER
+                  // Mirror the JC lane: an approval-free authorization must not be
+                  // reported as an acs:admin approval when no approval record backs it.
+                  approvalPolicy: adminAuthorizedWithoutApproval ? "auto_policy_allowed" : "auto",
+                  approvalRecord: adminAuthorizedWithoutApproval ? null : "acs:admin",
+                  approvedBy: adminAuthorizedWithoutApproval ? null : ACS_ADMIN_APPROVER
                 },
                 attributes: { "work_item.id": workItem.id, "execution_mode.mode": "admin" }
               });
@@ -3021,7 +3057,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           }
         }
 
-        if (workItem.status !== "approved" || (dcPolicy.requiresApproval && required.length === 0)) {
+        if (
+          !adminAuthorizedWithoutApproval &&
+          (workItem.status !== "approved" || (dcPolicy.requiresApproval && required.length === 0))
+        ) {
           recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
           return reply.code(409).send({
             decision: "require_approval",
@@ -3585,6 +3624,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           });
         }
 
+        // Set only in the admin-mode case where policy already allows every action and no
+        // approval record exists (see the admin auto-authorization block below).
+        let adminAuthorizedWithoutApproval = false;
         if (mode.mode === "admin") {
           const gate = adminExecutionGate(readAuthority(), true);
           if (!gate.ok) {
@@ -3615,38 +3657,70 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                 workItems.hasApproval(workItem.id, evaluation.actionHash) &&
                 workItems.hasExecutionPlanApproval(workItem.id, currentPlan.planHash, evaluation.actionHash)
             );
-          if (workItem.status !== "approved" || !hasCurrentApproval) {
+          // `required.length === 0` means policy asked for no approval record, so an
+          // "approved" status carries no approval authority and there is nothing for
+          // hasCurrentApproval to confirm. That case still has to run the admin
+          // evaluation below, otherwise admin mode silently falls through to the
+          // require_approval gate for an action policy already allows.
+          const needsAdminAuthorization =
+            workItem.status !== "approved" || !hasCurrentApproval || required.length === 0;
+          if (needsAdminAuthorization) {
             try {
               const adminEvaluations = policy.evaluateWorkItem(workItem, ACS_ADMIN_APPROVER, "approve");
+              const adminSummary = policy.summarize(adminEvaluations);
+              if (adminSummary.decision === "deny") {
+                recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+                return reply.code(403).send({
+                  decision: "deny",
+                  code: "admin_authorization_failed",
+                  reason: adminSummary.reason,
+                  workItemId: workItem.id
+                });
+              }
               const adminRequired = adminEvaluations.filter(
                 (evaluation) => evaluation.decision.decision === "require_approval"
               );
               const adminActionHash = adminRequired[0]?.actionHash;
-              if (!adminActionHash || policy.summarize(adminEvaluations).decision === "deny") {
+              if (adminSummary.decision === "allow") {
+                // Policy already authorizes every action for the admin approver, so there is
+                // no approval record to create: there is no actionHash to approve and nothing
+                // to approve. Treating that absence as a failure would deny with the allow reason.
+                //
+                // See the JC lane: admin authorization lets the ORDINARY admission path
+                // continue - approved status, normal execution-plan admission with
+                // requiresApproval=false, normal lease + fencing + ownership - with no
+                // approval record fabricated and no parallel admin-only authority model.
+                adminAuthorizedWithoutApproval = true;
+                if (workItem.status !== "approved") {
+                  workItem = workItems.approveWorkItem(workItem.id, { via: "policy_gate" });
+                }
+              } else if (adminActionHash) {
+                const approved = tools.approve_work_item({
+                  id: workItem.id,
+                  actionHash: adminActionHash,
+                  approvedBy: ACS_ADMIN_APPROVER,
+                  reason: ACS_ADMIN_APPROVAL_REASON
+                });
+                if (approved.decision.decision === "deny" || approved.workItem.status !== "approved") {
+                  recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+                  return reply.code(403).send({
+                    decision: "deny",
+                    code: "admin_authorization_failed",
+                    reason: approved.decision.reason,
+                    workItemId: workItem.id
+                  });
+                }
+                workItem = approved.workItem;
+              } else {
+                // require_approval with no approval record to satisfy: fail closed.
                 recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
                 return reply.code(403).send({
                   decision: "deny",
                   code: "admin_authorization_failed",
-                  reason: policy.summarize(adminEvaluations).reason,
+                  reason: adminSummary.reason,
                   workItemId: workItem.id
                 });
               }
-              const approved = tools.approve_work_item({
-                id: workItem.id,
-                actionHash: adminActionHash,
-                approvedBy: ACS_ADMIN_APPROVER,
-                reason: ACS_ADMIN_APPROVAL_REASON
-              });
-              if (approved.decision.decision === "deny" || approved.workItem.status !== "approved") {
-                recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
-                return reply.code(403).send({
-                  decision: "deny",
-                  code: "admin_authorization_failed",
-                  reason: approved.decision.reason,
-                  workItemId: workItem.id
-                });
-              }
-              workItem = approved.workItem;
             } catch (error) {
               recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
               return reply.code(403).send({
@@ -3657,7 +3731,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               });
             }
           }
-          if (workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER)) {
+          // Both admin-authorized outcomes must leave mode attribution in the audit chain:
+          // one backed by an approval record, and one where policy already allowed the
+          // action so no approval record was needed. Gating this solely on an approval
+          // record existing would leave the approval-free case unattributed.
+          if (adminAuthorizedWithoutApproval || workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER)) {
             try {
               workItems.recordSystemEventOnceForWorkItem({
                 name: "execution_mode.auto_authorized",
@@ -3666,8 +3744,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                   workItemId: workItem.id,
                   tool: invocation.toolName,
                   correlationId: body.correlationId ?? null,
-                  approvalPolicy: "auto",
-                  approvedBy: ACS_ADMIN_APPROVER,
+                  approvalPolicy: adminAuthorizedWithoutApproval ? "auto_policy_allowed" : "auto",
+                  // An approval-free authorization must not be reported as an approval by
+                  // acs:admin when no approval record backs it.
+                  approvalRecord: adminAuthorizedWithoutApproval ? null : "acs:admin",
+                  approvedBy: adminAuthorizedWithoutApproval ? null : ACS_ADMIN_APPROVER,
                   lane: "jc"
                 },
                 attributes: { "execution_mode.mode": "admin", "execution_mode.lane": "jc" }
@@ -3683,7 +3764,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             }
           }
         }
-        if (workItem.status !== "approved" || (toolPolicy.requiresApproval && required.length === 0)) {
+        if (
+          !adminAuthorizedWithoutApproval &&
+          (workItem.status !== "approved" || (toolPolicy.requiresApproval && required.length === 0))
+        ) {
           recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
           return reply.code(409).send({
             decision: "require_approval",
@@ -3759,8 +3843,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             lane: "jc",
             toolName: invocation.toolName,
             permit: admissionPermit,
-            ...(body.changeSetPermitId || adminApprovalWouldBeConsumed ? { validateAuthority } : {}),
-            ...(adminApprovalWouldBeConsumed ? { executionModeFence: "admin" as const } : {})
+            // The approval-free admin branch fabricates no approval record, so
+            // adminApprovalWouldBeConsumed is false for exactly that case. Fence and
+            // re-validate the mode/authority at claim time for it too, otherwise a flip
+            // to strict (or ambiguous authority) during the permit window would be
+            // caught for approval-backed calls but missed for approval-free ones.
+            ...(body.changeSetPermitId || adminApprovalWouldBeConsumed || adminAuthorizedWithoutApproval
+              ? { validateAuthority }
+              : {}),
+            ...(adminApprovalWouldBeConsumed || adminAuthorizedWithoutApproval
+              ? { executionModeFence: "admin" as const }
+              : {})
           });
           admissionBound =
             !!claimed?.attemptId && claimed.fencingEpoch !== undefined && !!claimed.planHash && !!claimed.inputHash;

@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { ManagedAuthorityObservation } from "./execution-mode.js";
 
 export interface LeaseFile {
@@ -26,13 +26,85 @@ export interface AuthorityRuntime {
   executionBackend?: string;
   launchArgs: readonly string[];
   pidAlive: (pid: number) => boolean;
-  /** Live processes whose command is the managed Desktop Commander executor. */
+  /** Live processes whose command is a managed Desktop Commander executor. */
   managedExecutorPids: readonly number[];
   /** Command line of the lease holder, when readable. */
   holderCommand?: string;
+  /**
+   * Distinct ACS executor roots observed among managedExecutorPids, i.e. the
+   * number of genuinely competing executor topologies. One ACS release normally
+   * runs several roles (control plane, Jace Commander bridge, remote) that all
+   * share a root and are therefore NOT competing. Supplied by the caller so
+   * ambiguity is derived from identity, not from a process count.
+   */
+  competingExecutorRoots?: readonly string[];
 }
 
-const MANAGED_EXECUTOR_MARK = "desktop-commander/dist/index.js";
+/**
+ * Recognizes a managed Desktop Commander / Jace Commander executor process.
+ *
+ * Matching is anchored to the ACS executor SCRIPT SHAPE, never a bare
+ * "dist/index.js" substring: OpenClaw, claude-acp, Chrome, Ollama and the node
+ * binary all contain a dist/index.js and must never enter the managed set.
+ *
+ * The identity returned is the release root that contains the script, so the
+ * several roles ONE release runs - control plane, Jace Commander bridge, remote -
+ * collapse to a single topology identity instead of counting as competitors.
+ */
+const ACS_EXECUTOR_SCRIPTS: readonly string[] = [
+  "dist/index.js",
+  "dist/jace-commander/cli.js",
+  "dist/control-plane/server.js"
+];
+const ACS_EXECUTOR_PACKAGE_DIR = "desktop-commander";
+
+export function acsExecutorRoot(command: string): string | undefined {
+  let root: string | undefined;
+  for (const token of command.split(/\s+/u)) {
+    if (!token.startsWith("/")) {
+      continue;
+    }
+    // Resolve first so a traversal spelling ("<known>/../../evil/dist/index.js")
+    // cannot make a different root textually look like a known one.
+    const resolved = resolve(token);
+    const marker = resolved.lastIndexOf("/");
+    if (marker <= 0) {
+      continue;
+    }
+    const script = resolved.slice(marker + 1);
+    const parent = resolved.slice(0, marker);
+
+    // An ACS executor script is deployed by ACS, never vendored inside somebody
+    // else's package tree. OpenClaw (node_modules/openclaw/dist/index.js) and
+    // claude-acp (node_modules/@agentclient/dist/index.js) have the exact same
+    // script shape, so "is it under node_modules" is the discriminator that keeps
+    // them out of the managed-executor set.
+    const vendored = parent.split("/").includes("node_modules");
+
+    if (!vendored) {
+      for (const known of ACS_EXECUTOR_SCRIPTS) {
+        if (resolved.endsWith(known)) {
+          root = resolved.slice(0, resolved.length - known.length);
+          break;
+        }
+      }
+    }
+    if (root) {
+      break;
+    }
+
+    // In-repo dev layouts: .../packages/desktop-commander/... or
+    // .../projects/desktop-commander/...
+    const segments = parent.split("/");
+    const lastSegment = segments[segments.length - 1] ?? "";
+    if (lastSegment === ACS_EXECUTOR_PACKAGE_DIR) {
+      root = parent;
+      break;
+    }
+    void script;
+  }
+  return root ? root.replace(/\/+$/u, "") : undefined;
+}
 
 export function defaultAuthorityStateDir(env: NodeJS.ProcessEnv = process.env): string {
   const override = env.DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR?.trim();
@@ -45,34 +117,54 @@ export function observeManagedAuthority(files: AuthorityFiles, runtime: Authorit
   const backendManaged = runtime.executionBackend?.trim() === "desktop_commander";
   const lease = classifyLease(files, runtime);
   const breakGlass = classifyBreakGlass(files, runtime.pidAlive);
-  const multiple = runtime.managedExecutorPids.length > 1;
+  // A single ACS release legitimately runs several executor roles (control
+  // plane, Jace Commander bridge, remote). Ambiguity is competing executor
+  // TOPOLOGIES - distinct ACS roots, or a second lease owner - not a raw process
+  // count. When the caller supplies no root analysis, fall back to the count so
+  // ambiguity can never be silently suppressed.
+  const competingRoots = runtime.competingExecutorRoots;
+  const competing = competingRoots === undefined ? runtime.managedExecutorPids.length > 1 : competingRoots.length > 1;
+  // An EMPTY discovery set cannot positively identify the lease holder as a managed
+  // executor. Treating "found nothing" as "nothing to check" would let an unrecognized
+  // (or hostile) executor hold the lease with zero identity verified, which is the
+  // original defect. Fail closed instead: no discovered executor means ambiguous.
+  const undiscovered = runtime.managedExecutorPids.length === 0;
   const holderUnmanaged =
     typeof runtime.holderCommand === "string" &&
     (runtime.holderCommand.includes("@wonderwhy-er/desktop-commander") ||
       runtime.holderCommand.includes("--standalone") ||
       runtime.holderCommand.includes("break-glass"));
-  const holderManaged =
-    typeof runtime.holderCommand === "string" && runtime.holderCommand.includes(MANAGED_EXECUTOR_MARK);
+  const holderManaged = typeof runtime.holderCommand === "string" && isManagedExecutorCommand(runtime.holderCommand);
   const managedRuntime =
     !launchUnmanaged &&
     !holderUnmanaged &&
     lease.active &&
     !lease.ambiguous &&
-    !multiple &&
+    !competing &&
+    !undiscovered &&
     (backendManaged || holderManaged);
-  const authoritative = lease.active && !lease.ambiguous && !multiple && !breakGlass.active && !breakGlass.ambiguous;
+  const authoritative =
+    lease.active && !lease.ambiguous && !competing && !undiscovered && !breakGlass.active && !breakGlass.ambiguous;
   const owner = lease.active && typeof lease.pid === "number" ? `managed:pid:${lease.pid}` : null;
-  const detail = [lease.detail, breakGlass.detail, multiple ? "multiple managed executors" : ""]
+  const detail = [
+    lease.detail,
+    breakGlass.detail,
+    competing
+      ? `competing managed executor topologies: ${(competingRoots ?? []).join(", ") || "multiple"}`
+      : undiscovered
+        ? "no managed executor discovered to verify the lease holder"
+        : ""
+  ]
     .filter((part) => part.length > 0)
     .join("; ");
   return {
     authorityOwner: authoritative ? owner : owner,
     authoritative,
     leaseActive: lease.active,
-    leaseAmbiguous: lease.ambiguous || multiple,
+    leaseAmbiguous: lease.ambiguous || competing || undiscovered,
     breakGlassActive: breakGlass.active,
     breakGlassAmbiguous: breakGlass.ambiguous,
-    multipleAuthoritativeExecutors: multiple,
+    multipleAuthoritativeExecutors: competing,
     managedRuntime,
     detail
   };
@@ -215,21 +307,39 @@ export function readProcessStartTicks(pid: number): string | undefined {
   }
 }
 
+/** True when a command line is a managed DC/JC executor process. */
+export function isManagedExecutorCommand(command: string): boolean {
+  return acsExecutorRoot(command) !== undefined;
+}
+
 export function listManagedExecutorPids(): number[] {
+  return listManagedExecutors().pids;
+}
+
+/**
+ * Managed executor processes plus the distinct ACS executor roots they belong to.
+ * Several processes sharing one root are roles of the SAME executor topology;
+ * more than one root means genuinely competing executors.
+ */
+export function listManagedExecutors(): { pids: number[]; roots: string[] } {
   const pids: number[] = [];
+  const roots = new Set<string>();
   let names: string[];
   try {
     names = readdirSync("/proc").filter((name) => /^\d+$/.test(name));
   } catch {
-    return pids;
+    return { pids, roots: [] };
   }
   for (const name of names) {
     const pid = Number(name);
     if (!Number.isInteger(pid)) continue;
     const command = readPidCommand(pid);
-    if (command?.includes(MANAGED_EXECUTOR_MARK)) pids.push(pid);
+    const root = command ? acsExecutorRoot(command) : undefined;
+    if (root === undefined) continue;
+    pids.push(pid);
+    roots.add(root);
   }
-  return pids;
+  return { pids, roots: [...roots] };
 }
 
 export function observeLiveManagedAuthority(
@@ -273,6 +383,7 @@ export function observeLiveManagedAuthority(
   }
   const files = readAuthorityFiles(stateDir);
   const leasePid = leasePidFrom(files);
+  const executors = listManagedExecutors();
   return observeManagedAuthority(files, {
     nowMs,
     bootId: readBootId(),
@@ -280,7 +391,8 @@ export function observeLiveManagedAuthority(
     executionBackend: env.ACS_EXECUTION_BACKEND,
     launchArgs,
     pidAlive,
-    managedExecutorPids: listManagedExecutorPids(),
+    managedExecutorPids: executors.pids,
+    competingExecutorRoots: executors.roots,
     holderCommand: typeof leasePid === "number" ? readPidCommand(leasePid) : undefined
   });
 }
