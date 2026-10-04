@@ -108,7 +108,7 @@ function keys() {
 }
 
 async function gateway(
-  authority: ManagedAuthorityObservation = healthyAuthority,
+  authority: ManagedAuthorityObservation | (() => ManagedAuthorityObservation) = healthyAuthority,
   rateLimit?: { windowMs: number; maxRequests: number }
 ) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "acs-admin-mode-")));
@@ -126,7 +126,7 @@ async function gateway(
       runtimeScopes: RUNTIME_SCOPES
     },
     desktopCommanderContainment: { allowedRoots: [root], deniedRoots: [] },
-    readManagedAuthority: () => authority,
+    readManagedAuthority: typeof authority === "function" ? authority : () => authority,
     ...(rateLimit ? { rateLimit } : {})
   });
   return { root, signing, app };
@@ -494,6 +494,89 @@ describe("canonical execution mode", () => {
           expect(detail.json().events.map((event: { name: string }) => event.name)).toEqual(
             expect.arrayContaining(["execution_mode.auto_authorized", "execution_mode.routing_override"])
           );
+        } finally {
+          await ctx.app.close();
+          rmSync(ctx.root, { recursive: true, force: true });
+        }
+      }));
+
+    it("admin issues an approval-free DC read with a routing override and no fabricated approval", () =>
+      withRouting(async () => {
+        const ctx = await gateway();
+        try {
+          await attest(ctx.app);
+          expect(
+            (
+              await ctx.app.inject({
+                method: "POST",
+                url: "/execution-mode",
+                headers: AUTH,
+                payload: { mode: "admin", reason: "approval-free DC read" }
+              })
+            ).statusCode
+          ).toBe(200);
+          const response = await issue(ctx.app, "get_config", {});
+          expect(response.statusCode, response.body).toBe(200);
+          expect(response.json().capability.payload.toolName).toBe("get_config");
+          expect(response.json().capability.payload.approvalId).toBeUndefined();
+          const detail = await ctx.app.inject({
+            method: "GET",
+            url: `/work-items/${response.json().workItemId}`,
+            headers: AUTH
+          });
+          const events = detail.json().events.map((event: { name: string }) => event.name);
+          expect(events.filter((name: string) => name === "execution_mode.routing_override")).toHaveLength(1);
+          expect(events).not.toContain("approval.granted");
+        } finally {
+          await ctx.app.close();
+          rmSync(ctx.root, { recursive: true, force: true });
+        }
+      }));
+
+    it("strict mode refuses an unrouted approval-free DC read", () =>
+      withRouting(async () => {
+        const ctx = await gateway();
+        try {
+          await attest(ctx.app);
+          const response = await issue(ctx.app, "get_config", {});
+          expect(response.statusCode).toBe(409);
+          expect(response.json().capability).toBeUndefined();
+        } finally {
+          await ctx.app.close();
+          rmSync(ctx.root, { recursive: true, force: true });
+        }
+      }));
+
+    it("rechecks managed authority inside the approval-free DC claim transaction", () =>
+      withRouting(async () => {
+        let calls = 0;
+        const ctx = await gateway(() =>
+          ++calls < 3
+            ? healthyAuthority
+            : {
+                ...healthyAuthority,
+                leaseAmbiguous: true,
+                detail: "authority changed at claim"
+              }
+        );
+        try {
+          await attest(ctx.app);
+          expect(
+            (
+              await ctx.app.inject({
+                method: "POST",
+                url: "/execution-mode",
+                headers: AUTH,
+                payload: { mode: "admin", reason: "DC claim authority race" }
+              })
+            ).statusCode
+          ).toBe(200);
+          calls = 0;
+          const response = await issue(ctx.app, "get_config", {});
+          expect(calls).toBe(3);
+          expect(response.statusCode, response.body).toBe(409);
+          expect(response.json().code).toBe("executor_ambiguous");
+          expect(response.json().capability).toBeUndefined();
         } finally {
           await ctx.app.close();
           rmSync(ctx.root, { recursive: true, force: true });

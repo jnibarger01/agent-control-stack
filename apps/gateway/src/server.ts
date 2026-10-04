@@ -3200,9 +3200,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           }
           let admissionBound = false;
           try {
-            // Same fenced admin authority as the JC lane: a claim that consumes an ACS admin approval must run in
-            // canonical admin mode with valid managed authority, and carries the admin fence so the claim gate can
-            // apply the admin routing override (and the store can refuse it outside admin mode).
+            // Approval-backed and approval-free admin calls share the JC lane's claim-time fence.
+            // Re-check canonical mode and managed authority inside the transaction in either case.
             const adminApprovalWouldBeConsumed =
               workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER) ||
               workItems.hasGrantedExecutionPlanApprovalBy(workItem.id, ACS_ADMIN_APPROVER);
@@ -3217,7 +3216,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                   bindingHash
                 );
               }
-              if (!adminApprovalWouldBeConsumed) return;
+              if (!adminApprovalWouldBeConsumed && !adminAuthorizedWithoutApproval) return;
               const claimMode = readExecutionModeValue(workItems.getExecutionMode().raw);
               if (claimMode.state !== "ok" || claimMode.mode !== "admin") {
                 workItems.recordSystemEvent({
@@ -3247,10 +3246,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               lane: "dc",
               toolName: body.tool,
               permit: admissionPermit,
-              ...(body.changeSetPermitId || adminApprovalWouldBeConsumed
+              ...(body.changeSetPermitId || adminApprovalWouldBeConsumed || adminAuthorizedWithoutApproval
                 ? { validateAuthority: validateDcAuthority }
                 : {}),
-              ...(adminApprovalWouldBeConsumed ? { executionModeFence: "admin" as const } : {})
+              ...(adminApprovalWouldBeConsumed || adminAuthorizedWithoutApproval
+                ? { executionModeFence: "admin" as const }
+                : {})
             });
             admissionBound =
               !!claimed?.attemptId && claimed.fencingEpoch !== undefined && !!claimed.planHash && !!claimed.inputHash;
