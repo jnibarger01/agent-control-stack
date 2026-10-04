@@ -36,12 +36,23 @@ globally. Returning to `strict` needs only the human-operator gate. The legacy
 single gateway token carries the admin scope only when its configured actor is
 `user`.
 
-Admin mode is time-boxed. It lapses to `strict` after `ACS_ADMIN_MODE_TTL_MS`
-(default 3600000 = 1 hour; accepted range 60000 to 86400000). Every reader sees
-the effective mode, so an expired row reads as `strict` immediately; the gateway
-also persists the lapse as an `acs:admin-expiry` `execution_mode.changed` audit
-event. `GET /execution-mode` reports `expiresAt` while admin is in effect.
-Re-enabling restarts the clock. Mission Control asks for the reason in a
+Admin mode is sticky by default. Once explicitly enabled it stays enabled until
+an operator explicitly disables it; there is no implicit expiry, because a silent
+revert to `strict` reintroduces human approval on the next call without anyone
+having asked for it. `GET /execution-mode` therefore reports a null `expiresAt`
+while admin is in effect.
+
+The safeguards live at ENTRY, not inside admin-mode capability checks: enabling
+requires the dedicated `acs:execution-mode:admin` scope, an explicit operator
+action, a stated reason, an audit event, and visible execution-mode state.
+Returning to `strict` needs only the human-operator gate.
+
+A caller that genuinely wants a bounded elevation may still request one by
+configuring `adminModeTtlMs` (or `ACS_ADMIN_MODE_TTL_MS`); accepted range is
+60000 to 86400000. With a bounded TTL an expired row reads as `strict`
+immediately and the gateway persists the lapse as an `acs:admin-expiry`
+`execution_mode.changed` audit event; `expiresAt` is reported while admin is in
+effect. Re-enabling restarts the clock. Mission Control asks for the reason in a
 confirmation dialog before it sends the request. Service, worker, mixed-role, and agent identities
 cannot change mode even when they hold that scope. Request-body identity fields
 do not confer authority. This restricts the legacy global mode; it does not yet
