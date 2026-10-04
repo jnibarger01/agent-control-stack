@@ -43,6 +43,8 @@ export interface AgentCliSpec {
   loginPaths: readonly string[];
   /** Environment variable name prefixes passed through so the CLI can reach its provider. */
   envPassthrough: readonly string[];
+  /** Exact names for credentials that must not allow a whole prefix. */
+  envPassthroughNames?: readonly string[];
   /** What the CLI itself enforces in `edit` mode. Shown to the operator in the dispatch dialog. */
   editContainment: string;
   readOnlySupported: boolean;
@@ -126,6 +128,7 @@ export const AGENT_CLI_CATALOG: Readonly<Record<AgentCliId, AgentCliSpec>> = {
     versionArgs: ["--version"],
     loginPaths: [".gemini/antigravity-cli"],
     envPassthrough: ["AGY_", "GOOGLE_"],
+    envPassthroughNames: ["GEMINI_API_KEY"],
     editContainment:
       "--mode accept-edits: file edits auto-approved, other tools gated by Antigravity's own permissions; plan mode is read-only",
     readOnlySupported: true,

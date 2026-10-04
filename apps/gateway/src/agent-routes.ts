@@ -146,6 +146,16 @@ export function registerAgentRoutes(deps: AgentRouteDeps): void {
       const views = await agentCliViews(store, service);
       let created = 0;
       let updated = 0;
+      // Preserve historical runs and audit references; retire only the former catalog-owned record.
+      const legacyGemini = store.getRegistryAgent("cli-gemini");
+      if (legacyGemini?.kind === "cli" && legacyGemini.provider === "google" && legacyGemini.status !== "OFFLINE") {
+        store.updateRegistryAgent(legacyGemini.id, {
+          status: "OFFLINE",
+          lastError: "Gemini CLI card retired; use Antigravity (cli-antigravity)",
+          actorId
+        });
+        updated += 1;
+      }
       for (const view of views) {
         const spec = AGENT_CLI_CATALOG[view.id];
         const status: "OFFLINE" | "DEGRADED" | "AVAILABLE" = !view.installed

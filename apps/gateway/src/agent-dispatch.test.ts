@@ -322,6 +322,37 @@ describe("agent dispatch", () => {
     expect(agents.find((a) => a.id === "cli-cline")?.status).toBe("OFFLINE");
   });
 
+  it("retires the old Gemini CLI record without deleting it or changing unrelated agents", async () => {
+    const seed = new SqliteWorkItemStore(join(root, "control.db"));
+    seed.registerActor({ id: "user", actorType: "HUMAN", displayName: "user" });
+    for (const id of ["cli-gemini", "gemini-cli"]) {
+      if (seed.getRegistryAgent(id)) {
+        seed.updateRegistryAgent(id, { status: "AVAILABLE", actorId: "user" });
+        continue;
+      }
+      seed.createRegistryAgent({
+        id,
+        name: id,
+        kind: "cli",
+        provider: "google",
+        status: "AVAILABLE",
+        acpRole: "LOCAL_CODING_AGENT",
+        actorId: "user"
+      });
+    }
+    seed.close();
+    const app = makeGateway(config());
+    const sync = await app.inject({ method: "POST", url: "/api/agent-clis/sync", headers: bearer(OP) });
+    expect(sync.statusCode, sync.body).toBe(200);
+    expect(sync.json()).toMatchObject({ created: 9, updated: 1 });
+    const agents = (await app.inject({ method: "GET", url: "/api/agents", headers: bearer(READER) })).json().agents;
+    expect(agents.find((a: { id: string }) => a.id === "cli-gemini")).toMatchObject({ status: "OFFLINE" });
+    expect(agents.find((a: { id: string }) => a.id === "gemini-cli")).toMatchObject({ status: "AVAILABLE" });
+    expect(agents.find((a: { id: string }) => a.id === "cli-antigravity")).toBeDefined();
+    const again = await app.inject({ method: "POST", url: "/api/agent-clis/sync", headers: bearer(OP) });
+    expect(again.json()).toMatchObject({ created: 0, updated: 9 });
+  });
+
   describe("governed lifecycle", () => {
     const preview = async (app: ReturnType<typeof makeGateway>, token = OP, payload: object = { ...request, repo }) =>
       (await app.inject({ method: "POST", url: "/api/agent-runs/preview", headers: bearer(token), payload })).json()

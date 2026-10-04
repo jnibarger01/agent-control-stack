@@ -33,7 +33,8 @@ export function agentEnv(spec: AgentCliSpec, source: NodeJS.ProcessEnv = process
     const allowed =
       (BASE_ENV as readonly string[]).includes(name) ||
       BASE_ENV_PREFIXES.some((prefix) => name.startsWith(prefix)) ||
-      spec.envPassthrough.some((prefix) => name.startsWith(prefix));
+      spec.envPassthrough.some((prefix) => name.startsWith(prefix)) ||
+      (spec.envPassthroughNames?.includes(name) ?? false);
     if (allowed) env[name] = value;
   }
   return env;

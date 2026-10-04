@@ -93,6 +93,18 @@ describe("catalog", () => {
 });
 
 describe("environment", () => {
+  it("forwards only the exact Gemini API-key name to Antigravity", () => {
+    const source = {
+      GEMINI_API_KEY: "fixture",
+      GEMINI_API_KEY_BACKUP: "other",
+      GEMINI_OTHER: "other",
+      ACS_GATEWAY_TOKEN: "other",
+      GITHUB_TOKEN: "other"
+    };
+    expect(agentEnv(AGENT_CLI_CATALOG.antigravity, source)).toEqual({ GEMINI_API_KEY: "fixture" });
+    expect(agentEnv(AGENT_CLI_CATALOG.claude, source)).toEqual({});
+  });
+
   it("drops ACS secrets and unrelated keys, keeps the CLI's own provider variables", () => {
     const source = {
       HOME: "/home/x",

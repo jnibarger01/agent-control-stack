@@ -36,6 +36,24 @@ describe("summarizeTestFailure", () => {
     expect(result.summary).not.toContain("AGY_ERROR");
   });
 
+  it("uses a sole structured diagnostic and ignores partial assistant text", () => {
+    const diagnostic = 'AGY_ERROR: {"canonical_status":"RESOURCE_EXHAUSTED","http_status":429}';
+    expect(failed(diagnostic).kind).toBe("usage_limit");
+    expect(failed(`Here is a partial answer\n${diagnostic}`).summary).toContain("RESOURCE_EXHAUSTED");
+    expect(failed('AGY_ERROR: {"message":"Authentication failed","http_status":401}').kind).toBe("auth");
+  });
+
+  it("never exposes structured metadata or malformed records", () => {
+    expect(failed('AGY_ERROR: {"message":"Model failed","token":"do-not-expose","stack":"private-path"}').summary).toBe(
+      "Model failed"
+    );
+    expect(failed('AGY_ERROR: {"message":"token=do-not-expose"}').summary).not.toContain("do-not-expose");
+    expect(failed("AGY_ERROR: {invalid secret=do-not-expose").summary).toBe(
+      "Antigravity returned an unreadable error diagnostic."
+    );
+    expect(failed("AGY_ERROR: []").kind).toBe("error");
+  });
+
   it("classifies sign-in failures and strips the provider URL path", () => {
     expect(failed("error: cline requires re-authentication.")).toEqual({
       kind: "auth",
@@ -45,7 +63,9 @@ describe("summarizeTestFailure", () => {
       "Ran into this error: Authentication error: Authentication failed for https://api.router.tetrate.ai/v1/chat/completions. Status: 401 Unauthorized."
     );
     expect(goose.kind).toBe("auth");
-    expect(goose.summary).toBe("Authentication error: Authentication failed for api.router.tetrate.ai. Status: 401 Unauthorized.");
+    expect(goose.summary).toBe(
+      "Authentication error: Authentication failed for api.router.tetrate.ai. Status: 401 Unauthorized."
+    );
   });
 
   it("never shows a stack frame or file path", () => {

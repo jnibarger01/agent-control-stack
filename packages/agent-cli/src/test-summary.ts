@@ -1,6 +1,14 @@
-import { stripAnsi } from "./runner.js";
+import { redactLines, stripAnsi } from "./runner.js";
 
-export const TEST_FAILURE_KINDS = ["usage_limit", "auth", "ineligible", "timeout", "cancelled", "no_reply", "error"] as const;
+export const TEST_FAILURE_KINDS = [
+  "usage_limit",
+  "auth",
+  "ineligible",
+  "timeout",
+  "cancelled",
+  "no_reply",
+  "error"
+] as const;
 export type TestFailureKind = (typeof TEST_FAILURE_KINDS)[number];
 
 export interface TestFailureSummary {
@@ -22,9 +30,7 @@ const LEADING_LABEL = /^(?:ran into this error|error|fatal|failed|\[spawn error\
 
 /** Keep the host, drop scheme/path/query, so a cut-off URL never ends a sentence. */
 function hostOnly(text: string): string {
-  return text
-    .replace(/file:\/\/\S+/gu, "")
-    .replace(/https?:\/\/([^\s/)]+)[^\s)]*?([.,;:]*)(?=\s|\)|$)/gu, "$1$2");
+  return text.replace(/file:\/\/\S+/gu, "").replace(/https?:\/\/([^\s/)]+)[^\s)]*?([.,;:]*)(?=\s|\)|$)/gu, "$1$2");
 }
 
 function tidy(line: string): string {
@@ -41,11 +47,39 @@ export function truncateAtWord(text: string, max = TEST_SUMMARY_MAX_CHARS): stri
   return `${(space > max * 0.6 ? cut.slice(0, space) : cut).replace(/[\s,;:.-]+$/u, "")}…`;
 }
 
+function antigravityDiagnostic(line: string): string {
+  try {
+    const record: unknown = JSON.parse(line.slice("AGY_ERROR:".length).trim());
+    if (!record || typeof record !== "object" || Array.isArray(record)) throw new Error("invalid record");
+    const fields = record as Record<string, unknown>;
+    // Never stringify arbitrary metadata: it may contain prompts, credentials or stack traces.
+    const parts = [fields.message, fields.short_error, fields.canonical_status, fields.status].filter(
+      (value): value is string => typeof value === "string" && value.trim().length > 0
+    );
+    const code = fields.http_status ?? fields.http_code ?? fields.grpc_code;
+    if (typeof code === "number" && Number.isInteger(code)) parts.push(`Error code ${code}`);
+    return redactLines(parts.join(". ")) || "Antigravity reported a model or agent failure.";
+  } catch {
+    return "Antigravity returned an unreadable error diagnostic.";
+  }
+}
+
 function candidateLines(output: string): string[] {
-  return stripAnsi(output)
+  const raw = stripAnsi(output)
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => line && !STACK_FRAME.test(line) && !/^AGY_ERROR:/u.test(line));
+    .filter(Boolean);
+  const diagnostics = raw.filter((line) => /^AGY_ERROR:/u.test(line)).map(antigravityDiagnostic);
+  const human = raw.filter((line) => !STACK_FRAME.test(line) && !/^AGY_ERROR:/u.test(line)).map(redactLines);
+  if (!diagnostics.length) return human;
+  // Prefer readable duplicates of a classified diagnostic, never partial assistant output.
+  const duplicate = human.filter(
+    (line) =>
+      [USAGE_LIMIT, AUTH, INELIGIBLE].some(
+        (pattern) => pattern.test(line) && diagnostics.some((item) => pattern.test(item))
+      ) || diagnostics.some((item) => tidy(item) === tidy(line))
+  );
+  return duplicate.length ? [...duplicate, ...diagnostics] : diagnostics;
 }
 
 /**
