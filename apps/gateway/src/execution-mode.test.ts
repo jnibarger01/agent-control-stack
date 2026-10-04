@@ -583,6 +583,46 @@ describe("canonical execution mode", () => {
         }
       }));
 
+    it("preserves a human-approved DC item and authorizes a new admin item", () =>
+      withRouting(async () => {
+        const ctx = await gateway();
+        try {
+          await attest(ctx.app);
+          const args = { path: join(ctx.root, "human-then-admin") };
+          const blocked = await issue(ctx.app, "create_directory", args);
+          expect(blocked.statusCode).toBe(409);
+          const id = blocked.json().workItemId;
+          const approved = await ctx.app.inject({
+            method: "POST",
+            url: `/work-items/${id}/approve`,
+            headers: AUTH,
+            payload: { actionHash: blocked.json().actionHash, reason: "human approved first" }
+          });
+          expect(approved.statusCode, approved.body).toBe(200);
+          const mode = await ctx.app.inject({
+            method: "POST",
+            url: "/execution-mode",
+            headers: AUTH,
+            payload: { mode: "admin", reason: "admin after human approval" }
+          });
+          expect(mode.statusCode).toBe(200);
+          const response = await issue(ctx.app, "create_directory", args);
+          expect(response.statusCode, response.body).toBe(200);
+          expect(response.json().capability.payload.workItemId).not.toBe(id);
+          const detail = await ctx.app.inject({
+            method: "GET",
+            url: `/work-items/${response.json().capability.payload.workItemId}`,
+            headers: AUTH
+          });
+          expect(detail.json().events.map((event: { name: string }) => event.name)).toContain(
+            "execution_mode.routing_override"
+          );
+        } finally {
+          await ctx.app.close();
+          rmSync(ctx.root, { recursive: true, force: true });
+        }
+      }));
+
     it("strict mode keeps routing enforced: a human-approved DC item is not claimed and nothing is signed", () =>
       withRouting(async () => {
         const ctx = await gateway();

@@ -246,6 +246,39 @@ describe("JC capability issuance with authoritative routing enabled", () => {
   });
 
   describe("stale capability items", () => {
+    it("preserves a human-approved write and authorizes a new item in admin mode", () =>
+      withGateway(async (ctx) => {
+        const call = writeTool(ctx);
+        const blocked = await issue(ctx, call.tool, call.args);
+        expect(blocked.statusCode).toBe(409);
+        const id = blocked.json().workItemId;
+        const approved = await ctx.app.inject({
+          method: "POST",
+          url: `/work-items/${id}/approve`,
+          headers: { authorization: `Bearer ${OP_TOKEN}` },
+          payload: { actionHash: blocked.json().actionHash, reason: "human approved first" }
+        });
+        expect(approved.statusCode, approved.body).toBe(200);
+        expect((await setMode(ctx, "admin", "admin after human approval")).statusCode).toBe(200);
+        const response = await issue(ctx, call.tool, call.args);
+        expect(response.statusCode, response.body).toBe(200);
+        expect(
+          query(
+            ctx,
+            "SELECT approved_by_actor_id AS actor FROM jace_commander_capability_issuances WHERE work_item_id = ?",
+            response.json().capability.payload.workItemId
+          )
+        ).toEqual([{ actor: "acs:admin" }]);
+        expect(
+          query(
+            ctx,
+            "SELECT approved_by_actor_id AS actor FROM execution_plan_approvals WHERE work_item_id = ? AND status = 'granted'",
+            id
+          )
+        ).toEqual([{ actor: "user" }]);
+        expect(overrideEvents(ctx)).toBe(1);
+      }));
+
     it("an item left over from a blocked strict-mode call does not keep forcing require_approval after admin is enabled", () =>
       withGateway(async (ctx) => {
         expect((await setMode(ctx, "strict", "strict first")).statusCode).toBe(200);

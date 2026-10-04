@@ -441,6 +441,18 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const policy = createPolicyEngine();
   const shutdownController = options.shutdownController ?? new ShutdownController();
   const tools = guardWorkItemClaimTools(createWorkItemTools(workItems, policy), shutdownController);
+  // Human plan approvals take precedence in the store. Keep that authority intact:
+  // an admin-mode retry gets its own item rather than relabelling a human approval.
+  const hasCurrentHumanPlanApproval = (candidate: WorkItem, workerId: string): boolean => {
+    const plan = workItems.getCurrentExecutionPlan(candidate.id);
+    if (!plan) return false;
+    return policy.evaluateWorkItem(candidate, workerId, "approve").some((evaluation) => {
+      if (evaluation.decision.decision !== "require_approval") return false;
+      const approval = workItems.getExecutionPlanApproval(candidate.id, plan.planHash, evaluation.actionHash);
+      return approval !== undefined && approval.approvedByActorId !== ACS_ADMIN_APPROVER;
+    });
+  };
+
   const resolvedAuth = resolveAuth(options);
   const auth = resolvedAuth
     ? { ...resolvedAuth, deviceAccessTokenResolver: (token: string) => deviceAuthStore.authenticateAccessToken(token) }
@@ -2872,7 +2884,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                   params?.bindingHash === bindingHash &&
                   ["needs_approval", "approved"].includes(candidate.status) &&
                   (modeBeforeLookup.state === "ok" && modeBeforeLookup.mode === "admin"
-                    ? true
+                    ? !hasCurrentHumanPlanApproval(candidate, workerId)
                     : !workItems.hasGrantedApprovalBy(candidate.id, ACS_ADMIN_APPROVER))
                 );
               })
@@ -3579,6 +3591,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           requesterSubject: jcActor
         });
 
+        const modeBeforeLookup = readExecutionModeValue(workItems.getExecutionMode().raw);
         const existing = body.changeSetPermitId
           ? changeSetPermitWorkItem(
               body.changeSetPermitId,
@@ -3597,7 +3610,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                   candidate.requesterSubject === jcActor &&
                   params?.tool === invocation.toolName &&
                   params?.bindingHash === bindingHash &&
-                  ["needs_approval", "approved"].includes(candidate.status)
+                  ["needs_approval", "approved"].includes(candidate.status) &&
+                  !(
+                    modeBeforeLookup.state === "ok" &&
+                    modeBeforeLookup.mode === "admin" &&
+                    hasCurrentHumanPlanApproval(candidate, workerId)
+                  )
                 );
               })
               .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
