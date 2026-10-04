@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -306,16 +306,22 @@ describe("worktrees", () => {
 });
 
 describe("ACS tool guard", () => {
-  const wt = "/work/run1";
   it("contains writes to the worktree and blocks dangerous shell commands", async () => {
     const { decideToolCall } = await import("./tool-guard.js");
-    expect(decideToolCall("Write", { file_path: "/work/run1/a.txt" }, wt).decision).toBe("allow");
+    const wt = join(dir, "run1");
+    mkdirSync(wt);
+    expect(decideToolCall("Write", { file_path: join(wt, "a.txt") }, wt).decision).toBe("allow");
     expect(decideToolCall("Write", { file_path: "src/a.ts" }, wt).decision).toBe("allow");
     expect(decideToolCall("Edit", { file_path: "/etc/passwd" }, wt).decision).toBe("deny");
     expect(decideToolCall("Write", { file_path: "../escape.txt" }, wt).decision).toBe("deny");
-    expect(decideToolCall("Write", { file_path: "/work/run10/a.txt" }, wt).decision).toBe("deny");
-    expect(decideToolCall("Read", { file_path: "/home/u/.ssh/id_rsa" }, wt, "/home/u").decision).toBe("deny");
-    expect(decideToolCall("Read", { file_path: "/work/run1/README.md" }, wt, "/home/u").decision).toBe("allow");
+    expect(decideToolCall("Write", { file_path: join(dir, "run10", "a.txt") }, wt).decision).toBe("deny");
+    const home = join(dir, "home");
+    mkdirSync(join(home, ".ssh"), { recursive: true });
+    const credential = join(home, ".ssh", "id_rsa");
+    writeFileSync(credential, "secret");
+    writeFileSync(join(wt, "README.md"), "hi");
+    expect(decideToolCall("Read", { file_path: credential }, wt, home).decision).toBe("deny");
+    expect(decideToolCall("Read", { file_path: join(wt, "README.md") }, wt, home).decision).toBe("allow");
     for (const command of [
       "git push origin main",
       "git -C . push --force",
@@ -330,6 +336,89 @@ describe("ACS tool guard", () => {
     for (const command of ["npm test", "git status", "git commit -am wip", "ls -la", "rm -rf node_modules"]) {
       expect(decideToolCall("Bash", { command }, wt).decision, command).toBe("allow");
     }
+  });
+
+  describe("symlink-aware path containment", () => {
+    let wt: string;
+    let outside: string;
+    let home: string;
+    beforeEach(() => {
+      wt = join(dir, "run1");
+      outside = join(dir, "outside");
+      home = join(dir, "home");
+      mkdirSync(wt);
+      mkdirSync(join(outside, "deep"), { recursive: true });
+      mkdirSync(join(home, ".ssh"), { recursive: true });
+      writeFileSync(join(home, ".ssh", "id_rsa"), "secret");
+      writeFileSync(join(wt, "README.md"), "hi");
+    });
+    const decide = async (tool: string, file: string) => {
+      const { decideToolCall } = await import("./tool-guard.js");
+      return decideToolCall(tool, { file_path: file }, wt, home).decision;
+    };
+
+    it("denies writes through a symlinked directory, existing or new", async () => {
+      symlinkSync(outside, join(wt, "escape"));
+      expect(await decide("Write", join(wt, "escape", "new.txt"))).toBe("deny");
+      expect(await decide("Write", "escape/nested/new.txt")).toBe("deny");
+      writeFileSync(join(outside, "existing.txt"), "x");
+      expect(await decide("Edit", join(wt, "escape", "existing.txt"))).toBe("deny");
+    });
+
+    it("denies writes through a symlinked file and through a dangling symlink", async () => {
+      writeFileSync(join(outside, "target.txt"), "x");
+      symlinkSync(join(outside, "target.txt"), join(wt, "file-link"));
+      symlinkSync(join(outside, "not-created-yet.txt"), join(wt, "dangling"));
+      expect(await decide("Write", join(wt, "file-link"))).toBe("deny");
+      expect(await decide("Write", join(wt, "dangling"))).toBe("deny");
+    });
+
+    it("does not let '..' after a symlink be normalised away lexically", async () => {
+      // <wt>/deeplink -> <outside>/deep, so <wt>/deeplink/../x is really <outside>/x.
+      symlinkSync(join(outside, "deep"), join(wt, "deeplink"));
+      // join() would normalise the ".." away before the guard ever saw it, so build the string by hand.
+      expect(await decide("Write", `${wt}/deeplink/../x.txt`)).toBe("deny");
+      expect(await decide("Write", "deeplink/../x.txt")).toBe("deny");
+    });
+
+    it("denies reads of credentials reached through a symlink, and through a symlinked home", async () => {
+      symlinkSync(join(home, ".ssh", "id_rsa"), join(wt, "credential-link"));
+      symlinkSync(join(home, ".ssh"), join(wt, "ssh-dir"));
+      expect(await decide("Read", join(wt, "credential-link"))).toBe("deny");
+      expect(await decide("Read", join(wt, "ssh-dir", "id_rsa"))).toBe("deny");
+      expect(await decide("Read", join(wt, "README.md"))).toBe("allow");
+      const linkedHome = join(dir, "linked-home");
+      symlinkSync(home, linkedHome);
+      const { decideToolCall } = await import("./tool-guard.js");
+      expect(decideToolCall("Read", { file_path: join(home, ".ssh", "id_rsa") }, wt, linkedHome).decision).toBe("deny");
+    });
+
+    it("still allows symlinks that stay inside the worktree and new files in new directories", async () => {
+      mkdirSync(join(wt, "src"));
+      symlinkSync(join(wt, "src"), join(wt, "alias"));
+      expect(await decide("Write", join(wt, "alias", "a.ts"))).toBe("allow");
+      expect(await decide("Write", "newdir/sub/a.ts")).toBe("allow");
+      expect(await decide("Write", `${wt}/src/../b.ts`)).toBe("allow");
+    });
+
+    it("fails closed when resolution errors: symlink loop, unreadable component, missing worktree", async () => {
+      symlinkSync(join(wt, "loop-b"), join(wt, "loop-a"));
+      symlinkSync(join(wt, "loop-a"), join(wt, "loop-b"));
+      expect(await decide("Write", join(wt, "loop-a", "x"))).toBe("deny");
+      if (process.getuid?.() !== 0) {
+        mkdirSync(join(wt, "locked", "inner"), { recursive: true });
+        chmodSync(join(wt, "locked"), 0o000);
+        try {
+          expect(await decide("Write", join(wt, "locked", "inner", "x"))).toBe("deny");
+        } finally {
+          chmodSync(join(wt, "locked"), 0o700);
+        }
+      }
+      const { decideToolCall } = await import("./tool-guard.js");
+      expect(decideToolCall("Write", { file_path: "a.txt" }, join(dir, "missing-worktree"), home).decision).toBe(
+        "deny"
+      );
+    });
   });
 
   it("runs as a hook: logs every call, denies in Claude's format, and fails closed on bad input", async () => {

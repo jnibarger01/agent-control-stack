@@ -7,9 +7,9 @@
  *
  * Usage as a hook: `node tool-guard.js <worktree> <log.jsonl>`; the tool call arrives as JSON on stdin.
  */
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export interface GuardDecision {
   decision: "allow" | "deny";
@@ -41,6 +41,53 @@ function inside(root: string, candidate: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
+const MAX_SYMLINK_HOPS = 40;
+
+/**
+ * Resolves `raw` against `base` the way the kernel will when the tool opens it: component by component,
+ * following every symlink where it stands and applying ".." to the real location reached so far. Normalising
+ * ".." lexically first would let `<worktree>/link/../x` look inside the worktree while really naming a sibling
+ * of whatever `link` points at. Components that do not exist yet (a new file being written) are appended
+ * lexically. Returns undefined when the path cannot be resolved safely (permission error, symlink loop), and
+ * callers must treat that as a denial.
+ */
+function resolveThroughSymlinks(base: string, raw: string): string | undefined {
+  const queue = raw.split(sep).filter((part) => part !== "" && part !== ".");
+  let current = isAbsolute(raw) ? sep : base;
+  let hops = 0;
+  while (queue.length > 0) {
+    const part = queue.shift()!;
+    if (part === "..") {
+      current = dirname(current);
+      continue;
+    }
+    const next = join(current, part);
+    let stat;
+    try {
+      stat = lstatSync(next);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
+      // Nothing on disk from here on, so no further symlinks can be involved.
+      return resolve(next, ...queue);
+    }
+    if (stat.isSymbolicLink()) {
+      hops += 1;
+      if (hops > MAX_SYMLINK_HOPS) return undefined;
+      let target: string;
+      try {
+        target = readlinkSync(next);
+      } catch {
+        return undefined;
+      }
+      if (isAbsolute(target)) current = sep;
+      queue.unshift(...target.split(sep).filter((segment) => segment !== "" && segment !== "."));
+    } else {
+      current = next;
+    }
+  }
+  return current;
+}
+
 function filePath(input: Record<string, unknown>): string | undefined {
   for (const key of ["file_path", "notebook_path", "path"]) {
     if (typeof input[key] === "string") return input[key] as string;
@@ -54,16 +101,28 @@ export function decideToolCall(
   worktree: string,
   home: string = homedir()
 ): GuardDecision {
-  const root = resolve(worktree);
+  let root: string;
+  try {
+    root = realpathSync(worktree);
+  } catch {
+    return { decision: "deny", reason: "worktree path could not be resolved" };
+  }
   if (WRITE_TOOLS.has(toolName) || READ_TOOLS.has(toolName)) {
     const raw = filePath(toolInput);
     if (raw === undefined) return { decision: "allow" };
-    const target = resolve(root, raw.startsWith("~/") ? resolve(home, raw.slice(2)) : raw);
+    const target = resolveThroughSymlinks(root, raw.startsWith("~/") ? resolve(home, raw.slice(2)) : raw);
+    if (target === undefined) return { decision: "deny", reason: "file path could not be resolved safely" };
     if (WRITE_TOOLS.has(toolName) && !inside(root, target)) {
       return { decision: "deny", reason: `writes are limited to the run worktree (${root})` };
     }
-    if (READ_TOOLS.has(toolName) && SECRET_DIRS.some((dir) => inside(resolve(home, dir), target))) {
-      return { decision: "deny", reason: "credential stores are not readable by an agent run" };
+    if (READ_TOOLS.has(toolName)) {
+      const secretRoots = SECRET_DIRS.map((dir) => resolveThroughSymlinks(root, resolve(home, dir)));
+      if (secretRoots.some((secretRoot) => secretRoot === undefined)) {
+        return { decision: "deny", reason: "credential paths could not be resolved safely" };
+      }
+      if (secretRoots.some((secretRoot) => inside(secretRoot!, target))) {
+        return { decision: "deny", reason: "credential stores are not readable by an agent run" };
+      }
     }
     return { decision: "allow" };
   }
