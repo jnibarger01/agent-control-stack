@@ -58,6 +58,14 @@ const ACS_EXECUTOR_SCRIPTS: readonly string[] = [
 ];
 const ACS_EXECUTOR_PACKAGE_DIR = "desktop-commander";
 
+/**
+ * The release roots ACS actually publishes under. An executor script counts as a
+ * managed executor only when it lives inside one of these, so an unrelated program
+ * that merely ships a dist/index.js can never enter the managed-executor set.
+ */
+const ACS_RELEASE_ROOT_PATTERN =
+  /(?:^|\/)releases\/(?:acs|dc|dc-mcp-gateway)\/[^/]+\/|(?:^|\/)packages\/(?:[^/]+\/)*desktop-commander\//;
+
 export function acsExecutorRoot(command: string): string | undefined {
   let root: string | undefined;
   for (const token of command.split(/\s+/u)) {
@@ -84,8 +92,16 @@ export function acsExecutorRoot(command: string): string | undefined {
     if (!vendored) {
       for (const known of ACS_EXECUTOR_SCRIPTS) {
         if (resolved.endsWith(known)) {
-          root = resolved.slice(0, resolved.length - known.length);
-          break;
+          const candidate = resolved.slice(0, resolved.length - known.length);
+          // Only trust a script that actually sits under a real ACS release root.
+          // An unrelated program that merely ships a dist/index.js
+          // (/srv/other, /opt/foo, /usr/local/app) must never be counted as a
+          // managed executor: that would manufacture a false competing topology
+          // AND could satisfy the lease-holder identity check.
+          if (ACS_RELEASE_ROOT_PATTERN.test(candidate)) {
+            root = candidate;
+            break;
+          }
         }
       }
     }

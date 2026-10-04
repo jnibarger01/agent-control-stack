@@ -86,6 +86,20 @@ describe("executor discovery is scoped to ACS-owned roots", () => {
     expect(acsExecutorRoot(claudeAcp)).toBeUndefined();
   });
 
+  it("does not treat an unrelated non-vendored dist/index.js as an ACS executor", () => {
+    // Regression: a script-shape-only match counted /srv/other/dist/index.js as a
+    // managed executor, which both manufactured a false competing topology and could
+    // satisfy the lease-holder identity check. Detection is anchored to ACS release roots.
+    for (const command of [
+      "/srv/other/dist/index.js",
+      "/opt/foo/dist/index.js",
+      "/usr/local/app/dist/jace-commander/cli.js serve",
+      "/var/lib/thing/dist/control-plane/server.js"
+    ]) {
+      expect(isManagedExecutorCommand(command), command).toBe(false);
+    }
+  });
+
   it("does not match unrelated or empty commands", () => {
     expect(isManagedExecutorCommand("/usr/bin/bash -c some-unrelated-command")).toBe(false);
     expect(isManagedExecutorCommand("")).toBe(false);
@@ -115,7 +129,8 @@ describe("executor discovery is scoped to ACS-owned roots", () => {
     // Regression: taking the FIRST unnormalized match let a second executor written
     // as "<known-root>/../../evil/dist/index.js" collapse onto the known root and go
     // uncounted. The last match is resolved, so the identity compared is the real one.
-    const traversal = `${DC_RELEASE}/../../evil-release/dist/index.js`;
+    // Resolves to a genuinely different, but still ACS-owned, release root.
+    const traversal = `${DC_RELEASE}/../../dc/evil-release/dist/index.js`;
     expect(acsExecutorRoot(traversal)).not.toBe(acsExecutorRoot(controlPlane));
     expect(acsExecutorRoot(traversal)).toContain("evil-release");
   });

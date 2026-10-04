@@ -97,7 +97,7 @@ describe("managed authority observation", () => {
         launchArgs: ["/home/jacen/projects/desktop-commander/dist/index.js"],
         pidAlive: (pid) => pid === 42,
         managedExecutorPids: [42],
-        holderCommand: "/usr/bin/node /home/jacen/projects/desktop-commander/dist/index.js"
+        holderCommand: "/usr/bin/node /home/jacen/releases/dc/test-release/dist/index.js"
       }
     );
     expect(ok.authoritative).toBe(true);
@@ -111,7 +111,7 @@ describe("managed authority observation", () => {
         launchArgs: [],
         pidAlive: (pid) => pid === 42,
         managedExecutorPids: [42],
-        holderCommand: "/usr/bin/node /home/jacen/projects/desktop-commander/dist/index.js"
+        holderCommand: "/usr/bin/node /home/jacen/releases/dc/test-release/dist/index.js"
       }
     );
     expect(holderWithoutBackend.managedRuntime).toBe(true);
@@ -130,7 +130,7 @@ describe("managed authority observation", () => {
         launchArgs: [],
         pidAlive: () => true,
         managedExecutorPids: [42],
-        holderCommand: "node desktop-commander/dist/index.js"
+        holderCommand: "node /home/jacen/releases/dc/test-release/dist/index.js"
       }
     );
     expect(conflict.breakGlassActive).toBe(true);
@@ -144,7 +144,7 @@ describe("managed authority observation", () => {
         launchArgs: [],
         pidAlive: () => true,
         managedExecutorPids: [42, 77],
-        holderCommand: "node desktop-commander/dist/index.js"
+        holderCommand: "node /home/jacen/releases/dc/test-release/dist/index.js"
       }
     );
     expect(split.multipleAuthoritativeExecutors).toBe(true);
@@ -164,7 +164,7 @@ describe("managed authority observation", () => {
         pidAlive: (pid) => pid === 42,
         processStartTicks: "100",
         managedExecutorPids: [42],
-        holderCommand: "node desktop-commander/dist/index.js"
+        holderCommand: "node /home/jacen/releases/dc/test-release/dist/index.js"
       }
     );
     expect(expiredButAlive.leaseActive).toBe(true);
@@ -189,7 +189,7 @@ describe("managed authority observation", () => {
         pidAlive: () => true,
         processStartTicks: "200",
         managedExecutorPids: [42],
-        holderCommand: "node desktop-commander/dist/index.js"
+        holderCommand: "node /home/jacen/releases/dc/test-release/dist/index.js"
       }
     );
     expect(reused.leaseActive).toBe(false);

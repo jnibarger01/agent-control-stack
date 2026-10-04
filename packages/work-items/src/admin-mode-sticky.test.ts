@@ -14,9 +14,12 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { applyControlPlaneMigrations } from "@agent-control-stack/shared";
 import {
   SqliteWorkItemStore,
   ADMIN_MODE_NO_EXPIRY,
+  LEGACY_ADMIN_MODE_TTL_MS,
   MIN_ADMIN_MODE_TTL_MS,
   MAX_ADMIN_MODE_TTL_MS
 } from "./index.js";
@@ -25,6 +28,14 @@ function withStore<T>(fn: (store: SqliteWorkItemStore) => T, options: { adminMod
   const dir = mkdtempSync(join(tmpdir(), "acs-adminmode-"));
   const dbPath = join(dir, "control.db");
   try {
+    // Apply the control-plane migrations first so the schema (including the
+    // sticky_admin marker) matches a real deployment.
+    const seed = new DatabaseSync(dbPath);
+    try {
+      applyControlPlaneMigrations(seed);
+    } finally {
+      seed.close();
+    }
     const store = new SqliteWorkItemStore(dbPath, options);
     try {
       return fn(store);
@@ -89,6 +100,40 @@ describe("admin execution mode is sticky until explicitly disabled", () => {
       },
       { adminModeTtlMs: ADMIN_MODE_NO_EXPIRY }
     );
+  });
+
+  it("does not widen a legacy bounded admin row on upgrade", () => {
+    // An elevation enabled before the sticky_admin marker existed was authorized
+    // while time-boxed. Upgrading must not silently reinterpret it as indefinite.
+    withStore((store) => {
+      const row = (store as unknown as { db: { prepare: (q: string) => { run: (...a: unknown[]) => void } } }).db;
+      row.prepare(
+        `UPDATE execution_mode_state
+            SET mode = 'admin', updated_at = ?, updated_by = 'user',
+                reason = 'legacy bounded elevation', sticky_admin = NULL
+          WHERE id = 1`
+      ).run(new Date().toISOString());
+      // sticky_admin is NULL here: this row predates the marker.
+      expect(store.getExecutionMode().mode).toBe("admin");
+      const afterLegacyTtl = new Date(Date.now() + LEGACY_ADMIN_MODE_TTL_MS + 5_000);
+      expect(store.getExecutionMode(afterLegacyTtl).mode).toBe("strict");
+      expect(store.getExecutionMode(afterLegacyTtl).expired).toBe(true);
+    });
+  });
+
+  it("treats a corrupt admin timestamp as expired even when sticky", () => {
+    withStore((store) => {
+      const row = (store as unknown as { db: { prepare: (q: string) => { run: (...a: unknown[]) => void } } }).db;
+      row.prepare(
+        `UPDATE execution_mode_state
+            SET mode = 'admin', updated_at = 'not-a-timestamp', updated_by = 'user',
+                reason = 'corrupt row', sticky_admin = 1
+          WHERE id = 1`
+      ).run();
+      // Corruption must fail closed to strict, never yield indefinite admin.
+      expect(store.getExecutionMode().mode).toBe("strict");
+      expect(store.getExecutionMode().expired).toBe(true);
+    });
   });
 
   it("still rejects out-of-range bounded TTLs", () => {

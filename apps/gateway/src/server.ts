@@ -94,6 +94,7 @@ import {
   ACS_ADMIN_APPROVAL_REASON,
   adminExecutionGate,
   observeLiveManagedAuthority,
+  policyContextAuditReceipt,
   readExecutionModeValue,
   type ManagedAuthorityObservation
 } from "@agent-control-stack/policy-gate";
@@ -3001,6 +3002,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                 // requiresApproval=false, normal lease + fencing + ownership - with no
                 // approval record fabricated and no parallel admin-only authority model.
                 adminAuthorizedWithoutApproval = true;
+                // Record the authorizing evaluation itself, so the audit chain carries
+                // the action hash and matched policy rules rather than only a mode event.
+                for (const evaluation of adminEvaluations) {
+                  workItems.recordPolicyDecision({
+                    workItemId: workItem.id,
+                    actionHash: evaluation.actionHash,
+                    context: policyContextAuditReceipt(evaluation.context),
+                    ...evaluation.decision
+                  });
+                }
                 if (workItem.status !== "approved") {
                   workItem = workItems.approveWorkItem(workItem.id, { via: "policy_gate" });
                 }
@@ -3691,6 +3702,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                 // requiresApproval=false, normal lease + fencing + ownership - with no
                 // approval record fabricated and no parallel admin-only authority model.
                 adminAuthorizedWithoutApproval = true;
+                // Record the authorizing evaluation itself, so the audit chain carries
+                // the action hash and matched policy rules rather than only a mode event.
+                for (const evaluation of adminEvaluations) {
+                  workItems.recordPolicyDecision({
+                    workItemId: workItem.id,
+                    actionHash: evaluation.actionHash,
+                    context: policyContextAuditReceipt(evaluation.context),
+                    ...evaluation.decision
+                  });
+                }
                 if (workItem.status !== "approved") {
                   workItem = workItems.approveWorkItem(workItem.id, { via: "policy_gate" });
                 }
@@ -3813,7 +3834,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                 bindingHash
               );
             }
-            if (!adminApprovalWouldBeConsumed) return;
+            // Re-validate for ANY admin-authorized claim, not only approval-backed
+            // ones. The approval-free admin branch fabricates no approval record, so
+            // adminApprovalWouldBeConsumed is false exactly there; returning early on
+            // that condition would skip the check this callback exists to perform.
+            if (!adminApprovalWouldBeConsumed && !adminAuthorizedWithoutApproval) return;
             const mode = readExecutionModeValue(workItems.getExecutionMode().raw);
             if (mode.state !== "ok" || mode.mode !== "admin") {
               workItems.recordSystemEvent({

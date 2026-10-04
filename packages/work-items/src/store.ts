@@ -1084,6 +1084,12 @@ export const MAX_ADMIN_MODE_TTL_MS = 24 * 60 * 60 * 1000;
 /** Sentinel meaning "no expiry": admin mode persists until explicitly disabled. */
 export const ADMIN_MODE_NO_EXPIRY = 0;
 
+/**
+ * The former one-hour default. Still applied to admin rows that predate the
+ * sticky_admin marker, so upgrading never widens a previously bounded elevation.
+ */
+export const LEGACY_ADMIN_MODE_TTL_MS = 60 * 60 * 1000;
+
 function validateAdminModeTtl(value: number): number {
   if (value === ADMIN_MODE_NO_EXPIRY) {
     return value;
@@ -7529,7 +7535,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     expired: boolean;
   } {
     const row = this.db
-      .prepare(`SELECT mode, updated_at, updated_by, reason FROM execution_mode_state WHERE id = 1`)
+      .prepare(`SELECT mode, updated_at, updated_by, reason, sticky_admin FROM execution_mode_state WHERE id = 1`)
       .get() as { mode?: string; updated_at?: string; updated_by?: string; reason?: string } | undefined;
     if (!row || typeof row.mode !== "string") {
       return { mode: null, raw: null, updatedAt: null, updatedBy: null, reason: null, expiresAt: null, expired: false };
@@ -7541,13 +7547,32 @@ export class SqliteWorkItemStore implements WorkItemStore {
       // Sticky by default: with no explicit TTL an admin row stays admin until an
       // operator explicitly disables it. A caller that asked for a bounded
       // elevation still gets the fail-safe fallback to strict once that TTL
-      // elapses; the stored row is never rewritten on read, and an unparseable
-      // timestamp is treated as already expired.
-      if (this.adminModeTtlMs === ADMIN_MODE_NO_EXPIRY) {
+      // elapses; the stored row is never rewritten on read.
+      //
+      // A row whose canonical timestamp cannot be parsed is CORRUPT, and is treated
+      // as expired in BOTH modes. Honoring a sticky no-expiry row before validating
+      // its timestamp would let database corruption or tampering yield indefinite
+      // admin authority.
+      const setAt = updatedAt === null ? Number.NaN : Date.parse(updatedAt);
+      if (!Number.isFinite(setAt)) {
+        return { mode: "strict", raw: "strict", updatedAt, updatedBy, reason, expiresAt: null, expired: true };
+      }
+      // An explicit TTL configured by this deployment always wins.
+      // Otherwise the row itself decides: sticky_admin = 1 means the operator
+      // enabled it under sticky semantics (no expiry); a legacy row predates that
+      // marker and keeps the former one-hour bound, so an upgrade never silently
+      // widens a previously time-limited elevation.
+      const sticky = (row as { sticky_admin?: unknown }).sticky_admin === 1;
+      const ttlMs =
+        this.adminModeTtlMs !== ADMIN_MODE_NO_EXPIRY
+          ? this.adminModeTtlMs
+          : sticky
+            ? ADMIN_MODE_NO_EXPIRY
+            : LEGACY_ADMIN_MODE_TTL_MS;
+      if (ttlMs === ADMIN_MODE_NO_EXPIRY) {
         return { mode: "admin", raw: "admin", updatedAt, updatedBy, reason, expiresAt: null, expired: false };
       }
-      const setAt = updatedAt === null ? Number.NaN : Date.parse(updatedAt);
-      const expiresMs = setAt + this.adminModeTtlMs;
+      const expiresMs = setAt + ttlMs;
       if (!Number.isFinite(expiresMs) || expiresMs <= now.getTime()) {
         return { mode: "strict", raw: "strict", updatedAt, updatedBy, reason, expiresAt: null, expired: true };
       }
@@ -7593,17 +7618,22 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const updatedBy = requiredString(input.updatedBy, "updatedBy");
       const reason = requiredString(input.reason, "reason");
       const updatedAt = new Date().toISOString();
+      // Only an admin elevation explicitly enabled under sticky semantics is
+      // marked sticky. Enabling strict always clears the marker, so returning to
+      // strict and re-enabling later re-applies the operator's current choice.
+      const stickyAdmin = input.mode === "admin" && this.adminModeTtlMs === ADMIN_MODE_NO_EXPIRY ? 1 : 0;
       this.db
         .prepare(
-          `INSERT INTO execution_mode_state (id, mode, updated_at, updated_by, reason)
-           VALUES (1, ?, ?, ?, ?)
+          `INSERT INTO execution_mode_state (id, mode, updated_at, updated_by, reason, sticky_admin)
+           VALUES (1, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              mode = excluded.mode,
              updated_at = excluded.updated_at,
              updated_by = excluded.updated_by,
-             reason = excluded.reason`
+             reason = excluded.reason,
+             sticky_admin = excluded.sticky_admin`
         )
-        .run(input.mode, updatedAt, updatedBy, reason);
+        .run(input.mode, updatedAt, updatedBy, reason, stickyAdmin);
       const event = this.appendAuditEvent(
         createEvent(
           "execution_mode.changed",
