@@ -81,17 +81,19 @@ Click **Add to roster** once to list the CLIs under Agents.
 
 Verified by real runs on 2026-10-02 (versions in `packages/agent-cli/src/catalog.ts`).
 
-| CLI          | Dispatchable | Notes                                                                                               |
-| ------------ | ------------ | --------------------------------------------------------------------------------------------------- |
-| claude       | yes          | `--permission-mode acceptEdits` (edit) or `plan` (read-only).                                       |
-| codex        | yes          | `exec --sandbox workspace-write` or `read-only`.                                                    |
-| opencode     | yes          | Read-only uses the `plan` agent.                                                                    |
-| hermes       | yes          | Edit only. Slow to start (about 25 s).                                                              |
-| cursor-agent | yes          | `--trust` marks only the new worktree trusted. `ask` mode is read-only.                             |
-| gemini       | blocked      | Google rejects the account (IneligibleTierError). Sign in with a supported account or key.          |
-| cline        | blocked      | Needs re-authentication: run `cline` and sign in.                                                   |
-| goose        | blocked      | Provider returns 401 Invalid API key (and still exits 0). Run `goose configure`.                    |
-| openclaw     | blocked      | `agent exec` crashes while the OpenClaw Gateway owns its state dir; `--isolated` loses credentials. |
+| CLI          | Dispatchable | Notes                                                                                                    |
+| ------------ | ------------ | -------------------------------------------------------------------------------------------------------- |
+| claude       | yes          | `--permission-mode acceptEdits` (edit) or `plan` (read-only).                                            |
+| codex        | yes          | `exec --sandbox workspace-write` or `read-only`.                                                         |
+| opencode     | yes          | Read-only uses the `plan` agent.                                                                         |
+| hermes       | yes          | Edit only. Slow to start (about 25 s).                                                                   |
+| cursor-agent | yes          | `--trust` marks only the new worktree trusted. `ask` mode is read-only.                                  |
+| antigravity  | yes          | `agy --print`, `--mode accept-edits` (edit) or `plan` (read-only); login in `~/.gemini/antigravity-cli`. |
+| cline        | blocked      | Needs re-authentication: run `cline` and sign in.                                                        |
+| goose        | blocked      | Provider returns 401 Invalid API key (and still exits 0). Run `goose configure`.                         |
+| openclaw     | blocked      | `agent exec` crashes while the OpenClaw Gateway owns its state dir; `--isolated` loses credentials.      |
+
+Antigravity replaces the Gemini CLI card. Roster sync marks the old catalog-owned `cli-gemini` record offline while preserving its history; other Gemini actors are unchanged. For API-key authentication, configure `modelProvider: "gemini"` in Antigravity settings and supply `GEMINI_API_KEY` to the gateway environment. Only that exact Gemini variable is forwarded. Run **Test connection** to verify the current account or key; catalog dispatch support does not guarantee provider availability. Structured `AGY_ERROR` diagnostics are parsed and redacted when no better human-readable cause is present.
 
 A blocked reason is stored in the catalog (`dispatchBlockedReason`). After you fix the cause, use **Test
 connection**; if it passes, remove the reason from the catalog in a PR.

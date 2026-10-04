@@ -36,11 +36,11 @@ function fake(name: string, body: string): void {
 describe("catalog", () => {
   it("covers exactly the nine CLIs, each putting the prompt in its arguments", () => {
     expect([...AGENT_CLI_IDS].sort()).toEqual([
+      "antigravity",
       "claude",
       "cline",
       "codex",
       "cursor-agent",
-      "gemini",
       "goose",
       "hermes",
       "openclaw",
@@ -81,7 +81,7 @@ describe("catalog", () => {
       AGENT_CLI_CATALOG[id].buildArgs({ prompt: "p", mode: "read-only", timeoutSec: 60, cwd: "/w" });
     expect(ro("claude")).toContain("plan");
     expect(ro("codex")).toContain("read-only");
-    expect(ro("gemini")).toContain("plan");
+    expect(ro("antigravity")).toEqual(["--print", "p", "--mode", "plan"]);
     expect(ro("cursor-agent")).toContain("ask");
     expect(ro("cursor-agent")).toContain("--trust");
     expect(ro("cline")).toContain("--plan");
@@ -93,6 +93,18 @@ describe("catalog", () => {
 });
 
 describe("environment", () => {
+  it("forwards only the exact Gemini API-key name to Antigravity", () => {
+    const source = {
+      GEMINI_API_KEY: "fixture",
+      GEMINI_API_KEY_BACKUP: "other",
+      GEMINI_OTHER: "other",
+      ACS_GATEWAY_TOKEN: "other",
+      GITHUB_TOKEN: "other"
+    };
+    expect(agentEnv(AGENT_CLI_CATALOG.antigravity, source)).toEqual({ GEMINI_API_KEY: "fixture" });
+    expect(agentEnv(AGENT_CLI_CATALOG.claude, source)).toEqual({});
+  });
+
   it("drops ACS secrets and unrelated keys, keeps the CLI's own provider variables", () => {
     const source = {
       HOME: "/home/x",
@@ -126,8 +138,15 @@ describe("probe", () => {
     expect(codex).toMatchObject({ installed: true, version: "0.159.2", versionDrift: false, loginDetected: true });
     const claude = await probeAgentCli(AGENT_CLI_CATALOG.claude, { pathValue: bin, home });
     expect(claude).toMatchObject({ installed: true, version: "9.0.1", versionDrift: true, loginDetected: false });
-    const gemini = await probeAgentCli(AGENT_CLI_CATALOG.gemini, { pathValue: bin, home });
-    expect(gemini).toMatchObject({ installed: false, versionDrift: false });
+    const agy = await probeAgentCli(AGENT_CLI_CATALOG.antigravity, { pathValue: bin, home });
+    expect(agy).toMatchObject({ installed: false, versionDrift: false });
+    fake("agy", 'echo "1.2.13"');
+    mkdirSync(join(home, ".gemini", "antigravity-cli"), { recursive: true });
+    expect(await probeAgentCli(AGENT_CLI_CATALOG.antigravity, { pathValue: bin, home })).toMatchObject({
+      installed: true,
+      version: "1.2.13",
+      loginDetected: true
+    });
   });
 
   it("parses versions and detects minor drift only", () => {
@@ -140,10 +159,10 @@ describe("probe", () => {
 
 describe("planAgentCommand", () => {
   it("refuses CLIs whose dispatch is blocked, unless a connection test asks to try anyway", () => {
-    fake("gemini", "exit 0");
-    const base = { agentId: "gemini", prompt: "go", mode: "edit" as const, cwd: "/w", pathValue: bin };
+    fake("openclaw", "exit 0");
+    const base = { agentId: "openclaw", prompt: "go", mode: "edit" as const, cwd: "/w", pathValue: bin };
     expect(() => planAgentCommand(base)).toThrow(/not dispatchable/);
-    expect(planAgentCommand({ ...base, allowBlocked: true }).agentId).toBe("gemini");
+    expect(planAgentCommand({ ...base, allowBlocked: true }).agentId).toBe("openclaw");
   });
 
   it("binds the confirmed command to a hash and rejects bad input", () => {
