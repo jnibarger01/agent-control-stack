@@ -1,3 +1,4 @@
+import { probeExecutableVersion } from "@agent-control-stack/agent-cli";
 import { registerMissionDispatchRoutes } from "./mission-dispatch-routes.js";
 import {
   CodingMissionController,
@@ -4525,7 +4526,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (sweeping || closing) return;
       sweeping = true;
       try {
-        await discoverLocalActors({ store: workItems, ...actorDiscoveryConfig });
+        await discoverLocalActors({ store: workItems, probe: probeExecutableVersion, ...actorDiscoveryConfig });
         workItems.reconcileStaleAgents();
       } catch (error) {
         app.log.warn({ err: error }, "actor discovery sweep failed");
