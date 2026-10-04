@@ -111,6 +111,15 @@ function setMode(ctx: Ctx, mode: "strict" | "admin", reason: string) {
   });
 }
 
+function countWorkItems(dbPath: string): number {
+  const db = new DatabaseSync(dbPath);
+  try {
+    return (db.prepare("SELECT COUNT(*) AS c FROM work_items").get() as { c: number }).c;
+  } finally {
+    db.close();
+  }
+}
+
 function signatureValid(ctx: Ctx, capability: { payload: unknown; signature: string }): boolean {
   const publicKey = createPublicKey(
     createPrivateKey({ key: Buffer.from(ctx.privateKey, "base64url"), format: "der", type: "pkcs8" })
@@ -131,10 +140,26 @@ function assertNotContradictoryDenial(response: { statusCode: number; body: stri
   }
 }
 
-async function withGateway(
-  fn: (ctx: Ctx) => Promise<void>,
-  authority?: ManagedAuthorityObservation
-): Promise<void> {
+/**
+ * Same harness, but with authoritative (Nimble) routing ENABLED - the
+ * production configuration. This is what previously made every JC/DC capability
+ * claim abort before policy evaluation.
+ */
+async function withRoutedGateway(fn: (ctx: Ctx) => Promise<void>): Promise<void> {
+  const previous = process.env.ACS_NIMBLE_ROUTING_ENABLED;
+  process.env.ACS_NIMBLE_ROUTING_ENABLED = "1";
+  try {
+    await withGateway(fn);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.ACS_NIMBLE_ROUTING_ENABLED;
+    } else {
+      process.env.ACS_NIMBLE_ROUTING_ENABLED = previous;
+    }
+  }
+}
+
+async function withGateway(fn: (ctx: Ctx) => Promise<void>, authority?: ManagedAuthorityObservation): Promise<void> {
   const ctx = gateway(authority);
   try {
     await fn(ctx);
@@ -286,9 +311,7 @@ describe("admin mode: policy allow is admin-authorized, never a denial", () => {
       const db = new DatabaseSync(ctx.dbPath);
       try {
         const issued = db
-          .prepare(
-            "SELECT COUNT(*) AS count FROM jace_commander_capability_issuances WHERE tool_name = ?"
-          )
+          .prepare("SELECT COUNT(*) AS count FROM jace_commander_capability_issuances WHERE tool_name = ?")
           .get(READ_TOOL.tool) as { count: number };
         expect(issued.count).toBe(1);
       } finally {
@@ -304,9 +327,7 @@ describe("admin mode: policy allow is admin-authorized, never a denial", () => {
       const db = new DatabaseSync(ctx.dbPath);
       try {
         const rows = db
-          .prepare(
-            "SELECT body FROM audit_events WHERE name = 'execution_mode.auto_authorized' ORDER BY sequence DESC"
-          )
+          .prepare("SELECT body FROM audit_events WHERE name = 'execution_mode.auto_authorized' ORDER BY sequence DESC")
           .all() as { body: string }[];
         expect(rows.length).toBeGreaterThan(0);
         const body = JSON.parse(rows[0].body) as {
@@ -336,9 +357,7 @@ describe("admin mode: policy allow is admin-authorized, never a denial", () => {
       const db = new DatabaseSync(ctx.dbPath);
       try {
         const rows = db
-          .prepare(
-            "SELECT body FROM audit_events WHERE name = 'execution_mode.auto_authorized' ORDER BY sequence DESC"
-          )
+          .prepare("SELECT body FROM audit_events WHERE name = 'execution_mode.auto_authorized' ORDER BY sequence DESC")
           .all() as { body: string }[];
         expect(rows.length).toBeGreaterThan(0);
         const body = JSON.parse(rows[0].body) as { approvalPolicy?: string; approvedBy?: string | null };
@@ -368,4 +387,146 @@ describe("admin mode: policy allow is admin-authorized, never a denial", () => {
         detail: "multiple managed executors"
       }
     ));
+});
+
+/**
+ * JC and DC are direct-addressed lanes: no model routes them, so under
+ * ACS_NIMBLE_ROUTING_ENABLED=1 the claim previously aborted before policy
+ * evaluation (no routing evidence) and surfaced a misleading 409
+ * require_approval. Issuance now records deterministic, worker-matching
+ * evidence; the authoritative gate itself is unchanged.
+ *
+ * These tests assert the real outcome: a SIGNED capability that validates against
+ * the ACS public key, with no human approval record and no second work item.
+ */
+describe("direct-lane routing evidence satisfies the authoritative routing gate", () => {
+  it("records deterministic routing evidence and returns a signed, validating capability", () => {
+    return withRoutedGateway(async (ctx) => {
+      expect((await setMode(ctx, "admin", "admin direct-lane routing")).statusCode).toBe(200);
+
+      const before = countWorkItems(ctx.dbPath);
+      const response = await issue(ctx, READ_TOOL.tool, READ_TOOL.args);
+      const body = response.json();
+
+      assertNotContradictoryDenial(response);
+      expect(response.statusCode, response.body).toBe(200);
+      expect(body.decision).toBe("allow");
+
+      const { capability } = body;
+      expect(capability, response.body).toBeDefined();
+      expect(signatureValid(ctx, capability)).toBe(true);
+      expect(capability.payload.toolName).toBe(READ_TOOL.tool);
+      expect(capability.payload.version).toBe("acs.jc.v1");
+
+      // Claim actually happened: an attempt, lease, plan and input hash are bound.
+      expect(body.attemptId).toBeTruthy();
+      expect(body.leaseId).toBeTruthy();
+      expect(body.planHash).toBeTruthy();
+      expect(body.inputHash).toBeTruthy();
+
+      const db = new DatabaseSync(ctx.dbPath);
+      try {
+        const evidence = db
+          .prepare(
+            "SELECT e.source, e.decision, d.selected_actor_id, e.lane, e.reason_code FROM actor_routing_evidence e JOIN actor_routing_decisions d ON d.decision_id = e.decision_id"
+          )
+          .all() as {
+          source: string;
+          decision: string;
+          selected_actor_id: string;
+          lane: string;
+          reason_code: string;
+        }[];
+        expect(evidence.length).toBeGreaterThan(0);
+        expect(evidence[0].source).toBe("deterministic_fallback");
+        expect(evidence[0].decision).toBe("route");
+        expect(evidence[0].lane).toBe("jc");
+        expect(evidence[0].selected_actor_id).toBe("acs-jc-bridge");
+
+        // The claim-time policy decision now exists (it previously never ran).
+        const claims = db
+          .prepare(
+            "SELECT body FROM audit_events WHERE name = 'policy.decided' AND body LIKE '%\"operation\":\"claim\"%'"
+          )
+          .all() as { body: string }[];
+        expect(claims.length).toBeGreaterThan(0);
+
+        // Admin auto-authorization created NO human approval record.
+        const approvals = db
+          .prepare("SELECT COUNT(*) AS c FROM approval_records WHERE work_item_id = ?")
+          .get(body.workItemId) as { c: number };
+        expect(approvals.c).toBe(0);
+
+        // No second require_approval work item was generated.
+        expect(countWorkItems(ctx.dbPath)).toBe(before + 1);
+      } finally {
+        db.close();
+      }
+    });
+  });
+
+  it("still fails closed when routing evidence names a different worker", () => {
+    return withRoutedGateway(async (ctx) => {
+      expect((await setMode(ctx, "admin", "admin mismatched routing")).statusCode).toBe(200);
+      const response = await issue(ctx, READ_TOOL.tool, READ_TOOL.args);
+      expect(response.statusCode, response.body).toBe(200);
+
+      // Evidence is append-only; append newer evidence naming another worker and assert the gate directly.
+      const { authoritativeRouteAllows } = await import("@agent-control-stack/policy-gate");
+      const { SqliteWorkItemStore } = await import("@agent-control-stack/work-items");
+      const store = new SqliteWorkItemStore(ctx.dbPath);
+      try {
+        const item = { id: response.json().workItemId as string };
+        expect(item.id).toBeTruthy();
+        store.recordAuthoritativeRoutingEvidence(
+          {
+            workItemId: item.id,
+            selectedActorId: "some-other-worker",
+            decision: "route",
+            source: "deterministic_fallback",
+            reasonCode: "test_mismatch",
+            routerVersion: "test",
+            promptVersion: "test",
+            eligible: ["some-other-worker"],
+            excluded: {},
+            scores: {},
+            candidates: ["some-other-worker"],
+            constraints: {},
+            normalizedDecision: {},
+            now: new Date()
+          },
+          { via: "policy_gate" }
+        );
+        // Mismatched worker must not be allowed to claim.
+        expect(authoritativeRouteAllows(store, item.id, "acs-jc-bridge")).toBe(false);
+        // The recorded worker still matches.
+        expect(authoritativeRouteAllows(store, item.id, "some-other-worker")).toBe(true);
+      } finally {
+        store.close();
+      }
+    });
+  });
+
+  it("still fails closed for a lane with no routing evidence at all", () => {
+    return withRoutedGateway(async (ctx) => {
+      const { authoritativeRouteAllows } = await import("@agent-control-stack/policy-gate");
+      const { SqliteWorkItemStore } = await import("@agent-control-stack/work-items");
+      const store = new SqliteWorkItemStore(ctx.dbPath);
+      try {
+        expect(authoritativeRouteAllows(store, "wrk_nonexistent_evidence", "acs-jc-bridge")).toBe(false);
+      } finally {
+        store.close();
+      }
+    });
+  });
+
+  it("strict mode still requires approval for a JC mutation under routing", () => {
+    return withRoutedGateway(async (ctx) => {
+      expect((await setMode(ctx, "strict", "strict routed baseline")).statusCode).toBe(200);
+      const response = await issue(ctx, "write_file", WRITE_TOOL(ctx.root).args);
+      assertNotContradictoryDenial(response);
+      expect(response.statusCode).toBe(409);
+      expect(response.json().decision).toBe("require_approval");
+    });
+  });
 });

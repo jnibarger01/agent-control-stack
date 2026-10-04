@@ -71,6 +71,7 @@ const cloneInputSchema = idInputSchema.extend({
   risk: z.enum(["low", "medium", "high", "critical"]).optional()
 });
 const policyTransition = { via: "policy_gate" } satisfies PrivilegedTransitionOptions;
+const routingTransition = { via: "policy_gate" } satisfies PrivilegedTransitionOptions;
 const domainTransition = { via: "domain_service" } satisfies PrivilegedTransitionOptions;
 
 export function evaluateAndRecordPolicy(
@@ -560,6 +561,51 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
       return store.submitWorkResult(input);
     }
   };
+}
+
+/**
+ * JC and DC capability issuance are DIRECT-ADDRESSED lanes: the calling bridge
+ * IS the provider, so the executor is authoritatively known at issuance time and
+ * no model is consulted.
+ *
+ * When Nimble routing is enabled, `authoritativeRouteAllows` requires persisted
+ * routing evidence for every claim. Those lanes can never obtain model-routed
+ * evidence, so without this the gate would reject every capability claim - the
+ * claim aborts before policy is even evaluated. Record a deterministic routing
+ * decision at the point the provider is known, using source
+ * "deterministic_fallback" so the evidence chain distinguishes direct routing
+ * from model routing. This adds no bypass: the gate still requires valid,
+ * worker-matching evidence, and lanes that must be model-routed are unaffected.
+ */
+export function recordDirectLaneRoutingDecision(
+  store: WorkItemStore,
+  input: { workItemId: string; workerId: string; lane: "jc" | "dc"; toolName: string; now?: Date }
+): void {
+  const existing = store.getLatestAuthoritativeRoutingEvidence(input.workItemId);
+  // Idempotent: a retry must not append a second decision, and an existing
+  // model-routed decision stays authoritative.
+  if (existing && (existing.decision === "route" || existing.decision === "fallback")) {
+    return;
+  }
+  store.recordAuthoritativeRoutingEvidence(
+    {
+      workItemId: input.workItemId,
+      selectedActorId: input.workerId,
+      decision: "route",
+      source: "deterministic_fallback",
+      reasonCode: `direct_lane_${input.lane}_capability_issuance`,
+      lane: input.lane,
+      routerVersion: "acs.direct-lane.v1",
+      promptVersion: "none",
+      eligible: [input.workerId],
+      excluded: {},
+      scores: { [input.workerId]: 100 },
+      candidates: [input.workerId],
+      constraints: { tool: input.toolName, directAddressed: true },
+      normalizedDecision: { lane: input.lane, workerId: input.workerId }
+    },
+    routingTransition
+  );
 }
 
 /** When Nimble routing is enabled, a claim must match the persisted executor. */
