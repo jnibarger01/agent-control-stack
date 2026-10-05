@@ -32,9 +32,9 @@ const ORIGIN = 'https://gw.test';
 const b64u = (buf) => Buffer.from(buf).toString('base64url');
 const now = () => Math.floor(Date.now() / 1000);
 
-function token(aud) {
+function token(aud, iss = ORIGIN) {
   const h = b64u(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-  const p = b64u(JSON.stringify({ iss: ORIGIN, sub: 'jacen', client_id: 'c1', aud, scope: 'mcp', iat: now(), exp: now() + 600, jti: crypto.randomUUID() }));
+  const p = b64u(JSON.stringify({ iss, sub: 'jacen', client_id: 'c1', aud, scope: 'mcp', iat: now(), exp: now() + 600, jti: crypto.randomUUID() }));
   return `${h}.${p}.${crypto.createHmac('sha256', KEY).update(`${h}.${p}`).digest('base64url')}`;
 }
 
@@ -123,7 +123,7 @@ test('jc lane refuses to start without its own ACS bridge credential', async () 
 test('jc lane disabled: /jc/mcp and its metadata are not routable', async () => {
   const gw = await startGateway({});
   try {
-    const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`), { jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`, `${ORIGIN}/jc`), { jsonrpc: '2.0', id: 1, method: 'tools/list' });
     assert.equal(r.status, 404);
     assert.equal((await fetch(`http://127.0.0.1:${gw.port}/.well-known/oauth-protected-resource/jc/mcp`)).status, 404);
   } finally { gw.child.kill('SIGKILL'); }
@@ -133,7 +133,7 @@ test('RFC 8707 audience separation between /mcp and /jc/mcp', async () => {
   const { gw, dcUp, jcUp, close } = await lane();
   try {
     const dcToken = token(`${ORIGIN}/mcp`);
-    const jcToken = token(`${ORIGIN}/jc/mcp`);
+    const jcToken = token(`${ORIGIN}/jc/mcp`, `${ORIGIN}/jc`);
     const listTools = { jsonrpc: '2.0', id: 1, method: 'tools/list' };
 
     const crossToJc = await call(gw.port, '/jc/mcp', dcToken, listTools);
@@ -154,38 +154,102 @@ test('RFC 8707 audience separation between /mcp and /jc/mcp', async () => {
   } finally { close(); }
 });
 
-test('OAuth flow mints a jc-audience token only when resource=/jc/mcp is requested', async () => {
+test('hosted root OAuth flow preserves the JC lane without resource on token exchange', async () => {
   const { gw, close } = await lane();
   try {
     const base = `http://127.0.0.1:${gw.port}`;
-    const reg = await (await fetch(`${base}/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ redirect_uris: ['http://127.0.0.1:9/cb'] }) })).json();
+    const resourceMeta = await (await fetch(`${base}/.well-known/oauth-protected-resource/jc/mcp`)).json();
+    assert.deepEqual(resourceMeta.authorization_servers, [`${ORIGIN}/jc`]);
+
+    const asMeta = await (await fetch(`${base}/.well-known/oauth-authorization-server/jc`)).json();
+    assert.equal(asMeta.issuer, `${ORIGIN}/jc`);
+    for (const [name, pathname] of [
+      ['authorization_endpoint', '/authorize'],
+      ['token_endpoint', '/token'],
+      ['registration_endpoint', '/register'],
+    ]) {
+      const endpoint = new URL(asMeta[name]);
+      assert.equal(endpoint.origin + endpoint.pathname, `${ORIGIN}${pathname}`);
+      assert.equal(endpoint.searchParams.get('oauth_lane'), 'jc');
+      assert.equal(endpoint.searchParams.get('resource'), `${ORIGIN}/jc/mcp`);
+    }
+
+    const reg = await (await fetch(`${base}/register?oauth_lane=jc&resource=${encodeURIComponent(`${ORIGIN}/jc/mcp`)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        redirect_uris: ['http://127.0.0.1:9/cb'],
+        grant_types: ['authorization_code', 'refresh_token'],
+        token_endpoint_auth_method: 'none',
+      }),
+    })).json();
+    assert.equal(reg.token_endpoint_auth_method, 'none');
+    assert.equal(reg.client_secret, undefined);
+
     const verifier = crypto.randomBytes(32).toString('base64url');
     const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
-    const params = { client_id: reg.client_id, redirect_uri: 'http://127.0.0.1:9/cb', response_type: 'code', code_challenge: challenge, code_challenge_method: 'S256', scope: 'mcp', state: 's' };
+    const params = {
+      client_id: reg.client_id,
+      redirect_uri: 'http://127.0.0.1:9/cb',
+      response_type: 'code',
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+      scope: 'mcp',
+      state: 's',
+      oauth_lane: 'jc',
+    };
 
-    const bad = await fetch(`${base}/authorize?${new URLSearchParams({ ...params, resource: `${ORIGIN}/other` })}`, { redirect: 'manual' });
-    assert.equal(bad.status, 302);
-    assert.match(bad.headers.get('location'), /error=invalid_target/);
-
-    const page = await fetch(`${base}/authorize?${new URLSearchParams({ ...params, resource: `${ORIGIN}/jc/mcp` })}`);
-    const html = await page.text();
+    const page = await fetch(`${base}/authorize?${new URLSearchParams(params)}`);
     assert.equal(page.status, 200);
+    const html = await page.text();
     assert.match(html, /Jace Commander access/);
     assert.match(html, /ROOT commands/);
+    assert.match(html, new RegExp(`${ORIGIN.replaceAll('.', '\\.')}/jc/mcp`));
 
     const consent = await fetch(`${base}/authorize/consent`, {
-      method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      method: 'POST',
+      redirect: 'manual',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({ ...params, resource: `${ORIGIN}/jc/mcp`, passphrase: 'pass-phrase' }).toString(),
     });
-    const code = new URL(consent.headers.get('location')).searchParams.get('code');
-    const tokens = await (await fetch(`${base}/token`, {
-      method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: params.redirect_uri, client_id: reg.client_id }).toString(),
-    })).json();
+    assert.equal(consent.status, 302);
+    const location = new URL(consent.headers.get('location'));
+    assert.equal(location.searchParams.get('iss'), `${ORIGIN}/jc`);
+    const code = location.searchParams.get('code');
+
+    const tokenResponse = await fetch(`${base}/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        code_verifier: verifier,
+        redirect_uri: params.redirect_uri,
+        client_id: reg.client_id,
+      }).toString(),
+    });
+    assert.equal(tokenResponse.status, 200);
+    const tokens = await tokenResponse.json();
     const claims = JSON.parse(Buffer.from(tokens.access_token.split('.')[1], 'base64url').toString('utf8'));
+    assert.equal(claims.iss, `${ORIGIN}/jc`);
     assert.equal(claims.aud, `${ORIGIN}/jc/mcp`);
     assert.equal((await call(gw.port, '/jc/mcp', tokens.access_token, { jsonrpc: '2.0', id: 1, method: 'tools/list' })).status, 200);
     assert.equal((await call(gw.port, '/mcp', tokens.access_token, { jsonrpc: '2.0', id: 1, method: 'tools/list' })).status, 401);
+
+    const refreshResponse = await fetch(`${base}/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: tokens.refresh_token,
+        client_id: reg.client_id,
+      }).toString(),
+    });
+    assert.equal(refreshResponse.status, 200);
+    const refreshed = await refreshResponse.json();
+    const refreshedClaims = JSON.parse(Buffer.from(refreshed.access_token.split('.')[1], 'base64url').toString('utf8'));
+    assert.equal(refreshedClaims.iss, `${ORIGIN}/jc`);
+    assert.equal(refreshedClaims.aud, `${ORIGIN}/jc/mcp`);
   } finally { close(); }
 });
 
@@ -199,7 +263,7 @@ test('tools/call: jc issue route + jc credential, spoofed meta stripped, forward
         _meta: { acsCapability: { payload: { forged: true }, signature: 'forged', keyId: 'x' }, capability: { forged: true }, progressToken: 'p1' },
       },
     };
-    const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`), body);
+    const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`, `${ORIGIN}/jc`), body);
     assert.equal(r.status, 200);
     assert.equal(acs.requests.length, 1);
     assert.equal(acs.requests[0].path, '/jc/capability/issue');
@@ -231,7 +295,7 @@ test('privileged_exec awaiting human approval fails closed and surfaces the ACS 
     }),
   });
   try {
-    const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`), {
+    const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`, `${ORIGIN}/jc`), {
       jsonrpc: '2.0', id: 'jc-approval', method: 'tools/call', params: { name: 'privileged_exec', arguments: { argv: ['/usr/bin/apt-get', 'update'] } },
     });
     assert.equal(r.status, 200);
@@ -254,7 +318,7 @@ test('ACS unreachable fails closed on the jc lane', async () => {
   const jcPort = await jcUp.listen();
   const gw = await startGateway({ JC_ENABLED: '1', JC_UPSTREAM: `http://127.0.0.1:${jcPort}`, ACS_GATEWAY_URL: 'http://127.0.0.1:1', ACS_JC_GATEWAY_TOKEN: 'jc-bridge-token' });
   try {
-    const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`), { jsonrpc: '2.0', id: 'jc-unreachable', method: 'tools/call', params: { name: 'jc_status', arguments: {} } });
+    const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`, `${ORIGIN}/jc`), { jsonrpc: '2.0', id: 'jc-unreachable', method: 'tools/call', params: { name: 'jc_status', arguments: {} } });
     assert.equal(r.status, 200);
     const body = await r.json();
     assert.equal(body.jsonrpc, '2.0');
@@ -277,7 +341,7 @@ test('wrong-audience envelope on the jc route fails closed (acs_capability_wrong
     }),
   });
   try {
-    const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`), {
+    const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`, `${ORIGIN}/jc`), {
       jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'acs_read', arguments: { view: 'health' } },
     });
     assert.equal(r.status, 200);
@@ -300,7 +364,7 @@ test('JSON-RPC batch containing tools/call is rejected fail-closed on /jc/mcp', 
       { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} },
       { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'acs_read', arguments: { view: 'health' } } },
     ];
-    const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`), batch);
+    const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`, `${ORIGIN}/jc`), batch);
     assert.equal(r.status, 503);
     assert.equal((await r.json()).code, 'batched_tools_call_rejected');
     assert.equal(acs.requests.length, 0, 'no ACS issuance for a rejected batch');
@@ -315,7 +379,7 @@ test('JSON-RPC batch without tools/call still proxies on /jc/mcp', async () => {
       { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} },
       { jsonrpc: '2.0', id: 2, method: 'ping', params: {} },
     ];
-    const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`), batch);
+    const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`, `${ORIGIN}/jc`), batch);
     assert.equal(r.status, 200);
     assert.equal(acs.requests.length, 0);
   } finally { close(); }
@@ -384,7 +448,7 @@ for (const [label, relative] of [['absolute path with spaces', false], ['relativ
 test('/jc/mcp refuses to issue or forward when JC_UPSTREAM is not the jc bridge', async () => {
   const { gw, acs, dcUp, jcUp, close } = await lane({ jcVariant: 'dc' });
   try {
-    const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`), { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'jc_status', arguments: {} } });
+    const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`, `${ORIGIN}/jc`), { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'jc_status', arguments: {} } });
     assert.equal(r.status, 200);
     const body = await r.json();
     assert.equal(body.jsonrpc, '2.0');
