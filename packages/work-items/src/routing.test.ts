@@ -296,6 +296,83 @@ describe("authoritative routing persistence", () => {
     );
   });
 
+  it("fails closed when a route-shadow observation references a missing authoritative decision", () => {
+    const f = fixture();
+    directory = f.directory;
+    expect(() =>
+      f.store.recordRouteShadowObservation({ decisionId: "missing-shadow-decision", status: "no_recommendation" }, via)
+    ).toThrowError(expect.objectContaining<Partial<ControlStackError>>({ code: "routing_decision_not_found" }));
+  });
+
+  it("refuses route-shadow observations for authoritative rejects", () => {
+    const f = fixture();
+    directory = f.directory;
+    const rejected = f.store.recordAuthoritativeRoutingEvidence(
+      evidenceInput(f.workItem.id, {
+        decision: "reject",
+        source: "deterministic_fallback",
+        reasonCode: "no_eligible_candidate",
+        candidates: [],
+        eligible: [],
+        scores: {},
+        normalizedDecision: { decision: "reject" }
+      }),
+      via
+    );
+    expect(() =>
+      f.store.recordRouteShadowObservation({ decisionId: rejected.decisionId, status: "no_recommendation" }, via)
+    ).toThrowError(expect.objectContaining<Partial<ControlStackError>>({ code: "routing_shadow_not_applicable" }));
+  });
+
+  it("round-trips the complete route-shadow observation projection", () => {
+    const f = fixture();
+    directory = f.directory;
+    const decision = f.store.recordAuthoritativeRoutingEvidence(
+      evidenceInput(f.workItem.id, {
+        missionId: "mission-shadow",
+        selectedActorId: "codex-cli",
+        candidates: ["codex-cli", "claude-code"]
+      }),
+      via
+    );
+    const observedAt = new Date("2026-10-02T12:01:00.000Z");
+    const observation = f.store.recordRouteShadowObservation(
+      {
+        decisionId: decision.decisionId,
+        status: "recommended",
+        recommendedExecutorId: "claude-code",
+        confidence: 0.73,
+        model: "jev-shadow",
+        failureReason: "counterfactual_only",
+        latencyMs: 12,
+        questionSetVersion: "jev-route-shadow@test",
+        probabilities: { "codex-cli": 0.27, "claude-code": 0.73 },
+        now: observedAt
+      },
+      via
+    );
+    expect(observation).toMatchObject({
+      decisionId: decision.decisionId,
+      workItemId: f.workItem.id,
+      missionId: "mission-shadow",
+      source: "jev",
+      mode: "shadow",
+      status: "recommended",
+      recommendedExecutorId: "claude-code",
+      confidence: 0.73,
+      model: "jev-shadow",
+      failureReason: "counterfactual_only",
+      authoritativeExecutorId: "codex-cli",
+      authoritativeSource: "nimble",
+      agrees: false,
+      latencyMs: 12,
+      questionSetVersion: "jev-route-shadow@test",
+      candidates: ["codex-cli", "claude-code"],
+      probabilities: { "codex-cli": 0.27, "claude-code": 0.73 },
+      createdAt: observedAt.toISOString()
+    });
+  });
+
   it("requires the privileged transition before writing evidence or outcomes", () => {
     const f = fixture();
     directory = f.directory;
