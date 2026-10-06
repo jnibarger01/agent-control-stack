@@ -107,7 +107,10 @@ export async function startJcAcs(box: Sandbox, allowedRoots: string[]): Promise<
       const response = await fetch(`${url}/internal/execution-admission`, {
         headers: { authorization: `Bearer ${OPERATOR_TOKEN}` }
       });
-      return (await response.json()) as { global: { active: number; queued: number }; wait: { active: number; queued: number } };
+      return (await response.json()) as {
+        global: { active: number; queued: number };
+        wait: { active: number; queued: number };
+      };
     },
     close: () => app.close()
   };
@@ -189,7 +192,7 @@ export function jcAccessToken(origin: string, audience = `${origin}/jc/mcp`): st
   const b64u = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
   const header = b64u({ alg: "HS256", typ: "JWT" });
   const payload = b64u({
-    iss: origin,
+    iss: `${origin}/jc`,
     sub: "jacen",
     client_id: "jc-e2e-cli",
     aud: audience,

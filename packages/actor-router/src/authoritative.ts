@@ -10,6 +10,7 @@ import type {
 import { askNimbleToChooseExecutor, type NimbleChoiceResult } from "./nimble-client.js";
 import { NIMBLE_PROMPT_VERSION, NIMBLE_ROUTER_VERSION, type NimbleRoutingConfig } from "./nimble-config.js";
 import { routeActor, type ActorRoutingInput } from "./index.js";
+import { startRouteShadow, type RouteShadowOptions } from "./route-shadow.js";
 
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "blocked", "cancelled", "rejected", "quarantined"]);
 // TypeSafe Choice rejects criteria outside 2–26 options. One eligible executor is already decided.
@@ -76,6 +77,8 @@ export interface DecideAuthoritativeRouteOptions {
   store: AuthoritativeRoutingPort;
   transition: PrivilegedTransitionOptions;
   fetchImpl?: typeof fetch;
+  /** ADR 0025 shadow stage. Observed after the decision is persisted; never read back by the decision. */
+  routeShadow?: RouteShadowOptions;
 }
 
 /**
@@ -85,6 +88,52 @@ export interface DecideAuthoritativeRouteOptions {
 export async function decideAuthoritativeRoute(
   options: DecideAuthoritativeRouteOptions
 ): Promise<AuthoritativeRouteResult> {
+  const result = await decideRoute(options);
+  if (options.routeShadow) launchShadow(options, result);
+  return result;
+}
+
+/**
+ * Shadow only fresh or replacement decisions that selected an executor from two or more candidates.
+ * Replays, rejects and sole-candidate decisions are never shadowed, so a resume does not re-query a model.
+ */
+function launchShadow(options: DecideAuthoritativeRouteOptions, result: AuthoritativeRouteResult): void {
+  try {
+    const shadow = options.routeShadow;
+    const evidence = result.evidence;
+    if (!shadow || !evidence) return;
+    if (result.disposition !== "fresh" && result.disposition !== "replacement") return;
+    if (result.decision === "reject" || !result.executorId) return;
+    const byId = new Map(options.agents.map((agent) => [agent.id, agent]));
+    const candidates = evidence.candidates.flatMap((id) => {
+      const agent = byId.get(id);
+      if (!agent) return [];
+      return [
+        {
+          id: agent.id,
+          ...(agent.acpRole ? { role: agent.acpRole } : {}),
+          ...(agent.kind ? { kind: agent.kind } : {}),
+          capabilities: agent.capabilities.map((capability) => capability.name)
+        }
+      ];
+    });
+    if (candidates.length < MIN_NIMBLE_CANDIDATES) return;
+    startRouteShadow(shadow, {
+      decisionId: result.decisionId,
+      workItemId: options.context.workItemId,
+      ...(options.context.missionId ? { missionId: options.context.missionId } : {}),
+      operationType: options.context.operationType,
+      requiredCapabilities: [...options.context.requiredCapabilities],
+      ...(options.context.lane ? { lane: options.context.lane } : {}),
+      authoritative: { executorId: result.executorId, source: result.source },
+      candidates
+    });
+  } catch {
+    // The shadow stage can never fail a route.
+  }
+}
+
+async function decideRoute(options: DecideAuthoritativeRouteOptions): Promise<AuthoritativeRouteResult> {
   const { context, store } = options;
   const snapshot = store.getWorkItemRoutingSnapshot(context.workItemId);
   if (!snapshot) {

@@ -82,4 +82,41 @@ describe("Jev authority boundary (ADR 0020)", () => {
       expect(await boundaryMessages(file, adapterImport)).toEqual([]);
     }
   );
+  describe("route shadow (ADR 0025)", () => {
+    const routeShadowImport =
+      'import { createJevRouteShadow } from "@agent-control-stack/policy-gate";\nvoid createJevRouteShadow;\n';
+
+    it.each([
+      "packages/actor-router/src/authoritative.ts",
+      "packages/work-items/src/store.ts",
+      "packages/execution-admission/src/index.ts",
+      "apps/gateway/src/server.ts",
+      "apps/gateway/src/mcp.ts"
+    ])("refuses the route shadow factory in %s", async (file) => {
+      expect((await boundaryMessages(file, routeShadowImport)).join(" ")).toContain("advisory-only");
+    });
+
+    it.each(["apps/worker/src/index.ts", "apps/gateway/src/tools/execute-approved.ts"])(
+      "allows the route shadow factory only in the composition root %s",
+      async (file) => {
+        expect(await boundaryMessages(file, routeShadowImport)).toEqual([]);
+      }
+    );
+
+    it("keeps the router package from importing the Jev adapter", async () => {
+      const messages = await boundaryMessages(
+        "packages/actor-router/src/route-shadow.ts",
+        'import { classifyJev } from "@agent-control-stack/jev-advisor";\nvoid classifyJev;\n'
+      );
+      expect(messages.join(" ")).toContain("advisory-only");
+    });
+
+    it("refuses the route shadow observer in policy decision modules", async () => {
+      const messages = await boundaryMessages(
+        "packages/policy-gate/src/authoritative-dispatch.ts",
+        'import { createJevRouteShadowObserver } from "./jev-shadow.js";\nvoid createJevRouteShadowObserver;\n'
+      );
+      expect(messages.join(" ")).toContain("shadow hook");
+    });
+  });
 });

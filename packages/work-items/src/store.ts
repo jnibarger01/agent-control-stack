@@ -189,6 +189,8 @@ import {
   recordActorRoutingDecisionInputSchema,
   recordAuthoritativeRoutingEvidenceInputSchema,
   recordRoutingExecutionOutcomeInputSchema,
+  recordRouteShadowObservationInputSchema,
+  routeShadowObservationSchema,
   routingExecutionOutcomeSchema,
   workItemRoutingSnapshotSchema,
   type ActorReliability,
@@ -198,6 +200,8 @@ import {
   type RecordActorRoutingDecisionInput,
   type RecordAuthoritativeRoutingEvidenceInput,
   type RecordRoutingExecutionOutcomeInput,
+  type RecordRouteShadowObservationInput,
+  type RouteShadowObservation,
   type RoutingExecutionOutcome,
   type WorkItemRoutingSnapshot
 } from "./routing.js";
@@ -399,6 +403,28 @@ interface AuthoritativeEvidenceRow extends RoutingDecisionRow {
   constraints_json: string;
   normalized_decision_json: string;
   supersedes_decision_id: string | null;
+}
+
+interface RouteShadowRow {
+  observation_id: string;
+  decision_id: string;
+  work_item_id: string;
+  mission_id: string | null;
+  source: "jev";
+  mode: "shadow";
+  status: RouteShadowObservation["status"];
+  recommended_executor_id: string | null;
+  confidence: number | null;
+  model: string | null;
+  failure_reason: string | null;
+  authoritative_executor_id: string | null;
+  authoritative_source: "nimble" | "deterministic_fallback";
+  agrees: number | null;
+  latency_ms: number | null;
+  question_set_version: string | null;
+  candidate_json: string;
+  probabilities_json: string | null;
+  created_at: string;
 }
 
 interface RoutingOutcomeRow {
@@ -1287,6 +1313,11 @@ export interface WorkItemStore {
     options: PrivilegedTransitionOptions
   ): RoutingExecutionOutcome;
   listRoutingExecutionOutcomes(decisionId: string): RoutingExecutionOutcome[];
+  recordRouteShadowObservation(
+    input: RecordRouteShadowObservationInput,
+    options: PrivilegedTransitionOptions
+  ): RouteShadowObservation;
+  listRouteShadowObservations(decisionId: string): RouteShadowObservation[];
   recordActorReliability(input: RecordActorReliabilityInput, options: PrivilegedTransitionOptions): ActorReliability;
   getActorReliability(actorId: string): ActorReliability | undefined;
   recordValidationRun(input: RecordValidationRunInput, options: PrivilegedTransitionOptions): ValidationRun;
@@ -3924,6 +3955,121 @@ export class SqliteWorkItemStore implements WorkItemStore {
       .prepare(`SELECT * FROM routing_execution_outcomes WHERE decision_id = ? ORDER BY created_at ASC`)
       .all(decisionId) as unknown as RoutingOutcomeRow[];
     return rows.map((row) => rowToRoutingExecutionOutcome(row));
+  }
+
+  /**
+   * Record what the Jev shadow observer would have recommended beside the persisted authoritative decision.
+   * ADR 0025: shadow only. The authoritative executor, source and candidate set are read from the persisted
+   * evidence, never from the caller, and an out-of-set recommendation is stored as `invalid_recommendation`.
+   */
+  recordRouteShadowObservation(
+    input: RecordRouteShadowObservationInput,
+    options: PrivilegedTransitionOptions
+  ): RouteShadowObservation {
+    requirePrivilegedTransition(options, "record_actor_routing_decision");
+    const parsed = recordRouteShadowObservationInputSchema.parse(input);
+    return this.write(() => {
+      const existing = this.db
+        .prepare(`SELECT * FROM routing_shadow_observations WHERE decision_id = ? AND source = 'jev'`)
+        .get(parsed.decisionId) as unknown as RouteShadowRow | undefined;
+      if (existing) return { value: rowToRouteShadowObservation(existing), events: [] };
+      const row = this.db
+        .prepare(
+          `SELECT decision.work_item_id, decision.selected_actor_id, evidence.mission_id, evidence.source, evidence.decision,
+                  evidence.candidate_json
+           FROM actor_routing_decisions AS decision
+           JOIN actor_routing_evidence AS evidence ON evidence.decision_id = decision.decision_id
+           WHERE decision.decision_id = ?`
+        )
+        .get(parsed.decisionId) as
+        | {
+            work_item_id: string;
+            selected_actor_id: string | null;
+            mission_id: string | null;
+            source: "nimble" | "deterministic_fallback";
+            decision: "route" | "fallback" | "reject";
+            candidate_json: string;
+          }
+        | undefined;
+      if (!row) {
+        throw new ControlStackError(
+          "routing_decision_not_found",
+          `routing decision ${parsed.decisionId} has no authoritative evidence`
+        );
+      }
+      if (row.decision === "reject") {
+        throw new ControlStackError(
+          "routing_shadow_not_applicable",
+          `routing decision ${parsed.decisionId} did not select an executor`
+        );
+      }
+      const candidates = JSON.parse(row.candidate_json) as string[];
+      const recommended = parsed.recommendedExecutorId;
+      const status: RouteShadowObservation["status"] =
+        recommended !== undefined && !candidates.includes(recommended) ? "invalid_recommendation" : parsed.status;
+      const agrees = status === "recommended" ? recommended === row.selected_actor_id : null;
+      const observationId = createId("rshadow");
+      const createdAt = (parsed.now ?? new Date()).toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO routing_shadow_observations
+          (observation_id, decision_id, work_item_id, mission_id, source, mode, status, recommended_executor_id, confidence,
+           model, failure_reason, authoritative_executor_id, authoritative_source, agrees, latency_ms, question_set_version,
+           candidate_json, probabilities_json, created_at)
+          VALUES (?, ?, ?, ?, 'jev', 'shadow', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          observationId,
+          parsed.decisionId,
+          row.work_item_id,
+          row.mission_id,
+          status,
+          recommended ?? null,
+          parsed.confidence ?? null,
+          parsed.model ?? null,
+          parsed.failureReason ?? null,
+          row.selected_actor_id,
+          row.source,
+          agrees === null ? null : agrees ? 1 : 0,
+          parsed.latencyMs ?? null,
+          parsed.questionSetVersion ?? null,
+          row.candidate_json,
+          parsed.probabilities ? JSON.stringify(parsed.probabilities) : null,
+          createdAt
+        );
+      const stored = this.db
+        .prepare(`SELECT * FROM routing_shadow_observations WHERE observation_id = ?`)
+        .get(observationId) as unknown as RouteShadowRow;
+      const event = this.appendAuditEvent(
+        createEvent(
+          "actor.routing_shadow.recorded",
+          {
+            observationId,
+            decisionId: parsed.decisionId,
+            workItemId: row.work_item_id,
+            source: "jev",
+            mode: "shadow",
+            status,
+            recommendedExecutorId: recommended ?? null,
+            authoritativeExecutorId: row.selected_actor_id,
+            agrees
+          },
+          {
+            "work_item.id": row.work_item_id,
+            "routing.decision_id": parsed.decisionId,
+            "actor.id": row.selected_actor_id ?? "none"
+          }
+        )
+      );
+      return { value: rowToRouteShadowObservation(stored), events: [event] };
+    });
+  }
+
+  listRouteShadowObservations(decisionId: string): RouteShadowObservation[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM routing_shadow_observations WHERE decision_id = ? ORDER BY created_at ASC`)
+      .all(decisionId) as unknown as RouteShadowRow[];
+    return rows.map((row) => rowToRouteShadowObservation(row));
   }
 
   private readAuthoritativeRoutingEvidence(decisionId: string): AuthoritativeRoutingEvidence | undefined {
@@ -9282,6 +9428,32 @@ function rowToAuthoritativeRoutingEvidence(row: AuthoritativeEvidenceRow): Autho
     normalizedDecision: JSON.parse(row.normalized_decision_json) as Record<string, unknown>,
     ...(row.supersedes_decision_id === null ? {} : { supersedesDecisionId: row.supersedes_decision_id }),
     idempotencyKey: row.idempotency_key,
+    createdAt: row.created_at
+  });
+}
+
+function rowToRouteShadowObservation(row: RouteShadowRow): RouteShadowObservation {
+  return routeShadowObservationSchema.parse({
+    observationId: row.observation_id,
+    decisionId: row.decision_id,
+    workItemId: row.work_item_id,
+    ...(row.mission_id === null ? {} : { missionId: row.mission_id }),
+    source: row.source,
+    mode: row.mode,
+    status: row.status,
+    ...(row.recommended_executor_id === null ? {} : { recommendedExecutorId: row.recommended_executor_id }),
+    ...(row.confidence === null ? {} : { confidence: row.confidence }),
+    ...(row.model === null ? {} : { model: row.model }),
+    ...(row.failure_reason === null ? {} : { failureReason: row.failure_reason }),
+    ...(row.authoritative_executor_id === null ? {} : { authoritativeExecutorId: row.authoritative_executor_id }),
+    authoritativeSource: row.authoritative_source,
+    ...(row.agrees === null ? {} : { agrees: row.agrees === 1 }),
+    ...(row.latency_ms === null ? {} : { latencyMs: row.latency_ms }),
+    ...(row.question_set_version === null ? {} : { questionSetVersion: row.question_set_version }),
+    candidates: JSON.parse(row.candidate_json) as string[],
+    ...(row.probabilities_json === null
+      ? {}
+      : { probabilities: JSON.parse(row.probabilities_json) as Record<string, number> }),
     createdAt: row.created_at
   });
 }

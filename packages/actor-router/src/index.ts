@@ -148,6 +148,15 @@ export {
   type DecideAuthoritativeRouteOptions
 } from "./authoritative.js";
 export {
+  DEFAULT_ROUTE_SHADOW_TIMEOUT_MS,
+  type RouteShadowCandidate,
+  type RouteShadowInput,
+  type RouteShadowObserver,
+  type RouteShadowOptions,
+  type RouteShadowRecorder,
+  type RouteShadowReport
+} from "./route-shadow.js";
+export {
   askNimbleToChooseExecutor,
   probeNimbleRouting,
   type NimbleChoiceRequest,

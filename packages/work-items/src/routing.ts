@@ -103,6 +103,67 @@ export const recordRoutingExecutionOutcomeInputSchema = routingExecutionOutcomeS
   .extend({ now: z.date().optional() })
   .strict();
 
+export const ROUTE_SHADOW_STATUSES = [
+  "recommended",
+  "invalid_recommendation",
+  "no_recommendation",
+  "degraded",
+  "timeout",
+  "error"
+] as const;
+
+/** Statuses a shadow observer may report. `invalid_recommendation` is derived by the store, never claimed. */
+export const ROUTE_SHADOW_REPORTED_STATUSES = [
+  "recommended",
+  "no_recommendation",
+  "degraded",
+  "timeout",
+  "error"
+] as const;
+
+/** ADR 0025: shadow is the only stage the schema can represent. */
+export const routeShadowObservationSchema = z
+  .object({
+    observationId: identifierSchema,
+    decisionId: identifierSchema,
+    workItemId: identifierSchema,
+    missionId: identifierSchema.optional(),
+    source: z.literal("jev"),
+    mode: z.literal("shadow"),
+    status: z.enum(ROUTE_SHADOW_STATUSES),
+    recommendedExecutorId: z.string().min(1).max(256).optional(),
+    confidence: z.number().min(0).max(1).optional(),
+    model: z.string().min(1).max(128).optional(),
+    failureReason: z.string().min(1).max(128).optional(),
+    authoritativeExecutorId: identifierSchema.optional(),
+    authoritativeSource: z.enum(["nimble", "deterministic_fallback"]),
+    agrees: z.boolean().optional(),
+    latencyMs: z.number().int().nonnegative().optional(),
+    questionSetVersion: z.string().min(1).max(128).optional(),
+    candidates: z.array(identifierSchema),
+    probabilities: z.record(z.string(), z.number().min(0).max(1)).optional(),
+    createdAt: z.string().datetime({ offset: true })
+  })
+  .strict();
+
+export const recordRouteShadowObservationInputSchema = z
+  .object({
+    decisionId: identifierSchema,
+    status: z.enum(ROUTE_SHADOW_REPORTED_STATUSES),
+    recommendedExecutorId: z.string().min(1).max(256).optional(),
+    confidence: z.number().min(0).max(1).optional(),
+    model: z.string().min(1).max(128).optional(),
+    failureReason: z.string().min(1).max(128).optional(),
+    latencyMs: z.number().int().nonnegative().optional(),
+    questionSetVersion: z.string().min(1).max(128).optional(),
+    probabilities: z.record(z.string(), z.number().min(0).max(1)).optional(),
+    now: z.date().optional()
+  })
+  .strict()
+  .refine((value) => (value.status === "recommended") === (value.recommendedExecutorId !== undefined), {
+    message: "recommendedExecutorId is required exactly when status is recommended"
+  });
+
 export const workItemRoutingSnapshotSchema = z
   .object({
     workItemId: identifierSchema,
@@ -121,3 +182,6 @@ export type RecordAuthoritativeRoutingEvidenceInput = z.infer<typeof recordAutho
 export type RoutingExecutionOutcome = z.infer<typeof routingExecutionOutcomeSchema>;
 export type RecordRoutingExecutionOutcomeInput = z.infer<typeof recordRoutingExecutionOutcomeInputSchema>;
 export type WorkItemRoutingSnapshot = z.infer<typeof workItemRoutingSnapshotSchema>;
+export type RouteShadowObservation = z.infer<typeof routeShadowObservationSchema>;
+export type RouteShadowStatus = (typeof ROUTE_SHADOW_STATUSES)[number];
+export type RecordRouteShadowObservationInput = z.infer<typeof recordRouteShadowObservationInputSchema>;
