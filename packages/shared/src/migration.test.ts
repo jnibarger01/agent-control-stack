@@ -421,6 +421,126 @@ describe("deployed 39-47 lineage (admission permits at 39)", () => {
   });
 });
 
+describe("deployed 39-47 lineage: structural verification and recovery", () => {
+  const RELEASED_MARKER_CHECKSUM = "17d881e7033b4cbd33e1f2b55aefe4e1ae91a0314e8b4b8724a7d46a1fce3c2c";
+
+  function deployed(last = 47): DatabaseSync {
+    const db = database(38);
+    const canonical = new Map(controlPlaneMigrations().map((migration) => [migration.version, migration]));
+    for (let version = 39; version <= last; version += 1) {
+      const next = canonical.get(version + 1)!;
+      db.exec(next.sql);
+      db.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)").run(
+        version,
+        next.name,
+        `${String(version).padStart(3, "0")}_${next.name}.sql`,
+        version === 43 ? RELEASED_MARKER_CHECKSUM : next.checksum,
+        `2026-10-02T03:13:50.${String(version).padStart(3, "0")}Z`
+      );
+    }
+    return db;
+  }
+
+  const metadata = (db: DatabaseSync) => db.prepare("SELECT * FROM schema_migrations ORDER BY version").all();
+
+  // Each drop removes one object a recorded migration must have created; the metadata alone still looks exact.
+  it.each([
+    ["admission_permits table", "DROP TABLE admission_permits"],
+    ["admission_permits.execution_class", "ALTER TABLE admission_permits DROP COLUMN execution_class"],
+    ["admission_permits index", "DROP INDEX idx_admission_permits_lease"],
+    ["change_set_revisions", "DROP TABLE change_set_revisions"],
+    ["change_set_heads", "DROP TABLE change_set_heads"],
+    ["change_set_revisions trigger", "DROP TRIGGER change_set_revisions_no_update"],
+    ["work_item_assignments", "DROP TABLE work_item_assignments"],
+    ["work_item_assignments index", "DROP INDEX work_item_assignments_worker_idx"],
+    ["change_set_approvals", "DROP TABLE change_set_approvals"],
+    ["change_set_approval_revocations", "DROP TABLE change_set_approval_revocations"],
+    ["change_set_approvals trigger", "DROP TRIGGER change_set_approvals_no_delete"],
+    ["change_set_operation_permits", "DROP TABLE change_set_operation_permits"],
+    ["change_set_operation_permits trigger", "DROP TRIGGER change_set_operation_permits_no_update"],
+    ["change_set_operation_permits.authorization_id index", "DROP INDEX change_set_operation_permits_authorization"],
+    ["autonomous_authority_grants", "DROP TABLE autonomous_authority_grants"],
+    ["autonomous_authority_revocations", "DROP TABLE autonomous_authority_revocations"],
+    ["change_set_grant_authorizations", "DROP TABLE change_set_grant_authorizations"],
+    ["autonomous_authority trigger", "DROP TRIGGER autonomous_authority_grants_no_update"]
+  ])("fails closed when %s is missing, without touching metadata", (_label, sql) => {
+    const db = deployed();
+    try {
+      db.exec(sql);
+      const before = metadata(db);
+      expect(() => applyControlPlaneMigrations(db)).toThrow(/deployed migration layout schema validation failed/);
+      expect(metadata(db)).toEqual(before);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("fails closed when the operation-permit rebuild of the last migration never completed", () => {
+    const db = deployed();
+    try {
+      db.exec("ALTER TABLE change_set_operation_permits RENAME TO change_set_operation_permits_previous");
+      const before = metadata(db);
+      expect(() => applyControlPlaneMigrations(db)).toThrow(/deployed migration layout schema validation failed/);
+      expect(metadata(db)).toEqual(before);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("fails closed when a later migration's objects exist but its metadata is not recorded", () => {
+    const db = deployed(42);
+    try {
+      db.exec("CREATE TABLE change_set_approvals (approval_id TEXT PRIMARY KEY)");
+      const before = metadata(db);
+      expect(() => applyControlPlaneMigrations(db)).toThrow(/is not recorded/);
+      expect(metadata(db)).toEqual(before);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("recovers on restart when a migration after a successful repair fails", () => {
+    const db = deployed();
+    try {
+      // The ordinary loop must run canonical 039 after the repair. Make it fail: it renames this table.
+      db.exec("CREATE TABLE jace_commander_capability_issuances__pre037 (x TEXT)");
+      expect(() => applyControlPlaneMigrations(db)).toThrow();
+
+      // The repair committed on its own and is internally consistent: 40-48 renumbered, 39 not applied, no
+      // open transaction, and the failed migration left nothing behind.
+      expect(db.isTransaction).toBe(false);
+      const afterFailure = db.prepare("SELECT version, name, applied_at FROM schema_migrations ORDER BY version").all();
+      expect(afterFailure.map((row) => row.version)).toEqual(
+        [...Array(38).keys()].map((i) => i + 1).concat([40, 41, 42, 43, 44, 45, 46, 47, 48])
+      );
+      expect(afterFailure.find((row) => row.version === 40)).toMatchObject({
+        name: "admission_permits",
+        applied_at: "2026-10-02T03:13:50.039Z"
+      });
+      expect(db.prepare("SELECT 1 FROM schema_migrations WHERE version = 39").get()).toBeUndefined();
+
+      // A second attempt while the cause persists fails the same way and changes nothing (no double renumbering).
+      const stuck = metadata(db);
+      expect(() => applyControlPlaneMigrations(db)).toThrow();
+      expect(metadata(db)).toEqual(stuck);
+
+      // Operator fixes the cause; restart completes the remaining migrations without re-running the repair.
+      db.exec("DROP TABLE jace_commander_capability_issuances__pre037");
+      applyControlPlaneMigrations(db);
+      const rows = db.prepare("SELECT version, name, applied_at FROM schema_migrations ORDER BY version").all();
+      expect(rows.map((row) => `${row.version}:${row.name}`)).toEqual(
+        controlPlaneMigrations().map((migration) => `${migration.version}:${migration.name}`)
+      );
+      expect(rows.find((row) => row.version === 40)).toMatchObject({ applied_at: "2026-10-02T03:13:50.039Z" });
+      const settled = metadata(db);
+      applyControlPlaneMigrations(db);
+      expect(metadata(db)).toEqual(settled);
+    } finally {
+      db.close();
+    }
+  });
+});
+
 describe("fixture-only migrations", () => {
   it("keeps unregistered duplicate-prefix fixtures non-canonical and clearly marked", () => {
     const registered = new Set(controlPlaneMigrations().map((migration) => migration.filename));

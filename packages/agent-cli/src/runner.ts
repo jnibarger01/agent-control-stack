@@ -33,7 +33,8 @@ export function agentEnv(spec: AgentCliSpec, source: NodeJS.ProcessEnv = process
     const allowed =
       (BASE_ENV as readonly string[]).includes(name) ||
       BASE_ENV_PREFIXES.some((prefix) => name.startsWith(prefix)) ||
-      spec.envPassthrough.some((prefix) => name.startsWith(prefix));
+      spec.envPassthrough.some((prefix) => name.startsWith(prefix)) ||
+      (spec.envPassthroughNames?.includes(name) ?? false);
     if (allowed) env[name] = value;
   }
   return env;
@@ -160,6 +161,10 @@ export function runAgent(options: RunAgentOptions): Promise<AgentRunOutcome> {
       stdio: ["ignore", "pipe", "pipe"]
     });
     options.onStart?.(child.pid);
+    // The child is spawned detached, so it is its own process-group leader and -pid addresses the whole tree. A
+    // negative pid is only ever used while the leader has not been reaped: afterwards the number may belong to an
+    // unrelated process, so it is never signalled again from a stale timer.
+    let reaped = false;
     const killGroup = (signal: NodeJS.Signals) => {
       try {
         if (child.pid) process.kill(-child.pid, signal);
@@ -171,7 +176,9 @@ export function runAgent(options: RunAgentOptions): Promise<AgentRunOutcome> {
       if (why === "timeout") timedOut = true;
       else cancelled = true;
       killGroup("SIGTERM");
-      setTimeout(() => killGroup("SIGKILL"), 2_000).unref();
+      setTimeout(() => {
+        if (!reaped) killGroup("SIGKILL");
+      }, 2_000).unref();
     };
     const timer = setTimeout(() => stop("timeout"), options.command.timeoutSec * 1_000);
     const snapshotTimer = options.onSnapshot
@@ -199,7 +206,9 @@ export function runAgent(options: RunAgentOptions): Promise<AgentRunOutcome> {
       clearTimeout(timer);
       if (snapshotTimer) clearInterval(snapshotTimer);
       options.signal?.removeEventListener("abort", onAbort);
+      // Sweep stragglers (grandchildren that outlived the leader) once, immediately, then never signal again.
       killGroup("SIGKILL");
+      reaped = true;
       const text = redactLines(output + extra);
       resolvePromise({
         outcome: cancelled ? "cancelled" : timedOut ? "timed_out" : exitCode === 0 ? "succeeded" : "failed",

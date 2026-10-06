@@ -99,7 +99,7 @@ export const AGENT_RUN_EVENTS = {
 /** A preview is only dispatchable for this long, and only by the operator it was issued to. */
 export const PREVIEW_TTL_MS = 10 * 60_000;
 const MAX_ISSUED_PREVIEWS = 500;
-const MAX_GUARDED_CALLS_PER_RUN = 5_000;
+export const MAX_GUARDED_CALLS_PER_RUN = 5_000;
 
 /** Output that means the CLI never did the work even though it exited 0 (e.g. goose on a 401). */
 const FAILURE_SIGNATURES = [
@@ -214,7 +214,18 @@ export class AgentRunService {
   private readonly active = new Map<string, AbortController>();
   private readonly issued = new Map<string, IssuedPreview>();
   /** Per-run guard credentials (sha256 of the bearer token) and the worktree each run is confined to. */
-  private readonly guards = new Map<string, { tokenHash: Buffer; worktree: string; calls: number; logPath: string }>();
+  private readonly guards = new Map<
+    string,
+    {
+      tokenHash: Buffer;
+      /** Plaintext lives only in this process's memory, solely so it can be scrubbed from anything persisted. */
+      token: string;
+      worktree: string;
+      calls: number;
+      budgetEventRecorded: boolean;
+      logPath: string;
+    }
+  >();
 
   constructor(
     private readonly store: Pick<WorkItemStore, "recordSystemEvent" | "readEvents">,
@@ -263,6 +274,19 @@ export class AgentRunService {
     // Re-previewing an identical, already-claimed request must not reopen it for a second run.
     if (existing?.runId && existing.actorId === actorId) return;
     this.issued.set(hash, { actorId, expiresAt: now + PREVIEW_TTL_MS });
+  }
+
+  private priorRunForConfirmation(confirmationHash: string, actorId: string): AgentRunView | undefined {
+    const requested = this.store.readEvents({ name: AGENT_RUN_EVENTS.requested, limit: 500 });
+    for (const event of [...requested].sort((a, b) => b.sequence - a.sequence)) {
+      const body = event.body as Record<string, unknown>;
+      if (body.confirmationHash !== confirmationHash || body.actorId !== actorId || typeof body.runId !== "string") {
+        continue;
+      }
+      const run = this.get(body.runId);
+      if (run && run.status !== "interrupted") return run;
+    }
+    return undefined;
   }
 
   private async validate(request: DispatchRequest): Promise<DispatchPreview> {
@@ -321,6 +345,14 @@ export class AgentRunService {
       const existing = this.get(issued.runId);
       if (existing) return existing;
     }
+    // Claims are in-memory, so after a gateway restart a fresh preview of an already-run request looks unclaimed.
+    // The audit chain remembers: a confirmation that already produced a run (other than one the restart itself
+    // interrupted, which never completed) returns that run instead of starting a duplicate.
+    const prior = this.priorRunForConfirmation(confirmationHash, actorId);
+    if (prior) {
+      issued.runId = prior.runId;
+      return prior;
+    }
     if (issued.expiresAt <= this.now()) {
       this.issued.delete(confirmationHash);
       throw new ControlStackError(
@@ -364,6 +396,12 @@ export class AgentRunService {
     } catch (error) {
       this.active.delete(runId);
       delete issued.runId;
+      // Best-effort: a cleanup failure must never replace the setup error that is being reported.
+      try {
+        rmSync(outDir, { recursive: true, force: true });
+      } catch {
+        /* the original error is the one the caller needs */
+      }
       throw error;
     }
     void this.execute(runId, ownerToken, preview, prompt, controller, outDir);
@@ -379,6 +417,11 @@ export class AgentRunService {
     outDir: string
   ): Promise<void> {
     const attrs = { "agent_run.id": runId, "agent_run.agent": preview.agentId };
+    // The run's guard token must never reach persisted output, whatever the agent managed to print.
+    const scrub = (text: string): string => {
+      const token = this.guards.get(runId)?.token;
+      return token ? text.split(token).join("[REDACTED]") : text;
+    };
     let worktree;
     try {
       worktree = await createDispatchWorktree({
@@ -395,8 +438,10 @@ export class AgentRunService {
         writeFileSync(tokenFile, token, { mode: 0o600 });
         this.guards.set(runId, {
           tokenHash: createHash("sha256").update(token).digest(),
+          token,
           worktree: worktree.worktreePath,
           calls: 0,
+          budgetEventRecorded: false,
           logPath: toolLogPath
         });
         online = { url: this.config.guardUrl, runId, tokenFile };
@@ -439,8 +484,9 @@ export class AgentRunService {
             /* the run proceeds; recovery then cannot identify the process and will say so */
           }
         },
-        onSnapshot: (text) => writeAtomic(outputPath, text)
+        onSnapshot: (text) => writeAtomic(outputPath, scrub(text))
       });
+      result.output = scrub(result.output);
       writeAtomic(outputPath, result.output);
       const changes = await inspectWorktree(worktree).catch(() => undefined);
       const assessed = assessResult(preview.mode, result, changes);
@@ -477,7 +523,7 @@ export class AgentRunService {
         attributes: attrs
       });
     } catch (error) {
-      const message = redactLines(error instanceof Error ? error.message : String(error)).slice(0, 500);
+      const message = scrub(redactLines(error instanceof Error ? error.message : String(error))).slice(0, 500);
       try {
         this.store.recordSystemEvent({
           name: AGENT_RUN_EVENTS.finished,
@@ -498,7 +544,11 @@ export class AgentRunService {
     } finally {
       this.active.delete(runId);
       this.guards.delete(runId);
-      rmSync(join(outDir, "guard.token"), { force: true });
+      try {
+        rmSync(join(outDir, "guard.token"), { force: true });
+      } catch {
+        /* never mask the run's own outcome; the token is already unusable once the run is no longer active */
+      }
     }
   }
 
@@ -518,12 +568,23 @@ export class AgentRunService {
       throw new ControlStackError("agent_guard_unauthorized", "invalid or expired run credential");
     }
     guard.calls += 1;
-    const verdict =
-      guard.calls > MAX_GUARDED_CALLS_PER_RUN
-        ? ({ decision: "deny", reason: `tool call budget of ${MAX_GUARDED_CALLS_PER_RUN} exhausted` } as const)
-        : decideToolCall(toolName, toolInput, guard.worktree);
+    if (guard.calls > MAX_GUARDED_CALLS_PER_RUN) {
+      // Every recorded call is an append-only audit event, so a run that keeps calling after its budget must not
+      // keep writing: record the exhaustion once, then deny without touching the audit chain or the log.
+      const reason = `tool call budget of ${MAX_GUARDED_CALLS_PER_RUN} exhausted`;
+      if (!guard.budgetEventRecorded) {
+        guard.budgetEventRecorded = true;
+        this.store.recordSystemEvent({
+          name: AGENT_RUN_EVENTS.toolCall,
+          body: { runId, tool: toolName.slice(0, 64), decision: "deny", reason, summary: "" },
+          attributes: { "agent_run.id": runId, "agent_run.tool": toolName.slice(0, 64) }
+        });
+      }
+      return { decision: "deny", reason };
+    }
+    const verdict = decideToolCall(toolName, toolInput, guard.worktree);
     const raw = toolInput.command ?? toolInput.file_path ?? toolInput.notebook_path ?? toolInput.path ?? "";
-    const summary = redactLines(String(raw)).slice(0, 300);
+    const summary = redactLines(String(raw)).split(guard.token).join("[REDACTED]").slice(0, 300);
     this.store.recordSystemEvent({
       name: AGENT_RUN_EVENTS.toolCall,
       body: { runId, tool: toolName.slice(0, 64), decision: verdict.decision, reason: verdict.reason, summary },
@@ -672,6 +733,28 @@ export function processStartTicks(pid: number): number | undefined {
   }
 }
 
+/** Field 5 of /proc/<pid>/stat: the process group id. A process is a group leader only when this equals its pid. */
+export function processGroupId(pid: number): number | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    const pgrp = Number(fields[2]);
+    return Number.isInteger(pgrp) ? pgrp : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Signal the recorded process, addressing its whole group (-pid) only when it really leads one. Signalling -pid
+ * for a process that is not a group leader is either ESRCH or, worse, hits a different group that happens to
+ * carry that number.
+ */
+function signalOrphan(pid: number, recordedTicks: number, signal: NodeJS.Signals): void {
+  if (processStartTicks(pid) !== recordedTicks) return;
+  process.kill(processGroupId(pid) === pid ? -pid : pid, signal);
+}
+
 function terminateOrphan(pid: number, recordedTicks: number | null): OrphanFate {
   let alive = true;
   try {
@@ -687,10 +770,10 @@ function terminateOrphan(pid: number, recordedTicks: number | null): OrphanFate 
     return recordedTicks === null ? "identity_unverified" : "already_exited";
   }
   try {
-    process.kill(-pid, "SIGTERM");
+    signalOrphan(pid, recordedTicks, "SIGTERM");
     setTimeout(() => {
       try {
-        if (processStartTicks(pid) === recordedTicks) process.kill(-pid, "SIGKILL");
+        signalOrphan(pid, recordedTicks, "SIGKILL");
       } catch {
         /* gone */
       }

@@ -1,6 +1,10 @@
 # Plan: retire global admin mode in favour of mission-scoped grants
 
-Status: proposed. Owner: operator decision required at each phase gate.
+Status: proposed; **partly superseded by the product decision on admin mode.** Admin mode is deliberately a full-authority
+mode: when an authorized human operator explicitly enables it, it authorizes every capability (including
+`privileged_exec`), and it is sticky by default (no implicit TTL). Safeguards belong around entering and
+administering it (dedicated scope, stated reason, audit, optional bounded TTL), not inside it. The Phase 4 item that
+lowers the default TTL to 15 minutes is therefore **not adopted**. Owner: operator decision required at each phase gate.
 
 ## Where we are
 

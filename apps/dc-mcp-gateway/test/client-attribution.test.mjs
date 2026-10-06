@@ -27,9 +27,9 @@ const ORIGIN = 'https://gw.test';
 const b64u = (buf) => Buffer.from(buf).toString('base64url');
 const now = () => Math.floor(Date.now() / 1000);
 
-function token(aud, clientId = 'client-muse') {
+function token(aud, clientId = 'client-muse', iss = ORIGIN) {
   const h = b64u(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-  const p = b64u(JSON.stringify({ iss: ORIGIN, sub: 'jacen', client_id: clientId, aud, scope: 'mcp', iat: now(), exp: now() + 600, jti: crypto.randomUUID() }));
+  const p = b64u(JSON.stringify({ iss, sub: 'jacen', client_id: clientId, aud, scope: 'mcp', iat: now(), exp: now() + 600, jti: crypto.randomUUID() }));
   return `${h}.${p}.${crypto.createHmac('sha256', KEY).update(`${h}.${p}`).digest('base64url')}`;
 }
 
@@ -191,7 +191,7 @@ const settle = () => new Promise((r) => setTimeout(r, 300));
 test('end to end: initialize is reported to ACS, throttled, and its clientInfo rides the next tools/call', async () => {
   const { gw, acs, jcUp, close } = await lane((req) => (req.path === '/mcp-clients/observe' ? { status: 202, body: { recorded: true } } : allow(req)));
   try {
-    const bearer = token(`${ORIGIN}/jc/mcp`);
+    const bearer = token(`${ORIGIN}/jc/mcp`, 'client-muse', `${ORIGIN}/jc`);
     const init = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', clientInfo: { name: 'Muse', version: '1.4' }, capabilities: {} } };
     const first = await post(gw.port, bearer, init, { 'user-agent': 'Muse/1.4 (Linux)' });
     assert.equal(first.status, 200);
@@ -227,7 +227,7 @@ test('end to end: initialize is reported to ACS, throttled, and its clientInfo r
 test('an ACS that errors on observation cannot affect the proxied request', async () => {
   const { gw, acs, jcUp, close } = await lane((req) => (req.path === '/mcp-clients/observe' ? { status: 500, body: { error: 'down' } } : allow(req)));
   try {
-    const res = await post(gw.port, token(`${ORIGIN}/jc/mcp`, 'client-grok'), { jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'Grok' } } });
+    const res = await post(gw.port, token(`${ORIGIN}/jc/mcp`, 'client-grok', `${ORIGIN}/jc`), { jsonrpc: '2.0', id: 1, method: 'initialize', params: { clientInfo: { name: 'Grok' } } });
     assert.equal(res.status, 200);
     await settle();
     assert.equal(observes(acs).length, 1);

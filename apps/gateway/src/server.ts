@@ -1,3 +1,4 @@
+import { probeExecutableVersion } from "@agent-control-stack/agent-cli";
 import { registerMissionDispatchRoutes } from "./mission-dispatch-routes.js";
 import {
   CodingMissionController,
@@ -95,6 +96,7 @@ import {
   adminExecutionGate,
   observeLiveManagedAuthority,
   policyContextAuditReceipt,
+  recordDirectLaneRoutingDecision,
   readExecutionModeValue,
   type ManagedAuthorityObservation
 } from "@agent-control-stack/policy-gate";
@@ -299,7 +301,10 @@ export interface GatewayOptions {
   /** Test seam: clock for agent confirmation expiry. */
   agentRunNow?: () => number;
   missionDispatchEnabled?: boolean;
-  /** Admin execution mode lasts this long before reverting to strict. Env: ACS_ADMIN_MODE_TTL_MS. */
+  /**
+   * Optional bounded lifetime for admin execution mode (60000-86400000 ms). Unset means sticky: admin stays on until
+   * an operator disables it, and nothing in this process supplies a default. Env: ACS_ADMIN_MODE_TTL_MS.
+   */
   adminModeTtlMs?: number;
   logger?: boolean;
   auth?: GatewayAuthOptions;
@@ -1196,6 +1201,28 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.get("/health", deepHealth);
 
   const readAuthority = options.readManagedAuthority ?? (() => observeLiveManagedAuthority());
+  // With a managed execution backend configured, finding no managed executor makes authority silently
+  // non-authoritative (the lease holder cannot be verified, so it fails closed). Say so once at startup instead
+  // of leaving operators to discover it as unexplained approval requirements.
+  if (!options.readManagedAuthority && process.env.ACS_EXECUTION_BACKEND?.trim() === "desktop_commander") {
+    try {
+      const startupAuthority = readAuthority();
+      if (startupAuthority.managedExecutorDiscovered === false) {
+        app.log.warn(
+          {
+            event: "managed_executor_not_detected",
+            authoritative: startupAuthority.authoritative,
+            detail: startupAuthority.detail,
+            remediation:
+              "Start the ACS-managed executor (control plane, Jace Commander bridge or remote role) or unset ACS_EXECUTION_BACKEND; until one is detected, execution authority reports non-authoritative and gated actions fail closed."
+          },
+          "ACS_EXECUTION_BACKEND=desktop_commander but no managed executor was detected"
+        );
+      }
+    } catch (error) {
+      app.log.warn({ err: error }, "could not observe managed authority at startup");
+    }
+  }
   const executionModeView = () => {
     workItems.expireAdminModeIfDue();
     const row = workItems.getExecutionMode();
@@ -3229,6 +3256,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           }
           let admissionBound = false;
           let claimAuthorityDenial: { code: string; detail: string } | undefined;
+          // DC capability issuance is direct-addressed: the calling bridge IS the
+          // provider. Same reasoning as the JC lane - persist the routing decision
+          // so the authoritative-routing gate is satisfied by real evidence.
+          recordDirectLaneRoutingDecision(workItems, {
+            workItemId: workItem.id,
+            workerId,
+            lane: "dc",
+            toolName: body.tool
+          });
+
           try {
             // Approval-backed and approval-free admin calls share the JC lane's claim-time fence.
             // Re-check canonical mode and managed authority inside the transaction in either case.
@@ -3915,6 +3952,18 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             detail: jcRecheck.detail
           });
         }
+        // JC capability issuance is direct-addressed: the calling bridge IS the
+        // provider, so the executor is authoritatively known here. Record that
+        // decision so the authoritative-routing gate (enabled with
+        // ACS_NIMBLE_ROUTING_ENABLED=1) is satisfied by persisted, worker-matching
+        // evidence rather than rejecting every direct-lane claim. No model is
+        // consulted and no gate is bypassed.
+        recordDirectLaneRoutingDecision(workItems, {
+          workItemId: workItem.id,
+          workerId,
+          lane: "jc",
+          toolName: invocation.toolName
+        });
         let admissionBound = false;
         try {
           const adminApprovalWouldBeConsumed =
@@ -4622,7 +4671,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (sweeping || closing) return;
       sweeping = true;
       try {
-        await discoverLocalActors({ store: workItems, ...actorDiscoveryConfig });
+        await discoverLocalActors({ store: workItems, probe: probeExecutableVersion, ...actorDiscoveryConfig });
         workItems.reconcileStaleAgents();
       } catch (error) {
         app.log.warn({ err: error }, "actor discovery sweep failed");

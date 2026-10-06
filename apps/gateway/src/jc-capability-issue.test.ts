@@ -299,6 +299,40 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
       expect(typeof response.json().capability.payload.approvalId).toBe("string");
     }));
 
+  it("ordinary credentials cannot enter admin mode, so privileged_exec stays gated until an authorized operator does", () =>
+    withGateway(async (ctx) => {
+      const enable = (token: string) =>
+        ctx.app.inject({
+          method: "POST",
+          url: "/execution-mode",
+          headers: { authorization: `Bearer ${token}` },
+          payload: { mode: "admin", reason: "attempted escalation by an ordinary credential" }
+        });
+      // An approver without the dedicated admin scope, and both worker/service bridges, are all refused.
+      for (const token of [SELF_TOKEN, JC_BRIDGE_TOKEN, DC_BRIDGE_TOKEN]) {
+        const refused = await enable(token);
+        expect(refused.statusCode, token).toBe(403);
+      }
+      const mode = await ctx.app.inject({
+        method: "GET",
+        url: "/execution-mode",
+        headers: { authorization: `Bearer ${OP_TOKEN}` }
+      });
+      expect(mode.json().executionMode).toBe("strict");
+
+      // Still strict, so privileged_exec still needs a human approval and nothing is signed.
+      const gated = await issue(ctx, "privileged_exec", PRIV_ARGS);
+      expect(gated.statusCode).toBe(409);
+      expect(gated.json().decision).toBe("require_approval");
+      expect(gated.json().capability).toBeUndefined();
+
+      // The same request succeeds once an authorized operator explicitly enables admin mode.
+      expect((await enable(OP_TOKEN)).statusCode).toBe(200);
+      const allowed = await issue(ctx, "privileged_exec", PRIV_ARGS);
+      expect(allowed.statusCode).toBe(200);
+      expect(allowed.json().decision).toBe("allow");
+    }));
+
   it("self-approval by the requesting subject is rejected at /approve and nothing is signed", () =>
     withGateway(async (ctx) => {
       const first = (await issue(ctx, "privileged_exec", PRIV_ARGS)).json();
