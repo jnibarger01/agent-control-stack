@@ -288,7 +288,7 @@ export const OAUTH_SIGNING_KEY = "e2e-oauth-signing-key-".padEnd(64, "0");
 /** bridge.js in ACS managed mode, spawning the real managed Desktop Commander. */
 export async function startBridge(box: Sandbox, acs: AcsHandle): Promise<ServiceProcess> {
   const port = await freePort();
-  return startNodeService(
+  const bridge = await startNodeService(
     "bridge.js",
     {
       HOME: box.home,
@@ -310,6 +310,19 @@ export async function startBridge(box: Sandbox, acs: AcsHandle): Promise<Service
     port,
     "/ready"
   );
+  // /ready intentionally does not require a completed MCP initialize, but the
+  // managed executor lease must exist before the edge can obtain a stable
+  // runtime-identity proof. Waiting here removes a startup race from every
+  // execution-chain test without weakening any production authorization gate.
+  await waitFor(async () => {
+    const authority = await bridgeAuthority(bridge);
+    return authority.observedMode === "managed" &&
+      authority.executor?.lease.active === true &&
+      authority.executor.lease.ambiguous === false
+      ? true
+      : undefined;
+  });
+  return bridge;
 }
 
 /** server.js: the OAuth edge with ACS managed mode and native runtime bootstrap. */
@@ -571,6 +584,8 @@ export function dcRejection(response: any): string | undefined {
 }
 
 export interface BridgeAuthority {
+  observedMode?: "managed" | "break_glass" | "ambiguous_conflict" | "none_active";
+  executor?: { lease: { active: boolean; ambiguous: boolean } };
   bridge: { hasUpstreamPair: boolean; initialized: boolean; spawnCount: number; sessionCount: number };
 }
 
