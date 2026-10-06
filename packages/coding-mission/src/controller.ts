@@ -7,12 +7,24 @@ import {
   type CodingMissionRecord,
   type CodingMissionState,
   type CodingOperation,
+  type MissionBudgetLimits,
   type ValidationEvidence
 } from "./store.js";
 
 const REQUIRED_CHECKS = ["tests", "typecheck", "lint", "format", "repository", "review"] as const;
 const MISSION_ID = /^[A-Za-z0-9._:-]{1,128}$/u;
 const SHA = /^[a-f0-9]{40}$/u;
+const BUDGETED_STATES = new Set<CodingMissionState>([
+  "PLANNING",
+  "RUNNING",
+  "RECONCILING",
+  "VALIDATING",
+  "PREPARING_CHANGE_SET",
+  "PUBLISHING_PROPOSAL",
+  "APPROVED",
+  "EXECUTING",
+  "VERIFYING"
+]);
 
 export interface ExternalOutcome<T> {
   status: "succeeded" | "unknown" | "absent" | "rejected";
@@ -148,6 +160,7 @@ export class CodingMissionController {
     baseRef: string;
     baseSha: string;
     summary: string;
+    budget?: Partial<MissionBudgetLimits>;
   }): CodingMissionRecord {
     if (!MISSION_ID.test(input.missionId)) {
       throw new ControlStackError("coding_mission_id_invalid", "mission identifier is invalid");
@@ -165,6 +178,7 @@ export class CodingMissionController {
       deploymentRequired: deployment.required,
       deploymentAction: deployment.action,
       deploymentImpact: deployment.impact,
+      ...(input.budget ? { budget: input.budget } : {}),
       now: this.ports.now()
     });
   }
@@ -198,6 +212,10 @@ export class CodingMissionController {
   async advance(missionId: string): Promise<AdvanceResult> {
     const mission = this.store.require(missionId);
     try {
+      if (BUDGETED_STATES.has(mission.state)) {
+        const budgetStop = this.enforceBudget(mission);
+        if (budgetStop) return budgetStop;
+      }
       switch (mission.state) {
         case "PLANNING":
           return this.plan(mission);
@@ -347,6 +365,10 @@ export class CodingMissionController {
     }
     if (hasCycle(operations)) {
       throw new ControlStackError("coding_mission_plan_invalid", "operation dependencies contain a cycle");
+    }
+    const budget = this.store.budget(mission.missionId, this.ports.now());
+    if (operations.length > budget.limits.maxWorkUnits) {
+      return this.fail(mission, "mission_budget_work_units_exhausted");
     }
     const next = this.store.replaceOperations(mission, operations, this.ports.now());
     return this.result(next, true);
@@ -662,6 +684,20 @@ export class CodingMissionController {
       this.store.clearEffect(mission.missionId, kind);
     }
     return called;
+  }
+
+  private enforceBudget(mission: CodingMissionRecord): AdvanceResult | undefined {
+    const now = this.ports.now();
+    const budget = this.store.budget(mission.missionId, now);
+    if (budget.usage.wallTimeMs >= budget.limits.maxWallTimeMs) {
+      return this.fail(mission, "mission_budget_wall_time_exhausted");
+    }
+    if (budget.usage.iterations >= budget.limits.maxIterations) {
+      return this.fail(mission, "mission_budget_iterations_exhausted");
+    }
+    const consumed = this.store.consumeIteration(mission.missionId, now);
+    if (!consumed.consumed) return this.fail(mission, "mission_budget_iterations_exhausted");
+    return undefined;
   }
 
   private degrade(mission: CodingMissionRecord, code: string): AdvanceResult {

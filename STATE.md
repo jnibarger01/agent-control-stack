@@ -43,10 +43,13 @@ As of 2026-10-04, re-checked in an isolated worktree on `fix/review-reconciliati
   `docs/protocol/execution-mode.md`.
 - Mission-scoped Autonomous Authority Grants exist for the Desktop Commander change-set path (migration 047);
   Jace Commander and ordinary gated tools still use the global admin row.
+- The coding-mission runtime remains the single mission engine and now exposes typed `Mission` / `WorkUnit`
+  projections over the existing tables. Durable mission limits (iterations, work units, wall time) live in
+  `mission_budgets` (migration 054) and survive controller restarts without changing the legacy coding APIs.
 - Jev integration is advisory-only per ADR 0020. ADR 0025 (2026-10-06) defines the staged path shadow, advisory, bounded;
   only the shadow stage exists, writing `routing_shadow_observations` (migration 053) beside the route and never into it. The deployed runtime is Noul-only, so trace analysis that needs
   Choice or Score degrades with INCOMPATIBLE_MODEL.
-- Migration numbering is contended: two `038_*` files exist (`038_admission_permits.sql` is a non-canonical fixture, pinned by a test) and open work adds more. Coordinate before adding one.
+- Migration numbering is contended: two `038_*` files exist (`038_admission_permits.sql` is a non-canonical fixture, pinned by a test). The canonical line is now through migration 054; coordinate before adding another.
 
 ## Open failures
 

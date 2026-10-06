@@ -17,9 +17,17 @@ export {
 } from "./controller.js";
 export {
   CodingMissionStore,
+  DEFAULT_MISSION_BUDGET,
   codingChangeSetHash,
   type CodingMissionRecord,
   type CodingMissionState,
   type CodingOperation,
-  type ValidationEvidence
+  type Mission,
+  type MissionBudget,
+  type MissionBudgetLimits,
+  type MissionBudgetUsage,
+  type MissionState,
+  type ValidationEvidence,
+  type WorkUnit,
+  type WorkUnitStatus
 } from "./store.js";
