@@ -19,6 +19,7 @@ const NOW = "2026-10-02T12:00:00.000Z";
 function mission(patch: Partial<CodingMissionRecord> = {}): CodingMissionRecord {
   return {
     missionId: "mission-1",
+    kind: "coding",
     repository: "acme/app",
     baseRef: "main",
     baseSha: "a".repeat(40),
