@@ -23,9 +23,14 @@ export default tseslint.config(
           paths: [
             {
               name: "@agent-control-stack/policy-gate",
-              importNames: ["maybeRunJevShadowAdvisory", "runJevShadowAdvisory"],
+              importNames: [
+                "maybeRunJevShadowAdvisory",
+                "runJevShadowAdvisory",
+                "createJevRouteShadow",
+                "createJevRouteShadowObserver"
+              ],
               message:
-                "Jev shadow hooks are advisory-only (ADR 0020). Only the gateway MCP observation path may import them from the policy-gate barrel."
+                "Jev shadow hooks are advisory-only (ADR 0020, ADR 0025). Only the gateway MCP observation path and the two authoritative-claim composition roots may import them from the policy-gate barrel."
             }
           ],
           patterns: [
@@ -58,17 +63,60 @@ export default tseslint.config(
     rules: { "no-restricted-imports": "off" }
   },
   {
-    // The gateway MCP transport is the single production caller of the advisory shadow hook.
-    // Keep the raw adapter forbidden here while allowing the policy-gate wrapper.
+    // The gateway MCP transport is the production caller of the advisory shadow hook. Keep the raw adapter forbidden
+    // here while allowing the policy-gate wrapper, but not the route shadow factory (ADR 0025).
     files: ["apps/gateway/src/mcp.ts"],
     rules: {
       "no-restricted-imports": [
         "error",
         {
+          paths: [
+            {
+              name: "@agent-control-stack/policy-gate",
+              importNames: ["createJevRouteShadow", "createJevRouteShadowObserver"],
+              message:
+                "The Jev route shadow factory is advisory-only (ADR 0020, ADR 0025). Only the authoritative-claim composition roots may import it."
+            }
+          ],
           patterns: [
             {
               group: ["@agent-control-stack/jev-advisor", "@agent-control-stack/jev-advisor/*", "**/jev-advisor/**"],
               message: "Jev is advisory-only (ADR 0020). Use the policy-gate shadow hook from this observation path."
+            },
+            {
+              group: [
+                "@agent-control-stack/policy-gate/*jev-shadow*",
+                "**/policy-gate/src/jev-shadow.js",
+                "**/policy-gate/src/jev-shadow.ts"
+              ],
+              message: "Jev shadow hooks are advisory-only (ADR 0020). Use the policy-gate barrel, not a deep import."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    // ADR 0025: the two authoritative-claim composition roots are the only callers of the route shadow factory.
+    // The raw adapter and the shadow module deep import stay forbidden.
+    files: ["apps/worker/src/index.ts", "apps/gateway/src/tools/execute-approved.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "@agent-control-stack/policy-gate",
+              importNames: ["maybeRunJevShadowAdvisory", "runJevShadowAdvisory"],
+              message:
+                "Jev shadow hooks are advisory-only (ADR 0020). Only the gateway MCP observation path may import them from the policy-gate barrel."
+            }
+          ],
+          patterns: [
+            {
+              group: ["@agent-control-stack/jev-advisor", "@agent-control-stack/jev-advisor/*", "**/jev-advisor/**"],
+              message:
+                "Jev is advisory-only (ADR 0020). Use the policy-gate route shadow factory from this composition root."
             },
             {
               group: [

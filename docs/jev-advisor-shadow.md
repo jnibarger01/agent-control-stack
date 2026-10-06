@@ -1,6 +1,7 @@
 # Jev Advisor — Shadow Semantic Observation
 
-Status: JEV-2 implemented on this branch; Jev remains advisory only.
+Status: JEV-2 implemented; Jev remains advisory only. Route-decision shadowing (ADR 0025) records Jev's executor
+recommendation beside, never into, the authoritative route; see `routing_shadow_observations`.
 
 The System One endpoint is http://127.0.0.1:8017/v1/systemone by default.
 The adapter lives in packages/jev-advisor.

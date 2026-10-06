@@ -131,7 +131,8 @@ const migrationFiles = [
   { version: 49, name: "coding_missions", filename: "049_coding_missions.sql" },
   { version: 50, name: "authoritative_routing", filename: "050_authoritative_routing.sql" },
   { version: 51, name: "jace_commander_universal_admin", filename: "051_jace_commander_universal_admin.sql" },
-  { version: 52, name: "admin_mode_sticky_marker", filename: "052_admin_mode_sticky_marker.sql" }
+  { version: 52, name: "admin_mode_sticky_marker", filename: "052_admin_mode_sticky_marker.sql" },
+  { version: 53, name: "routing_shadow_observations", filename: "053_routing_shadow_observations.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {

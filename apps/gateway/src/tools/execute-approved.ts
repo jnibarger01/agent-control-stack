@@ -1,6 +1,7 @@
 import { ExecutionAdmissionScheduler } from "@agent-control-stack/execution-admission";
 import {
   claimNextAuthoritativeWorkItem,
+  createJevRouteShadow,
   createPolicyEngine,
   createWorkItemTools,
   recordAuthoritativeExecutionOutcome,
@@ -35,12 +36,14 @@ export async function executeApprovedWorkItem(options: ExecuteApprovedOptions) {
   let routedDecision: AuthoritativeRouteResult | undefined;
   let running: ReturnType<typeof tools.claim_next_approved_work_item>;
   if (routingConfig.enabled) {
+    const routeShadow = createJevRouteShadow(options.store);
     const scheduler = new ExecutionAdmissionScheduler();
     const claimed = await claimNextAuthoritativeWorkItem({
       store: options.store,
       policy,
       workerId: options.workerId,
       config: routingConfig,
+      ...(routeShadow ? { routeShadow } : {}),
       ...(options.now ? { now: options.now } : {}),
       ...(options.routingFetch ? { fetchImpl: options.routingFetch } : {}),
       admission: {

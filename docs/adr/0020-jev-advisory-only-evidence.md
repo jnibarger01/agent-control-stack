@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted.
+Accepted. Partially superseded by [ADR 0025](0025-routing-ownership-and-staged-jev-influence.md): the clauses that
+forbid any Jev effect on routing, executor selection or model selection now follow the staged model in ADR 0025
+(shadow only today; advisory and bounded influence need measured gates and an ADR amendment). Every other clause
+below still binds.
 
 ## Context
 

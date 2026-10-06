@@ -2,7 +2,8 @@ import {
   decideAuthoritativeRoute,
   recordAuthoritativeOutcome,
   type AuthoritativeRouteResult,
-  type NimbleRoutingConfig
+  type NimbleRoutingConfig,
+  type RouteShadowOptions
 } from "@agent-control-stack/actor-router";
 import type { ClaimedWorkItem, RegistryAgentDetail, WorkItem, WorkItemStore } from "@agent-control-stack/work-items";
 import { createWorkItemTools } from "./tools.js";
@@ -42,6 +43,8 @@ export async function claimNextAuthoritativeWorkItem(options: {
   workerId: string;
   config: NimbleRoutingConfig;
   admission?: AuthoritativeAdmission;
+  /** ADR 0025 shadow stage: observed after each fresh decision, never read back. */
+  routeShadow?: RouteShadowOptions;
   fetchImpl?: typeof fetch;
   now?: Date;
   leaseMs?: number;
@@ -59,6 +62,7 @@ export async function claimNextAuthoritativeWorkItem(options: {
       config: options.config,
       store: options.store,
       transition,
+      ...(options.routeShadow ? { routeShadow: options.routeShadow } : {}),
       ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {})
     });
     if (

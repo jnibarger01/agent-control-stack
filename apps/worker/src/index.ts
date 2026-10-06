@@ -2,6 +2,7 @@ import { resumeDispatchedMissions } from "./mission-dispatch.js";
 import { ExecutionAdmissionScheduler } from "@agent-control-stack/execution-admission";
 import {
   claimNextAuthoritativeWorkItem,
+  createJevRouteShadow,
   createPolicyEngine,
   createWorkItemTools,
   evaluateVerificationRequirement,
@@ -227,6 +228,8 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     ownsMachineExecutor = true;
   }
 
+  // ADR 0025: shadow observations run off the routing path; drain them before the store closes.
+  const shadowPending: Promise<void>[] = [];
   try {
     workItems.failExpiredLeases();
     let running: ReturnType<typeof tools.claim_next_approved_work_item>;
@@ -239,6 +242,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         policy,
         workerId,
         config: routingConfig,
+        ...routeShadowOption(workItems, shadowPending),
         ...(options.routingFetch ? { fetchImpl: options.routingFetch } : {}),
         admission: {
           acquire: (input) => {
@@ -526,9 +530,15 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         await machineExecutor.close().catch(() => undefined);
       }
       if (ownsLearning) learning.close();
+      await Promise.allSettled(shadowPending);
       workItems.close();
     }
   }
+}
+
+function routeShadowOption(workItems: WorkItemStore, pending: Promise<void>[]) {
+  const routeShadow = createJevRouteShadow(workItems, { track: (settled) => void pending.push(settled) });
+  return routeShadow ? { routeShadow } : {};
 }
 
 interface DesktopCommanderExecutionInput {
