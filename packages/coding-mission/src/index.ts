@@ -23,3 +23,13 @@ export {
   type CodingOperation,
   type ValidationEvidence
 } from "./store.js";
+export * from "./mission-model.js";
+export * from "./budget.js";
+export type {
+  AddWorkUnitsResult,
+  BudgetRefusal,
+  CancelMissionResult,
+  ClaimUnitResult,
+  NewWorkUnit,
+  RetryUnitResult
+} from "./store.js";

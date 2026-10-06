@@ -197,6 +197,8 @@ export class CodingMissionController {
 
   async advance(missionId: string): Promise<AdvanceResult> {
     const mission = this.store.require(missionId);
+    // This controller drives the coding profile only; other mission kinds have their own drivers.
+    if (mission.kind !== "coding") return this.result(mission, false, "mission_kind_unsupported");
     try {
       switch (mission.state) {
         case "PLANNING":
@@ -229,6 +231,11 @@ export class CodingMissionController {
         const current = this.store.require(missionId);
         return this.result(current, false, error.code);
       }
+      if (error instanceof ControlStackError && error.code === "coding_mission_claim_conflict") {
+        // A result that arrives after cancellation is stale by construction: the unit is no longer claimable.
+        const current = this.store.require(missionId);
+        if (current.state === "CANCELLED") return this.result(current, false, "mission_cancelled");
+      }
       throw error;
     }
   }
@@ -242,6 +249,7 @@ export class CodingMissionController {
         latest.state === "WAITING_FOR_APPROVAL" ||
         latest.state === "COMPLETED" ||
         latest.state === "FAILED" ||
+        latest.state === "CANCELLED" ||
         latest.state === "DEGRADED"
       ) {
         return latest;
