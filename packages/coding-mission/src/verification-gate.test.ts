@@ -213,6 +213,42 @@ describe("work-unit verification gate", () => {
     expect(store.workUnits("m1")[0]?.attempt).toBe(0);
   });
 
+  it("resets a migration-quarantined unit only after a new rubric is admitted", () => {
+    const store = new CodingMissionStore(":memory:");
+    store.createGeneral({ missionId: "m1", summary: "execute", now: T0 });
+    store.addWorkUnits(
+      "m1",
+      [{ unitId: "u1", kind: "coding", title: "unit", verificationPolicy: "independent" }],
+      T0
+    );
+    store.db
+      .prepare(
+        `UPDATE coding_operations
+         SET status = 'failed', attempt = 1, failure_category = 'verification_failure'
+         WHERE mission_id = 'm1' AND operation_id = 'u1'`
+      )
+      .run();
+    store.db
+      .prepare(
+        `INSERT INTO work_unit_verification_quarantine (mission_id, unit_id, reason, quarantined_at)
+         VALUES ('m1', 'u1', 'migration_057_missing_verification_authority', ?)`
+      )
+      .run(T0);
+
+    store.setVerificationRequirement("m1", "u1", CRITERIA, T1);
+
+    expect(store.workUnits("m1")[0]).toMatchObject({
+      status: "pending",
+      attempt: 1
+    });
+    expect(
+      store.db
+        .prepare("SELECT COUNT(*) AS n FROM work_unit_verification_quarantine WHERE mission_id = 'm1' AND unit_id = 'u1'")
+        .get()
+    ).toEqual({ n: 0 });
+    expect(store.events("m1").map((event) => event.name)).toContain("verification.migration_recovered");
+  });
+
   it("audits a fail-closed authority lookup failure", async () => {
     const { store, gate, claim } = verifyingUnit("independent");
     store.db.exec("DROP TRIGGER work_unit_verification_requirements_immutable_delete");
