@@ -5,6 +5,7 @@ import {
   BudgetDecision,
   BudgetLimits,
   BudgetMetric,
+  BudgetProjection,
   MissionBudget,
   REPORTED_METRICS,
   budgetToLimits,
@@ -168,7 +169,14 @@ export type AddWorkUnitsResult = { ok: true; created: string[]; decision: Budget
 export type ClaimUnitResult =
   | { ok: true; attempt: number; decision: BudgetDecision }
   | BudgetRefusal
-  | { ok: false; outcome: "mission_not_active" | "dependencies_unmet" | "claim_conflict" };
+  | {
+      ok: false;
+      outcome:
+        | "mission_not_active"
+        | "dependencies_unmet"
+        | "claim_conflict"
+        | "verification_requirement_missing";
+    };
 export type RetryUnitResult =
   | { ok: true; attempt: number }
   | BudgetRefusal
@@ -183,6 +191,15 @@ export interface WorkUnitVerificationRequirement {
   criteria: VerificationCriterion[];
   criteriaHash: string;
   createdAt: string;
+}
+
+export type VerificationBudgetReservationResult =
+  | { ok: true }
+  | { ok: false; reason: "verification_budget_exhausted" | "verification_budget_unaccounted" };
+
+export interface VerificationUsageAmounts {
+  modelTokens?: number;
+  spendMicroUsd?: number;
 }
 
 function parseStringArray(value: string): string[] {
@@ -524,6 +541,15 @@ export class CodingMissionStore {
       const unit = units.find((row) => row.operation_id === operationId);
       if (!unit || (unit.status !== "pending" && unit.status !== "ready"))
         return { ok: false, outcome: "claim_conflict" };
+      if (unit.verification_policy !== "none" && !this.verificationRequirement(missionId, operationId)) {
+        this.event(
+          missionId,
+          "verification.authority_denied",
+          { unitId: operationId, reason: "missing_verification_requirement" },
+          claim.claimedAt
+        );
+        return { ok: false, outcome: "verification_requirement_missing" };
+      }
       const succeeded = new Set(units.filter((row) => row.status === "succeeded").map((row) => row.operation_id));
       if (!parseStringArray(unit.depends_on).every((dependency) => succeeded.has(dependency))) {
         return { ok: false, outcome: "dependencies_unmet" };
@@ -708,12 +734,6 @@ export class CodingMissionStore {
           "verification policy none cannot have a requirement"
         );
       }
-      if (!["pending", "ready"].includes(unit.status) || unit.attempt !== 0) {
-        throw new ControlStackError(
-          "verification_requirement_late",
-          "verification requirement must be fixed before the first execution attempt"
-        );
-      }
       const existing = this.verificationRequirement(missionId, unitId);
       if (existing) {
         if (existing.criteriaHash !== criteriaHash) {
@@ -724,6 +744,27 @@ export class CodingMissionStore {
         }
         return existing;
       }
+
+      const quarantine = this.db
+        .prepare(
+          `SELECT reason FROM work_unit_verification_quarantine
+           WHERE mission_id = ? AND unit_id = ?`
+        )
+        .get(missionId, unitId) as { reason: string } | undefined;
+      if (quarantine) {
+        if (unit.status !== "failed") {
+          throw new ControlStackError(
+            "coding_mission_integrity",
+            "quarantined verification unit is not in the fail-closed state"
+          );
+        }
+      } else if (!["pending", "ready"].includes(unit.status) || unit.attempt !== 0) {
+        throw new ControlStackError(
+          "verification_requirement_late",
+          "verification requirement must be fixed before the first execution attempt"
+        );
+      }
+
       this.db
         .prepare(
           `INSERT INTO work_unit_verification_requirements
@@ -731,6 +772,37 @@ export class CodingMissionStore {
            VALUES (?, ?, ?, ?, ?)`
         )
         .run(missionId, unitId, criteriaHash, criteriaJson, now);
+
+      if (quarantine) {
+        const reset = this.db
+          .prepare(
+            `UPDATE coding_operations
+             SET status = 'pending', claim_token = NULL, claimed_at = NULL, worker_id = NULL,
+                 route_json = NULL, result_hash = NULL, files_json = '[]',
+                 failure_category = NULL, cancel_external_state = NULL
+             WHERE mission_id = ? AND operation_id = ? AND status = 'failed'`
+          )
+          .run(missionId, unitId);
+        if (reset.changes !== 1) {
+          throw new ControlStackError(
+            "coding_mission_claim_conflict",
+            "quarantined verification unit could not be reset"
+          );
+        }
+        this.db
+          .prepare(
+            `DELETE FROM work_unit_verification_quarantine
+             WHERE mission_id = ? AND unit_id = ?`
+          )
+          .run(missionId, unitId);
+        this.event(
+          missionId,
+          "verification.migration_recovered",
+          { unitId, reason: quarantine.reason, criteriaHash },
+          now
+        );
+      }
+
       this.event(missionId, "verification.requirement_set", { unitId, criteriaHash }, now);
       return { missionId, unitId, criteria: parsed, criteriaHash, createdAt: now };
     });
@@ -1136,6 +1208,191 @@ export class CodingMissionStore {
         body: { reason: input.reason, cancelled: cancelled.length, uncertain }
       });
       return { ok: true, mission: next, alreadyCancelled: false, cancelled, uncertain };
+    });
+  }
+
+  /**
+   * Atomically reserve verifier tool/model/spend capacity before a provider call.
+   * Active reservations count against admission so concurrent verifier calls cannot
+   * all observe the same remaining budget and oversubscribe it.
+   */
+  reserveVerificationUsage(input: {
+    reservationId: string;
+    runId: string;
+    missionId: string;
+    executionAttemptId: string;
+    verifierEngineId: string;
+    modelTokens?: number;
+    spendMicroUsd?: number;
+    now: string;
+  }): VerificationBudgetReservationResult {
+    for (const value of [input.modelTokens, input.spendMicroUsd]) {
+      if (value !== undefined && (!Number.isInteger(value) || value < 0)) {
+        throw new ControlStackError("mission_usage_invalid", "verification reservations must be non-negative integers");
+      }
+    }
+    return this.transaction(() => {
+      this.require(input.missionId);
+      const existing = this.db
+        .prepare(
+          `SELECT state FROM work_unit_verification_usage_reservations
+           WHERE reservation_id = ?`
+        )
+        .get(input.reservationId) as { state: "active" | "settled" } | undefined;
+      if (existing) return { ok: true };
+
+      const budget = this.budget(input.missionId);
+      if (budget) {
+        const active = this.db
+          .prepare(
+            `SELECT COALESCE(SUM(tool_calls), 0) AS tool_calls,
+                    COALESCE(SUM(model_tokens), 0) AS model_tokens,
+                    COALESCE(SUM(spend_micro_usd), 0) AS spend_micro_usd
+             FROM work_unit_verification_usage_reservations
+             WHERE mission_id = ? AND state = 'active'`
+          )
+          .get(input.missionId) as {
+          tool_calls: number;
+          model_tokens: number;
+          spend_micro_usd: number;
+        };
+
+        const projection: BudgetProjection = {};
+        const accounted = new Set(Object.keys(budget.usage) as BudgetMetric[]);
+        if (budget.limits.tool_calls !== undefined) {
+          projection.tool_calls = (budget.usage.tool_calls ?? 0) + active.tool_calls + 1;
+          accounted.add("tool_calls");
+        }
+        if (budget.limits.model_tokens !== undefined) {
+          if (input.modelTokens === undefined) {
+            this.event(
+              input.missionId,
+              "verification.budget_refused",
+              { runId: input.runId, verifierEngineId: input.verifierEngineId, reason: "unaccounted_model_tokens" },
+              input.now
+            );
+            return { ok: false, reason: "verification_budget_unaccounted" };
+          }
+          projection.model_tokens = (budget.usage.model_tokens ?? 0) + active.model_tokens + input.modelTokens;
+          accounted.add("model_tokens");
+        }
+        if (budget.limits.spend_micro_usd !== undefined) {
+          if (input.spendMicroUsd === undefined) {
+            this.event(
+              input.missionId,
+              "verification.budget_refused",
+              { runId: input.runId, verifierEngineId: input.verifierEngineId, reason: "unaccounted_spend" },
+              input.now
+            );
+            return { ok: false, reason: "verification_budget_unaccounted" };
+          }
+          projection.spend_micro_usd =
+            (budget.usage.spend_micro_usd ?? 0) + active.spend_micro_usd + input.spendMicroUsd;
+          accounted.add("spend_micro_usd");
+        }
+        const decision = evaluateBudget(budget.limits, projection, accounted);
+        if (!decision.allowed) {
+          this.event(
+            input.missionId,
+            "budget.exhausted",
+            { operation: "verification_reserve", exhausted: decision.exhausted },
+            input.now
+          );
+          return { ok: false, reason: "verification_budget_exhausted" };
+        }
+      }
+
+      this.db
+        .prepare(
+          `INSERT INTO work_unit_verification_usage_reservations (
+             reservation_id, run_id, mission_id, execution_attempt_id, verifier_engine_id,
+             tool_calls, model_tokens, spend_micro_usd, state, created_at
+           ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, 'active', ?)`
+        )
+        .run(
+          input.reservationId,
+          input.runId,
+          input.missionId,
+          input.executionAttemptId,
+          input.verifierEngineId,
+          input.modelTokens ?? 0,
+          input.spendMicroUsd ?? 0,
+          input.now
+        );
+      this.event(
+        input.missionId,
+        "verification.budget_reserved",
+        {
+          runId: input.runId,
+          reservationId: input.reservationId,
+          verifierEngineId: input.verifierEngineId,
+          modelTokens: input.modelTokens ?? 0,
+          spendMicroUsd: input.spendMicroUsd ?? 0
+        },
+        input.now
+      );
+      return { ok: true };
+    });
+  }
+
+  /**
+   * Reconcile one active verifier reservation to observed usage. Unknown capped
+   * provider usage is conservatively charged at the reserved amount.
+   */
+  settleVerificationUsage(
+    reservationId: string,
+    actual: VerificationUsageAmounts,
+    now: string
+  ): { reason?: "verification_budget_exhausted" } {
+    return this.transaction(() => {
+      const row = this.db
+        .prepare(
+          `SELECT mission_id, tool_calls, model_tokens, spend_micro_usd, state
+           FROM work_unit_verification_usage_reservations
+           WHERE reservation_id = ?`
+        )
+        .get(reservationId) as
+        | {
+            mission_id: string;
+            tool_calls: number;
+            model_tokens: number;
+            spend_micro_usd: number;
+            state: "active" | "settled";
+          }
+        | undefined;
+      if (!row) {
+        throw new ControlStackError("verification_budget_reservation_missing", "verification reservation does not exist");
+      }
+      if (row.state === "settled") return {};
+
+      this.db
+        .prepare(
+          `UPDATE work_unit_verification_usage_reservations
+           SET state = 'settled', settled_at = ?
+           WHERE reservation_id = ? AND state = 'active'`
+        )
+        .run(now, reservationId);
+
+      const charges: Array<[
+        Extract<BudgetMetric, "tool_calls" | "model_tokens" | "spend_micro_usd">,
+        number
+      ]> = [
+        ["tool_calls", row.tool_calls],
+        ["model_tokens", actual.modelTokens ?? row.model_tokens],
+        ["spend_micro_usd", actual.spendMicroUsd ?? row.spend_micro_usd]
+      ];
+      let exhausted = false;
+      for (const [metric, delta] of charges) {
+        if (delta === 0) continue;
+        if (!this.recordUsage(row.mission_id, metric, delta, now).decision.allowed) exhausted = true;
+      }
+      this.event(
+        row.mission_id,
+        "verification.budget_settled",
+        { reservationId, exhausted },
+        now
+      );
+      return exhausted ? { reason: "verification_budget_exhausted" } : {};
     });
   }
 
