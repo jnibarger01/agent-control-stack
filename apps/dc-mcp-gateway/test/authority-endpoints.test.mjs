@@ -82,13 +82,13 @@ try {
     console.log('PASS: /authority reports none_active with no lease/break-glass, no secret material');
   }
 
-  // /ready: with a live upstream pair and no conflicts, must be 200.
+  // /ready: a live upstream without execution authority must fail closed.
   {
     const r = await fetch(`${BR}/ready`);
     const body = await r.json();
-    assert.equal(r.status, 200, `expected ready 200, got ${r.status}: ${JSON.stringify(body)}`);
-    assert.equal(body.ready, true);
-    console.log('PASS: /ready succeeds when the upstream pair is live and unconflicted');
+    assert.equal(r.status, 503, `expected ready 503 without authority, got ${r.status}: ${JSON.stringify(body)}`);
+    assert.equal(body.ready, false);
+    console.log('PASS: /ready fails closed when no managed lease or break-glass authority exists');
   }
 
   // Simulate a live managed executor lease -> /authority reflects 'managed'.
@@ -104,7 +104,9 @@ try {
     // with the upstream child, not just a lease file - no client has
     // connected yet in this test, so it must still be false here.
     assert.equal(body.authoritative, false, 'authoritative must require a proven handshake, not just a lease file');
-    console.log('PASS: /authority reflects a live managed executor lease (not yet "authoritative" without a proven handshake)');
+    const ready = await fetch(`${BR}/ready`);
+    assert.equal(ready.status, 200, 'a canonical live managed lease should satisfy execution-authority readiness');
+    console.log('PASS: /authority reflects a canonical live managed executor lease and /ready admits it');
   }
 
   // Now also simulate a live break-glass marker -> ambiguous_conflict, /ready must fail (503).
