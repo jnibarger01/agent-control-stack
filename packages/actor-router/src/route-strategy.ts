@@ -36,6 +36,9 @@ export type StrategyChooser = (input: {
   eligibleCount: number;
 }) => Promise<string | undefined> | string | undefined;
 
+const SAFE = /[^A-Za-z0-9_.:-]/gu;
+const SAFE_LIST = /[^A-Za-z0-9_.:,-]/gu;
+
 export const MAX_ROUTE_PARALLELISM = 8;
 export const DEFAULT_STRATEGY_CHOOSER_TIMEOUT_MS = 1000;
 
@@ -59,6 +62,23 @@ export function executorClassFor(kind: RouteUnitKind): RouteExecutorClass {
 export interface StrategyCandidates {
   candidates: RouteStrategy[];
   reasons: Array<{ code: string; detail?: string }>;
+  /** True when the policy allow-list leaves no candidate. The route must be rejected, never defaulted. */
+  rejected?: boolean;
+}
+
+/**
+ * Thrown by deriveRouteEnrichment when policy leaves no allowed strategy. Fail closed: callers must reject the
+ * route and persist `reasons` / `deterministicEvidence`, never substitute a default strategy.
+ */
+export class RouteStrategyRejectedError extends Error {
+  readonly code = "route_strategy_rejected";
+  constructor(
+    readonly reasons: StrategyCandidates["reasons"],
+    readonly deterministicEvidence: Array<{ kind: string; value: unknown }>
+  ) {
+    super("route policy allow-list leaves no permitted strategy");
+    this.name = "RouteStrategyRejectedError";
+  }
 }
 
 /** The hard-policy candidate set. Anything a model says is checked against exactly this list. */
@@ -89,13 +109,17 @@ export function candidateStrategies(
   const allowed = new Set<RouteStrategy>(policy.allowedStrategies);
   const narrowed = candidates.filter((strategy) => allowed.has(strategy));
   if (narrowed.length === 0) {
-    reasons.push({ code: "allowed_strategies_empty_defaulted_single" });
-    return { candidates: ["single"], reasons };
+    // Fail closed: an empty or non-matching allow-list rejects the route. It never falls back to `single`.
+    reasons.push({
+      code: "allowed_strategies_rejected",
+      detail: (policy.allowedStrategies.length === 0 ? "empty" : policy.allowedStrategies.join(","))
+        .replace(SAFE_LIST, "?")
+        .slice(0, 64)
+    });
+    return { candidates: [], reasons, rejected: true };
   }
   return { candidates: narrowed, reasons };
 }
-
-const SAFE = /[^A-Za-z0-9_.:-]/gu;
 
 export function deriveRouteEnrichment(input: {
   unit: RouteUnitContext;
@@ -105,7 +129,24 @@ export function deriveRouteEnrichment(input: {
   recommended?: string;
 }): RouteEnrichment {
   const policy = input.policy ?? {};
-  const { candidates, reasons } = candidateStrategies(input.unit, input.eligibleCount, policy);
+  const { candidates, reasons, rejected } = candidateStrategies(input.unit, input.eligibleCount, policy);
+  const baseEvidence = (): Array<{ kind: string; value: unknown }> => [
+    { kind: "unit_kind", value: input.unit.kind },
+    { kind: "verification_policy", value: input.unit.verificationPolicy },
+    { kind: "eligible_count", value: input.eligibleCount },
+    { kind: "candidate_strategies", value: candidates },
+    ...(policy.maxParallelism === undefined ? [] : [{ kind: "max_parallelism", value: policy.maxParallelism }]),
+    ...(policy.allowedStrategies ? [{ kind: "allowed_strategies", value: [...policy.allowedStrategies] }] : [])
+  ];
+  if (rejected || candidates.length === 0) {
+    if (input.recommended !== undefined) {
+      reasons.push({
+        code: "strategy_recommendation_rejected",
+        detail: input.recommended.replace(SAFE, "?").slice(0, 64)
+      });
+    }
+    throw new RouteStrategyRejectedError(reasons.slice(0, 16), baseEvidence());
+  }
   let strategy: RouteStrategy = candidates.includes("single") ? "single" : candidates[0]!;
   let strategySource: RouteEnrichment["strategySource"] = "deterministic";
   if (input.recommended !== undefined) {
@@ -140,14 +181,7 @@ export function deriveRouteEnrichment(input: {
     ...(checkpointPolicy ? { checkpointPolicy } : {}),
     ...(policy.retryPolicy ? { retryPolicy: policy.retryPolicy } : {}),
     reasons: reasons.slice(0, 16),
-    deterministicEvidence: [
-      { kind: "unit_kind", value: input.unit.kind },
-      { kind: "verification_policy", value: input.unit.verificationPolicy },
-      { kind: "eligible_count", value: input.eligibleCount },
-      { kind: "candidate_strategies", value: candidates },
-      ...(policy.maxParallelism === undefined ? [] : [{ kind: "max_parallelism", value: policy.maxParallelism }]),
-      ...(policy.allowedStrategies ? [{ kind: "allowed_strategies", value: [...policy.allowedStrategies] }] : [])
-    ],
+    deterministicEvidence: baseEvidence(),
     version: ROUTE_ENRICHMENT_VERSION
   };
 }
