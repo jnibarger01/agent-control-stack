@@ -164,6 +164,37 @@ describe("ClaudeVerifier", () => {
     expect(verifier.usageReservation).toEqual({ maxSpendMicroUsd: 500_000 });
   });
 
+  it("does not undercount when per-model usage is partially malformed", async () => {
+    const verifier = verifierWithFakeIsolation(() =>
+      fakeObservation({
+        stdout: claudeEnvelope(
+          {
+            verdict: "pass",
+            summary: "all criteria satisfied",
+            criteriaResults: [{ criterionId: "c1", satisfied: true, observed: "exit code 0" }]
+          },
+          {
+            modelUsage: {
+              "claude-sonnet-5": {
+                inputTokens: 10,
+                outputTokens: "malformed"
+              }
+            },
+            usage: {
+              input_tokens: 12,
+              output_tokens: 8,
+              cache_read_input_tokens: 2
+            }
+          }
+        )
+      })
+    );
+
+    const result = await verifier.verify(criteria(), evidence());
+
+    expect(result.usage).toEqual({ modelTokens: 22 });
+  });
+
   it("parses an inconclusive verdict without coercing it to pass or fail", async () => {
     const verifier = verifierWithFakeIsolation(() =>
       fakeObservation({
