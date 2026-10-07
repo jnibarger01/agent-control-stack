@@ -637,7 +637,8 @@ function spawnPair() {
     routes: new Map(),
     expiredRoutes: new Set(),
     initTail: Promise.resolve(),
-    initializedOnce: false
+    initializedOnce: false,
+    upstreamStarted: false
   };
   upstream.onmessage = async (msg) => {
     if (isResponse(msg)) {
@@ -727,10 +728,15 @@ function spawnPair() {
       if (!shuttingDown) spawnPair();
     }
   };
-  next.startPromise = upstream.start().catch((e) => {
-    console.error("bridge: upstream start failed:", e?.message);
-    process.exit(1);
-  });
+  next.startPromise = upstream
+    .start()
+    .then(() => {
+      next.upstreamStarted = true;
+    })
+    .catch((e) => {
+      console.error("bridge: upstream start failed:", e?.message);
+      process.exit(1);
+    });
   spawnCount++;
   pair = next;
   console.log(
@@ -836,7 +842,13 @@ function computeJcAuthority() {
     configuredExecutionMode: MANAGED ? "managed" : "unmanaged_gateway",
     // The child is always started as `serve` (managed); there is no standalone path.
     childMode: "managed",
-    bridge: { hasUpstreamPair: !!pair, initialized, spawnCount, sessionCount: pair ? pair.sessions.size : 0 },
+    bridge: {
+      hasUpstreamPair: !!pair,
+      upstreamStarted: !!pair?.upstreamStarted,
+      initialized,
+      spawnCount,
+      sessionCount: pair ? pair.sessions.size : 0
+    },
     // Which build the child runs (paths only, no secrets): lets `jace-commander
     // doctor` and operators spot a bridge left on a legacy checkout.
     runtime: { dir: JC_DIR, entrypoint: DC_ARGS[0], monorepoDefault: JC_DIR === MONOREPO_DC_DIR },
@@ -869,7 +881,13 @@ function computeAuthority() {
         ? `break_glass:pid:${breakGlass.pid}`
         : "none",
     executor: { lease: executorLease, breakGlass },
-    bridge: { hasUpstreamPair: !!pair, initialized, spawnCount, sessionCount: pair ? pair.sessions.size : 0 },
+    bridge: {
+      hasUpstreamPair: !!pair,
+      upstreamStarted: !!pair?.upstreamStarted,
+      initialized,
+      spawnCount,
+      sessionCount: pair ? pair.sessions.size : 0
+    },
     enforcement: {
       gatewayAttestationActive: !!GATEWAY_ATTESTATION_KEY,
       capabilityVerificationActive: !!PIPELINE_ACS_PUBLIC_KEY,
@@ -899,9 +917,16 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
   if (path === "/ready" && JC) {
-    const ready = !!pair;
+    const ready = !!pair?.upstreamStarted;
     res.writeHead(ready ? 200 : 503, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ready, variant: "jc", hasUpstreamPair: !!pair }));
+    res.end(
+      JSON.stringify({
+        ready,
+        variant: "jc",
+        hasUpstreamPair: !!pair,
+        upstreamStarted: !!pair?.upstreamStarted
+      })
+    );
     return;
   }
   if (path === "/authority") {
@@ -912,12 +937,19 @@ const httpServer = http.createServer(async (req, res) => {
   if (path === "/ready") {
     const authority = computeAuthority();
     const ready =
-      !!pair &&
+      !!pair?.upstreamStarted &&
       authority.observedMode !== "ambiguous_conflict" &&
       !authority.executor.lease.ambiguous &&
       !authority.executor.breakGlass.ambiguous;
     res.writeHead(ready ? 200 : 503, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ready, observedMode: authority.observedMode, hasUpstreamPair: !!pair }));
+    res.end(
+      JSON.stringify({
+        ready,
+        observedMode: authority.observedMode,
+        hasUpstreamPair: !!pair,
+        upstreamStarted: !!pair?.upstreamStarted
+      })
+    );
     return;
   }
   if (path === "/debug/last-headers") {
