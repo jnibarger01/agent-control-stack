@@ -370,7 +370,6 @@ export class WorkUnitExecutionLedger {
     unitId: string;
     claimToken: string;
     workerId: string;
-    implementerEngineId?: string;
     lane: ExecutorLane;
     authority?: ExecutionAuthorityRefs;
     now: string;
