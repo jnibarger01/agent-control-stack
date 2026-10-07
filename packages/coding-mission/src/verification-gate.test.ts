@@ -166,6 +166,32 @@ describe("work-unit verification gate", () => {
     expect(store.workUnits("m1")[0]?.status).toBe("verifying");
   });
 
+  it("rejects an identity collision before reserving or charging verifier budget", async () => {
+    const { store, gate, claim } = verifyingUnit("independent", {
+      budget: { maxToolCalls: 1, maxSpendUsd: 0.01 }
+    });
+    await expect(
+      gate.verifyUnit(
+        gateInput(claim.token, [
+          verifier("codex", "pass", {
+            usageReservation: { maxSpendMicroUsd: 5_000 }
+          })
+        ])
+      )
+    ).resolves.toMatchObject({
+      outcome: "inconclusive",
+      reason: "verifier_identity_collision"
+    });
+    expect(store.budget("m1")?.usage.tool_calls).toBeUndefined();
+    expect(
+      (
+        store.db
+          .prepare("SELECT COUNT(*) AS n FROM work_unit_verification_usage_reservations")
+          .get() as { n: number }
+      ).n
+    ).toBe(0);
+  });
+
   it("derives verifier evidence only from the durable execution report and receipts", async () => {
     let observed: VerificationEvidence | undefined;
     const { gate, claim, dispatch } = verifyingUnit("independent");
@@ -355,7 +381,8 @@ describe("work-unit verification gate", () => {
     const one = verifyingUnit("multi_verifier");
     await expect(one.gate.verifyUnit(gateInput(one.claim.token, [verifier("claude", "pass")]))).resolves.toMatchObject({
       outcome: "inconclusive",
-      reason: "insufficient_verifiers"
+      reason: "insufficient_verifiers",
+      verifierEngineIds: ["claude"]
     });
 
     let laterVerifierRan = false;
