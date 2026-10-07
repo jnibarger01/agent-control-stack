@@ -120,13 +120,25 @@ const TERMINAL_ATTEMPT_STATES = new Set<ExecutionAttemptRecord["state"]>([
   "rejected_stale"
 ]);
 
-function boundedText(value: string | undefined, max = 500): string | undefined {
-  if (!value) return undefined;
+function boundedText(value: string, max = 500): string {
   const scrubbed = value
     .replace(/authorization\s*[:=]\s*[^\s]+/giu, "authorization=[redacted]")
-    .replace(/(?:token|password|secret)\s*[:=]\s*[^\s]+/giu, "$1=[redacted]")
+    .replace(/(?:token|password|secret)\s*[:=]\s*[^\s]+/giu, "[redacted]")
     .replace(/sk-[A-Za-z0-9_-]{12,}/gu, "[redacted]");
   return scrubbed.slice(0, max);
+}
+
+function normalizedAuthority(authority: ExecutionAuthorityRefs | undefined): ExecutionAuthorityRefs {
+  if (!authority) return {};
+  return {
+    ...(typeof authority.grantId === "string" ? { grantId: authority.grantId } : {}),
+    ...(typeof authority.permitId === "string" ? { permitId: authority.permitId } : {}),
+    ...(typeof authority.leaseId === "string" ? { leaseId: authority.leaseId } : {}),
+    ...(typeof authority.fencingToken === "number" && Number.isInteger(authority.fencingToken)
+      ? { fencingToken: authority.fencingToken }
+      : {}),
+    ...(typeof authority.actionHash === "string" ? { actionHash: authority.actionHash } : {})
+  };
 }
 
 export function failureCategoryForCode(code?: string, message?: string): FailureCategory {
