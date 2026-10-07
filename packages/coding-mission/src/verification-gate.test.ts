@@ -86,7 +86,6 @@ function verifyingUnit(
     unitId: "u1",
     claimToken: claim.token,
     workerId: claim.workerId,
-    implementerEngineId: "codex",
     lane: "coder",
     now: T1
   });
