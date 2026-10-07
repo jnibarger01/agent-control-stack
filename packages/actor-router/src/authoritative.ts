@@ -265,7 +265,14 @@ async function decideRoute(options: DecideAuthoritativeRouteOptions): Promise<Au
     const agent = eligibleAgents.find((candidate) => candidate.id === accepted.executorId)!;
     const enriched = await enrich(options, eligibleAgents.length);
     if (enriched.kind === "rejected") {
-      return strategyRejected(options, enriched.rejection, eligibleAgents, excluded, eligibility.scores, publicNimble(nimble));
+      return strategyRejected(
+        options,
+        enriched.rejection,
+        eligibleAgents,
+        excluded,
+        eligibility.scores,
+        publicNimble(nimble)
+      );
     }
     const enrichment = enriched.enrichment;
     return persist(options, {
@@ -410,7 +417,12 @@ async function enrich(options: DecideAuthoritativeRouteOptions, eligibleCount: n
   try {
     return {
       kind: "enriched",
-      enrichment: deriveRouteEnrichment({ unit, eligibleCount, policy, ...(recommended === undefined ? {} : { recommended }) })
+      enrichment: deriveRouteEnrichment({
+        unit,
+        eligibleCount,
+        policy,
+        ...(recommended === undefined ? {} : { recommended })
+      })
     };
   } catch (error) {
     if (error instanceof RouteStrategyRejectedError) return { kind: "rejected", rejection: error };

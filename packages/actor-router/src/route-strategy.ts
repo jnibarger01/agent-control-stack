@@ -74,7 +74,7 @@ export class RouteStrategyRejectedError extends Error {
   readonly code = "route_strategy_rejected";
   constructor(
     readonly reasons: StrategyCandidates["reasons"],
-    readonly deterministicEvidence: Array<{ kind: string; value: unknown }>
+    readonly deterministicEvidence: RouteEnrichment["deterministicEvidence"]
   ) {
     super("route policy allow-list leaves no permitted strategy");
     this.name = "RouteStrategyRejectedError";
@@ -130,7 +130,7 @@ export function deriveRouteEnrichment(input: {
 }): RouteEnrichment {
   const policy = input.policy ?? {};
   const { candidates, reasons, rejected } = candidateStrategies(input.unit, input.eligibleCount, policy);
-  const baseEvidence = (): Array<{ kind: string; value: unknown }> => [
+  const baseEvidence = (): RouteEnrichment["deterministicEvidence"] => [
     { kind: "unit_kind", value: input.unit.kind },
     { kind: "verification_policy", value: input.unit.verificationPolicy },
     { kind: "eligible_count", value: input.eligibleCount },
