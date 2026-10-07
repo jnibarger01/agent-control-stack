@@ -91,6 +91,20 @@ try {
     console.log('PASS: /ready fails closed when no managed lease or break-glass authority exists');
   }
 
+  // A live PID is not enough: malformed executor identity must fail closed.
+  {
+    fs.writeFileSync(path.join(stateDir, 'executor.lock'), JSON.stringify({
+      pid: process.pid,
+      expiresAt: Date.now() + 60_000,
+    }));
+    const authority = await (await fetch(`${BR}/authority`)).json();
+    assert.equal(authority.executor.lease.ambiguous, true);
+    const ready = await fetch(`${BR}/ready`);
+    assert.equal(ready.status, 503, 'malformed executor lease must not satisfy readiness');
+    fs.unlinkSync(path.join(stateDir, 'executor.lock'));
+    console.log('PASS: malformed live-PID executor lease fails closed');
+  }
+
   // Simulate a live managed executor lease -> /authority reflects 'managed'.
   {
     fs.writeFileSync(path.join(stateDir, 'executor.lock'), JSON.stringify({
