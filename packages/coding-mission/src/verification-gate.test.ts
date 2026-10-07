@@ -76,7 +76,7 @@ function verifyingUnit(
   const claim = {
     token: "claim-super-secret",
     workerId: "worker-1",
-    route: { lane: "coder" as const },
+    route: { lane: "coder" as const, implementerEngineId: "codex" },
     claimedAt: T1
   };
   expect(store.claimUnit("m1", "u1", claim)).toMatchObject({ ok: true, attempt: 1 });
@@ -206,7 +206,7 @@ describe("work-unit verification gate", () => {
       store.claimUnit("m1", "u1", {
         token: "claim",
         workerId: "worker-1",
-        route: { lane: "coder" },
+        route: { lane: "coder", implementerEngineId: "codex" },
         claimedAt: T1
       })
     ).toEqual({ ok: false, outcome: "verification_requirement_missing" });
