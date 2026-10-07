@@ -33,3 +33,5 @@ export type {
   NewWorkUnit,
   RetryUnitResult
 } from "./store.js";
+
+export * from "./worker-execution.js";
