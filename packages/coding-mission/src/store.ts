@@ -747,11 +747,17 @@ export class CodingMissionStore {
 
       const quarantine = this.db
         .prepare(
-          `SELECT reason FROM work_unit_verification_quarantine
+          `SELECT reason, previous_status FROM work_unit_verification_quarantine
            WHERE mission_id = ? AND unit_id = ?`
         )
-        .get(missionId, unitId) as { reason: string } | undefined;
+        .get(missionId, unitId) as { reason: string; previous_status: string } | undefined;
       if (quarantine) {
+        if (quarantine.previous_status === "unknown") {
+          throw new ControlStackError(
+            "verification_migration_reconciliation_required",
+            "quarantined unit had unknown external state and must be reconciled before it can be retried"
+          );
+        }
         if (unit.status !== "failed") {
           throw new ControlStackError(
             "coding_mission_integrity",
