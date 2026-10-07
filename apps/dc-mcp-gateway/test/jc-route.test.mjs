@@ -505,7 +505,7 @@ test('with the jc lane on, /mcp refuses a UPSTREAM that is the jc bridge (swappe
 
 test('/ready is not delayed by an unresponsive jc bridge', async () => {
   const dcUp = recorder((req) => (req.path === '/authority'
-    ? { status: 200, body: { variant: 'dc', bridge: { hasUpstreamPair: true } } }
+    ? { status: 200, body: { variant: 'dc', bridge: { hasUpstreamPair: true, upstreamStarted: true } } }
     : { status: 200, body: {} }));
   // Accepts connections but never answers.
   const hung = http.createServer(() => {});
