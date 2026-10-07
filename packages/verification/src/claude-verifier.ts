@@ -271,31 +271,59 @@ function parseClaudeEnvelope(raw: string): {
 }
 
 function claudeEnvelopeTokens(envelope: ClaudeCliEnvelope): number | undefined {
-  let total = 0;
-  let observed = false;
-  const add = (value: unknown) => {
-    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
-      total += Math.ceil(value);
-      observed = true;
-    }
-  };
+  const topLevel = tokenTotal(envelope.usage, {
+    input: "input_tokens",
+    output: "output_tokens",
+    cacheRead: "cache_read_input_tokens",
+    cacheCreate: "cache_creation_input_tokens"
+  });
+
   if (envelope.modelUsage && typeof envelope.modelUsage === "object") {
-    for (const raw of Object.values(envelope.modelUsage)) {
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
-      const usage = raw as Record<string, unknown>;
-      add(usage.inputTokens);
-      add(usage.outputTokens);
-      add(usage.cacheReadInputTokens);
-      add(usage.cacheCreationInputTokens);
+    const entries = Object.values(envelope.modelUsage);
+    if (entries.length > 0) {
+      let total = 0;
+      for (const raw of entries) {
+        const parsed = tokenTotal(raw, {
+          input: "inputTokens",
+          output: "outputTokens",
+          cacheRead: "cacheReadInputTokens",
+          cacheCreate: "cacheCreationInputTokens"
+        });
+        // A partially malformed per-model receipt is never silently
+        // undercounted. Prefer a complete top-level receipt; otherwise usage
+        // is unknown and the mission reservation is charged conservatively.
+        if (parsed === undefined) return topLevel;
+        total += parsed;
+      }
+      return total;
     }
   }
-  if (!observed && envelope.usage && typeof envelope.usage === "object") {
-    add(envelope.usage.input_tokens);
-    add(envelope.usage.output_tokens);
-    add(envelope.usage.cache_read_input_tokens);
-    add(envelope.usage.cache_creation_input_tokens);
+  return topLevel;
+}
+
+function tokenTotal(
+  value: unknown,
+  keys: { input: string; output: string; cacheRead: string; cacheCreate: string }
+): number | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const input = nonNegativeNumber(record[keys.input]);
+  const output = nonNegativeNumber(record[keys.output]);
+  if (input === undefined || output === undefined) return undefined;
+
+  let total = input + output;
+  for (const key of [keys.cacheRead, keys.cacheCreate]) {
+    const raw = record[key];
+    if (raw === undefined) continue;
+    const parsed = nonNegativeNumber(raw);
+    if (parsed === undefined) return undefined;
+    total += parsed;
   }
-  return observed ? total : undefined;
+  return Math.ceil(total);
+}
+
+function nonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 function resolveOnPath(name: string): string {
