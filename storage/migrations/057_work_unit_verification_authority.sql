@@ -29,13 +29,14 @@ CREATE TABLE work_unit_verification_quarantine (
   mission_id TEXT NOT NULL,
   unit_id TEXT NOT NULL,
   reason TEXT NOT NULL,
+  previous_status TEXT NOT NULL DEFAULT 'failed',
   quarantined_at TEXT NOT NULL,
   PRIMARY KEY (mission_id, unit_id),
   FOREIGN KEY (mission_id, unit_id) REFERENCES coding_operations (mission_id, operation_id)
 );
 
-INSERT INTO work_unit_verification_quarantine (mission_id, unit_id, reason, quarantined_at)
-SELECT mission_id, operation_id, 'migration_057_missing_verification_authority', datetime('now')
+INSERT INTO work_unit_verification_quarantine (mission_id, unit_id, reason, previous_status, quarantined_at)
+SELECT mission_id, operation_id, 'migration_057_missing_verification_authority', status, datetime('now')
 FROM coding_operations
 WHERE verification_policy <> 'none'
   AND attempt > 0
