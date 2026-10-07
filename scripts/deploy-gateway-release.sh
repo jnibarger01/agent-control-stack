@@ -19,7 +19,8 @@
 #   - One deploy at a time per service unit AND per database (lock files in the account's private /run/user/<uid>,
 #     keyed by the unit name and by the database's canonical path).
 #   - The live database is backed up before activation. If activation fails, rollback AUTOMATICALLY restores that
-#     backup over the live database (using the previous release's db-ops, which understands the old schema),
+#     backup over the live database (using the previous release's db-ops, which understands the old schema; never
+#     the new release's: with no previous db-ops it restores nothing and leaves the unit stopped),
 #     because the failed release may already have migrated it and the previous release cannot read a migrated
 #     database. Any write made between the backup and the rollback is LOST; the output names the backup.
 #     With --resume there is no new backup and nothing is restored: only the drop-ins and unit are left as they are.
@@ -29,6 +30,8 @@
 #     leaves everything for an operator. If the database restore itself fails, the unit is LEFT STOPPED (starting the
 #     previous release against a possibly migrated database would serve and could mutate it); restore the database by
 #     hand, then start the unit.
+#   - The installed dispatch drop-in sets ACS_AGENT_DISPATCH_ENABLED from ACS_DEPLOY_DISPATCH_ENABLED (0 or 1,
+#     default 0): the installed gateway launches host coding CLIs only when the operator opts in.
 set -euo pipefail
 
 REF="HEAD"
@@ -67,6 +70,10 @@ UNIT_DIR="$HOME/.config/systemd/user"
 DROPIN_DIR="$UNIT_DIR/$UNIT.d"
 ENV_FILE="${ACS_GATEWAY_ENV_FILE:-$HOME/.config/agent-control-stack/gateway.env}"
 DISPATCH_ROOTS="${ACS_AGENT_REPO_ROOTS:-$HOME/projects}"
+# Whether the INSTALLED gateway may launch host coding CLIs. Off unless the operator says so; the smoke test always runs
+# with dispatch on (it uses a copy of the database and an isolated HOME) so the route stays covered.
+DISPATCH_ENABLED="${ACS_DEPLOY_DISPATCH_ENABLED:-0}"
+[[ "$DISPATCH_ENABLED" == "0" || "$DISPATCH_ENABLED" == "1" ]] || { echo "ACS_DEPLOY_DISPATCH_ENABLED must be 0 or 1" >&2; exit 2; }
 SMOKE_PORT="${ACS_SMOKE_PORT:-3999}"
 # The PATH the systemd drop-in installs; the smoke test uses the same one to prove the CLIs are visible to the service.
 # Defined here, not in the build block, because --resume installs the drop-in without building.
@@ -297,8 +304,12 @@ rollback() {
     if [[ ( -z "$prev_dir" || ! -f "$prev_dir/scripts/db-ops.mjs" ) && -f "$RELEASE_DROPIN.pre-$SHORT-$STAMP" ]]; then
       prev_dir="$(sed -n 's/^WorkingDirectory=//p' "$RELEASE_DROPIN.pre-$SHORT-$STAMP" | head -1)"
     fi
-    [[ -n "$prev_dir" && -f "$prev_dir/scripts/db-ops.mjs" ]] || prev_dir="$FINAL"
-    if node "$prev_dir/scripts/db-ops.mjs" restore "$BACKUP_DB" "$LIVE_DB" --replace --writers-stopped; then
+    # Never fall back to the NEW release's tool ($FINAL): it is the release that just failed. Without a previous
+    # release's db-ops, fail closed and leave the restore to an operator.
+    if [[ "$prev_dir" == "$FINAL" ]]; then prev_dir=""; fi
+    if [[ -z "$prev_dir" || ! -f "$prev_dir/scripts/db-ops.mjs" ]]; then
+      reason="no previous release db-ops was found (the new release's tool is never used for rollback). Leaving $UNIT STOPPED"
+    elif node "$prev_dir/scripts/db-ops.mjs" restore "$BACKUP_DB" "$LIVE_DB" --replace --writers-stopped; then
       restored=1
     else
       reason="the restore failed. Leaving $UNIT STOPPED"
@@ -334,7 +345,7 @@ cat >"$DISPATCH_DROPIN" <<EOF
 [Service]
 # The gateway must see the agent CLIs (Homebrew and ~/.local/bin are not on a systemd user service's default PATH).
 Environment=PATH=$AGENT_PATH
-Environment=ACS_AGENT_DISPATCH_ENABLED=1
+Environment=ACS_AGENT_DISPATCH_ENABLED=$DISPATCH_ENABLED
 Environment=ACS_AGENT_REPO_ROOTS=$DISPATCH_ROOTS
 EOF
 
