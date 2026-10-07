@@ -145,7 +145,7 @@ describe("work-unit execution ledger", () => {
       T0
     );
     store.releaseReadyUnits("m-engine", T0);
-    const claim = { token: "claim", workerId: "worker-1", route: { lane: "coder", implementerEngineId: "codex" }, claimedAt: T1 };
+    const claim = { token: "claim", workerId: "worker-1", route: { lane: "coder" }, claimedAt: T1 };
     expect(store.claimUnit("m-engine", "u1", claim)).toMatchObject({ ok: true });
     const ledger = new WorkUnitExecutionLedger(store);
     expect(() =>
