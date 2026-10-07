@@ -52,6 +52,19 @@ mission asks for it, and policy can override any value.
 may have started external work are marked `cancel_external_state = 'uncertain'` and returned in `uncertain`: cancellation
 never claims side effects were rolled back. Claim tokens are kept, so a late result from the old worker fails on status.
 
+## Unified execution contract (PR3)
+
+Mission work now has a transport-neutral execution boundary in `worker-execution.ts`.
+
+- `DispatchEnvelope` binds mission, work unit, durable unit attempt, worker, executor lane, payload/route hashes, verification policy, and ACS authority references. The raw claim token never enters the durable attempt tables; only its stable hash is persisted.
+- Migration 055 adds `work_unit_execution_attempts` and `work_unit_execution_receipts`. One durable execution attempt is allowed per mission/unit attempt, so restart/replay can distinguish never-dispatched, started, completed, failed, cancelled, unknown, and stale execution.
+- `ResultEnvelope` normalizes success, failure, cancellation and unknown outcomes plus receipts and normalized failure categories. Applying a result re-checks the live claim, worker and unit-attempt fence in the same transaction that advances the work unit.
+- A stale result is retained as `rejected_stale` evidence and cannot overwrite a cancelled or superseded work unit. An unknown external outcome stays `unknown` and cannot be blindly retried.
+- Successful execution does not bypass verification: any work unit whose verification policy is not `none` moves to `verifying`; the executor is not its own verifier.
+- `CoderExecutionAdapter` normalizes the existing coding port. `ToolLaneExecutionAdapter` is the thin result-normalization facade for already-authorized Jace Commander, Desktop Commander and MCP composition roots. It does not authorize calls, mint capabilities, widen scopes, or bypass their existing lease/fencing checks.
+
+The execution contract deliberately does **not** add swarm delegation or CUA. Those future executors must enter through the same dispatch/result/receipt boundary.
+
 ## Not yet in this runtime
 
 Mission authority envelopes and narrowed child authority, the unified worker contract and checkpoint/resume, enriched
