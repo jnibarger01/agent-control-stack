@@ -47,6 +47,48 @@ export const recordActorReliabilityInputSchema = z
 export const authoritativeRoutingDecisionKindSchema = z.enum(["route", "fallback", "reject"]);
 export const authoritativeRoutingSourceSchema = z.enum(["nimble", "deterministic_fallback"]);
 
+export const ROUTE_EXECUTOR_CLASSES = ["coding", "shell", "desktop", "cua", "agent", "swarm"] as const;
+export const ROUTE_STRATEGIES = [
+  "single",
+  "plan_execute",
+  "maker_verifier",
+  "parallel_candidates",
+  "specialist_delegation",
+  "cua_recovery"
+] as const;
+export const ROUTE_STRATEGY_SOURCES = ["deterministic", "model"] as const;
+
+export const routeReasonSchema = z
+  .object({ code: z.string().min(1).max(64), detail: z.string().max(256).optional() })
+  .strict();
+export const routeEvidenceItemSchema = z
+  .object({
+    kind: z.string().min(1).max(64),
+    value: z.union([z.string().max(256), z.number(), z.boolean(), z.array(z.string().max(64)).max(32)])
+  })
+  .strict();
+
+/**
+ * The structured execution strategy ACS attaches to a persisted route (ADR 0025). Every field is decided by
+ * deterministic ACS policy. A model may recommend a strategy, but only one inside the policy-derived candidate set
+ * is accepted, and `strategySource` records which it was. The Jev recommendation is never part of this record.
+ */
+export const routeEnrichmentSchema = z
+  .object({
+    executorClass: z.enum(ROUTE_EXECUTOR_CLASSES),
+    strategy: z.enum(ROUTE_STRATEGIES),
+    strategySource: z.enum(ROUTE_STRATEGY_SOURCES),
+    modelClass: z.string().min(1).max(64).optional(),
+    parallelism: z.number().int().min(1).max(64),
+    verificationRequired: z.boolean(),
+    checkpointPolicy: z.string().min(1).max(64).optional(),
+    retryPolicy: z.string().min(1).max(64).optional(),
+    reasons: z.array(routeReasonSchema).max(16),
+    deterministicEvidence: z.array(routeEvidenceItemSchema).max(16),
+    version: z.string().min(1).max(64)
+  })
+  .strict();
+
 export const authoritativeRoutingEvidenceSchema = z
   .object({
     decisionId: identifierSchema,
@@ -70,6 +112,7 @@ export const authoritativeRoutingEvidenceSchema = z
     candidates: z.array(identifierSchema),
     constraints: z.record(z.string(), z.unknown()),
     normalizedDecision: z.record(z.string(), z.unknown()),
+    enrichment: routeEnrichmentSchema.optional(),
     supersedesDecisionId: identifierSchema.optional(),
     idempotencyKey: identifierSchema,
     createdAt: z.string().datetime({ offset: true })
@@ -93,6 +136,11 @@ export const routingExecutionOutcomeSchema = z
     verificationResult: z.string().min(1).max(128).optional(),
     testsResult: z.string().min(1).max(128).optional(),
     retryCount: z.number().int().nonnegative(),
+    actualStrategy: z.enum(ROUTE_STRATEGIES).optional(),
+    /** Optional accounting. Absent means not reported, which is not zero. */
+    toolCalls: z.number().int().nonnegative().optional(),
+    modelTokens: z.number().int().nonnegative().optional(),
+    costMicroUsd: z.number().int().nonnegative().optional(),
     idempotencyKey: identifierSchema,
     createdAt: z.string().datetime({ offset: true })
   })
@@ -164,6 +212,44 @@ export const recordRouteShadowObservationInputSchema = z
     message: "recommendedExecutorId is required exactly when status is recommended"
   });
 
+/** One routed decision joined with its enrichment, Nimble choice, Jev shadow output and latest outcome. */
+export const routingComparisonSchema = z
+  .object({
+    decisionId: identifierSchema,
+    workItemId: identifierSchema,
+    missionId: identifierSchema.optional(),
+    decision: authoritativeRoutingDecisionKindSchema,
+    source: authoritativeRoutingSourceSchema,
+    reasonCode: z.string(),
+    executorId: identifierSchema.optional(),
+    nimbleConfidence: z.number().optional(),
+    nimbleModel: z.string().optional(),
+    executorClass: z.enum(ROUTE_EXECUTOR_CLASSES).optional(),
+    strategy: z.enum(ROUTE_STRATEGIES).optional(),
+    strategySource: z.enum(ROUTE_STRATEGY_SOURCES).optional(),
+    parallelism: z.number().int().optional(),
+    verificationRequired: z.boolean().optional(),
+    candidates: z.array(z.string()),
+    excluded: z.array(z.string()),
+    decidedAt: z.string(),
+    jevStatus: z.enum(ROUTE_SHADOW_STATUSES).optional(),
+    jevRecommended: z.string().optional(),
+    jevConfidence: z.number().optional(),
+    jevAgrees: z.boolean().optional(),
+    jevLatencyMs: z.number().int().optional(),
+    actualExecutor: z.string().optional(),
+    actualStrategy: z.enum(ROUTE_STRATEGIES).optional(),
+    success: z.boolean().optional(),
+    timedOut: z.boolean().optional(),
+    verificationResult: z.string().optional(),
+    wallMs: z.number().int().optional(),
+    retryCount: z.number().int().optional(),
+    toolCalls: z.number().int().optional(),
+    modelTokens: z.number().int().optional(),
+    costMicroUsd: z.number().int().optional()
+  })
+  .strict();
+
 export const workItemRoutingSnapshotSchema = z
   .object({
     workItemId: identifierSchema,
@@ -185,3 +271,7 @@ export type WorkItemRoutingSnapshot = z.infer<typeof workItemRoutingSnapshotSche
 export type RouteShadowObservation = z.infer<typeof routeShadowObservationSchema>;
 export type RouteShadowStatus = (typeof ROUTE_SHADOW_STATUSES)[number];
 export type RecordRouteShadowObservationInput = z.infer<typeof recordRouteShadowObservationInputSchema>;
+export type RouteEnrichment = z.infer<typeof routeEnrichmentSchema>;
+export type RouteExecutorClass = (typeof ROUTE_EXECUTOR_CLASSES)[number];
+export type RouteStrategy = (typeof ROUTE_STRATEGIES)[number];
+export type RoutingComparison = z.infer<typeof routingComparisonSchema>;

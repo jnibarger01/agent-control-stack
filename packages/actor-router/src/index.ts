@@ -148,6 +148,30 @@ export {
   type DecideAuthoritativeRouteOptions
 } from "./authoritative.js";
 export {
+  DEFAULT_PROMOTION_THRESHOLDS,
+  evaluateShadowGates,
+  summarizeRoutingComparisons,
+  type GateResult,
+  type GateStatus,
+  type PromotionEvaluation,
+  type PromotionThresholds,
+  type RoutingSummary
+} from "./route-metrics.js";
+export {
+  DEFAULT_STRATEGY_CHOOSER_TIMEOUT_MS,
+  MAX_ROUTE_PARALLELISM,
+  ROUTE_ENRICHMENT_VERSION,
+  candidateStrategies,
+  deriveRouteEnrichment,
+  executorClassFor,
+  recommendStrategy,
+  type RoutePolicy,
+  type RouteUnitContext,
+  type RouteUnitKind,
+  type RouteVerificationPolicy,
+  type StrategyChooser
+} from "./route-strategy.js";
+export {
   DEFAULT_ROUTE_SHADOW_TIMEOUT_MS,
   type RouteShadowCandidate,
   type RouteShadowInput,
