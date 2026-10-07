@@ -55,7 +55,6 @@ function claimed(options: {
     unitId: "u1",
     claimToken: claim.token,
     workerId: claim.workerId,
-    implementerEngineId: "codex",
     lane: options.lane ?? "coder",
     authority: { leaseId: "lease-1", fencingToken: 7, actionHash: "a".repeat(64) },
     now: T1
