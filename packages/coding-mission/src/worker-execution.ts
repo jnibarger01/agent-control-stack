@@ -366,6 +366,7 @@ export class WorkUnitExecutionLedger {
         throw new ControlStackError("execution_lane_invalid", "executor lane is invalid");
       }
       const claimTokenHash = stableHash(input.claimToken);
+      const authority = normalizedAuthority(input.authority);
       const payloadHash = stableHash(unit.payload ?? null);
       const routeHash = stableHash(unit.route ?? null);
       const attemptId = `wua_${stableHash({
@@ -389,7 +390,7 @@ export class WorkUnitExecutionLedger {
         payloadHash,
         routeHash,
         ...(unit.payload ? { payload: unit.payload } : {}),
-        authority: input.authority ?? {},
+        authority,
         issuedAt: input.now
       };
       const dispatchHash = stableHash(dispatch);
@@ -436,7 +437,7 @@ export class WorkUnitExecutionLedger {
           claimTokenHash,
           dispatchHash,
           JSON.stringify(dispatch),
-          JSON.stringify(input.authority ?? {}),
+          JSON.stringify(authority),
           input.now
         );
       this.store.putEvidence(
@@ -587,14 +588,35 @@ export class WorkUnitExecutionLedger {
           applied = { applied: next };
           break;
         }
-        case "cancelled":
-          this.store.failUnit(row.mission_id, row.unit_id, input.claimToken, {
-            category: "cancelled",
-            retryable: false,
-            now: input.result.finishedAt
-          });
+        case "cancelled": {
+          const changed = this.store.db
+            .prepare(
+              `UPDATE coding_operations
+               SET status = 'cancelled', failure_category = 'cancelled', cancel_external_state = ?
+               WHERE mission_id = ? AND operation_id = ? AND claim_token = ? AND status = 'running'`
+            )
+            .run(
+              input.result.externalStateUncertain ? "uncertain" : "none",
+              row.mission_id,
+              row.unit_id,
+              input.claimToken
+            );
+          if (changed.changes !== 1) {
+            throw new ControlStackError("coding_mission_claim_conflict", "cancelled outcome lost the claim");
+          }
+          this.store.db
+            .prepare(
+              `INSERT INTO coding_events (mission_id, name, body_json, created_at)
+               VALUES (?, 'work_unit.cancelled', ?, ?)`
+            )
+            .run(
+              row.mission_id,
+              JSON.stringify({ unitId: row.unit_id, attemptId: row.attempt_id }),
+              input.result.finishedAt
+            );
           applied = { applied: "cancelled" };
           break;
+        }
         case "unknown": {
           const changed = this.store.db
             .prepare(
@@ -665,7 +687,7 @@ export class WorkUnitExecutionLedger {
         state,
         result.finishedAt,
         result.result?.resultHash ?? null,
-        result.failure?.category ?? (result.outcome === "unknown" ? "unknown" : null),
+        result.failure?.category ?? (result.outcome === "failed" || result.outcome === "unknown" ? "unknown" : null),
         reportHash,
         JSON.stringify(result),
         row.attempt_id
