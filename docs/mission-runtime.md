@@ -68,5 +68,19 @@ The execution contract deliberately does **not** add swarm delegation or CUA. Th
 ## Not yet in this runtime
 
 Mission authority envelopes and narrowed child authority, the unified worker contract and checkpoint/resume, enriched
-route decisions, the verification gate, `request_child_work`, CUA, and recovery policy are separate slices. Today the
+route decisions, `request_child_work`, CUA, and recovery policy are separate slices. Today the
 legacy coding path has no budget row (uncapped) and the `general` kind has no driver of its own.
+
+## Verification gate
+
+A successful execution never completes a unit whose verification policy is not `none`. The unit parks in
+`verifying` and only `WorkUnitVerificationGate` (`verification-gate.ts`) can move it: an independent verifier
+(identity different from the implementer, enforced by `runIndependentVerification`) judges typed criteria
+against the execution evidence. `lightweight` and `independent` need one verifier; `multi_verifier` needs
+two distinct verifiers and every verdict must pass; `release_gate` failure is terminal rather than
+auto-retryable. A pass promotes `verifying -> succeeded` (`succeedVerifiedUnit`, the only completion path
+out of `verifying`); a failure records `verification_failure` (retryable within the mission retry budget,
+except under `release_gate`); an inconclusive verdict — including verifier errors and identity collisions —
+holds the unit in `verifying` for re-verification or a human. It never succeeds. Every verdict is applied
+under the live claim fence, re-checked after the verifiers run, and persisted as `verification:<unit>:<attempt>`
+evidence plus a `verification.completed` event. The implementer’s claim is evidence input, never a verdict.
