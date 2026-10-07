@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { ControlStackError, redactValue, stableHash } from "@agent-control-stack/shared";
 import {
   runIndependentVerification,
@@ -9,21 +10,15 @@ import {
 } from "@agent-control-stack/verification";
 import { TERMINAL_MISSION_STATES, type VerificationPolicy } from "./mission-model.js";
 import type { CodingMissionStore, WorkUnitVerificationRequirement } from "./store.js";
-
-/**
- * Evidence handed to a verifier is caller-collected, but its durable execution
- * binding is not caller-authoritative. The gate checks these four fields
- * against migration 055 before invoking any verifier.
- */
-export interface BoundVerificationEvidence extends VerificationEvidence {
-  executionAttemptId: string;
-  unitAttempt: number;
-  resultHash: string;
-  reportHash: string;
-}
+import type { ExecutionReceipt, ResultEnvelope } from "./worker-execution.js";
 
 export type VerificationGateOutcome =
-  "succeeded" | "failed" | "retryable" | "inconclusive" | "not_verifying" | "policy_none";
+  | "succeeded"
+  | "failed"
+  | "retryable"
+  | "inconclusive"
+  | "not_verifying"
+  | "policy_none";
 
 export interface VerificationGateResult {
   outcome: VerificationGateOutcome;
@@ -39,8 +34,11 @@ interface ExecutionBinding {
   unitId: string;
   unitAttempt: number;
   workerId: string;
+  implementerEngineId: string;
   resultHash: string;
   reportHash: string;
+  report: ResultEnvelope;
+  receipts: ExecutionReceipt[];
 }
 
 interface VerificationContext {
@@ -50,7 +48,7 @@ interface VerificationContext {
   policy: Exclude<VerificationPolicy, "none">;
   requirement: WorkUnitVerificationRequirement;
   binding: ExecutionBinding;
-  evidence: BoundVerificationEvidence;
+  evidence: VerificationEvidence;
 }
 
 interface DecidedVerification {
@@ -61,13 +59,16 @@ interface DecidedVerification {
   reason?: string;
 }
 
+function boundedText(value: string, max: number): string {
+  return value.slice(0, max);
+}
+
 /**
  * ACS-owned verification transition for WorkUnits.
  *
- * The implementer identity, rubric, execution attempt, result hash and report
- * hash all come from durable ACS state. Callers may supply verifier instances
- * and observed evidence, but cannot select the producer identity or replace
- * the admitted rubric after seeing the result.
+ * The rubric, implementer engine identity, execution report, result hash and
+ * verifier evidence all come from durable ACS state. Callers select verifier
+ * implementations only; they cannot supply or rewrite the evidence being judged.
  */
 export class WorkUnitVerificationGate {
   constructor(
@@ -80,7 +81,6 @@ export class WorkUnitVerificationGate {
     unitId: string;
     claimToken: string;
     verifiers: readonly Verifier[];
-    evidence: BoundVerificationEvidence;
   }): Promise<VerificationGateResult> {
     const mission = this.store.require(input.missionId);
     const unit = this.store.workUnits(input.missionId).find((candidate) => candidate.unitId === input.unitId);
@@ -98,24 +98,17 @@ export class WorkUnitVerificationGate {
 
     const requirement = this.store.verificationRequirement(input.missionId, input.unitId);
     if (!requirement) {
-      return {
-        outcome: "inconclusive",
-        policy,
-        verifierEngineIds: [],
-        reason: "missing_verification_requirement"
-      };
+      const reason = "missing_verification_requirement";
+      this.auditAuthorityHold(input.missionId, input.unitId, policy, reason);
+      return { outcome: "inconclusive", policy, verifierEngineIds: [], reason };
     }
 
     const binding = this.executionBinding(input.missionId, input.unitId, unit.attempt);
     if (!binding) {
-      return {
-        outcome: "inconclusive",
-        policy,
-        verifierEngineIds: [],
-        reason: "missing_execution_binding"
-      };
+      const reason = "missing_execution_binding";
+      this.auditAuthorityHold(input.missionId, input.unitId, policy, reason);
+      return { outcome: "inconclusive", policy, verifierEngineIds: [], reason };
     }
-    this.assertEvidenceBinding(input.evidence, binding);
 
     const context: VerificationContext = {
       missionId: input.missionId,
@@ -124,53 +117,78 @@ export class WorkUnitVerificationGate {
       policy,
       requirement,
       binding,
-      evidence: input.evidence
+      evidence: this.durableEvidence(binding)
     };
+    const runId = `wvr_${randomUUID().replaceAll("-", "")}`;
     const verifierEngineIds = input.verifiers.map((verifier) => verifier.engineId);
-    const hold = (reason: string, results: VerificationResult[] = []): VerificationGateResult =>
-      this.apply(context, {
+    const hold = (
+      reason: string,
+      results: VerificationResult[] = [],
+      verdict?: VerificationResult["verdict"]
+    ): VerificationGateResult =>
+      this.apply(context, runId, {
         outcome: "inconclusive",
-        verifierEngineIds,
+        verifierEngineIds: results.map((result) => result.verifierEngineId),
         reason,
-        results
+        results,
+        ...(verdict ? { verdict } : {})
       });
 
     if (input.verifiers.length === 0) return hold("no_verifier");
     if (new Set(verifierEngineIds).size !== verifierEngineIds.length) return hold("duplicate_verifier");
     if (policy === "multi_verifier" && input.verifiers.length < 2) return hold("insufficient_verifiers");
 
-    const verifierEvidence = verificationEvidenceSchema.parse({
-      workItemId: input.evidence.workItemId,
-      implementerClaim: input.evidence.implementerClaim,
-      diffSummary: input.evidence.diffSummary,
-      commandResults: input.evidence.commandResults
-    });
-
     const results: VerificationResult[] = [];
-    for (const verifier of input.verifiers) {
-      const admissionFailure = this.verifierBudgetAdmission(input.missionId, verifier);
-      if (admissionFailure) return hold(admissionFailure, results);
+    let accountingReason: string | undefined;
+
+    for (const [index, verifier] of input.verifiers.entries()) {
+      const reservationId = `wub_${stableHash({ runId, index, verifier: verifier.engineId }).slice(0, 32)}`;
+      const reserved = this.store.reserveVerificationUsage({
+        reservationId,
+        runId,
+        missionId: input.missionId,
+        executionAttemptId: binding.attemptId,
+        verifierEngineId: verifier.engineId,
+        ...(verifier.usageReservation?.maxModelTokens === undefined
+          ? {}
+          : { modelTokens: verifier.usageReservation.maxModelTokens }),
+        ...(verifier.usageReservation?.maxSpendMicroUsd === undefined
+          ? {}
+          : { spendMicroUsd: verifier.usageReservation.maxSpendMicroUsd }),
+        now: this.clock()
+      });
+      if (!reserved.ok) return hold(reserved.reason, results);
 
       try {
         const raw = await runIndependentVerification({
-          implementerEngineId: binding.workerId,
+          implementerEngineId: binding.implementerEngineId,
           verifier,
           criteria: requirement.criteria,
-          evidence: verifierEvidence
+          evidence: context.evidence
         });
         const result = verificationResultSchema.parse(raw);
-        const accountingFailure = this.accountVerifierUsage(input.missionId, verifier, result);
-        if (accountingFailure) return hold(accountingFailure, results);
         results.push(result);
 
-        // Every supported policy is "all required verifiers must pass".
-        // A failure is decisive; do not spend more or let a later verifier
-        // exception erase a failure already observed.
+        const settled = this.store.settleVerificationUsage(
+          reservationId,
+          {
+            ...(result.usage?.modelTokens === undefined ? {} : { modelTokens: result.usage.modelTokens }),
+            ...(result.usage?.spendMicroUsd === undefined ? {} : { spendMicroUsd: result.usage.spendMicroUsd })
+          },
+          this.clock()
+        );
+        accountingReason = settled.reason ?? accountingReason;
+
+        // A validated failure is decisive even if the provider overspent its
+        // reservation. Budget exhaustion is still recorded, but never erases
+        // negative verification evidence.
         if (result.verdict === "fail" || result.verdict === "inconclusive") break;
+        if (settled.reason) return hold(settled.reason, results, result.verdict);
       } catch (error) {
-        const accountingFailure = this.accountVerifierUsage(input.missionId, verifier);
-        if (results.some((result) => result.verdict === "fail")) break;
-        return hold(accountingFailure ?? (error instanceof ControlStackError ? error.code : "verifier_error"), results);
+        const settled = this.store.settleVerificationUsage(reservationId, {}, this.clock());
+        const reason =
+          settled.reason ?? (error instanceof ControlStackError ? error.code : "verifier_error");
+        return hold(reason, results);
       }
     }
 
@@ -182,77 +200,20 @@ export class WorkUnitVerificationGate {
           ? "pass"
           : "inconclusive";
 
-    return this.apply(context, {
+    return this.apply(context, runId, {
       outcome: verdict === "pass" ? "succeeded" : verdict === "fail" ? "failed" : "inconclusive",
       verdict,
       verifierEngineIds: results.map((result) => result.verifierEngineId),
-      results
+      results,
+      ...(verdict === "fail" && accountingReason ? { reason: accountingReason } : {})
     });
   }
 
-  private verifierBudgetAdmission(missionId: string, verifier: Verifier): string | undefined {
-    const budget = this.store.budget(missionId);
-    if (!budget) return undefined;
-
-    const toolLimit = budget.limits.tool_calls;
-    if (toolLimit !== undefined && (budget.usage.tool_calls ?? 0) + 1 > toolLimit) {
-      return "verification_budget_exhausted";
-    }
-
-    const tokenLimit = budget.limits.model_tokens;
-    if (tokenLimit !== undefined) {
-      const reserved = verifier.usageReservation?.maxModelTokens;
-      if (reserved === undefined) return "verification_budget_unaccounted";
-      if ((budget.usage.model_tokens ?? 0) + reserved > tokenLimit) return "verification_budget_exhausted";
-    }
-
-    const spendLimit = budget.limits.spend_micro_usd;
-    if (spendLimit !== undefined) {
-      const reserved = verifier.usageReservation?.maxSpendMicroUsd;
-      if (reserved === undefined) return "verification_budget_unaccounted";
-      if ((budget.usage.spend_micro_usd ?? 0) + reserved > spendLimit) return "verification_budget_exhausted";
-    }
-    return undefined;
-  }
-
-  /**
-   * Record every verifier invocation. When a call fails before exact provider
-   * usage is available, charge the conservative reservation for capped model
-   * metrics rather than silently treating unknown usage as zero.
-   */
-  private accountVerifierUsage(missionId: string, verifier: Verifier, result?: VerificationResult): string | undefined {
-    const now = this.clock();
-    if (!this.store.recordUsage(missionId, "tool_calls", 1, now).decision.allowed) {
-      return "verification_budget_exhausted";
-    }
-
-    const budget = this.store.budget(missionId);
-    const cappedTokens = budget?.limits.model_tokens !== undefined;
-    const cappedSpend = budget?.limits.spend_micro_usd !== undefined;
-    const modelTokens =
-      result?.usage?.modelTokens ?? (cappedTokens ? verifier.usageReservation?.maxModelTokens : undefined);
-    const spendMicroUsd =
-      result?.usage?.spendMicroUsd ?? (cappedSpend ? verifier.usageReservation?.maxSpendMicroUsd : undefined);
-
-    if (cappedTokens && modelTokens === undefined) return "verification_budget_unaccounted";
-    if (cappedSpend && spendMicroUsd === undefined) return "verification_budget_unaccounted";
-
-    if (
-      modelTokens !== undefined &&
-      !this.store.recordUsage(missionId, "model_tokens", modelTokens, now).decision.allowed
-    ) {
-      return "verification_budget_exhausted";
-    }
-    if (
-      spendMicroUsd !== undefined &&
-      !this.store.recordUsage(missionId, "spend_micro_usd", spendMicroUsd, now).decision.allowed
-    ) {
-      return "verification_budget_exhausted";
-    }
-    return undefined;
-  }
-
-  private apply(context: VerificationContext, decided: DecidedVerification): VerificationGateResult {
+  private apply(
+    context: VerificationContext,
+    runId: string,
+    decided: DecidedVerification
+  ): VerificationGateResult {
     const decidedAt = this.clock();
     return this.store.transaction(() => {
       const mission = this.store.require(context.missionId);
@@ -272,11 +233,12 @@ export class WorkUnitVerificationGate {
         currentBinding.resultHash !== context.binding.resultHash ||
         currentBinding.reportHash !== context.binding.reportHash ||
         currentBinding.workerId !== context.binding.workerId ||
+        currentBinding.implementerEngineId !== context.binding.implementerEngineId ||
         !requirement ||
         requirement.criteriaHash !== context.requirement.criteriaHash;
 
       if (stale) {
-        this.persistDecision(context, decided, "rejected_stale", decidedAt);
+        this.persistDecision(context, runId, decided, "rejected_stale", decidedAt);
         return {
           outcome: "not_verifying",
           policy: context.policy,
@@ -331,28 +293,11 @@ export class WorkUnitVerificationGate {
         outcome = "inconclusive";
       }
 
-      this.persistDecision(context, decided, outcome, decidedAt);
-
-      const evidencePayload = redactValue({
-        unitId: context.unitId,
-        attempt: context.binding.unitAttempt,
-        executionAttemptId: context.binding.attemptId,
-        executionReportHash: context.binding.reportHash,
-        resultHash: context.binding.resultHash,
-        criteriaHash: context.requirement.criteriaHash,
-        policy: context.policy,
-        outcome,
-        ...(decided.verdict ? { verdict: decided.verdict } : {}),
-        ...(decided.reason ? { reason: decided.reason } : {}),
-        implementerWorkerId: context.binding.workerId,
-        verifierEngineIds: decided.verifierEngineIds,
-        evidence: context.evidence,
-        results: decided.results ?? []
-      });
+      const durablePayload = this.persistDecision(context, runId, decided, outcome, decidedAt);
       this.store.putEvidence(
         context.missionId,
-        `verification:${context.unitId}:${context.binding.unitAttempt}`,
-        evidencePayload,
+        `verification:${context.unitId}:${context.binding.unitAttempt}:${runId}`,
+        durablePayload,
         decidedAt
       );
       this.store.db
@@ -363,6 +308,7 @@ export class WorkUnitVerificationGate {
         .run(
           context.missionId,
           JSON.stringify({
+            runId,
             unitId: context.unitId,
             attempt: context.binding.unitAttempt,
             executionAttemptId: context.binding.attemptId,
@@ -388,36 +334,27 @@ export class WorkUnitVerificationGate {
 
   private persistDecision(
     context: VerificationContext,
+    runId: string,
     decided: DecidedVerification,
     outcome: "succeeded" | "failed" | "retryable" | "inconclusive" | "rejected_stale",
     now: string
-  ): void {
+  ): unknown {
     const evidenceHash = stableHash(context.evidence);
     const verifierEngineIdsJson = JSON.stringify(decided.verifierEngineIds);
-    const payload = redactValue({
-      evidence: context.evidence,
-      results: decided.results ?? [],
-      ...(decided.reason ? { reason: decided.reason } : {})
-    });
-    const decisionId = `wuv_${stableHash({
-      executionAttemptId: context.binding.attemptId,
-      criteriaHash: context.requirement.criteriaHash,
-      evidenceHash,
-      verifierEngineIds: decided.verifierEngineIds,
-      outcome,
-      verdict: decided.verdict ?? null
-    }).slice(0, 32)}`;
+    const payload = this.boundedDecisionPayload(context, runId, decided, outcome);
+    const decisionId = `wuv_${stableHash({ runId, executionAttemptId: context.binding.attemptId }).slice(0, 32)}`;
 
-    const inserted = this.store.db
+    this.store.db
       .prepare(
-        `INSERT OR IGNORE INTO work_unit_verification_decisions (
-           decision_id, mission_id, unit_id, unit_attempt, execution_attempt_id, execution_report_hash,
+        `INSERT INTO work_unit_verification_decisions (
+           decision_id, run_id, mission_id, unit_id, unit_attempt, execution_attempt_id, execution_report_hash,
            result_hash, criteria_hash, verification_policy, outcome, verdict, implementer_worker_id,
-           verifier_engine_ids_json, evidence_hash, evidence_json, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           implementer_engine_id, verifier_engine_ids_json, evidence_hash, evidence_json, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         decisionId,
+        runId,
         context.missionId,
         context.unitId,
         context.binding.unitAttempt,
@@ -429,40 +366,69 @@ export class WorkUnitVerificationGate {
         outcome,
         decided.verdict ?? null,
         context.binding.workerId,
+        context.binding.implementerEngineId,
         verifierEngineIdsJson,
         evidenceHash,
         JSON.stringify(payload),
         now
       );
+    return payload;
+  }
 
-    if (inserted.changes === 0) {
-      const existing = this.store.db
-        .prepare(
-          `SELECT decision_id, outcome, verdict
-           FROM work_unit_verification_decisions
-           WHERE execution_attempt_id = ? AND criteria_hash = ?
-             AND verifier_engine_ids_json = ? AND evidence_hash = ?`
-        )
-        .get(context.binding.attemptId, context.requirement.criteriaHash, verifierEngineIdsJson, evidenceHash) as
-        { decision_id: string; outcome: string; verdict: string | null } | undefined;
-      if (
-        !existing ||
-        existing.decision_id !== decisionId ||
-        existing.outcome !== outcome ||
-        existing.verdict !== (decided.verdict ?? null)
-      ) {
-        throw new ControlStackError(
-          "verification_decision_conflict",
-          "the same bound verification evidence already has a different durable decision"
-        );
-      }
-    }
+  private boundedDecisionPayload(
+    context: VerificationContext,
+    runId: string,
+    decided: DecidedVerification,
+    outcome: string
+  ): unknown {
+    const payload = {
+      runId,
+      unitId: context.unitId,
+      unitAttempt: context.binding.unitAttempt,
+      executionAttemptId: context.binding.attemptId,
+      executionReportHash: context.binding.reportHash,
+      resultHash: context.binding.resultHash,
+      criteriaHash: context.requirement.criteriaHash,
+      policy: context.policy,
+      outcome,
+      ...(decided.verdict ? { verdict: decided.verdict } : {}),
+      ...(decided.reason ? { reason: boundedText(decided.reason, 256) } : {}),
+      implementerWorkerId: context.binding.workerId,
+      implementerEngineId: context.binding.implementerEngineId,
+      verifierEngineIds: decided.verifierEngineIds,
+      evidence: {
+        workItemId: context.evidence.workItemId,
+        implementerClaimHash: stableHash(context.evidence.implementerClaim),
+        diffSummaryHash: stableHash(context.evidence.diffSummary),
+        commandResults: context.evidence.commandResults.map((command) => ({
+          commandProfile: boundedText(command.commandProfile, 128),
+          exitCode: command.exitCode,
+          observedSuccess: command.observedSuccess,
+          stdoutHash: stableHash(command.stdout),
+          stderrHash: stableHash(command.stderr)
+        }))
+      },
+      results: (decided.results ?? []).map((result) => ({
+        verdict: result.verdict,
+        verifierEngineId: result.verifierEngineId,
+        durationMs: result.durationMs,
+        ...(result.usage ? { usage: result.usage } : {}),
+        summary: boundedText(result.summary, 1_000),
+        criteriaResults: result.criteriaResults.map((criterion) => ({
+          criterionId: boundedText(criterion.criterionId, 128),
+          satisfied: criterion.satisfied,
+          observed: boundedText(criterion.observed, 500)
+        }))
+      }))
+    };
+    return redactValue(payload);
   }
 
   private executionBinding(missionId: string, unitId: string, unitAttempt: number): ExecutionBinding | undefined {
     const row = this.store.db
       .prepare(
-        `SELECT attempt_id, mission_id, unit_id, unit_attempt, worker_id, state, result_hash, report_hash
+        `SELECT attempt_id, mission_id, unit_id, unit_attempt, worker_id, implementer_engine_id,
+                state, result_hash, report_hash, report_json
          FROM work_unit_execution_attempts
          WHERE mission_id = ? AND unit_id = ? AND unit_attempt = ?`
       )
@@ -473,35 +439,92 @@ export class WorkUnitVerificationGate {
           unit_id: string;
           unit_attempt: number;
           worker_id: string;
+          implementer_engine_id: string | null;
           state: string;
           result_hash: string | null;
           report_hash: string | null;
+          report_json: string | null;
         }
       | undefined;
-    if (!row || row.state !== "succeeded" || !row.result_hash || !row.report_hash) return undefined;
+    if (
+      !row ||
+      row.state !== "succeeded" ||
+      !row.result_hash ||
+      !row.report_hash ||
+      !row.report_json ||
+      !row.implementer_engine_id
+    ) {
+      return undefined;
+    }
+    const report = JSON.parse(row.report_json) as ResultEnvelope;
+    if (
+      report.attemptId !== row.attempt_id ||
+      report.unitId !== row.unit_id ||
+      report.unitAttempt !== row.unit_attempt ||
+      report.workerId !== row.worker_id ||
+      report.result?.resultHash !== row.result_hash
+    ) {
+      throw new ControlStackError("coding_mission_integrity", "persisted execution report binding is invalid");
+    }
+    const receipts = this.store.db
+      .prepare(
+        `SELECT kind, hash
+         FROM work_unit_execution_receipts
+         WHERE attempt_id = ?
+         ORDER BY receipt_index`
+      )
+      .all(row.attempt_id) as Array<{ kind: string; hash: string }>;
+
     return {
       attemptId: row.attempt_id,
       missionId: row.mission_id,
       unitId: row.unit_id,
       unitAttempt: row.unit_attempt,
       workerId: row.worker_id,
+      implementerEngineId: row.implementer_engine_id,
       resultHash: row.result_hash,
-      reportHash: row.report_hash
+      reportHash: row.report_hash,
+      report,
+      receipts
     };
   }
 
-  private assertEvidenceBinding(evidence: BoundVerificationEvidence, binding: ExecutionBinding): void {
-    if (
-      evidence.workItemId !== binding.unitId ||
-      evidence.executionAttemptId !== binding.attemptId ||
-      evidence.unitAttempt !== binding.unitAttempt ||
-      evidence.resultHash !== binding.resultHash ||
-      evidence.reportHash !== binding.reportHash
-    ) {
-      throw new ControlStackError(
-        "verification_evidence_mismatch",
-        "verification evidence does not match the durable execution attempt and result"
-      );
-    }
+  private durableEvidence(binding: ExecutionBinding): VerificationEvidence {
+    const files = (binding.report.result?.files ?? []).slice(0, 128).map((file) => boundedText(file, 256));
+    return verificationEvidenceSchema.parse({
+      workItemId: binding.unitId,
+      implementerClaim: boundedText(
+        `Durable execution ${binding.attemptId} reported ${binding.report.outcome} with result ${binding.resultHash}.`,
+        2_000
+      ),
+      diffSummary: boundedText(
+        files.length > 0 ? `Durable result files: ${files.join(", ")}` : "Durable execution reported no result files.",
+        8_000
+      ),
+      commandResults: binding.receipts.slice(0, 32).map((receipt) => ({
+        commandProfile: boundedText(`receipt:${receipt.kind}`, 128),
+        exitCode: null,
+        observedSuccess: binding.report.outcome === "succeeded",
+        stdout: boundedText(`receipt_hash=${receipt.hash}`, 512),
+        stderr: ""
+      }))
+    });
+  }
+
+  private auditAuthorityHold(
+    missionId: string,
+    unitId: string,
+    policy: Exclude<VerificationPolicy, "none">,
+    reason: string
+  ): void {
+    const now = this.clock();
+    const body = { unitId, policy, reason };
+    this.store.putEvidence(missionId, `verification_authority_denied:${unitId}:${stableHash(body).slice(0, 12)}`, body, now);
+    this.store.db
+      .prepare(
+        `INSERT INTO coding_events (mission_id, name, body_json, created_at)
+         VALUES (?, 'verification.authority_denied', ?, ?)`
+      )
+      .run(missionId, JSON.stringify(body), now);
   }
 }
