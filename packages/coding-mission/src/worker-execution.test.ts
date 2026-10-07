@@ -133,16 +133,34 @@ describe("work-unit execution ledger", () => {
 
   it("keeps unknown external outcomes unknown and therefore non-retryable", () => {
     const { store, ledger, dispatch, claim } = claimed();
+    const { result: _result, ...base } = success(dispatch);
     const result: ResultEnvelope = {
-      ...success(dispatch),
+      ...base,
       outcome: "unknown",
       receipts: [],
-      result: undefined,
       externalStateUncertain: true
     };
     expect(ledger.applyResult({ claimToken: claim.token, result })).toEqual({ applied: "unknown" });
     expect(store.workUnits("m1")[0]).toMatchObject({ status: "unknown", failureCategory: "unknown" });
     expect(store.retryUnit("m1", "u1", T2)).toEqual({ ok: false, outcome: "retry_unsafe" });
+  });
+
+  it("persists a worker cancellation as cancelled with honest external-state uncertainty", () => {
+    const { store, ledger, dispatch, claim } = claimed();
+    const { result: _result, ...base } = success(dispatch);
+    const result: ResultEnvelope = {
+      ...base,
+      outcome: "cancelled",
+      receipts: [],
+      failure: { category: "cancelled", retrySafe: false },
+      externalStateUncertain: true
+    };
+    expect(ledger.applyResult({ claimToken: claim.token, result })).toEqual({ applied: "cancelled" });
+    expect(store.workUnits("m1")[0]).toMatchObject({
+      status: "cancelled",
+      failureCategory: "cancelled",
+      cancelExternalState: "uncertain"
+    });
   });
 
   it("is idempotent for the same terminal report and rejects a different replay", () => {
