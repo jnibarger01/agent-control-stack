@@ -183,9 +183,9 @@ describe("work-unit verification gate", () => {
       workItemId: "u1",
       commandResults: [
         {
-          commandProfile: "receipt:tool_result",
-          observedSuccess: true,
-          stdout: "receipt_hash=receipt-1"
+          commandProfile: "opaque_receipt:tool_result",
+          observedSuccess: false,
+          stdout: "opaque receipt hash only: receipt-1; no command attestation is present"
         }
       ]
     });
@@ -262,10 +262,66 @@ describe("work-unit verification gate", () => {
       expect.arrayContaining([
         expect.objectContaining({
           name: "verification.authority_denied",
-          body: expect.objectContaining({ reason: "missing_verification_requirement" })
+          body: expect.objectContaining({
+            reason: "missing_verification_requirement",
+            unitAttempt: 1
+          })
         })
       ])
     );
+  });
+
+  it("refuses migration recovery when the pre-057 external outcome was unknown", () => {
+    const store = new CodingMissionStore(":memory:");
+    store.createGeneral({ missionId: "m1", summary: "execute", now: T0 });
+    store.addWorkUnits(
+      "m1",
+      [{ unitId: "u1", kind: "coding", title: "unit", verificationPolicy: "independent" }],
+      T0
+    );
+    store.db
+      .prepare(
+        `UPDATE coding_operations
+         SET status = 'failed', attempt = 1, failure_category = 'verification_failure'
+         WHERE mission_id = 'm1' AND operation_id = 'u1'`
+      )
+      .run();
+    store.db
+      .prepare(
+        `INSERT INTO work_unit_verification_quarantine
+           (mission_id, unit_id, reason, previous_status, quarantined_at)
+         VALUES ('m1', 'u1', 'migration_057_missing_verification_authority', 'unknown', ?)`
+      )
+      .run(T0);
+
+    expect(() => store.setVerificationRequirement("m1", "u1", CRITERIA, T1)).toThrow(
+      /must be reconciled/
+    );
+    expect(store.workUnits("m1")[0]).toMatchObject({ status: "failed", attempt: 1 });
+  });
+
+  it("fails closed when the persisted execution report hash is tampered", async () => {
+    const { store, gate, claim, dispatch } = verifyingUnit("independent");
+    store.db
+      .prepare("UPDATE work_unit_execution_attempts SET report_hash = ? WHERE attempt_id = ?")
+      .run("tampered-report-hash", dispatch.attemptId);
+
+    await expect(gate.verifyUnit(gateInput(claim.token, [verifier("claude", "pass")]))).rejects.toThrow(
+      /report hash does not match/
+    );
+    expect(store.workUnits("m1")[0]?.status).toBe("verifying");
+  });
+
+  it("fails closed when persisted receipt rows diverge from report_json", async () => {
+    const { store, gate, claim, dispatch } = verifyingUnit("independent");
+    store.db
+      .prepare("UPDATE work_unit_execution_receipts SET hash = 'tampered' WHERE attempt_id = ?")
+      .run(dispatch.attemptId);
+
+    await expect(gate.verifyUnit(gateInput(claim.token, [verifier("claude", "pass")]))).rejects.toThrow(
+      /receipts do not match/
+    );
+    expect(store.workUnits("m1")[0]?.status).toBe("verifying");
   });
 
   it("persists the actual retryable lifecycle outcome on a failed check", async () => {
