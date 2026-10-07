@@ -826,14 +826,59 @@ function readJsonLease(file) {
   }
 }
 /** Fail closed: a present-but-unparsable lease/marker reports active+ambiguous, never inactive. */
-function leaseStatus(file, label) {
+function basicLeaseStatus(file, label) {
   if (!fs.existsSync(file)) return { active: false, ambiguous: false, detail: `no ${label} file` };
   const info = readJsonLease(file);
-  if (!info || typeof info.pid !== "number")
+  if (!info || !Number.isInteger(info.pid) || info.pid <= 0)
     return { active: true, ambiguous: true, detail: `${label} file present but unreadable/malformed: ${file}` };
   if (!isPidAlive(info.pid))
     return { active: false, ambiguous: false, detail: `${label} stale (pid ${info.pid} not alive)` };
-  return { active: true, ambiguous: false, pid: info.pid, detail: `${label} held by pid ${info.pid}` };
+  return { active: true, ambiguous: false, pid: info.pid, info, detail: `${label} held by pid ${info.pid}` };
+}
+
+function executorLeaseStatus(file) {
+  const status = basicLeaseStatus(file, "executor lease");
+  if (!status.active || status.ambiguous) return status;
+  const info = status.info;
+  const now = Date.now();
+  const canonical =
+    typeof info.instanceId === "string" &&
+    info.instanceId.length > 0 &&
+    info.instanceId.length <= 128 &&
+    typeof info.hostname === "string" &&
+    info.hostname === os.hostname() &&
+    Number.isFinite(info.acquiredAt) &&
+    info.acquiredAt > 0 &&
+    info.acquiredAt <= now &&
+    Number.isFinite(info.expiresAt) &&
+    info.expiresAt > now;
+  if (!canonical) {
+    return {
+      active: true,
+      ambiguous: true,
+      pid: info.pid,
+      detail: `executor lease failed canonical identity/expiry validation: ${file}`
+    };
+  }
+  return {
+    active: true,
+    ambiguous: false,
+    pid: info.pid,
+    instanceId: info.instanceId,
+    expiresAt: info.expiresAt,
+    detail: `executor lease held by pid ${info.pid}`
+  };
+}
+
+function breakGlassStatus(file) {
+  const status = basicLeaseStatus(file, "break-glass marker");
+  if (!status.active || status.ambiguous) return status;
+  return {
+    active: true,
+    ambiguous: false,
+    pid: status.pid,
+    detail: `break-glass marker held by pid ${status.pid}`
+  };
 }
 function computeJcAuthority() {
   const initialized = !!(pair && pair.initializedOnce);
@@ -862,8 +907,8 @@ function computeJcAuthority() {
 
 function computeAuthority() {
   if (JC) return computeJcAuthority();
-  const executorLease = leaseStatus(path.join(dcStateDir(), "executor.lock"), "executor lease");
-  const breakGlass = leaseStatus(path.join(dcStateDir(), "break-glass.lock"), "break-glass marker");
+  const executorLease = executorLeaseStatus(path.join(dcStateDir(), "executor.lock"));
+  const breakGlass = breakGlassStatus(path.join(dcStateDir(), "break-glass.lock"));
   const initialized = !!(pair && pair.initializedOnce);
   let observedMode;
   if (breakGlass.active && executorLease.active) observedMode = "ambiguous_conflict";
