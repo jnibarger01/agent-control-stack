@@ -23,6 +23,7 @@ export interface DispatchEnvelope {
   unitKind: WorkUnitKind;
   verificationPolicy: VerificationPolicy;
   workerId: string;
+  implementerEngineId: string;
   lane: ExecutorLane;
   claimTokenHash: string;
   payloadHash: string;
@@ -73,6 +74,7 @@ export interface ExecutionAttemptRecord {
   unitId: string;
   unitAttempt: number;
   workerId: string;
+  implementerEngineId: string;
   lane: ExecutorLane;
   claimTokenHash: string;
   dispatchHash: string;
@@ -98,6 +100,7 @@ interface AttemptRow {
   unit_id: string;
   unit_attempt: number;
   worker_id: string;
+  implementer_engine_id: string | null;
   executor_lane: ExecutorLane;
   claim_token_hash: string;
   dispatch_hash: string;
@@ -359,6 +362,7 @@ export class WorkUnitExecutionLedger {
     unitId: string;
     claimToken: string;
     workerId: string;
+    implementerEngineId?: string;
     lane: ExecutorLane;
     authority?: ExecutionAuthorityRefs;
     now: string;
@@ -377,6 +381,20 @@ export class WorkUnitExecutionLedger {
       if (!EXECUTOR_LANES.includes(input.lane)) {
         throw new ControlStackError("execution_lane_invalid", "executor lane is invalid");
       }
+      if (unit.verificationPolicy !== "none" && !this.store.verificationRequirement(input.missionId, input.unitId)) {
+        throw new ControlStackError(
+          "verification_requirement_missing",
+          "verified execution cannot begin without an admitted verification requirement"
+        );
+      }
+      const implementerEngineId =
+        input.implementerEngineId?.trim() || (unit.verificationPolicy === "none" ? `lane:${input.lane}` : "");
+      if (!implementerEngineId) {
+        throw new ControlStackError(
+          "execution_implementer_identity_required",
+          "verified execution requires the implementer engine/provider identity"
+        );
+      }
       const claimTokenHash = stableHash(input.claimToken);
       const authority = normalizedAuthority(input.authority);
       const payloadHash = stableHash(unit.payload ?? null);
@@ -386,6 +404,7 @@ export class WorkUnitExecutionLedger {
         unitId: input.unitId,
         unitAttempt: unit.attempt,
         workerId: input.workerId,
+        implementerEngineId,
         claimTokenHash
       }).slice(0, 32)}`;
       const dispatch: DispatchEnvelope = {
@@ -397,6 +416,7 @@ export class WorkUnitExecutionLedger {
         unitKind: unit.kind,
         verificationPolicy: unit.verificationPolicy,
         workerId: input.workerId,
+        implementerEngineId,
         lane: input.lane,
         claimTokenHash,
         payloadHash,
@@ -412,6 +432,7 @@ export class WorkUnitExecutionLedger {
           existing.dispatch_hash !== dispatchHash ||
           existing.claim_token_hash !== claimTokenHash ||
           existing.worker_id !== input.workerId ||
+          existing.implementer_engine_id !== implementerEngineId ||
           existing.executor_lane !== input.lane
         ) {
           throw new ControlStackError("execution_attempt_conflict", "execution attempt identity already has another dispatch");
@@ -435,9 +456,9 @@ export class WorkUnitExecutionLedger {
       this.store.db
         .prepare(
           `INSERT INTO work_unit_execution_attempts (
-             attempt_id, mission_id, unit_id, unit_attempt, worker_id, executor_lane, claim_token_hash,
-             dispatch_hash, dispatch_json, authority_json, state, started_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'started', ?)`
+             attempt_id, mission_id, unit_id, unit_attempt, worker_id, implementer_engine_id,
+             executor_lane, claim_token_hash, dispatch_hash, dispatch_json, authority_json, state, started_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'started', ?)`
         )
         .run(
           attemptId,
@@ -445,6 +466,7 @@ export class WorkUnitExecutionLedger {
           input.unitId,
           unit.attempt,
           input.workerId,
+          implementerEngineId,
           input.lane,
           claimTokenHash,
           dispatchHash,
@@ -477,6 +499,7 @@ export class WorkUnitExecutionLedger {
       unitId: row.unit_id,
       unitAttempt: row.unit_attempt,
       workerId: row.worker_id,
+      implementerEngineId: row.implementer_engine_id ?? `lane:${row.executor_lane}`,
       lane: row.executor_lane,
       claimTokenHash: row.claim_token_hash,
       dispatchHash: row.dispatch_hash,
