@@ -755,9 +755,9 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, body);
       }
       // A jc bridge on UPSTREAM is a misconfiguration, never a ready DC bridge.
-      const bridgeExecutionReady =
-        !MANAGED.enabled ||
-        bridgeAuthority.data?.observedMode === 'managed';
+      const bridgeExecutionReady = MANAGED.enabled
+        ? bridgeAuthority.data?.observedMode === 'managed'
+        : bridgeAuthority.data?.observedMode === 'managed' || bridgeAuthority.data?.observedMode === 'break_glass';
       const bridgeReady =
         bridgeAuthority.ok &&
         bridgeAuthority.data &&
