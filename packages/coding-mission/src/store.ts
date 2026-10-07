@@ -590,6 +590,27 @@ export class CodingMissionStore {
     });
   }
 
+  /**
+   * Promote a unit that an independent verification gate has passed. This is the only
+   * completion path out of `verifying`: the maker-facing `completeOperation` deliberately
+   * does not accept that status, so an executor can never complete its own verified unit.
+   */
+  succeedVerifiedUnit(missionId: string, operationId: string, claimToken: string, now: string): void {
+    this.transaction(() => {
+      const resultRow = this.db
+        .prepare(
+          `UPDATE coding_operations
+           SET status = 'succeeded'
+           WHERE mission_id = ? AND operation_id = ? AND status = 'verifying' AND claim_token = ?`
+        )
+        .run(missionId, operationId, claimToken);
+      if (resultRow.changes !== 1) {
+        throw new ControlStackError("coding_mission_claim_conflict", "verified completion did not match the claim");
+      }
+      this.event(missionId, "work_unit.completed", { unitId: operationId, verified: true }, now);
+    });
+  }
+
   markOperation(missionId: string, operationId: string, status: "conflict" | "unknown" | "failed"): void {
     this.transaction(() => {
       this.db

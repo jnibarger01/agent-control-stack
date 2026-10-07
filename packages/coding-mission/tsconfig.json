@@ -10,6 +10,7 @@
     { "path": "../actor-router" },
     { "path": "../publication" },
     { "path": "../shared" },
-    { "path": "../work-items" }
+    { "path": "../work-items" },
+    { "path": "../verification" }
   ]
 }
