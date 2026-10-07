@@ -128,7 +128,8 @@ export class WorkUnitVerificationGate {
     ): VerificationGateResult =>
       this.apply(context, runId, {
         outcome: "inconclusive",
-        verifierEngineIds: results.map((result) => result.verifierEngineId),
+        verifierEngineIds:
+          results.length > 0 ? results.map((result) => result.verifierEngineId) : verifierEngineIds,
         reason,
         results,
         ...(verdict ? { verdict } : {})
@@ -142,6 +143,9 @@ export class WorkUnitVerificationGate {
     let accountingReason: string | undefined;
 
     for (const [index, verifier] of input.verifiers.entries()) {
+      if (verifier.engineId === binding.implementerEngineId) {
+        return hold("verifier_identity_collision", results);
+      }
       const reservationId = `wub_${stableHash({ runId, index, verifier: verifier.engineId }).slice(0, 32)}`;
       const reserved = this.store.reserveVerificationUsage({
         reservationId,
@@ -457,6 +461,9 @@ export class WorkUnitVerificationGate {
       return undefined;
     }
     const report = JSON.parse(row.report_json) as ResultEnvelope;
+    if (stableHash(report) !== row.report_hash) {
+      throw new ControlStackError("coding_mission_integrity", "persisted execution report hash does not match report_json");
+    }
     if (
       report.attemptId !== row.attempt_id ||
       report.unitId !== row.unit_id ||
@@ -474,6 +481,9 @@ export class WorkUnitVerificationGate {
          ORDER BY receipt_index`
       )
       .all(row.attempt_id) as Array<{ kind: string; hash: string }>;
+    if (stableHash(receipts) !== stableHash(report.receipts)) {
+      throw new ControlStackError("coding_mission_integrity", "persisted execution receipts do not match report_json");
+    }
 
     return {
       attemptId: row.attempt_id,
@@ -502,10 +512,10 @@ export class WorkUnitVerificationGate {
         8_000
       ),
       commandResults: binding.receipts.slice(0, 32).map((receipt) => ({
-        commandProfile: boundedText(`receipt:${receipt.kind}`, 128),
+        commandProfile: boundedText(`opaque_receipt:${receipt.kind}`, 128),
         exitCode: null,
-        observedSuccess: binding.report.outcome === "succeeded",
-        stdout: boundedText(`receipt_hash=${receipt.hash}`, 512),
+        observedSuccess: false,
+        stdout: boundedText(`opaque receipt hash only: ${receipt.hash}; no command attestation is present`, 512),
         stderr: ""
       }))
     });
@@ -518,7 +528,22 @@ export class WorkUnitVerificationGate {
     reason: string
   ): void {
     const now = this.clock();
-    const body = { unitId, policy, reason };
+    const unit = this.store.workUnits(missionId).find((candidate) => candidate.unitId === unitId);
+    const executionAttempt = unit?.attempt
+      ? this.store.db
+          .prepare(
+            `SELECT attempt_id FROM work_unit_execution_attempts
+             WHERE mission_id = ? AND unit_id = ? AND unit_attempt = ?`
+          )
+          .get(missionId, unitId, unit.attempt) as { attempt_id: string } | undefined
+      : undefined;
+    const body = {
+      unitId,
+      policy,
+      reason,
+      ...(unit ? { unitAttempt: unit.attempt } : {}),
+      ...(executionAttempt ? { executionAttemptId: executionAttempt.attempt_id } : {})
+    };
     this.store.putEvidence(missionId, `verification_authority_denied:${unitId}:${stableHash(body).slice(0, 12)}`, body, now);
     this.store.db
       .prepare(
