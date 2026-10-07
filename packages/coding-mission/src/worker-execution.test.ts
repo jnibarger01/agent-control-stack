@@ -47,7 +47,7 @@ function claimed(options: {
     );
   }
   store.releaseReadyUnits("m1", T0);
-  const claim = { token: "claim-super-secret", workerId: "worker-1", route: { lane: options.lane ?? "coder" }, claimedAt: T1 };
+  const claim = { token: "claim-super-secret", workerId: "worker-1", route: { lane: options.lane ?? "coder", implementerEngineId: "codex" }, claimedAt: T1 };
   expect(store.claimUnit("m1", "u1", claim)).toMatchObject({ ok: true, attempt: 1 });
   const ledger = new WorkUnitExecutionLedger(store);
   const dispatch = ledger.beginDispatch({
@@ -145,7 +145,7 @@ describe("work-unit execution ledger", () => {
       T0
     );
     store.releaseReadyUnits("m-engine", T0);
-    const claim = { token: "claim", workerId: "worker-1", route: { lane: "coder" }, claimedAt: T1 };
+    const claim = { token: "claim", workerId: "worker-1", route: { lane: "coder", implementerEngineId: "codex" }, claimedAt: T1 };
     expect(store.claimUnit("m-engine", "u1", claim)).toMatchObject({ ok: true });
     const ledger = new WorkUnitExecutionLedger(store);
     expect(() =>
