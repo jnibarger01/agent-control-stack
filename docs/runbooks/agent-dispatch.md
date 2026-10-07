@@ -35,10 +35,14 @@ else touching the service.
   `ACS_RELEASES_DIR`, `TMPDIR` or `XDG_RUNTIME_DIR` it uses.
 - **`ACS_DB_PATH` must be absolute.** The gateway resolves a relative path against its systemd working directory, which a
   deploy changes; the script refuses a relative path before touching anything.
+- **Dispatch is off by default.** The dispatch drop-in writes `ACS_AGENT_DISPATCH_ENABLED=$ACS_DEPLOY_DISPATCH_ENABLED`,
+  which defaults to `0`. Set `ACS_DEPLOY_DISPATCH_ENABLED=1` to let the installed gateway launch host coding CLIs; any
+  other value is refused. The smoke test always exercises the Dispatch route on its isolated copy.
 - **Backup first.** Activation backs up the live database and the current drop-ins before changing anything.
 - **Automatic rollback restores the database.** If the new release is not live within `ACS_DEPLOY_WAIT_SEC` (default
   180s), or the unit crash-loops, the script stops the unit, restores the pre-activation backup over the live database
-  with the previous release's `db-ops`, restores the previous drop-ins (or removes the ones it installed, on a first deployment where none existed) and starts the previous release. The new release
+  with the previous release's `db-ops` (never the new release's; if no previous release tool is found it restores
+  nothing and leaves the unit stopped), restores the previous drop-ins (or removes the ones it installed, on a first deployment where none existed) and starts the previous release. The new release
   may already have migrated the database, which the previous release cannot read, so the restore is not optional.
   **Writes made between the backup and the rollback are lost.** The output prints the backup path. Before restoring it
   fails closed: the unit must really be stopped and no other process (a worker, scheduler, CLI or another gateway) may
