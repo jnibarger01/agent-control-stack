@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type {
   VerificationCriterion,
+  VerificationEvidence,
   VerificationResult,
   VerificationUsageReservation,
   Verifier
@@ -8,15 +9,13 @@ import type {
 import type { MissionBudget } from "./budget.js";
 import type { VerificationPolicy } from "./mission-model.js";
 import { CodingMissionStore } from "./store.js";
-import { WorkUnitVerificationGate, type BoundVerificationEvidence } from "./verification-gate.js";
+import { WorkUnitVerificationGate } from "./verification-gate.js";
 import { WorkUnitExecutionLedger, type ResultEnvelope } from "./worker-execution.js";
 
 const T0 = "2026-10-06T00:00:00.000Z";
 const T1 = "2026-10-06T00:00:01.000Z";
 const T2 = "2026-10-06T00:00:02.000Z";
 const T3 = "2026-10-06T00:00:03.000Z";
-const T4 = "2026-10-06T00:00:04.000Z";
-const T5 = "2026-10-06T00:00:05.000Z";
 
 const CRITERIA: VerificationCriterion[] = [
   { id: "c1", description: "result exists", expected: "a result hash is present" }
@@ -28,15 +27,15 @@ interface VerifierOptions {
   observed?: string;
   usage?: VerificationResult["usage"];
   usageReservation?: VerificationUsageReservation;
-  onVerify?: () => void;
+  onVerify?: (evidence: VerificationEvidence) => void;
 }
 
 function verifier(engineId: string, verdict: VerificationResult["verdict"], options: VerifierOptions = {}): Verifier {
   return {
     engineId,
     ...(options.usageReservation ? { usageReservation: options.usageReservation } : {}),
-    async verify(criteria) {
-      options.onVerify?.();
+    async verify(criteria, evidence) {
+      options.onVerify?.(evidence);
       if (options.throws) throw new Error("verifier exploded");
       return {
         verdict,
@@ -59,7 +58,6 @@ function verifyingUnit(
   options: {
     budget?: MissionBudget;
     criteria?: VerificationCriterion[];
-    setRequirement?: boolean;
     clock?: () => string;
   } = {}
 ) {
@@ -71,7 +69,7 @@ function verifyingUnit(
     ...(options.budget ? { budget: options.budget } : {})
   });
   store.addWorkUnits("m1", [{ unitId: "u1", kind: "coding", title: "unit", verificationPolicy: policy }], T0);
-  if (policy !== "none" && options.setRequirement !== false) {
+  if (policy !== "none") {
     store.setVerificationRequirement("m1", "u1", options.criteria ?? CRITERIA, T0);
   }
   store.releaseReadyUnits("m1", T0);
@@ -88,6 +86,7 @@ function verifyingUnit(
     unitId: "u1",
     claimToken: claim.token,
     workerId: claim.workerId,
+    implementerEngineId: "codex",
     lane: "coder",
     now: T1
   });
@@ -110,131 +109,150 @@ function verifyingUnit(
   expect(ledger.applyResult({ claimToken: claim.token, result })).toEqual({
     applied: policy === "none" ? "completed" : "awaiting_verification"
   });
-  const attempt = ledger.attempt(dispatch.attemptId);
-  const evidence: BoundVerificationEvidence = {
-    workItemId: "u1",
-    executionAttemptId: dispatch.attemptId,
-    unitAttempt: 1,
-    resultHash: "result-1",
-    reportHash: attempt?.reportHash ?? "",
-    implementerClaim: "done",
-    diffSummary: "a.ts changed",
-    commandResults: []
-  };
   return {
     store,
     ledger,
     gate: new WorkUnitVerificationGate(store, options.clock),
     claim,
-    dispatch,
-    evidence
+    dispatch
   };
 }
 
-function gateInput(claimToken: string, evidence: BoundVerificationEvidence, verifiers: readonly Verifier[]) {
+function gateInput(claimToken: string, verifiers: readonly Verifier[]) {
   return {
     missionId: "m1",
     unitId: "u1",
     claimToken,
-    verifiers,
-    evidence
+    verifiers
   };
 }
 
 describe("work-unit verification gate", () => {
   it("promotes only an attempt-bound independent pass", async () => {
-    const { store, gate, claim, evidence, dispatch } = verifyingUnit("independent");
+    const { store, gate, claim, dispatch } = verifyingUnit("independent");
 
     expect(() =>
       store.completeOperation("m1", "u1", claim.token, { resultHash: "result-1", files: ["a.ts"] }, T3)
     ).toThrow();
-    expect((store as unknown as Record<string, unknown>).succeedVerifiedUnit).toBeUndefined();
 
-    await expect(
-      gate.verifyUnit(gateInput(claim.token, evidence, [verifier("verifier-a", "pass")]))
-    ).resolves.toMatchObject({ outcome: "succeeded", verdict: "pass" });
+    await expect(gate.verifyUnit(gateInput(claim.token, [verifier("claude", "pass")]))).resolves.toMatchObject({
+      outcome: "succeeded",
+      verdict: "pass"
+    });
 
     expect(store.workUnits("m1")[0]).toMatchObject({ status: "succeeded", resultHash: "result-1" });
     const row = store.db
       .prepare(
-        "SELECT execution_attempt_id, result_hash, criteria_hash, implementer_worker_id, outcome FROM work_unit_verification_decisions"
+        `SELECT execution_attempt_id, result_hash, criteria_hash, implementer_worker_id,
+                implementer_engine_id, outcome
+         FROM work_unit_verification_decisions`
       )
       .get() as Record<string, unknown>;
     expect(row).toMatchObject({
       execution_attempt_id: dispatch.attemptId,
       result_hash: "result-1",
       implementer_worker_id: "worker-1",
+      implementer_engine_id: "codex",
       outcome: "succeeded"
     });
-    expect(row.criteria_hash).toBe(store.verificationRequirement("m1", "u1")?.criteriaHash);
   });
 
-  it("derives producer identity from the durable execution attempt", async () => {
-    const { store, gate, claim, evidence } = verifyingUnit("independent");
-    await expect(
-      gate.verifyUnit(gateInput(claim.token, evidence, [verifier("worker-1", "pass")]))
-    ).resolves.toMatchObject({
+  it("rejects the same implementer engine even when the worker identity differs", async () => {
+    const { store, gate, claim } = verifyingUnit("independent");
+    await expect(gate.verifyUnit(gateInput(claim.token, [verifier("codex", "pass")]))).resolves.toMatchObject({
       outcome: "inconclusive",
       reason: "verifier_identity_collision"
     });
     expect(store.workUnits("m1")[0]?.status).toBe("verifying");
   });
 
-  it.each([
-    ["executionAttemptId", "wua_wrong"],
-    ["unitAttempt", 2],
-    ["resultHash", "wrong-result"],
-    ["reportHash", "wrong-report"]
-  ] as const)("rejects evidence with a stale %s binding", async (field, value) => {
-    const { store, gate, claim, evidence } = verifyingUnit("independent");
-    await expect(
-      gate.verifyUnit(gateInput(claim.token, { ...evidence, [field]: value }, [verifier("verifier-a", "pass")]))
-    ).rejects.toThrow(/durable execution attempt/);
-    expect(store.workUnits("m1")[0]?.status).toBe("verifying");
+  it("derives verifier evidence only from the durable execution report and receipts", async () => {
+    let observed: VerificationEvidence | undefined;
+    const { gate, claim, dispatch } = verifyingUnit("independent");
+    await gate.verifyUnit(
+      gateInput(claim.token, [
+        verifier("claude", "pass", {
+          onVerify: (evidence) => {
+            observed = evidence;
+          }
+        })
+      ])
+    );
+
+    expect(observed).toMatchObject({
+      workItemId: "u1",
+      commandResults: [
+        {
+          commandProfile: "receipt:tool_result",
+          observedSuccess: true,
+          stdout: "receipt_hash=receipt-1"
+        }
+      ]
+    });
+    expect(observed?.implementerClaim).toContain(dispatch.attemptId);
+    expect(observed?.diffSummary).toContain("a.ts");
   });
 
-  it("uses the immutable admitted rubric instead of caller-selected criteria", async () => {
-    const setup = verifyingUnit("independent");
-    expect(() =>
-      setup.store.setVerificationRequirement("m1", "u1", [{ id: "easy", description: "trivial", expected: "yes" }], T3)
-    ).toThrow(/before the first execution attempt/);
-
-    await expect(
-      setup.gate.verifyUnit(gateInput(setup.claim.token, setup.evidence, [verifier("verifier-a", "pass")]))
-    ).resolves.toMatchObject({ outcome: "succeeded" });
+  it("refuses the first claim when a verified unit has no admitted rubric", () => {
+    const store = new CodingMissionStore(":memory:");
+    store.createGeneral({ missionId: "m1", summary: "execute", now: T0 });
+    store.addWorkUnits(
+      "m1",
+      [{ unitId: "u1", kind: "coding", title: "unit", verificationPolicy: "independent" }],
+      T0
+    );
+    store.releaseReadyUnits("m1", T0);
+    expect(
+      store.claimUnit("m1", "u1", {
+        token: "claim",
+        workerId: "worker-1",
+        route: { lane: "coder" },
+        claimedAt: T1
+      })
+    ).toEqual({ ok: false, outcome: "verification_requirement_missing" });
+    expect(store.workUnits("m1")[0]?.attempt).toBe(0);
   });
 
-  it("holds when no authoritative verification requirement was admitted", async () => {
-    const { store, gate, claim, evidence } = verifyingUnit("independent", { setRequirement: false });
-    await expect(
-      gate.verifyUnit(gateInput(claim.token, evidence, [verifier("verifier-a", "pass")]))
-    ).resolves.toMatchObject({
+  it("audits a fail-closed authority lookup failure", async () => {
+    const { store, gate, claim } = verifyingUnit("independent");
+    store.db.exec("DROP TRIGGER work_unit_verification_requirements_immutable_delete");
+    store.db.exec("DELETE FROM work_unit_verification_requirements WHERE mission_id = 'm1' AND unit_id = 'u1'");
+
+    await expect(gate.verifyUnit(gateInput(claim.token, [verifier("claude", "pass")]))).resolves.toMatchObject({
       outcome: "inconclusive",
       reason: "missing_verification_requirement"
     });
-    expect(store.workUnits("m1")[0]?.status).toBe("verifying");
+    expect(store.events("m1")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "verification.authority_denied",
+          body: expect.objectContaining({ reason: "missing_verification_requirement" })
+        })
+      ])
+    );
   });
 
   it("persists the actual retryable lifecycle outcome on a failed check", async () => {
-    const { store, gate, claim, evidence } = verifyingUnit("independent");
-    await expect(
-      gate.verifyUnit(gateInput(claim.token, evidence, [verifier("verifier-a", "fail")]))
-    ).resolves.toMatchObject({ outcome: "retryable", verdict: "fail" });
-
+    const { store, gate, claim } = verifyingUnit("independent");
+    await expect(gate.verifyUnit(gateInput(claim.token, [verifier("claude", "fail")]))).resolves.toMatchObject({
+      outcome: "retryable",
+      verdict: "fail"
+    });
     expect(store.workUnits("m1")[0]).toMatchObject({
       status: "retryable",
       failureCategory: "verification_failure"
     });
-    const row = store.db.prepare("SELECT outcome FROM work_unit_verification_decisions").get() as { outcome: string };
-    expect(row.outcome).toBe("retryable");
-    expect(store.evidence<{ outcome: string }>("m1", "verification:u1:1")?.outcome).toBe("retryable");
+    expect(
+      (store.db.prepare("SELECT outcome FROM work_unit_verification_decisions").get() as { outcome: string }).outcome
+    ).toBe("retryable");
   });
 
   it("makes release-gate failure terminal", async () => {
-    const { store, gate, claim, evidence } = verifyingUnit("release_gate");
-    await expect(
-      gate.verifyUnit(gateInput(claim.token, evidence, [verifier("verifier-a", "fail")]))
-    ).resolves.toMatchObject({ outcome: "failed", verdict: "fail" });
+    const { store, gate, claim } = verifyingUnit("release_gate");
+    await expect(gate.verifyUnit(gateInput(claim.token, [verifier("claude", "fail")]))).resolves.toMatchObject({
+      outcome: "failed",
+      verdict: "fail"
+    });
     expect(store.workUnits("m1")[0]).toMatchObject({
       status: "failed",
       failureCategory: "verification_failure"
@@ -243,27 +261,23 @@ describe("work-unit verification gate", () => {
 
   it("requires two distinct multi-verifiers and stops after a decisive failure", async () => {
     const one = verifyingUnit("multi_verifier");
-    await expect(
-      one.gate.verifyUnit(gateInput(one.claim.token, one.evidence, [verifier("verifier-a", "pass")]))
-    ).resolves.toMatchObject({ outcome: "inconclusive", reason: "insufficient_verifiers" });
-
-    const duplicate = verifyingUnit("multi_verifier");
-    await expect(
-      duplicate.gate.verifyUnit(
-        gateInput(duplicate.claim.token, duplicate.evidence, [
-          verifier("verifier-a", "pass"),
-          verifier("verifier-a", "pass")
-        ])
-      )
-    ).resolves.toMatchObject({ outcome: "inconclusive", reason: "duplicate_verifier" });
+    await expect(one.gate.verifyUnit(gateInput(one.claim.token, [verifier("claude", "pass")]))).resolves.toMatchObject({
+      outcome: "inconclusive",
+      reason: "insufficient_verifiers"
+    });
 
     let laterVerifierRan = false;
     const failed = verifyingUnit("multi_verifier");
     await expect(
       failed.gate.verifyUnit(
-        gateInput(failed.claim.token, failed.evidence, [
-          verifier("verifier-a", "fail"),
-          verifier("verifier-b", "pass", { onVerify: () => (laterVerifierRan = true), throws: true })
+        gateInput(failed.claim.token, [
+          verifier("claude-a", "fail"),
+          verifier("claude-b", "pass", {
+            onVerify: () => {
+              laterVerifierRan = true;
+            },
+            throws: true
+          })
         ])
       )
     ).resolves.toMatchObject({ outcome: "retryable", verdict: "fail" });
@@ -272,22 +286,47 @@ describe("work-unit verification gate", () => {
     const passed = verifyingUnit("multi_verifier");
     await expect(
       passed.gate.verifyUnit(
-        gateInput(passed.claim.token, passed.evidence, [verifier("verifier-a", "pass"), verifier("verifier-b", "pass")])
+        gateInput(passed.claim.token, [verifier("claude-a", "pass"), verifier("claude-b", "pass")])
       )
     ).resolves.toMatchObject({ outcome: "succeeded", verdict: "pass" });
   });
 
+  it("allows a fresh verification run after an inconclusive run", async () => {
+    const { store, gate, claim } = verifyingUnit("independent");
+    await expect(
+      gate.verifyUnit(gateInput(claim.token, [verifier("claude", "pass", { throws: true })]))
+    ).resolves.toMatchObject({ outcome: "inconclusive", reason: "verifier_error" });
+
+    await expect(gate.verifyUnit(gateInput(claim.token, [verifier("claude", "pass")]))).resolves.toMatchObject({
+      outcome: "succeeded",
+      verdict: "pass"
+    });
+    expect(
+      (store.db.prepare("SELECT COUNT(*) AS n FROM work_unit_verification_decisions").get() as { n: number }).n
+    ).toBe(2);
+  });
+
   it("rejects a late pass after cancellation while verification is running", async () => {
-    const { store, gate, claim, evidence } = verifyingUnit("independent");
+    const { store, gate, claim } = verifyingUnit("independent");
     const cancelling: Verifier = {
-      engineId: "verifier-a",
+      engineId: "claude",
       async verify(criteria) {
         store.cancelMission("m1", { reason: "operator_stop", now: T3 });
-        return verifier("verifier-a", "pass").verify(criteria, evidence);
+        return {
+          verdict: "pass",
+          summary: "pass",
+          criteriaResults: criteria.map((criterion) => ({
+            criterionId: criterion.id,
+            satisfied: true,
+            observed: "ok"
+          })),
+          verifierEngineId: "claude",
+          durationMs: 1
+        };
       }
     };
 
-    await expect(gate.verifyUnit(gateInput(claim.token, evidence, [cancelling]))).resolves.toMatchObject({
+    await expect(gate.verifyUnit(gateInput(claim.token, [cancelling]))).resolves.toMatchObject({
       outcome: "not_verifying",
       reason: "verification_binding_stale"
     });
@@ -297,35 +336,35 @@ describe("work-unit verification gate", () => {
     ).toBe("rejected_stale");
   });
 
-  it("redacts verifier prose before durable persistence", async () => {
+  it("persists bounded redacted summaries and hashes rather than raw verifier evidence", async () => {
     const secret = "redaction-test-only-1234567890";
-    const { store, gate, claim, evidence } = verifyingUnit("independent");
+    const { store, gate, claim } = verifyingUnit("independent");
     await gate.verifyUnit(
-      gateInput(claim.token, evidence, [
-        verifier("verifier-a", "pass", {
+      gateInput(claim.token, [
+        verifier("claude", "pass", {
           summary: `Authorization: Bearer ${secret}`,
           observed: `Bearer ${secret}`
         })
       ])
     );
 
-    const durable = JSON.stringify(store.evidence("m1", "verification:u1:1"));
     const decision = (
       store.db.prepare("SELECT evidence_json FROM work_unit_verification_decisions").get() as { evidence_json: string }
     ).evidence_json;
-    expect(durable).not.toContain(secret);
     expect(decision).not.toContain(secret);
-    expect(`${durable}${decision}`).toContain("[redacted]");
+    expect(decision).not.toContain("receipt_hash=receipt-1");
+    expect(decision).toContain("stdoutHash");
+    expect(decision.length).toBeLessThan(20_000);
   });
 
-  it("accounts verifier calls and exact reported model usage", async () => {
-    const { store, gate, claim, evidence } = verifyingUnit("independent", {
+  it("accounts exact verifier usage after an atomic reservation", async () => {
+    const { store, gate, claim } = verifyingUnit("independent", {
       budget: { maxToolCalls: 2, maxModelTokens: 100, maxSpendUsd: 0.02 }
     });
     await expect(
       gate.verifyUnit(
-        gateInput(claim.token, evidence, [
-          verifier("verifier-a", "pass", {
+        gateInput(claim.token, [
+          verifier("claude", "pass", {
             usageReservation: { maxModelTokens: 50, maxSpendMicroUsd: 10_000 },
             usage: { modelTokens: 12, spendMicroUsd: 3_000 }
           })
@@ -339,17 +378,45 @@ describe("work-unit verification gate", () => {
     });
   });
 
+  it("counts active verifier reservations during concurrent budget admission", () => {
+    const { store, dispatch } = verifyingUnit("independent", { budget: { maxSpendUsd: 0.01 } });
+    expect(
+      store.reserveVerificationUsage({
+        reservationId: "reserve-one",
+        runId: "run-one",
+        missionId: "m1",
+        executionAttemptId: dispatch.attemptId,
+        verifierEngineId: "claude-a",
+        spendMicroUsd: 8_000,
+        now: T3
+      })
+    ).toEqual({ ok: true });
+    expect(
+      store.reserveVerificationUsage({
+        reservationId: "reserve-two",
+        runId: "run-two",
+        missionId: "m1",
+        executionAttemptId: dispatch.attemptId,
+        verifierEngineId: "claude-b",
+        spendMicroUsd: 3_000,
+        now: T3
+      })
+    ).toEqual({ ok: false, reason: "verification_budget_exhausted" });
+  });
+
   it("does not invoke a verifier whose reservation cannot fit the mission budget", async () => {
     let invoked = false;
-    const { store, gate, claim, evidence } = verifyingUnit("independent", {
+    const { store, gate, claim } = verifyingUnit("independent", {
       budget: { maxSpendUsd: 0.01 }
     });
     await expect(
       gate.verifyUnit(
-        gateInput(claim.token, evidence, [
-          verifier("verifier-a", "pass", {
+        gateInput(claim.token, [
+          verifier("claude", "pass", {
             usageReservation: { maxSpendMicroUsd: 20_000 },
-            onVerify: () => (invoked = true)
+            onVerify: () => {
+              invoked = true;
+            }
           })
         ])
       )
@@ -363,12 +430,18 @@ describe("work-unit verification gate", () => {
 
   it("refuses capped model verification when the verifier cannot bound token usage", async () => {
     let invoked = false;
-    const { gate, claim, evidence } = verifyingUnit("independent", {
+    const { gate, claim } = verifyingUnit("independent", {
       budget: { maxModelTokens: 100 }
     });
     await expect(
       gate.verifyUnit(
-        gateInput(claim.token, evidence, [verifier("verifier-a", "pass", { onVerify: () => (invoked = true) })])
+        gateInput(claim.token, [
+          verifier("claude", "pass", {
+            onVerify: () => {
+              invoked = true;
+            }
+          })
+        ])
       )
     ).resolves.toMatchObject({
       outcome: "inconclusive",
@@ -377,23 +450,34 @@ describe("work-unit verification gate", () => {
     expect(invoked).toBe(false);
   });
 
-  it("samples the durable decision timestamp after verifier execution", async () => {
-    const clockValues = [T4, T5];
-    let index = 0;
-    const { store, gate, claim, evidence } = verifyingUnit("independent", {
-      clock: () => clockValues[Math.min(index++, clockValues.length - 1)] ?? T5
+  it("preserves a fail verdict even when observed usage exceeds the reservation", async () => {
+    const { store, gate, claim } = verifyingUnit("independent", {
+      budget: { maxSpendUsd: 0.01 }
     });
-    await gate.verifyUnit(gateInput(claim.token, evidence, [verifier("verifier-a", "pass")]));
-    const row = store.db.prepare("SELECT created_at FROM work_unit_verification_decisions").get() as {
-      created_at: string;
-    };
-    expect(row.created_at).toBe(T5);
+    await expect(
+      gate.verifyUnit(
+        gateInput(claim.token, [
+          verifier("claude", "fail", {
+            usageReservation: { maxSpendMicroUsd: 5_000 },
+            usage: { spendMicroUsd: 20_000 }
+          })
+        ])
+      )
+    ).resolves.toMatchObject({
+      outcome: "retryable",
+      verdict: "fail",
+      reason: "verification_budget_exhausted"
+    });
+    expect(store.workUnits("m1")[0]).toMatchObject({
+      status: "retryable",
+      failureCategory: "verification_failure"
+    });
   });
 
   it("is a no-op for policy none", async () => {
-    const { gate, claim, evidence } = verifyingUnit("none");
-    await expect(
-      gate.verifyUnit(gateInput(claim.token, evidence, [verifier("verifier-a", "pass")]))
-    ).resolves.toMatchObject({ outcome: "policy_none" });
+    const { gate, claim } = verifyingUnit("none");
+    await expect(gate.verifyUnit(gateInput(claim.token, [verifier("claude", "pass")]))).resolves.toMatchObject({
+      outcome: "policy_none"
+    });
   });
 });
