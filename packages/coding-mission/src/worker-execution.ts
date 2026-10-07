@@ -131,6 +131,14 @@ function boundedText(value: string, max = 500): string {
   return scrubbed.slice(0, max);
 }
 
+function implementerEngineIdFromRoute(route: unknown): string | undefined {
+  if (!route || typeof route !== "object" || Array.isArray(route)) return undefined;
+  const value = (route as Record<string, unknown>).implementerEngineId;
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized.length > 0 && normalized.length <= 128 ? normalized : undefined;
+}
+
 function normalizedAuthority(authority: ExecutionAuthorityRefs | undefined): ExecutionAuthorityRefs {
   if (!authority) return {};
   return {
@@ -387,12 +395,14 @@ export class WorkUnitExecutionLedger {
           "verified execution cannot begin without an admitted verification requirement"
         );
       }
+      // Verified dispatches derive the producer engine from the route admitted
+      // with the durable claim. A beginDispatch caller cannot relabel the producer.
       const implementerEngineId =
-        input.implementerEngineId?.trim() || (unit.verificationPolicy === "none" ? `lane:${input.lane}` : "");
+        implementerEngineIdFromRoute(unit.route) ?? (unit.verificationPolicy === "none" ? `lane:${input.lane}` : "");
       if (!implementerEngineId) {
         throw new ControlStackError(
           "execution_implementer_identity_required",
-          "verified execution requires the implementer engine/provider identity"
+          "verified execution requires an implementer engine/provider identity on the admitted route"
         );
       }
       const claimTokenHash = stableHash(input.claimToken);
