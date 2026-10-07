@@ -26,6 +26,7 @@
     { "path": "./packages/agent-cli" },
     { "path": "./packages/publication" },
     { "path": "./packages/coding-mission" },
+    { "path": "./packages/mission-worker" },
     { "path": "packages/verification" },
     { "path": "packages/jev-advisor" },
     { "path": "packages/eval-harness" },

@@ -172,6 +172,20 @@ export type RetryUnitResult =
   | { ok: true; attempt: number }
   | BudgetRefusal
   | { ok: false; outcome: "mission_not_active" | "retry_unsafe" | "not_retryable" | "not_found" };
+export interface UnitCheckpoint {
+  checkpointId: string;
+  unitId: string;
+  attempt: number;
+  createdAt: string;
+  /** Hash (or reference) of the worker-held state. The state itself never enters the relational row. */
+  stateRef: string;
+  resumeHint?: string;
+  completedActions: string[];
+}
+export type ResumeUnitResult =
+  | { ok: true; attempt: number; checkpoint: UnitCheckpoint }
+  | BudgetRefusal
+  | { ok: false; outcome: "mission_not_active" | "not_resumable" | "no_checkpoint" };
 export type CancelMissionResult =
   | { ok: true; mission: CodingMissionRecord; alreadyCancelled: boolean; cancelled: string[]; uncertain: string[] }
   | { ok: false; outcome: "already_terminal"; state: MissionState };
@@ -935,6 +949,119 @@ export class CodingMissionStore {
       }
       this.event(missionId, "work_unit.failed", { unitId, category: failure.category, next }, failure.now);
       return next;
+    });
+  }
+
+  /**
+   * Record a checkpoint for a claimed unit and park it as `checkpointed`. Only the current claim token may do it.
+   * A checkpoint is a recovery hint, never proof that external state is unchanged.
+   */
+  checkpointUnit(
+    missionId: string,
+    unitId: string,
+    claimToken: string,
+    checkpoint: Omit<UnitCheckpoint, "unitId" | "attempt" | "createdAt">,
+    now: string
+  ): UnitCheckpoint {
+    return this.transaction(() => {
+      const unit = this.unitRows(missionId).find((row) => row.operation_id === unitId);
+      if (!unit || unit.claim_token !== claimToken || (unit.status !== "running" && unit.status !== "checkpointed")) {
+        throw new ControlStackError("coding_mission_claim_conflict", "checkpoint did not match the claim");
+      }
+      const stored: UnitCheckpoint = { ...checkpoint, unitId, attempt: unit.attempt, createdAt: now };
+      this.putEvidence(missionId, `checkpoint:${unitId}:${unit.attempt}:${checkpoint.checkpointId}`, stored, now);
+      this.db
+        .prepare(
+          `UPDATE coding_operations SET status = 'checkpointed'
+           WHERE mission_id = ? AND operation_id = ? AND claim_token = ? AND status IN ('running', 'checkpointed')`
+        )
+        .run(missionId, unitId, claimToken);
+      this.event(missionId, "work_unit.checkpointed", { unitId, checkpointId: checkpoint.checkpointId }, now);
+      return stored;
+    });
+  }
+
+  /** The most recent checkpoint recorded for a unit, across attempts. */
+  latestCheckpoint(missionId: string, unitId: string): UnitCheckpoint | undefined {
+    const rows = this.db
+      .prepare(
+        `SELECT payload_json FROM coding_evidence WHERE mission_id = ? AND kind LIKE 'checkpoint:%' ORDER BY created_at DESC, rowid DESC`
+      )
+      .all(missionId) as Array<{ payload_json: string }>;
+    const parsed = rows
+      .map((row) => JSON.parse(row.payload_json) as UnitCheckpoint)
+      .filter((entry) => entry.unitId === unitId);
+    return parsed[0];
+  }
+
+  /**
+   * A worker reported success for a unit that needs independent verification. The unit waits in `verifying`; the
+   * worker's own statement is evidence only and can never move it to `succeeded`.
+   */
+  awaitVerification(
+    missionId: string,
+    unitId: string,
+    claimToken: string,
+    result: { resultHash: string; files: string[] },
+    now: string
+  ): void {
+    this.transaction(() => {
+      const changed = this.db
+        .prepare(
+          `UPDATE coding_operations SET status = 'verifying', result_hash = ?, files_json = ?
+           WHERE mission_id = ? AND operation_id = ? AND claim_token = ? AND status IN ('running', 'checkpointed')`
+        )
+        .run(result.resultHash, JSON.stringify(result.files), missionId, unitId, claimToken);
+      if (changed.changes !== 1) {
+        throw new ControlStackError("coding_mission_claim_conflict", "verification hand-off did not match the claim");
+      }
+      this.event(missionId, "verification.started", { unitId, resultHash: result.resultHash }, now);
+    });
+  }
+
+  /**
+   * Re-claim a checkpointed unit for a new worker. The claim token is replaced, so the previous worker is fenced out,
+   * and the resume counts as an attempt against the retry cap. The caller must re-observe external state before acting.
+   */
+  resumeUnit(
+    missionId: string,
+    unitId: string,
+    claim: { token: string; workerId: string; route: unknown; claimedAt: string }
+  ): ResumeUnitResult {
+    return this.transaction(() => {
+      const mission = this.get(missionId);
+      if (!mission || TERMINAL_MISSION_STATES.has(mission.state)) return { ok: false, outcome: "mission_not_active" };
+      const unit = this.unitRows(missionId).find((row) => row.operation_id === unitId);
+      if (!unit || unit.status !== "checkpointed") return { ok: false, outcome: "not_resumable" };
+      const checkpoint = this.latestCheckpoint(missionId, unitId);
+      if (!checkpoint) return { ok: false, outcome: "no_checkpoint" };
+      const budget = this.budget(missionId);
+      if (budget) {
+        const decision = evaluateBudget(
+          budget.limits,
+          {
+            retries_per_work_unit: unit.attempt,
+            wall_clock_ms: Math.max(0, Date.parse(claim.claimedAt) - Date.parse(mission.createdAt))
+          },
+          new Set(Object.keys(budget.usage) as BudgetMetric[])
+        );
+        if (!decision.allowed) return this.refuse(missionId, "resume", decision, claim.claimedAt);
+      }
+      const changed = this.db
+        .prepare(
+          `UPDATE coding_operations
+           SET status = 'running', claim_token = ?, claimed_at = ?, worker_id = ?, route_json = ?, attempt = attempt + 1
+           WHERE mission_id = ? AND operation_id = ? AND status = 'checkpointed'`
+        )
+        .run(claim.token, claim.claimedAt, claim.workerId, JSON.stringify(claim.route), missionId, unitId);
+      if (changed.changes !== 1) return { ok: false, outcome: "not_resumable" };
+      this.event(
+        missionId,
+        "work_unit.resumed",
+        { unitId, workerId: claim.workerId, checkpointId: checkpoint.checkpointId },
+        claim.claimedAt
+      );
+      return { ok: true, attempt: unit.attempt + 1, checkpoint };
     });
   }
 

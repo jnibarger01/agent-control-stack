@@ -31,5 +31,7 @@ export type {
   CancelMissionResult,
   ClaimUnitResult,
   NewWorkUnit,
-  RetryUnitResult
+  ResumeUnitResult,
+  RetryUnitResult,
+  UnitCheckpoint
 } from "./store.js";

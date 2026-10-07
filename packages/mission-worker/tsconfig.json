@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../coding-mission" },
+    { "path": "../engine-adapter" },
+    { "path": "../machine-controller" },
+    { "path": "../shared" }
+  ]
+}

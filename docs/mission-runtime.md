@@ -52,8 +52,41 @@ mission asks for it, and policy can override any value.
 may have started external work are marked `cancel_external_state = 'uncertain'` and returned in `uncertain`: cancellation
 never claims side effects were rolled back. Claim tokens are kept, so a late result from the old worker fails on status.
 
+## Worker contract (`packages/mission-worker`)
+
+Every executor is wrapped behind one `MissionWorker` shape: `prepare`, `execute`, `observe`, optional `checkpoint`,
+`cancel`, optional `resume`, and `report`. A worker only produces **evidence**; ACS decides what it means.
+
+- **Claim binding.** `runClaimedUnit` checks the persisted row (status `running`, claim token, worker id, unit kind)
+  before `prepare` runs. A worker that does not hold the claim never executes.
+- **Report ingestion under the fence.** `ingestReport` stores the report as durable evidence (token hash only, never
+  the token), then applies it with the claim token. A report from a stale, cancelled or superseded attempt is stored as
+  `rejected_stale` evidence and changes nothing. A report whose claim hash does not match is `rejected_invalid`.
+- **Verification is not self-assessed.** A success report for a unit whose `verification_policy` is not `none` moves it
+  to `verifying`, never `succeeded`. The worker's `selfAssessment` is evidence only.
+- **Retry safety.** A failure is `retryable` only if the worker says no external side effect was possible **and** it
+  did not report `externalStateUncertain`. `retrySafe` defaults to false. An `unknown` outcome, or a worker that cannot
+  produce a report, marks the unit `unknown`, which `retryUnit` refuses.
+- **Normalized failures.** `FAILURE_CATEGORIES` with the worker's scrubbed native code/message kept beside it.
+  A policy refusal always classifies as `policy_denied`, even if it mentions a lease.
+- **Checkpoint / resume.** A checkpoint (`stateRef` hash, completed actions, hint) is evidence in `coding_evidence`; the
+  unit parks as `checkpointed`. `resumeCheckpointedUnit` replaces the claim token (fencing the old worker), counts the
+  resume against the retry cap, and passes `reobserveBeforeActing: true`. A checkpoint is never proof that external
+  state is unchanged.
+
+Wrappers (existing adapters are unchanged):
+
+| Wrapper                    | Wraps                                 | Checkpoint | Notes                                                                                                |
+| -------------------------- | ------------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------- |
+| `EngineMissionWorker`      | `EngineAdapter` (sandboxed agent CLI) | no         | Opaque process: failures are `externalStateUncertain`; files changed are reported as not enumerated. |
+| `MachineToolMissionWorker` | `MachineController.callTool`          | no         | Binds tool name and argument hash to the unit; only read-only tools are ever declared retry-safe.    |
+| `CoderPortMissionWorker`   | coding-mission `coder` port           | no         | `unknown` stays `unknown`; `conflict` becomes `environment_changed`.                                 |
+
+Cancellation is propagated as an `AbortSignal` plus `worker.cancel`. `MachineController.callTool` and the coder port
+are not abortable, so for them cancellation is best effort and is reported with the uncertainty it implies.
+
 ## Not yet in this runtime
 
-Mission authority envelopes and narrowed child authority, the unified worker contract and checkpoint/resume, enriched
-route decisions, the verification gate, `request_child_work`, CUA, and recovery policy are separate slices. Today the
+Mission authority envelopes and narrowed child authority, wrappers for Desktop Commander, ACP and the Jace Commander
+lane, enriched route decisions, the verification gate, `request_child_work`, CUA, and recovery policy are separate slices. Today the
 legacy coding path has no budget row (uncapped) and the `general` kind has no driver of its own.
