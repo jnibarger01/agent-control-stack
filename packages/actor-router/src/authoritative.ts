@@ -1,4 +1,4 @@
-import type { RegistryAgentDetail } from "@agent-control-stack/work-items";
+import type { RegistryAgentDetail, RouteEnrichment } from "@agent-control-stack/work-items";
 import type {
   AuthoritativeRoutingEvidence,
   PrivilegedTransitionOptions,
@@ -11,6 +11,13 @@ import { askNimbleToChooseExecutor, type NimbleChoiceResult } from "./nimble-cli
 import { NIMBLE_PROMPT_VERSION, NIMBLE_ROUTER_VERSION, type NimbleRoutingConfig } from "./nimble-config.js";
 import { routeActor, type ActorRoutingInput } from "./index.js";
 import { startRouteShadow, type RouteShadowOptions } from "./route-shadow.js";
+import {
+  deriveRouteEnrichment,
+  recommendStrategy,
+  type RoutePolicy,
+  type RouteUnitContext,
+  type StrategyChooser
+} from "./route-strategy.js";
 
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "blocked", "cancelled", "rejected", "quarantined"]);
 // TypeSafe Choice rejects criteria outside 2–26 options. One eligible executor is already decided.
@@ -54,6 +61,12 @@ export interface AuthoritativeRoutingContext {
   executionModeAllowed?: (agent: RegistryAgentDetail) => boolean;
   operatorRestricted?: ReadonlySet<string>;
   unhealthy?: ReadonlySet<string>;
+  /**
+   * The mission work unit being routed. When present, the persisted route carries a structured execution strategy
+   * (ADR 0025). Without it the route is persisted exactly as before, with no strategy fields.
+   */
+  workUnit?: RouteUnitContext;
+  routePolicy?: RoutePolicy;
 }
 
 export interface AuthoritativeRouteResult {
@@ -67,6 +80,8 @@ export interface AuthoritativeRouteResult {
   decisionId: string;
   source: "nimble" | "deterministic_fallback";
   disposition: "fresh" | "resumed" | "completed" | "reconcile" | "replacement";
+  /** The persisted structured strategy, when the route was made for a mission work unit. */
+  enrichment?: AuthoritativeRoutingEvidence["enrichment"];
   evidence?: AuthoritativeRoutingEvidence;
 }
 
@@ -77,6 +92,8 @@ export interface DecideAuthoritativeRouteOptions {
   store: AuthoritativeRoutingPort;
   transition: PrivilegedTransitionOptions;
   fetchImpl?: typeof fetch;
+  /** An untrusted strategy recommendation. Accepted only if it is inside the policy-derived candidate set. */
+  strategyChooser?: StrategyChooser;
   /** ADR 0025 shadow stage. Observed after the decision is persisted; never read back by the decision. */
   routeShadow?: RouteShadowOptions;
 }
@@ -244,10 +261,12 @@ async function decideRoute(options: DecideAuthoritativeRouteOptions): Promise<Au
   const accepted = acceptNimbleChoice(nimble, eligibleAgents, options.config);
   if (accepted.kind === "route") {
     const agent = eligibleAgents.find((candidate) => candidate.id === accepted.executorId)!;
+    const enrichment = await enrich(options, eligibleAgents.length);
     return persist(options, {
       decision: "route",
       source: "nimble",
       reasonCode: "nimble_choice",
+      ...(enrichment ? { enrichment } : {}),
       executorId: agent.id,
       model: nimble.ok ? nimble.model : agent.model,
       confidence: accepted.confidence,
@@ -317,7 +336,7 @@ function acceptNimbleChoice(
   return { kind: "route", executorId: result.executorId, confidence: result.confidence };
 }
 
-function fallback(
+async function fallback(
   options: DecideAuthoritativeRouteOptions,
   eligibleAgents: RegistryAgentDetail[],
   excluded: Record<string, string[]>,
@@ -325,7 +344,7 @@ function fallback(
   reason: string,
   normalized: Record<string, unknown> = {},
   disposition: AuthoritativeRouteResult["disposition"] = "fresh"
-): AuthoritativeRouteResult {
+): Promise<AuthoritativeRouteResult> {
   if (options.config.fallbackMode !== "deterministic_score") {
     throw new Error(`unsupported Nimble fallback mode ${options.config.fallbackMode}`);
   }
@@ -343,8 +362,10 @@ function fallback(
     });
   }
   const agent = eligibleAgents.find((candidate) => candidate.id === selected);
+  const enrichment = await enrich(options, eligibleAgents.length);
   return persist(options, {
     decision: "fallback",
+    ...(enrichment ? { enrichment } : {}),
     source: "deterministic_fallback",
     reasonCode: "deterministic_fallback",
     fallbackReason: reason,
@@ -356,6 +377,28 @@ function fallback(
     normalized: { ...normalized, fallbackReason: reason, fallbackMode: options.config.fallbackMode },
     disposition
   });
+}
+
+/**
+ * Derive the structured strategy for a work-unit route. The candidate set comes from hard policy; a chooser's
+ * recommendation is only ever one input to be validated against it. Routes without a work-unit context get none.
+ */
+async function enrich(
+  options: DecideAuthoritativeRouteOptions,
+  eligibleCount: number
+): Promise<RouteEnrichment | undefined> {
+  const unit = options.context.workUnit;
+  if (!unit) return undefined;
+  const policy = options.context.routePolicy ?? {};
+  const candidates = deriveRouteEnrichment({ unit, eligibleCount, policy }).deterministicEvidence.find(
+    (item) => item.kind === "candidate_strategies"
+  )?.value;
+  const recommended = await recommendStrategy(options.strategyChooser, {
+    candidates: Array.isArray(candidates) ? (candidates as never) : ["single"],
+    unit,
+    eligibleCount
+  });
+  return deriveRouteEnrichment({ unit, eligibleCount, policy, ...(recommended === undefined ? {} : { recommended }) });
 }
 
 function persist(
@@ -372,6 +415,7 @@ function persist(
     excluded: Record<string, string[]>;
     scores: Record<string, number>;
     normalized: Record<string, unknown>;
+    enrichment?: RouteEnrichment;
     supersedesDecisionId?: string;
     disposition: AuthoritativeRouteResult["disposition"];
   }
@@ -403,6 +447,7 @@ function persist(
         operationType: options.context.operationType
       },
       normalizedDecision: input.normalized,
+      ...(input.enrichment ? { enrichment: input.enrichment } : {}),
       ...(input.supersedesDecisionId ? { supersedesDecisionId: input.supersedesDecisionId } : {}),
       ...(options.context.now ? { now: options.context.now } : {})
     },
@@ -419,6 +464,7 @@ function persist(
     decisionId: evidence.decisionId,
     source: evidence.source,
     disposition: input.disposition,
+    ...(evidence.enrichment ? { enrichment: evidence.enrichment } : {}),
     evidence
   };
 }
@@ -450,6 +496,7 @@ function replay(
     decisionId: latest.decisionId,
     source: latest.source,
     disposition,
+    ...(latest.enrichment ? { enrichment: latest.enrichment } : {}),
     evidence: latest
   };
 }

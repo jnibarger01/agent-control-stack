@@ -191,6 +191,7 @@ import {
   recordRoutingExecutionOutcomeInputSchema,
   recordRouteShadowObservationInputSchema,
   routeShadowObservationSchema,
+  routingComparisonSchema,
   routingExecutionOutcomeSchema,
   workItemRoutingSnapshotSchema,
   type ActorReliability,
@@ -202,6 +203,7 @@ import {
   type RecordRoutingExecutionOutcomeInput,
   type RecordRouteShadowObservationInput,
   type RouteShadowObservation,
+  type RoutingComparison,
   type RoutingExecutionOutcome,
   type WorkItemRoutingSnapshot
 } from "./routing.js";
@@ -403,6 +405,17 @@ interface AuthoritativeEvidenceRow extends RoutingDecisionRow {
   constraints_json: string;
   normalized_decision_json: string;
   supersedes_decision_id: string | null;
+  executor_class: string | null;
+  strategy: string | null;
+  strategy_source: string | null;
+  model_class: string | null;
+  parallelism: number | null;
+  verification_required: number | null;
+  checkpoint_policy: string | null;
+  retry_policy: string | null;
+  reasons_json: string | null;
+  deterministic_evidence_json: string | null;
+  enrichment_version: string | null;
 }
 
 interface RouteShadowRow {
@@ -440,6 +453,10 @@ interface RoutingOutcomeRow {
   retry_count: number;
   idempotency_key: string;
   created_at: string;
+  actual_strategy: string | null;
+  tool_calls: number | null;
+  model_tokens: number | null;
+  cost_micro_usd: number | null;
 }
 
 interface ReliabilityRow {
@@ -1318,6 +1335,7 @@ export interface WorkItemStore {
     options: PrivilegedTransitionOptions
   ): RouteShadowObservation;
   listRouteShadowObservations(decisionId: string): RouteShadowObservation[];
+  listRoutingComparisons(options?: { since?: string; limit?: number }): RoutingComparison[];
   recordActorReliability(input: RecordActorReliabilityInput, options: PrivilegedTransitionOptions): ActorReliability;
   getActorReliability(actorId: string): ActorReliability | undefined;
   recordValidationRun(input: RecordValidationRunInput, options: PrivilegedTransitionOptions): ValidationRun;
@@ -3815,8 +3833,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
         .prepare(
           `INSERT INTO actor_routing_evidence
           (decision_id, mission_id, operation_id, decision, source, reason_code, fallback_reason, confidence, model, lane,
-           router_version, prompt_version, candidate_json, constraints_json, normalized_decision_json, supersedes_decision_id, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           router_version, prompt_version, candidate_json, constraints_json, normalized_decision_json, supersedes_decision_id, created_at,
+           executor_class, strategy, strategy_source, model_class, parallelism, verification_required, checkpoint_policy,
+           retry_policy, reasons_json, deterministic_evidence_json, enrichment_version)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           decisionId,
@@ -3835,7 +3855,18 @@ export class SqliteWorkItemStore implements WorkItemStore {
           JSON.stringify(parsed.constraints),
           JSON.stringify(parsed.normalizedDecision),
           parsed.supersedesDecisionId ?? null,
-          createdAt
+          createdAt,
+          parsed.enrichment?.executorClass ?? null,
+          parsed.enrichment?.strategy ?? null,
+          parsed.enrichment?.strategySource ?? null,
+          parsed.enrichment?.modelClass ?? null,
+          parsed.enrichment?.parallelism ?? null,
+          parsed.enrichment === undefined ? null : parsed.enrichment.verificationRequired ? 1 : 0,
+          parsed.enrichment?.checkpointPolicy ?? null,
+          parsed.enrichment?.retryPolicy ?? null,
+          parsed.enrichment ? JSON.stringify(parsed.enrichment.reasons) : null,
+          parsed.enrichment ? JSON.stringify(parsed.enrichment.deterministicEvidence) : null,
+          parsed.enrichment?.version ?? null
         );
       const evidence = this.readAuthoritativeRoutingEvidence(decisionId);
       if (!evidence) {
@@ -3856,7 +3887,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
             lane: parsed.lane ?? null,
             confidence: parsed.confidence ?? null,
             routerVersion: parsed.routerVersion,
-            promptVersion: parsed.promptVersion
+            promptVersion: parsed.promptVersion,
+            executorClass: parsed.enrichment?.executorClass ?? null,
+            strategy: parsed.enrichment?.strategy ?? null,
+            strategySource: parsed.enrichment?.strategySource ?? null
           },
           {
             "work_item.id": parsed.workItemId,
@@ -3917,8 +3951,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
       this.db
         .prepare(
           `INSERT INTO routing_execution_outcomes
-          (outcome_id, decision_id, executor_id, model, latency_ms, success, timed_out, verification_result, tests_result, retry_count, idempotency_key, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          (outcome_id, decision_id, executor_id, model, latency_ms, success, timed_out, verification_result, tests_result, retry_count, idempotency_key, created_at,
+           actual_strategy, tool_calls, model_tokens, cost_micro_usd)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           outcomeId,
@@ -3932,7 +3967,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
           parsed.testsResult ?? null,
           parsed.retryCount,
           parsed.idempotencyKey,
-          createdAt
+          createdAt,
+          parsed.actualStrategy ?? null,
+          parsed.toolCalls ?? null,
+          parsed.modelTokens ?? null,
+          parsed.costMicroUsd ?? null
         );
       const row = this.db.prepare(`SELECT * FROM routing_execution_outcomes WHERE outcome_id = ?`).get(outcomeId) as
         RoutingOutcomeRow | undefined;
@@ -4072,13 +4111,66 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return rows.map((row) => rowToRouteShadowObservation(row));
   }
 
+  /** Routed decisions joined with enrichment, Jev shadow output and the latest outcome. Read-only. */
+  listRoutingComparisons(options: { since?: string; limit?: number } = {}): RoutingComparison[] {
+    const limit = Math.min(Math.max(options.limit ?? 1000, 1), 10_000);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM routing_comparison_v WHERE (? IS NULL OR decided_at >= ?) ORDER BY decided_at ASC, decision_id ASC LIMIT ?`
+      )
+      .all(options.since ?? null, options.since ?? null, limit) as unknown as Array<
+      Record<string, string | number | null>
+    >;
+    return rows.map((row) => {
+      const set = <K extends string>(key: K, value: unknown) =>
+        value === null || value === undefined ? {} : { [key]: value };
+      return routingComparisonSchema.parse({
+        decisionId: row.decision_id,
+        workItemId: row.work_item_id,
+        ...set("missionId", row.mission_id),
+        decision: row.decision,
+        source: row.source,
+        reasonCode: row.reason_code,
+        ...set("executorId", row.executor_id),
+        ...set("nimbleConfidence", row.nimble_confidence),
+        ...set("nimbleModel", row.nimble_model),
+        ...set("executorClass", row.executor_class),
+        ...set("strategy", row.strategy),
+        ...set("strategySource", row.strategy_source),
+        ...set("parallelism", row.parallelism),
+        ...(row.verification_required === null ? {} : { verificationRequired: row.verification_required === 1 }),
+        candidates: JSON.parse(String(row.candidate_json)) as string[],
+        excluded: Object.keys(JSON.parse(String(row.excluded_json)) as Record<string, unknown>),
+        decidedAt: row.decided_at,
+        ...set("jevStatus", row.jev_status),
+        ...set("jevRecommended", row.jev_recommended),
+        ...set("jevConfidence", row.jev_confidence),
+        ...(row.jev_agrees === null ? {} : { jevAgrees: row.jev_agrees === 1 }),
+        ...set("jevLatencyMs", row.jev_latency_ms),
+        ...set("actualExecutor", row.actual_executor),
+        ...set("actualStrategy", row.actual_strategy),
+        ...(row.success === null ? {} : { success: row.success === 1 }),
+        ...(row.timed_out === null ? {} : { timedOut: row.timed_out === 1 }),
+        ...set("verificationResult", row.verification_result),
+        ...set("wallMs", row.wall_ms),
+        ...set("retryCount", row.retry_count),
+        ...set("toolCalls", row.tool_calls),
+        ...set("modelTokens", row.model_tokens),
+        ...set("costMicroUsd", row.cost_micro_usd)
+      });
+    });
+  }
+
   private readAuthoritativeRoutingEvidence(decisionId: string): AuthoritativeRoutingEvidence | undefined {
     const row = this.db
       .prepare(
         `SELECT decision.*, evidence.mission_id, evidence.operation_id, evidence.decision, evidence.source,
                 evidence.reason_code, evidence.fallback_reason, evidence.confidence, evidence.model, evidence.lane,
                 evidence.router_version, evidence.prompt_version, evidence.candidate_json, evidence.constraints_json,
-                evidence.normalized_decision_json, evidence.supersedes_decision_id
+                evidence.normalized_decision_json, evidence.supersedes_decision_id, evidence.executor_class, evidence.strategy,
+                evidence.strategy_source, evidence.model_class, evidence.parallelism, evidence.verification_required,
+                evidence.checkpoint_policy, evidence.retry_policy, evidence.reasons_json,
+                evidence.deterministic_evidence_json, evidence.enrichment_version
          FROM actor_routing_decisions AS decision
          JOIN actor_routing_evidence AS evidence ON evidence.decision_id = decision.decision_id
          WHERE decision.decision_id = ?`
@@ -9426,6 +9518,26 @@ function rowToAuthoritativeRoutingEvidence(row: AuthoritativeEvidenceRow): Autho
     candidates: JSON.parse(row.candidate_json) as string[],
     constraints: JSON.parse(row.constraints_json) as Record<string, unknown>,
     normalizedDecision: JSON.parse(row.normalized_decision_json) as Record<string, unknown>,
+    ...(row.executor_class === null || row.strategy === null || row.strategy_source === null
+      ? {}
+      : {
+          enrichment: {
+            executorClass: row.executor_class,
+            strategy: row.strategy,
+            strategySource: row.strategy_source,
+            ...(row.model_class === null ? {} : { modelClass: row.model_class }),
+            parallelism: row.parallelism ?? 1,
+            verificationRequired: row.verification_required === 1,
+            ...(row.checkpoint_policy === null ? {} : { checkpointPolicy: row.checkpoint_policy }),
+            ...(row.retry_policy === null ? {} : { retryPolicy: row.retry_policy }),
+            reasons: row.reasons_json === null ? [] : (JSON.parse(row.reasons_json) as unknown[]),
+            deterministicEvidence:
+              row.deterministic_evidence_json === null
+                ? []
+                : (JSON.parse(row.deterministic_evidence_json) as unknown[]),
+            version: row.enrichment_version ?? "unversioned"
+          }
+        }),
     ...(row.supersedes_decision_id === null ? {} : { supersedesDecisionId: row.supersedes_decision_id }),
     idempotencyKey: row.idempotency_key,
     createdAt: row.created_at
@@ -9470,6 +9582,10 @@ function rowToRoutingExecutionOutcome(row: RoutingOutcomeRow): RoutingExecutionO
     ...(row.verification_result === null ? {} : { verificationResult: row.verification_result }),
     ...(row.tests_result === null ? {} : { testsResult: row.tests_result }),
     retryCount: row.retry_count,
+    ...(row.actual_strategy === null ? {} : { actualStrategy: row.actual_strategy }),
+    ...(row.tool_calls === null ? {} : { toolCalls: row.tool_calls }),
+    ...(row.model_tokens === null ? {} : { modelTokens: row.model_tokens }),
+    ...(row.cost_micro_usd === null ? {} : { costMicroUsd: row.cost_micro_usd }),
     idempotencyKey: row.idempotency_key,
     createdAt: row.created_at
   });
