@@ -936,9 +936,12 @@ const httpServer = http.createServer(async (req, res) => {
   }
   if (path === "/ready") {
     const authority = computeAuthority();
+    const executionAuthorityReady = MANAGED
+      ? authority.observedMode === "managed"
+      : authority.observedMode !== "none_active" && authority.observedMode !== "ambiguous_conflict";
     const ready =
       !!pair?.upstreamStarted &&
-      authority.observedMode !== "ambiguous_conflict" &&
+      executionAuthorityReady &&
       !authority.executor.lease.ambiguous &&
       !authority.executor.breakGlass.ambiguous;
     res.writeHead(ready ? 200 : 503, { "Content-Type": "application/json" });
