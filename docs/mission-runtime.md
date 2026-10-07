@@ -67,20 +67,26 @@ The execution contract deliberately does **not** add swarm delegation or CUA. Th
 
 ## Not yet in this runtime
 
-Mission authority envelopes and narrowed child authority, the unified worker contract and checkpoint/resume, enriched
-route decisions, `request_child_work`, CUA, and recovery policy are separate slices. Today the
-legacy coding path has no budget row (uncapped) and the `general` kind has no driver of its own.
+Mission authority envelopes and narrowed child authority, checkpoint/resume, `request_child_work`, CUA, and recovery
+policy are separate slices. Today the legacy coding path has no budget row (uncapped) and the `general` kind has no
+driver of its own.
 
 ## Verification gate
 
 A successful execution never completes a unit whose verification policy is not `none`. The unit parks in
-`verifying` and only `WorkUnitVerificationGate` (`verification-gate.ts`) can move it: an independent verifier
-(identity different from the implementer, enforced by `runIndependentVerification`) judges typed criteria
-against the execution evidence. `lightweight` and `independent` need one verifier; `multi_verifier` needs
-two distinct verifiers and every verdict must pass; `release_gate` failure is terminal rather than
-auto-retryable. A pass promotes `verifying -> succeeded` (`succeedVerifiedUnit`, the only completion path
-out of `verifying`); a failure records `verification_failure` (retryable within the mission retry budget,
-except under `release_gate`); an inconclusive verdict — including verifier errors and identity collisions —
-holds the unit in `verifying` for re-verification or a human. It never succeeds. Every verdict is applied
-under the live claim fence, re-checked after the verifiers run, and persisted as `verification:<unit>:<attempt>`
-evidence plus a `verification.completed` event. The implementer’s claim is evidence input, never a verdict.
+`verifying` and only `WorkUnitVerificationGate` (`verification-gate.ts`) owns the verified completion transition.
+Verification criteria are admitted before the first execution attempt and persisted immutably by migration 057.
+The gate derives the implementer identity, unit attempt, execution-attempt id, result hash, and execution-report hash
+from migration 055 state; caller-supplied evidence must match that durable binding before any verifier runs.
+
+`lightweight` and `independent` need one verifier; `multi_verifier` needs two distinct verifiers and every required
+verdict must pass; `release_gate` failure is terminal rather than auto-retryable. A failure records the actual resulting
+lifecycle state (`retryable` or `failed`), while an inconclusive verdict or verifier error holds the unit in
+`verifying`. A decisive failure stops further verifier calls. Terminal missions, cancelled units, changed attempts,
+changed results, and changed requirements reject late verdicts as stale rather than promoting them.
+
+Migration 057 also records an attempt-bound verification decision ledger. Durable decision evidence is redacted before
+persistence, conflicting decisions over the same bound evidence are rejected, and verifier tool/model/spend usage is
+charged to mission budgets. A capped model or spend metric with no conservative verifier reservation is not admitted.
+The final decision timestamp is sampled after verifier execution, and the ACS transaction that persists the decision is
+the same transaction that advances the work-unit state. The implementer’s claim remains evidence input, never a verdict.

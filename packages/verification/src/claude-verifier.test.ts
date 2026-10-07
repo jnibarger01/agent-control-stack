@@ -36,12 +36,13 @@ function evidence(): VerificationEvidence {
   };
 }
 
-function claudeEnvelope(resultObject: unknown): string {
+function claudeEnvelope(resultObject: unknown, telemetry: Record<string, unknown> = {}): string {
   return JSON.stringify({
     type: "result",
     subtype: "success",
     is_error: false,
-    result: JSON.stringify(resultObject)
+    result: JSON.stringify(resultObject),
+    ...telemetry
   });
 }
 
@@ -131,6 +132,36 @@ describe("ClaudeVerifier", () => {
     expect(result.verdict).toBe("pass");
     expect(result.verifierEngineId).toBe("claude-cli-verifier");
     expect(result.criteriaResults).toEqual([{ criterionId: "c1", satisfied: true, observed: "exit code 0" }]);
+  });
+
+  it("returns provider-observed token and spend usage for mission accounting", async () => {
+    const verifier = verifierWithFakeIsolation(() =>
+      fakeObservation({
+        stdout: claudeEnvelope(
+          {
+            verdict: "pass",
+            summary: "all criteria satisfied",
+            criteriaResults: [{ criterionId: "c1", satisfied: true, observed: "exit code 0" }]
+          },
+          {
+            total_cost_usd: 0.012345,
+            modelUsage: {
+              "claude-sonnet-5": {
+                inputTokens: 10,
+                outputTokens: 20,
+                cacheReadInputTokens: 3,
+                cacheCreationInputTokens: 2
+              }
+            }
+          }
+        )
+      })
+    );
+
+    const result = await verifier.verify(criteria(), evidence());
+
+    expect(result.usage).toEqual({ modelTokens: 35, spendMicroUsd: 12_345 });
+    expect(verifier.usageReservation).toEqual({ maxSpendMicroUsd: 500_000 });
   });
 
   it("parses an inconclusive verdict without coercing it to pass or fail", async () => {

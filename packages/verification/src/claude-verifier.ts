@@ -14,7 +14,8 @@ import {
   type Verifier,
   type VerificationCriterion,
   type VerificationEvidence,
-  type VerificationResult
+  type VerificationResult,
+  type VerificationUsageReservation
 } from "./types.js";
 
 const DEFAULT_CREDENTIAL_ENV_NAME = "ANTHROPIC_API_KEY";
@@ -108,6 +109,9 @@ interface ClaudeCliEnvelope {
   subtype: string;
   is_error: boolean;
   result: string;
+  total_cost_usd?: number;
+  modelUsage?: Record<string, unknown>;
+  usage?: Record<string, unknown>;
 }
 
 let verifierInvocationCounter = 0;
@@ -131,6 +135,7 @@ let verifierInvocationCounter = 0;
  */
 export class ClaudeVerifier implements Verifier {
   readonly engineId = "claude-cli-verifier" as const;
+  readonly usageReservation: VerificationUsageReservation;
   private readonly binaryPath: string;
   private readonly model: string;
   private readonly maxBudgetUsd: number;
@@ -144,6 +149,7 @@ export class ClaudeVerifier implements Verifier {
     this.binaryPath = options.binaryPath ?? resolveOnPath("claude");
     this.model = options.model ?? "claude-sonnet-5";
     this.maxBudgetUsd = options.maxBudgetUsd ?? 0.5;
+    this.usageReservation = { maxSpendMicroUsd: Math.ceil(this.maxBudgetUsd * 1_000_000) };
     this.timeoutMs = options.timeoutMs ?? 2 * 60 * 1_000;
     this.credentialEnvName = options.credentialEnvName ?? DEFAULT_CREDENTIAL_ENV_NAME;
     this.credentialSource = options.credentialSource ?? ((envName) => process.env[envName]);
@@ -208,11 +214,12 @@ export class ClaudeVerifier implements Verifier {
     }
 
     const parsed = parseClaudeEnvelope(observation.stdout);
-    const judged = JSON.parse(parsed) as unknown;
+    const judged = JSON.parse(parsed.result) as unknown;
     return verificationResultSchema.parse({
       ...(judged as Record<string, unknown>),
       verifierEngineId: this.engineId,
-      durationMs: Date.now() - started
+      durationMs: Date.now() - started,
+      usage: parsed.usage
     });
   }
 }
@@ -226,7 +233,10 @@ function buildVerificationPrompt(criteria: VerificationCriterion[], evidence: Ve
   });
 }
 
-function parseClaudeEnvelope(raw: string): string {
+function parseClaudeEnvelope(raw: string): {
+  result: string;
+  usage: { modelTokens?: number; spendMicroUsd?: number };
+} {
   let value: unknown;
   try {
     value = JSON.parse(raw);
@@ -243,7 +253,49 @@ function parseClaudeEnvelope(raw: string): string {
   if (typeof envelope.result !== "string") {
     throw new ControlStackError("verifier_invalid_response", "verifier CLI result is missing the result field");
   }
-  return envelope.result;
+
+  const tokens = claudeEnvelopeTokens(envelope);
+  const spendMicroUsd =
+    typeof envelope.total_cost_usd === "number" &&
+    Number.isFinite(envelope.total_cost_usd) &&
+    envelope.total_cost_usd >= 0
+      ? Math.ceil(envelope.total_cost_usd * 1_000_000)
+      : undefined;
+  return {
+    result: envelope.result,
+    usage: {
+      ...(tokens === undefined ? {} : { modelTokens: tokens }),
+      ...(spendMicroUsd === undefined ? {} : { spendMicroUsd })
+    }
+  };
+}
+
+function claudeEnvelopeTokens(envelope: ClaudeCliEnvelope): number | undefined {
+  let total = 0;
+  let observed = false;
+  const add = (value: unknown) => {
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+      total += Math.ceil(value);
+      observed = true;
+    }
+  };
+  if (envelope.modelUsage && typeof envelope.modelUsage === "object") {
+    for (const raw of Object.values(envelope.modelUsage)) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+      const usage = raw as Record<string, unknown>;
+      add(usage.inputTokens);
+      add(usage.outputTokens);
+      add(usage.cacheReadInputTokens);
+      add(usage.cacheCreationInputTokens);
+    }
+  }
+  if (!observed && envelope.usage && typeof envelope.usage === "object") {
+    add(envelope.usage.input_tokens);
+    add(envelope.usage.output_tokens);
+    add(envelope.usage.cache_read_input_tokens);
+    add(envelope.usage.cache_creation_input_tokens);
+  }
+  return observed ? total : undefined;
 }
 
 function resolveOnPath(name: string): string {

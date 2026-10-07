@@ -1,5 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { ControlStackError, applyControlPlaneMigrations, stableHash } from "@agent-control-stack/shared";
+import { verificationCriterionSchema, type VerificationCriterion } from "@agent-control-stack/verification";
 import {
   BudgetDecision,
   BudgetLimits,
@@ -175,6 +176,14 @@ export type RetryUnitResult =
 export type CancelMissionResult =
   | { ok: true; mission: CodingMissionRecord; alreadyCancelled: boolean; cancelled: string[]; uncertain: string[] }
   | { ok: false; outcome: "already_terminal"; state: MissionState };
+
+export interface WorkUnitVerificationRequirement {
+  missionId: string;
+  unitId: string;
+  criteria: VerificationCriterion[];
+  criteriaHash: string;
+  createdAt: string;
+}
 
 function parseStringArray(value: string): string[] {
   const parsed: unknown = JSON.parse(value);
@@ -590,27 +599,6 @@ export class CodingMissionStore {
     });
   }
 
-  /**
-   * Promote a unit that an independent verification gate has passed. This is the only
-   * completion path out of `verifying`: the maker-facing `completeOperation` deliberately
-   * does not accept that status, so an executor can never complete its own verified unit.
-   */
-  succeedVerifiedUnit(missionId: string, operationId: string, claimToken: string, now: string): void {
-    this.transaction(() => {
-      const resultRow = this.db
-        .prepare(
-          `UPDATE coding_operations
-           SET status = 'succeeded'
-           WHERE mission_id = ? AND operation_id = ? AND status = 'verifying' AND claim_token = ?`
-        )
-        .run(missionId, operationId, claimToken);
-      if (resultRow.changes !== 1) {
-        throw new ControlStackError("coding_mission_claim_conflict", "verified completion did not match the claim");
-      }
-      this.event(missionId, "work_unit.completed", { unitId: operationId, verified: true }, now);
-    });
-  }
-
   markOperation(missionId: string, operationId: string, status: "conflict" | "unknown" | "failed"): void {
     this.transaction(() => {
       this.db
@@ -679,6 +667,99 @@ export class CodingMissionStore {
         .prepare(`DELETE FROM coding_effects WHERE mission_id = ? AND effect_kind = ? AND outcome = 'unknown'`)
         .run(missionId, kind);
     });
+  }
+
+  /**
+   * Persist the immutable verification rubric before a unit begins execution.
+   * Verification never trusts a rubric supplied after the result exists.
+   */
+  setVerificationRequirement(
+    missionId: string,
+    unitId: string,
+    criteria: readonly VerificationCriterion[],
+    now: string
+  ): WorkUnitVerificationRequirement {
+    const parsed = criteria.map((criterion) => verificationCriterionSchema.parse(criterion));
+    if (
+      parsed.length === 0 ||
+      parsed.length > 32 ||
+      new Set(parsed.map((criterion) => criterion.id)).size !== parsed.length
+    ) {
+      throw new ControlStackError(
+        "verification_requirement_invalid",
+        "verification criteria must contain 1-32 unique criterion ids"
+      );
+    }
+    const criteriaHash = stableHash(parsed);
+    const criteriaJson = JSON.stringify(parsed);
+    return this.transaction(() => {
+      const mission = this.require(missionId);
+      if (TERMINAL_MISSION_STATES.has(mission.state)) {
+        throw new ControlStackError(
+          "verification_requirement_invalid",
+          "terminal missions cannot add verification requirements"
+        );
+      }
+      const unit = this.workUnits(missionId).find((candidate) => candidate.unitId === unitId);
+      if (!unit) throw new ControlStackError("work_unit_not_found", "work unit does not exist");
+      if (unit.verificationPolicy === "none") {
+        throw new ControlStackError(
+          "verification_requirement_invalid",
+          "verification policy none cannot have a requirement"
+        );
+      }
+      if (!["pending", "ready"].includes(unit.status) || unit.attempt !== 0) {
+        throw new ControlStackError(
+          "verification_requirement_late",
+          "verification requirement must be fixed before the first execution attempt"
+        );
+      }
+      const existing = this.verificationRequirement(missionId, unitId);
+      if (existing) {
+        if (existing.criteriaHash !== criteriaHash) {
+          throw new ControlStackError(
+            "verification_requirement_conflict",
+            "verification criteria are immutable once admitted"
+          );
+        }
+        return existing;
+      }
+      this.db
+        .prepare(
+          `INSERT INTO work_unit_verification_requirements
+             (mission_id, unit_id, criteria_hash, criteria_json, created_at)
+           VALUES (?, ?, ?, ?, ?)`
+        )
+        .run(missionId, unitId, criteriaHash, criteriaJson, now);
+      this.event(missionId, "verification.requirement_set", { unitId, criteriaHash }, now);
+      return { missionId, unitId, criteria: parsed, criteriaHash, createdAt: now };
+    });
+  }
+
+  verificationRequirement(missionId: string, unitId: string): WorkUnitVerificationRequirement | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT criteria_hash, criteria_json, created_at
+         FROM work_unit_verification_requirements
+         WHERE mission_id = ? AND unit_id = ?`
+      )
+      .get(missionId, unitId) as { criteria_hash: string; criteria_json: string; created_at: string } | undefined;
+    if (!row) return undefined;
+    const raw = JSON.parse(row.criteria_json) as unknown;
+    if (!Array.isArray(raw)) {
+      throw new ControlStackError("coding_mission_integrity", "persisted verification criteria are invalid");
+    }
+    const criteria = raw.map((criterion) => verificationCriterionSchema.parse(criterion));
+    if (stableHash(criteria) !== row.criteria_hash) {
+      throw new ControlStackError("coding_mission_integrity", "persisted verification criteria hash does not match");
+    }
+    return {
+      missionId,
+      unitId,
+      criteria,
+      criteriaHash: row.criteria_hash,
+      createdAt: row.created_at
+    };
   }
 
   putEvidence(missionId: string, kind: string, payload: unknown, now: string): void {
