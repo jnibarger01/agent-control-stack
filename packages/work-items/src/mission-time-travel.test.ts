@@ -3,8 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
+import { domainHash } from "@agent-control-stack/shared";
 import { SqliteWorkItemStore } from "./store.js";
-import { readMissionTimeTravel, compareMissionTimeTravel, verifyMissionTimeTravel } from "./mission-time-travel.js";
+import { readMissionTimeTravel, compareMissionTimeTravel, verifyMissionTimeTravel, MISSION_TIME_TRAVEL_VERSION } from "./mission-time-travel.js";
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "acs-time-travel-"));
@@ -34,7 +35,7 @@ describe("mission time travel", () => {
     try {
       ctx.store.recordSystemEvent({
         name: "policy.decided",
-        attributes: { "work_item.id": ctx.work.id, "actor.id": "operator" },
+        attributes: { "work_item.id": ctx.work.id, "actor.id": "SECRET_IN_EVENT_ATTRIBUTE" },
         body: { sensitive: "SECRET_IN_EVENT_BODY" }
       });
       const earlier = readMissionTimeTravel(ctx.store, ctx.work.id);
@@ -51,7 +52,7 @@ describe("mission time travel", () => {
       expect(past.events.length).toBe(earlier.events.length);
       expect(past.sideEffects).toBe("disabled");
       expect(current.integrity).toBe("full-chain-verified");
-      expect(JSON.stringify(current)).not.toMatch(/SECRET_IN_EVENT_BODY|SECRET_COMMAND/);
+      expect(JSON.stringify(current)).not.toMatch(/SECRET_IN_EVENT_BODY|SECRET_COMMAND|SECRET_IN_EVENT_ATTRIBUTE/);
       expect(compareMissionTimeTravel(past, current).reason).toBe("added");
       expect(compareMissionTimeTravel(current, readMissionTimeTravel(ctx.store, ctx.work.id)).equal).toBe(true);
     } finally {
@@ -72,7 +73,7 @@ describe("mission time travel", () => {
       const snapshot = readMissionTimeTravel(ctx.store, ctx.work.id);
       expect(snapshot.events).toHaveLength(221);
       expect(snapshot.auditEventCount).toBe(221);
-      expect(verifyMissionTimeTravel(snapshot)).toBe(true);
+      expect(verifyMissionTimeTravel(snapshot, ctx.store)).toBe(true);
     } finally {
       ctx.close();
     }
@@ -83,9 +84,41 @@ describe("mission time travel", () => {
     try {
       ctx.store.recordSystemEvent({ name: "lease.claimed", attributes: { "work_item.id": ctx.work.id } });
       const snapshot = readMissionTimeTravel(ctx.store, ctx.work.id);
-      expect(verifyMissionTimeTravel({ ...snapshot, events: [...snapshot.events].reverse() })).toBe(false);
-      expect(verifyMissionTimeTravel({ ...snapshot, events: snapshot.events.slice(1) })).toBe(false);
-      expect(verifyMissionTimeTravel({ ...snapshot, auditHeadHash: "f".repeat(64) })).toBe(false);
+      expect(verifyMissionTimeTravel({ ...snapshot, events: [...snapshot.events].reverse() }, ctx.store)).toBe(false);
+      expect(verifyMissionTimeTravel({ ...snapshot, events: snapshot.events.slice(1) }, ctx.store)).toBe(false);
+      expect(verifyMissionTimeTravel({ ...snapshot, auditHeadHash: "f".repeat(64) }, ctx.store)).toBe(false);
+    } finally {
+      ctx.close();
+    }
+  });
+
+  it("rejects a recomputed forged snapshot and compares projected actor metadata", () => {
+    const ctx = fixture();
+    try {
+      ctx.store.recordSystemEvent({
+        name: "policy.decided",
+        attributes: { "work_item.id": ctx.work.id, "actor.id": "PRIVATE_ACTOR_SECRET" }
+      });
+      const snapshot = readMissionTimeTravel(ctx.store, ctx.work.id);
+      expect(verifyMissionTimeTravel(snapshot, ctx.store)).toBe(true);
+      expect(JSON.stringify(snapshot)).not.toContain("PRIVATE_ACTOR_SECRET");
+      expect(snapshot.events.some((event) => typeof event.actorIdHash === "string")).toBe(true);
+
+      const mutated = {
+        ...snapshot,
+        events: snapshot.events.map((event, i) =>
+          i === snapshot.events.length - 1 ? { ...event, actorIdHash: "f".repeat(64) } : event
+        )
+      };
+      const { snapshotHash: _oldHash, ...body } = mutated;
+      const forged = { ...mutated, snapshotHash: domainHash(MISSION_TIME_TRAVEL_VERSION, body) };
+      // Recomputing a local hash cannot authenticate a forged projection.
+      expect(verifyMissionTimeTravel(forged, ctx.store)).toBe(false);
+      expect(compareMissionTimeTravel(snapshot, forged)).toEqual({
+        equal: false,
+        firstDivergence: snapshot.events.at(-1)!.sequence,
+        reason: "changed"
+      });
     } finally {
       ctx.close();
     }
