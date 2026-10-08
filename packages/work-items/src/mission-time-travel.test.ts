@@ -11,7 +11,7 @@ function fixture() {
   const file = join(dir, "store.sqlite");
   const store = new SqliteWorkItemStore(file);
   const work = store.create({
-    title: "inspect", intent: "read-only", requester: "test", risk: "low",
+    title: "inspect", intent: "read-only", requester: "agent", risk: "low",
     requestedActions: [{ kind: "fs.read", description: "read", params: {} }]
   });
   return { file, store, work, close: () => { store.close(); rmSync(dir, { recursive: true, force: true }); } };
