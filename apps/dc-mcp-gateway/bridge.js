@@ -839,9 +839,9 @@ function linuxProcessIdentity(pid) {
   try {
     const bootId = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
     const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
-    const processStartTicks = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\\s+/)[19];
+    const processStartTicks = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
     const invocation = linuxProcessInvocation(pid);
-    if (!invocation || !/^[a-f0-9-]{36}$/.test(bootId) || !/^\\d+$/.test(processStartTicks ?? "")) return undefined;
+    if (!invocation || !/^[a-f0-9-]{36}$/.test(bootId) || !/^\d+$/.test(processStartTicks ?? "")) return undefined;
     return { bootId, processStartTicks, ...invocation };
   } catch {
     return undefined;
@@ -900,7 +900,7 @@ function managedExecutorRoot(invocation) {
     .find((candidate) => resolved.endsWith(candidate));
   if (script) {
     const root = resolved.slice(0, resolved.length - script.length);
-    if (/(?:^|\\/)releases\\/(?:acs|dc|dc-mcp-gateway)\\/[^/]+\\/$/.test(root)) return root;
+    if (/(?:^|\/)releases\/(?:acs|dc|dc-mcp-gateway)\/[^/]+\/$/.test(root)) return root;
   }
   if (parent.split("/").at(-1) === "desktop-commander") return parent;
   return undefined;
@@ -908,7 +908,7 @@ function managedExecutorRoot(invocation) {
 function discoverManagedExecutorRoots() {
   try {
     return new Set(fs.readdirSync("/proc")
-      .filter((name) => /^\\d+$/.test(name))
+      .filter((name) => /^\d+$/.test(name))
       .map((name) => managedExecutorRoot(linuxProcessInvocation(name)))
       .filter((root) => root !== undefined));
   } catch {
