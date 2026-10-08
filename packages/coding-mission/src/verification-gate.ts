@@ -10,7 +10,7 @@ import {
 } from "@agent-control-stack/verification";
 import { TERMINAL_MISSION_STATES, type VerificationPolicy } from "./mission-model.js";
 import type { CodingMissionStore, WorkUnitVerificationRequirement } from "./store.js";
-import type { ExecutionReceipt, ResultEnvelope } from "./worker-execution.js";
+import type { DispatchEnvelope, ExecutionReceipt, ResultEnvelope } from "./worker-execution.js";
 
 export type VerificationGateOutcome =
   "succeeded" | "failed" | "retryable" | "inconclusive" | "not_verifying" | "policy_none";
@@ -450,6 +450,7 @@ export class WorkUnitVerificationGate {
     const row = this.store.db
       .prepare(
         `SELECT attempt_id, mission_id, unit_id, unit_attempt, worker_id, implementer_engine_id,
+                executor_lane, claim_token_hash, dispatch_hash, dispatch_json,
                 state, result_hash, report_hash, report_json
          FROM work_unit_execution_attempts
          WHERE mission_id = ? AND unit_id = ? AND unit_attempt = ?`
@@ -462,6 +463,10 @@ export class WorkUnitVerificationGate {
           unit_attempt: number;
           worker_id: string;
           implementer_engine_id: string | null;
+          executor_lane: string;
+          claim_token_hash: string;
+          dispatch_hash: string;
+          dispatch_json: string;
           state: string;
           result_hash: string | null;
           report_hash: string | null;
@@ -477,6 +482,34 @@ export class WorkUnitVerificationGate {
       !row.implementer_engine_id
     ) {
       return undefined;
+    }
+    // The standalone implementer_engine_id column is only an index of the durable
+    // dispatch. Rebind it to the hashed dispatch envelope before it is trusted as
+    // the producer identity for the self-verification check.
+    const dispatch = JSON.parse(row.dispatch_json) as Partial<DispatchEnvelope> | null;
+    if (!dispatch || typeof dispatch !== "object" || stableHash(dispatch) !== row.dispatch_hash) {
+      throw new ControlStackError(
+        "coding_mission_integrity",
+        "persisted execution dispatch hash does not match dispatch_json"
+      );
+    }
+    if (
+      dispatch.schemaVersion !== "acs.work-unit-dispatch.v1" ||
+      dispatch.attemptId !== row.attempt_id ||
+      dispatch.missionId !== row.mission_id ||
+      dispatch.unitId !== row.unit_id ||
+      dispatch.unitAttempt !== row.unit_attempt ||
+      dispatch.workerId !== row.worker_id ||
+      dispatch.lane !== row.executor_lane ||
+      dispatch.claimTokenHash !== row.claim_token_hash ||
+      typeof dispatch.implementerEngineId !== "string" ||
+      dispatch.implementerEngineId.length === 0 ||
+      dispatch.implementerEngineId !== row.implementer_engine_id
+    ) {
+      throw new ControlStackError(
+        "coding_mission_integrity",
+        "persisted implementer identity is not bound to the durable dispatch"
+      );
     }
     const report = JSON.parse(row.report_json) as ResultEnvelope;
     if (stableHash(report) !== row.report_hash) {
