@@ -819,15 +819,30 @@ function isPidAlive(pid) {
     return !!(err && err.code === "EPERM");
   }
 }
+// Node and other runtimes expose actual argument boundaries through /proc.
+// Never turn cmdline into a whitespace-delimited string: an executable path
+// occurring as an inert argument is not evidence that the process ran it.
+function linuxProcessInvocation(pid) {
+  try {
+    const raw = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+    if (!raw.endsWith("\u0000")) return undefined;
+    const argv = raw.slice(0, -1).split("\u0000");
+    if (argv.length < 2 || argv.some((arg) => arg.length === 0)) return undefined;
+    const executable = fs.realpathSync(`/proc/${pid}/exe`);
+    return { argv, executable };
+  } catch {
+    return undefined;
+  }
+}
 function linuxProcessIdentity(pid) {
   if (process.platform !== "linux") return undefined;
   try {
     const bootId = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
     const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
-    const processStartTicks = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
-    const command = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replaceAll("\u0000", " ").trim();
-    if (!/^[a-f0-9-]{36}$/.test(bootId) || !/^\d+$/.test(processStartTicks ?? "")) return undefined;
-    return { bootId, processStartTicks, command };
+    const processStartTicks = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\\s+/)[19];
+    const invocation = linuxProcessInvocation(pid);
+    if (!invocation || !/^[a-f0-9-]{36}$/.test(bootId) || !/^\\d+$/.test(processStartTicks ?? "")) return undefined;
+    return { bootId, processStartTicks, ...invocation };
   } catch {
     return undefined;
   }
@@ -847,35 +862,54 @@ const CONFIGURED_EXECUTOR_ROOT = CONFIGURED_EXECUTOR_ENTRYPOINT
     ? CONFIGURED_EXECUTOR_ENTRYPOINT.slice(0, -"dist/index.js".length)
     : path.dirname(CONFIGURED_EXECUTOR_ENTRYPOINT)
   : undefined;
-function managedExecutorRoot(command) {
-  for (const token of command.split(/\s+/u)) {
-    if (!token.startsWith("/")) continue;
-    const resolved = path.resolve(token);
-    if (CONFIGURED_EXECUTOR_ENTRYPOINT && resolved === CONFIGURED_EXECUTOR_ENTRYPOINT) return CONFIGURED_EXECUTOR_ROOT;
-    const parent = resolved.slice(0, resolved.lastIndexOf("/"));
-    if (parent.split("/").includes("node_modules")) continue;
-    const script = ["dist/index.js", "dist/jace-commander/cli.js", "dist/control-plane/server.js"]
-      .find((candidate) => resolved.endsWith(candidate));
-    if (script) {
-      const root = resolved.slice(0, resolved.length - script.length);
-      if (/(?:^|\/)releases\/(?:acs|dc|dc-mcp-gateway)\/[^/]+\/$/.test(root)) return root;
+function configuredBinaryPath() {
+  const candidates = path.isAbsolute(DC_CMD)
+    ? [DC_CMD]
+    : (process.env.PATH || "").split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, DC_CMD));
+  for (const candidate of candidates) {
+    try {
+      const executable = fs.realpathSync(candidate);
+      if (fs.statSync(executable).isFile()) return executable;
+    } catch {
+      // A missing configured executable must never establish managed identity.
     }
-    if (parent.split("/").at(-1) === "desktop-commander") return parent;
   }
+  return undefined;
+}
+const CONFIGURED_EXECUTOR_BINARY = !JC ? configuredBinaryPath() : undefined;
+function managedExecutorRoot(invocation) {
+  const argv = invocation?.argv;
+  if (!Array.isArray(argv) || argv.length < 2) return undefined;
+  // argv[1] is the script argument of the directly spawned node runtime.
+  // node -e '<script>' /configured/entrypoint and shell wrappers do not
+  // execute the entrypoint in that position, even if the path appears later.
+  const scriptArg = argv[1];
+  if (!scriptArg || scriptArg.startsWith("-")) return undefined;
+  const resolved = path.isAbsolute(scriptArg) ? path.resolve(scriptArg) : path.resolve(DC_CWD, scriptArg);
+  if (CONFIGURED_EXECUTOR_ENTRYPOINT && resolved === CONFIGURED_EXECUTOR_ENTRYPOINT) {
+    if (!CONFIGURED_EXECUTOR_BINARY || invocation.executable !== CONFIGURED_EXECUTOR_BINARY) return undefined;
+    if (argv.length !== DC_ARGS.length + 1) return undefined;
+    if (DC_ARGS.slice(1).some((arg, i) => argv[i + 2] !== arg)) return undefined;
+    return CONFIGURED_EXECUTOR_ROOT;
+  }
+  // Legacy release-layout discovery still requires a real script position.
+  if (!path.isAbsolute(scriptArg)) return undefined;
+  const parent = path.dirname(resolved);
+  if (parent.split("/").includes("node_modules")) return undefined;
+  const script = ["dist/index.js", "dist/jace-commander/cli.js", "dist/control-plane/server.js"]
+    .find((candidate) => resolved.endsWith(candidate));
+  if (script) {
+    const root = resolved.slice(0, resolved.length - script.length);
+    if (/(?:^|\\/)releases\\/(?:acs|dc|dc-mcp-gateway)\\/[^/]+\\/$/.test(root)) return root;
+  }
+  if (parent.split("/").at(-1) === "desktop-commander") return parent;
   return undefined;
 }
 function discoverManagedExecutorRoots() {
   try {
     return new Set(fs.readdirSync("/proc")
-      .filter((name) => /^\d+$/.test(name))
-      .map((name) => {
-        try {
-          const command = fs.readFileSync(`/proc/${name}/cmdline`, "utf8").replaceAll("\u0000", " ").trim();
-          return command ? managedExecutorRoot(command) : undefined;
-        } catch {
-          return undefined;
-        }
-      })
+      .filter((name) => /^\\d+$/.test(name))
+      .map((name) => managedExecutorRoot(linuxProcessInvocation(name)))
       .filter((root) => root !== undefined));
   } catch {
     return new Set();
@@ -920,7 +954,7 @@ function executorLeaseStatus(file) {
     typeof info.processStartTicks === "string" &&
     /^\d+$/.test(info.processStartTicks);
   const identity = canonical ? linuxProcessIdentity(info.pid) : undefined;
-  const holderRoot = identity ? managedExecutorRoot(identity.command) : undefined;
+  const holderRoot = identity ? managedExecutorRoot(identity) : undefined;
   const managedRoots = discoverManagedExecutorRoots();
   const processMatchesLease =
     !!identity &&
