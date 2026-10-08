@@ -43,7 +43,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 const bootId = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
 const stat = fs.readFileSync('/proc/self/stat', 'utf8');
-const processStartTicks = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\\s+/)[19];
+const processStartTicks = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
 const now = Date.now();
 fs.writeFileSync(path.join(process.env.DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR, 'executor.lock'), JSON.stringify({
   pid: process.pid, instanceId: 'executor-' + process.pid, acquiredAt: now, expiresAt: now + 60000,
@@ -123,7 +123,7 @@ try {
     assert.equal(impostor.exitCode, null, 'spoofing process must still be alive');
     const bootId = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
     const stat = fs.readFileSync(`/proc/${impostor.pid}/stat`, 'utf8');
-    const processStartTicks = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\\s+/)[19];
+    const processStartTicks = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
     const now = Date.now();
     fs.writeFileSync(path.join(lockDir, 'executor.lock'), JSON.stringify({
       pid: impostor.pid, instanceId: 'impostor-' + impostor.pid,
