@@ -65,7 +65,7 @@ describe("proof-of-execution receipt integrity", () => {
     ["wrong final readback", (v: ExecutionReceiptCore) => { v.readback.diffHash = H("9"); }, "readback_mismatch"],
     ["reused audit id", (v: ExecutionReceiptCore) => { v.readback.audit.eventId = "auth_1"; }, "audit_event_reused"],
     ["clock inversion", (v: ExecutionReceiptCore) => { v.manifest.startedAt = "2026-10-08T13:00:00Z"; }, "inverted_execution_time"]
-  ])("rejects %s", (_label, change, code) => {
+  ] as const)("rejects %s", (_label, change, code) => {
     const value = core();
     change(value);
     expect(receiptDefects(value)).toContain(code);
