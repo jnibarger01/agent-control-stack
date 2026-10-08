@@ -1,6 +1,11 @@
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
-import { classifyReadOnlyArgv, commandPathOperands, inferCommandEffects } from "./command-effects.js";
+import {
+  classifyReadOnlyArgv,
+  commandPathOperands,
+  inferCommandEffects,
+  type CommandEffectTag
+} from "./command-effects.js";
 import type { PolicyContext, PolicyDecision } from "./policy.js";
 
 export type PolicyRiskLevel = "read_only" | "safe_mutation" | "requires_approval" | "destructive" | "forbidden";
@@ -15,8 +20,7 @@ export interface PolicyRiskClassification {
 
 const credentialPathPattern =
   /(^|\/)(\.env(\.|$)|id_rsa$|id_ed25519$|\.ssh(\/|$)|\.aws\/credentials$|credentials(\.json)?$|token(\.json)?$)/i;
-// A newline or carriage return separates commands exactly like `;` does.
-const shellMetaPattern = /[;&|`$<>\n\r]/;
+const shellMetaPattern = /[;&|`$<>]/;
 
 export function evaluateRules(context: PolicyContext): PolicyDecision {
   const classification = classifyPolicyRisk(context);
@@ -50,9 +54,7 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
     if (context.operation === "approve" && isRequestingActor(context)) {
       return risk("forbidden", "privileged execution cannot be self-approved", ["deny:self-approval"]);
     }
-    return risk("requires_approval", "privileged execution requires an approval record", [
-      "approval:privileged-exec"
-    ]);
+    return risk("requires_approval", "privileged execution requires an approval record", ["approval:privileged-exec"]);
   }
   if (JC_APPROVAL_KINDS.has(context.action.kind)) {
     if (context.operation === "approve" && isRequestingActor(context)) {
@@ -67,8 +69,9 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
     // Creates an ACS work item that is itself policy-evaluated on its own.
     return risk("safe_mutation", "Jace Commander mission submission is allowed", ["allow:jc-mission-submit"]);
   }
-  // Effects implied by the argv itself (P0-1). They are OR-ed with the caller-asserted flags, so they can
-  // only add denials; `write` is never inferred because it would turn deny:fail-closed into an approval.
+  // Effects implied by the argv itself (P0-1). They annotate the decision; they only change its outcome
+  // where the rules below say so. `write` is never inferred, because inferring it would move an action the
+  // old rules denied into an approval.
   const effects = inferCommandEffects(command);
   // Paths the argv names count for the credential and project-root checks, not just declared `paths`.
   const pathScope = withCommandPathOperands(context, command);
@@ -76,7 +79,10 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
   if (isSudo(command)) {
     return risk("forbidden", "sudo is denied by default", ["deny:sudo"]);
   }
-  if (isRmRfRoot(command) || context.destructive === true || effects.destructive) {
+  // `destructive: true` from the caller, and the literal `rm -rf /`, were hard denies before argv
+  // classification existed, so they stay denies. A destructive argv on its own is not one: admin mode
+  // auto-approves authorized execution (see the command-review branch below).
+  if (isRmRfRoot(command) || context.destructive === true) {
     return risk("destructive", "destructive command is denied", ["deny:destructive"]);
   }
   if (hasShellMetacharacter(command)) {
@@ -85,7 +91,10 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
   if (touchesCredentialPath(pathScope)) {
     return risk("forbidden", "credential path access is denied", ["deny:credential-path"]);
   }
-  if (hasPathEscape(pathScope)) {
+  // Only declared paths. An argv operand outside the workspace is tagged on the approval below; denying
+  // it would be a new hard deny for commands the old rules allowed. Credential paths are different: this
+  // file already hard-denies them (`deny:credential-path`), so an argv that names one stays denied.
+  if (hasPathEscape(context)) {
     return risk("forbidden", "paths outside project root are denied", ["deny:path-escape"]);
   }
   if (isSelfApproval(context)) {
@@ -98,7 +107,9 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
   if (isPackageInstall(command)) {
     return risk("requires_approval", "package install requires approval", ["approval:package-install"]);
   }
-  if ((context.network === true || effects.network) && !explicitlyAllowsNetwork(context)) {
+  // Only the caller-asserted flag was a hard deny before argv classification existed. A networked argv
+  // is handled by the command review below, so it can be approved under admin mode instead of denied.
+  if (context.network === true && !explicitlyAllowsNetwork(context)) {
     return risk("forbidden", "outbound network is denied by default", ["deny:network"]);
   }
   if (context.write === true) {
@@ -140,7 +151,18 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
       allowedPaths: allowedPaths(context)
     });
   }
+  const reviewed = reviewCommandBearingAction(context, effects.tags);
+  if (reviewed) {
+    return reviewed;
+  }
 
+  // Nothing else matched, so the old rules denied this. A destructive argv keeps that deny, but under the
+  // rule id Jace approved for `git push --force` (P11): deny:destructive rather than deny:fail-closed.
+  // The outcome is unchanged. A destructive command the old rules allowed never reaches here; the review
+  // above already sent it to approval.
+  if (effects.destructive) {
+    return risk("destructive", "destructive command is denied", ["deny:destructive"]);
+  }
   return risk("forbidden", "no policy rule matched", ["deny:fail-closed"]);
 }
 
@@ -346,6 +368,13 @@ function isAllowedGitRead(command: string[]): boolean {
   return command[0] === "git" && (command[1] === "status" || command[1] === "diff") && classifyReadOnlyArgv(command).ok;
 }
 
+/** The pre-P0-1 git-read rule, which allowed any `git status` / `git diff` without reading the flags. */
+function isLegacyUnscopedGitRead(command: string[]): boolean {
+  return (
+    command[0] === "git" && (command[1] === "status" || command[1] === "diff") && !classifyReadOnlyArgv(command).ok
+  );
+}
+
 function isPackageLifecycleCommand(command: string[]): boolean {
   return (
     (command[0] === "npm" && command[1] === "test") ||
@@ -359,10 +388,10 @@ function isPackageLifecycleCommand(command: string[]): boolean {
 const COMMAND_BEARING_KINDS: ReadonlySet<string> = new Set(["shell", "cmd.run", "service.restart"]);
 
 /**
- * Read-only inspection inside the project root. Declared `paths` alone never make an action read-only:
- * when the action carries a command, the argv itself must be an allowlisted read-only shape and every
- * operand it names must stay inside `cwd` (deny by default for any other command). Command-bearing
- * kinds without a command are not read-only either.
+ * Read-only inspection inside the project root. For an action that carries a command, declared `paths`
+ * alone are not enough: the argv must be an allowlisted read-only shape and every operand it names must
+ * stay inside `cwd`. A command that is not that shape is not read-only here; the command review below
+ * sends it to approval instead of allowing it.
  */
 function isReadOnlyInsideCwd(context: PolicyContext): boolean {
   if (context.write || context.network || context.destructive) {
@@ -387,6 +416,50 @@ function isReadOnlyInsideCwd(context: PolicyContext): boolean {
   }
   const verdict = classifyReadOnlyArgv(command);
   return verdict.ok && verdict.operands.every((operand) => isInside(root, resolve(root, operand)));
+}
+
+/**
+ * The pre-P0-1 read-only rule: caller flags clear, declared paths present and all inside `cwd`.
+ */
+function legacyReadOnlyInsideCwd(context: PolicyContext): boolean {
+  if (context.write || context.network || context.destructive) {
+    return false;
+  }
+  if (!context.paths?.length || !context.cwd) {
+    return false;
+  }
+  const root = resolve(context.cwd);
+  return context.paths.every((path) => isInside(root, resolve(root, path)));
+}
+
+/**
+ * Command-bearing actions no earlier rule decided. The old rules auto-approved these whenever the
+ * declared paths were inside `cwd`, without reading the argv, so a command that is not an exact
+ * allowlisted read-only shape now needs a human approval instead (admin mode auto-approves those).
+ * A command-bearing action the old rules did not allow keeps `deny:fail-closed`.
+ *
+ * The effect tags say why the approval is needed. They never change the outcome, so nothing the old
+ * rules denied becomes an approval.
+ */
+function reviewCommandBearingAction(
+  context: PolicyContext,
+  tags: readonly CommandEffectTag[]
+): PolicyRiskClassification | undefined {
+  const command = context.command ?? [];
+  if (!COMMAND_BEARING_KINDS.has(context.action.kind)) {
+    return undefined;
+  }
+  // The old rules auto-approved a command-bearing action when its declared paths were inside `cwd`, and
+  // any `git status` / `git diff` regardless of flags. Those now need approval unless the exact-shape
+  // allowlist already allowed them above. Anything the old rules did not auto-approve is left to deny.
+  const oldAutoApproved = legacyReadOnlyInsideCwd(context) || isLegacyUnscopedGitRead(command);
+  if (!oldAutoApproved) {
+    return undefined;
+  }
+  const effectTags = command.length === 0 ? (["unknown_command"] as const) : tags;
+  const matchedRules = ["approval:command-review", ...effectTags.map((tag) => `effect:${tag}`)];
+  const summary = effectTags.length > 0 ? effectTags.join(", ") : "unclassified command";
+  return risk("requires_approval", `command requires approval (${summary})`, matchedRules);
 }
 
 function withCommandPathOperands(context: PolicyContext, command: string[]): PolicyContext {

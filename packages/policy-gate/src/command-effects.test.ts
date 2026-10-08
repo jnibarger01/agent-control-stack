@@ -38,7 +38,7 @@ describe("inferCommandEffects", () => {
       ["pwd"]
     ] as const) {
       const effects = inferCommandEffects(command);
-      expect(effects, command.join(" ")).toEqual({ destructive: false, network: false, reasons: [] });
+      expect(effects, command.join(" ")).toEqual({ destructive: false, network: false, tags: [], reasons: [] });
     }
   });
 
@@ -62,7 +62,9 @@ describe("inferCommandEffects", () => {
 
   it("never invents a write effect", () => {
     const effects = inferCommandEffects(["cp", "a", "b"]);
-    expect(effects).toEqual({ destructive: false, network: false, reasons: [] });
+    expect(effects.destructive).toBe(false);
+    expect(effects.network).toBe(false);
+    expect("write" in effects).toBe(false);
   });
 });
 

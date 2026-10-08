@@ -4,10 +4,9 @@
  * Two questions are answered from the command itself rather than from caller-asserted flags:
  *
  * 1. `inferCommandEffects`: does the argv (including anything it chains, wraps or embeds) look
- *    destructive or networked? The result is OR-ed with the caller's `destructive` / `network`
- *    flags, so it can only ever turn a decision into a deny. It deliberately never infers `write`:
- *    in the rule order a `write` leads to `require_approval`, which would loosen today's
- *    `deny:fail-closed` for unrecognised commands.
+ *    destructive, networked, exfiltrating or obfuscated, and is the program off the read-only
+ *    allowlist? The tags annotate the decision. They never infer `write`, and they never turn a
+ *    deny the old rules already produced into an approval.
  *
  * 2. `classifyReadOnlyArgv`: is the argv one of a small set of exact read-only shapes? Anything not
  *    explicitly recognised (interpreters, wrappers, absolute or relative binary paths, unknown flags,
@@ -18,9 +17,30 @@
  * Nothing here executes or reads anything.
  */
 
+/**
+ * Why a command needs review, for the decision reason and the flight recorder:
+ * - destructive: deletes or discards state (rm, shred, git reset --hard, git push --force, ...)
+ * - network: reaches another host (scp, curl, git push/fetch/clone, ...)
+ * - exfil: sends local data out (curl -T, scp/sftp of a local file, ...)
+ * - obfuscated: the command is not what it looks like (sh -c, $()/backticks, subshells, quoted or
+ *   escaped program names)
+ * - outside_workspace: an operand resolves outside the project root
+ * - unknown_command: the program is not on the read-only allowlist
+ */
+export const COMMAND_EFFECT_TAGS = [
+  "destructive",
+  "network",
+  "exfil",
+  "obfuscated",
+  "outside_workspace",
+  "unknown_command"
+] as const;
+export type CommandEffectTag = (typeof COMMAND_EFFECT_TAGS)[number];
+
 export interface CommandEffects {
   destructive: boolean;
   network: boolean;
+  tags: CommandEffectTag[];
   reasons: string[];
 }
 
@@ -283,12 +303,78 @@ function segmentEffects(segment: readonly string[], effects: CommandEffects): vo
 
 /** Effects implied by the argv itself. Monotonic: only ever reports more risk, never less. */
 export function inferCommandEffects(command: readonly string[] | undefined): CommandEffects {
-  const effects: CommandEffects = { destructive: false, network: false, reasons: [] };
+  const effects: CommandEffects = { destructive: false, network: false, tags: [], reasons: [] };
   if (!command || command.length === 0) return effects;
   for (const segment of commandSegments(command)) {
     segmentEffects(segment, effects);
   }
+  if (isObfuscated(command)) {
+    effects.reasons.push("command hides its program (shell wrapper, substitution, subshell, quoting or escapes)");
+  }
+  if (commandPathOperands(command).some(operandOutsideWorkspace)) {
+    effects.reasons.push("an operand resolves outside the workspace");
+  }
+  const verdict = classifyReadOnlyArgv(command);
+  if (!verdict.ok) {
+    effects.reasons.push(`not an allowlisted read-only command: ${verdict.reason}`);
+  }
+  effects.tags = effectTags(effects, command);
   return effects;
+}
+
+/** A tag applies when its condition holds, in a fixed order so the audit record is stable. */
+function effectTags(effects: CommandEffects, command: readonly string[]): CommandEffectTag[] {
+  const tags: CommandEffectTag[] = [];
+  if (effects.destructive) tags.push("destructive");
+  if (effects.network) tags.push("network");
+  if (isExfiltration(command)) tags.push("exfil");
+  if (isObfuscated(command)) tags.push("obfuscated");
+  if (commandPathOperands(command).some(operandOutsideWorkspace)) tags.push("outside_workspace");
+  if (!classifyReadOnlyArgv(command).ok) tags.push("unknown_command");
+  return tags;
+}
+
+/** Sends local content to another host: an upload, or a copy/transfer of a local path. */
+function isExfiltration(command: readonly string[]): boolean {
+  return commandSegments(command).some((segment) => {
+    const name = programName(segment[0] ?? "");
+    const args = segment.slice(1);
+    if (
+      name === "curl" &&
+      args.some(
+        (arg) => /^-[A-Za-z]*T[A-Za-z]*$/.test(arg) || arg === "--upload-file" || arg.startsWith("--upload-file=")
+      )
+    ) {
+      return true;
+    }
+    if (name === "scp" || name === "sftp") {
+      return true;
+    }
+    return name === "rsync" && args.some((arg) => /^[A-Za-z0-9._-]*:/.test(arg) || arg.startsWith("rsync://"));
+  });
+}
+
+/**
+ * The argv is not the plain command it appears to be: a shell runs a script, a wrapper hides the real
+ * program, a token carries command substitution or a subshell, or the program name is quoted or escaped
+ * so it only matches after a shell sees it.
+ */
+function isObfuscated(command: readonly string[]): boolean {
+  if (command.some((token) => /[$()\n\r]/.test(token) || token.includes("`"))) return true;
+  if (command.some((token) => token !== unquote(token))) return true;
+  return commandSegments(command).some((segment) => {
+    const head = programName(segment[0] ?? "");
+    if (WRAPPERS.has(head)) return true;
+    if (SHELLS.has(head)) {
+      const flag = segment.slice(1).find((token) => token.startsWith("-"));
+      return flag !== undefined && flag.includes("c");
+    }
+    return false;
+  });
+}
+
+function operandOutsideWorkspace(operand: string): boolean {
+  return operand.startsWith("/") || operand.startsWith("~") || operand.split("/").includes("..");
 }
 
 /**

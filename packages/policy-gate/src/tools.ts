@@ -258,6 +258,19 @@ export function gateWorkerClaim(
   return store.withTransaction(() => gateWorkerClaimInTransaction(store, policy, parsed));
 }
 
+/**
+ * Claim-time re-evaluation said the item now needs approval, but it was approved earlier (for example
+ * under the command-blind read-only rule). Send it back to `needs_approval` so a human sees it again.
+ * The policy decision itself is already on the audit chain via `evaluateAndRecordPolicy`. Approved has
+ * no direct edge to needs_approval, so this goes approved -> blocked -> pending_policy -> needs_approval,
+ * each step an audited status event. It is never left blocked and never dropped.
+ */
+function returnApprovedItemToApproval(store: WorkItemStore, id: string): void {
+  store.blockWorkItem(id, policyTransition);
+  store.unblockWorkItem(id, policyTransition);
+  store.transition(id, "needs_approval", policyTransition);
+}
+
 function gateWorkerClaimInTransaction(
   store: WorkItemStore,
   policy: PolicyEngine,
@@ -301,6 +314,10 @@ function gateWorkerClaimInTransaction(
   const planApprovals = required.map((evaluation) =>
     store.getExecutionPlanApproval(candidate.id, plan.planHash, evaluation.actionHash)
   );
+  if (decision.decision === "require_approval" && (missing || planApprovals.some((approval) => !approval))) {
+    returnApprovedItemToApproval(store, candidate.id);
+    return undefined;
+  }
   if (decision.decision === "deny" || !admission || missing || planApprovals.some((approval) => !approval)) {
     const blocked = store.blockWorkItem(candidate.id, policyTransition);
     return {
@@ -418,6 +435,10 @@ function gateWorkerClaimByIdInTransaction(
   const planApprovals = required.map((evaluation) =>
     store.getExecutionPlanApproval(candidate.id, plan.planHash, evaluation.actionHash)
   );
+  if (decision.decision === "require_approval" && (missing || planApprovals.some((approval) => !approval))) {
+    returnApprovedItemToApproval(store, candidate.id);
+    return undefined;
+  }
   if (decision.decision === "deny" || !admission || missing || planApprovals.some((approval) => !approval)) {
     const blocked = store.blockWorkItem(candidate.id, policyTransition);
     return {
