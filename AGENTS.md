@@ -327,7 +327,7 @@ Stop before Git writes when:
 
 Read-only inspection may continue to determine whether the discrepancy is benign.
 
-Prefer an isolated worktree for implementation, repair, review fixes, cherry-picks, or work that may overlap with another session.
+Prefer an isolated worktree for implementation, repair, review fixes, cherry-picks, or work that may overlap with another session. For new changes, use `scripts/new-slice.sh` (see Slice Workflow).
 
 Before committing, verify exactly which paths are staged.
 
@@ -341,6 +341,15 @@ git add -A
 when unrelated work may exist.
 
 Use path-scoped staging.
+
+## Slice Workflow
+
+Stale checkouts and parallel agents have repeatedly produced blocked work and duplicate pull requests (#270, #273 and #280 were superseded by parallel work). Every change follows these rules:
+
+1. **One agent per repository at a time.** Before starting, check for another active writer (open draft PRs from another agent, a recent foreign branch, a dirty primary checkout). If one exists, coordinate or work elsewhere; do not start a parallel slice of the same area.
+2. **Fresh worktree per change.** Start every slice with `scripts/new-slice.sh <branch> [worktree-path]` (or `npm run slice:new -- <branch>`). It fetches `origin`, then creates a new branch and worktree from the current `origin/main`. It refuses a dirty checkout (exit 3), a failed fetch (4), a stale base (5), an existing branch (6), or an existing worktree path (7). `--dry-run` runs the checks only. Never reuse an old worktree or branch for new work.
+3. **Preflight before opening or updating a PR.** Run `node scripts/pr-preflight.mjs` (or `npm run pr:preflight`) from the branch. It refuses when the branch is behind `origin/main` (exit 3) or a migration number collides (exit 6), and lists open PRs that touch the same files. Use `--strict` to make any overlap a refusal (exit 5). If gh cannot list PRs it fails closed (exit 4). Resolve an overlap by coordinating, waiting, or narrowing the change, not by opening a competing PR.
+4. **Reserve migration numbers early.** Migrations are `storage/migrations/NNN_name.sql`. Run `node scripts/pr-preflight.mjs --next-migration`; it prints max(numbers on `origin/main`, numbers added by other open PRs) + 1. Add the migration under that number and register it in `packages/shared/src/migration.ts`, then push and open a **draft** PR right away (`gh pr create --draft`): the open draft is the reservation, because every other agent's preflight counts it. Closing the PR releases the number. If two agents race to the same number, both preflights now refuse; the PR opened later renumbers. Never edit a merged migration to resolve a collision.
 
 ## Commit and Pull Request Rules
 
