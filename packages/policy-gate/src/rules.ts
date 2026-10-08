@@ -1,5 +1,6 @@
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
+import { classifyReadOnlyArgv, commandPathOperands, inferCommandEffects } from "./command-effects.js";
 import type { PolicyContext, PolicyDecision } from "./policy.js";
 
 export type PolicyRiskLevel = "read_only" | "safe_mutation" | "requires_approval" | "destructive" | "forbidden";
@@ -14,7 +15,8 @@ export interface PolicyRiskClassification {
 
 const credentialPathPattern =
   /(^|\/)(\.env(\.|$)|id_rsa$|id_ed25519$|\.ssh(\/|$)|\.aws\/credentials$|credentials(\.json)?$|token(\.json)?$)/i;
-const shellMetaPattern = /[;&|`$<>]/;
+// A newline or carriage return separates commands exactly like `;` does.
+const shellMetaPattern = /[;&|`$<>\n\r]/;
 
 export function evaluateRules(context: PolicyContext): PolicyDecision {
   const classification = classifyPolicyRisk(context);
@@ -65,19 +67,25 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
     // Creates an ACS work item that is itself policy-evaluated on its own.
     return risk("safe_mutation", "Jace Commander mission submission is allowed", ["allow:jc-mission-submit"]);
   }
+  // Effects implied by the argv itself (P0-1). They are OR-ed with the caller-asserted flags, so they can
+  // only add denials; `write` is never inferred because it would turn deny:fail-closed into an approval.
+  const effects = inferCommandEffects(command);
+  // Paths the argv names count for the credential and project-root checks, not just declared `paths`.
+  const pathScope = withCommandPathOperands(context, command);
+
   if (isSudo(command)) {
     return risk("forbidden", "sudo is denied by default", ["deny:sudo"]);
   }
-  if (isRmRfRoot(command) || context.destructive === true) {
+  if (isRmRfRoot(command) || context.destructive === true || effects.destructive) {
     return risk("destructive", "destructive command is denied", ["deny:destructive"]);
   }
   if (hasShellMetacharacter(command)) {
     return risk("forbidden", "shell metacharacters are denied", ["deny:shell-metacharacter"]);
   }
-  if (touchesCredentialPath(context)) {
+  if (touchesCredentialPath(pathScope)) {
     return risk("forbidden", "credential path access is denied", ["deny:credential-path"]);
   }
-  if (hasPathEscape(context)) {
+  if (hasPathEscape(pathScope)) {
     return risk("forbidden", "paths outside project root are denied", ["deny:path-escape"]);
   }
   if (isSelfApproval(context)) {
@@ -90,7 +98,7 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
   if (isPackageInstall(command)) {
     return risk("requires_approval", "package install requires approval", ["approval:package-install"]);
   }
-  if (context.network === true && !explicitlyAllowsNetwork(context)) {
+  if ((context.network === true || effects.network) && !explicitlyAllowsNetwork(context)) {
     return risk("forbidden", "outbound network is denied by default", ["deny:network"]);
   }
   if (context.write === true) {
@@ -333,8 +341,9 @@ function requiresRiskApproval(context: PolicyContext): boolean {
   return context.risk === "high" || context.risk === "critical";
 }
 
+/** `git status` / `git diff` in an exact read-only shape (no --output, --ext-diff, -c, ...). */
 function isAllowedGitRead(command: string[]): boolean {
-  return command[0] === "git" && (command[1] === "status" || command[1] === "diff");
+  return command[0] === "git" && (command[1] === "status" || command[1] === "diff") && classifyReadOnlyArgv(command).ok;
 }
 
 function isPackageLifecycleCommand(command: string[]): boolean {
@@ -346,6 +355,15 @@ function isPackageLifecycleCommand(command: string[]): boolean {
   );
 }
 
+/** Action kinds whose effect is the command they carry. Without a command there is nothing to classify. */
+const COMMAND_BEARING_KINDS: ReadonlySet<string> = new Set(["shell", "cmd.run", "service.restart"]);
+
+/**
+ * Read-only inspection inside the project root. Declared `paths` alone never make an action read-only:
+ * when the action carries a command, the argv itself must be an allowlisted read-only shape and every
+ * operand it names must stay inside `cwd` (deny by default for any other command). Command-bearing
+ * kinds without a command are not read-only either.
+ */
 function isReadOnlyInsideCwd(context: PolicyContext): boolean {
   if (context.write || context.network || context.destructive) {
     return false;
@@ -356,8 +374,27 @@ function isReadOnlyInsideCwd(context: PolicyContext): boolean {
   if (!context.cwd) {
     return false;
   }
+  const command = context.command ?? [];
+  if (command.length === 0 && COMMAND_BEARING_KINDS.has(context.action.kind)) {
+    return false;
+  }
   const root = resolve(context.cwd);
-  return context.paths.every((path) => isInside(root, resolve(root, path)));
+  if (!context.paths.every((path) => isInside(root, resolve(root, path)))) {
+    return false;
+  }
+  if (command.length === 0) {
+    return true;
+  }
+  const verdict = classifyReadOnlyArgv(command);
+  return verdict.ok && verdict.operands.every((operand) => isInside(root, resolve(root, operand)));
+}
+
+function withCommandPathOperands(context: PolicyContext, command: string[]): PolicyContext {
+  const operands = commandPathOperands(command);
+  if (operands.length === 0) {
+    return context;
+  }
+  return { ...context, paths: [...new Set([...(context.paths ?? []), ...operands])] };
 }
 
 function allowedPaths(context: PolicyContext): string[] | undefined {
