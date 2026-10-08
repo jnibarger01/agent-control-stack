@@ -10,29 +10,52 @@ import { evidenceManifestSchema, verifyEvidenceManifestHash } from "./evidence-m
 export const EXECUTION_RECEIPT_SCHEMA_VERSION = "acs.execution-receipt.v1" as const;
 export const EXECUTION_RECEIPT_HASH_DOMAIN = "acs:execution-receipt:v1" as const;
 const hash = z.string().regex(/^[a-f0-9]{64}$/u);
-const id = z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
+const id = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
 const auditRef = z.object({ eventId: id, eventHash: hash }).strict();
 
-export const executionReceiptCoreSchema = z.object({
-  schemaVersion: z.literal(EXECUTION_RECEIPT_SCHEMA_VERSION),
-  manifest: evidenceManifestSchema,
-  authorization: z.object({
-    actorId: id, workerId: id, attemptId: id,
-    actionHash: hash, admittedPlanHash: hash, capabilityId: id,
-    leaseId: id, claimTokenHash: hash,
-    policyDecision: z.enum(["allow", "approved"]),
-    audit: auditRef
-  }).strict(),
-  verification: z.object({
-    verifierEngineId: id, implementerEngineId: id, verdict: z.literal("pass"),
-    manifestHash: hash, criteriaPassed: z.number().int().positive().max(512),
-    criteriaFailed: z.literal(0), audit: auditRef
-  }).strict(),
-  readback: z.object({
-    resultWorkspaceRevision: z.string().min(1).max(256),
-    diffHash: hash, status: z.literal("succeeded"), audit: auditRef
-  }).strict()
-}).strict();
+export const executionReceiptCoreSchema = z
+  .object({
+    schemaVersion: z.literal(EXECUTION_RECEIPT_SCHEMA_VERSION),
+    manifest: evidenceManifestSchema,
+    authorization: z
+      .object({
+        actorId: id,
+        workerId: id,
+        attemptId: id,
+        actionHash: hash,
+        admittedPlanHash: hash,
+        capabilityId: id,
+        leaseId: id,
+        claimTokenHash: hash,
+        policyDecision: z.enum(["allow", "approved"]),
+        audit: auditRef
+      })
+      .strict(),
+    verification: z
+      .object({
+        verifierEngineId: id,
+        implementerEngineId: id,
+        verdict: z.literal("pass"),
+        manifestHash: hash,
+        criteriaPassed: z.number().int().positive().max(512),
+        criteriaFailed: z.literal(0),
+        audit: auditRef
+      })
+      .strict(),
+    readback: z
+      .object({
+        resultWorkspaceRevision: z.string().min(1).max(256),
+        diffHash: hash,
+        status: z.literal("succeeded"),
+        audit: auditRef
+      })
+      .strict()
+  })
+  .strict();
 export const executionReceiptSchema = executionReceiptCoreSchema.extend({ receiptHash: hash }).strict();
 export type ExecutionReceipt = z.infer<typeof executionReceiptSchema>;
 export type ExecutionReceiptCore = z.infer<typeof executionReceiptCoreSchema>;
@@ -51,16 +74,13 @@ export function receiptDefects(core: ExecutionReceiptCore): string[] {
   if (m.admittedPlanHash !== a.admittedPlanHash) defects.push("admitted_plan_mismatch");
   if (v.manifestHash !== m.manifestHash) defects.push("verification_manifest_mismatch");
   if (v.implementerEngineId === v.verifierEngineId) defects.push("verifier_not_independent");
-  if (!m.testEvidence || !m.testEvidence.passed ||
-      m.testEvidence.checksPassed < 1 || m.testEvidence.checksFailed !== 0)
+  if (!m.testEvidence || !m.testEvidence.passed || m.testEvidence.checksPassed < 1 || m.testEvidence.checksFailed !== 0)
     defects.push("tests_not_proven");
-  if (m.commands.length === 0 || m.commands.some((c) => c.exitCode !== 0))
-    defects.push("command_execution_not_proven");
+  if (m.commands.length === 0 || m.commands.some((c) => c.exitCode !== 0)) defects.push("command_execution_not_proven");
   if (r.resultWorkspaceRevision !== m.resultWorkspaceRevision || r.diffHash !== m.diffHash)
     defects.push("readback_mismatch");
   if (Date.parse(m.startedAt) > Date.parse(m.finishedAt)) defects.push("inverted_execution_time");
-  if (new Set([a.audit.eventId, v.audit.eventId, r.audit.eventId]).size !== 3)
-    defects.push("audit_event_reused");
+  if (new Set([a.audit.eventId, v.audit.eventId, r.audit.eventId]).size !== 3) defects.push("audit_event_reused");
   return defects;
 }
 
@@ -77,12 +97,21 @@ export function buildExecutionReceipt(input: unknown): ExecutionReceipt {
  * canonical audit chain and current attempt/lease state. Never use values
  * copied from the receipt as their own proof.
  */
-export const receiptBindingSchema = z.object({
-  workItemId: id, attemptId: id, workerId: id,
-  actionHash: hash, admittedPlanHash: hash,
-  leaseId: id, claimTokenHash: hash, capabilityId: id,
-  policyAuditEventHash: hash, verificationAuditEventHash: hash, readbackAuditEventHash: hash
-}).strict();
+export const receiptBindingSchema = z
+  .object({
+    workItemId: id,
+    attemptId: id,
+    workerId: id,
+    actionHash: hash,
+    admittedPlanHash: hash,
+    leaseId: id,
+    claimTokenHash: hash,
+    capabilityId: id,
+    policyAuditEventHash: hash,
+    verificationAuditEventHash: hash,
+    readbackAuditEventHash: hash
+  })
+  .strict();
 export type ReceiptBinding = z.infer<typeof receiptBindingSchema>;
 
 export function verifyExecutionReceipt(receipt: unknown, expected: unknown): { ok: boolean; defects: string[] } {
