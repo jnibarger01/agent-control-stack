@@ -27,6 +27,10 @@ import {
   type ChangeSetReviewInput
 } from "./change-set-review.js";
 import { readMissionTrace, type MissionTrace, type MissionTraceQuery } from "./mission-trace.js";
+import {
+  buildAuthoritativeCompletionReceipts,
+  authoritativeReceiptBundleHash
+} from "./authoritative-completion-receipt.js";
 import { transitionWorkItem } from "./state-machine.js";
 import {
   issueAutonomousAuthorityBodySchema,
@@ -1896,6 +1900,13 @@ export class SqliteWorkItemStore implements WorkItemStore {
             "operation belongs to another authority"
           );
       }
+      const record = this.getChangeSet(input.missionId);
+      if (!record || record.manifestHash !== input.expectedManifestHash)
+        throw new ControlStackError("change_set_receipt_integrity_mismatch", "Change Set receipt source changed");
+      // Execute the authoritative evidence gate INSIDE the same IMMEDIATE write
+      // transaction as the terminal state update and completion audit event.
+      const operationReceipts = buildAuthoritativeCompletionReceipts(this.db, this, record, progress);
+      const receiptBundleHash = authoritativeReceiptBundleHash(operationReceipts);
       const completedAt = new Date().toISOString();
       const core = changeSetCompletionCoreSchema.parse({
         schemaVersion: "acs.change-set.completion.v1",
@@ -1906,6 +1917,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
         authorityId,
         policyHash: authority.policyHash,
         operations: progress.operations,
+        operationReceipts,
         completedAt
       });
       const completionHash = changeSetCompletionHash(core);
@@ -1918,6 +1930,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
             authorityId,
             authorityKind: core.authorityKind,
             policyHash: core.policyHash,
+            receiptBundleHash,
             completedAt,
             completionHash
           },
