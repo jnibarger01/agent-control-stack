@@ -236,6 +236,9 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
   repairExactPreLeaseRenewalTwentyToTwentyThreeLayout(db);
   repairExactRecoveryThirtySevenThirtyEightLayout(db);
   repairExactDeployedThirtyNineFortySevenLayout(db);
+  // 057 and 059 in one uninterrupted upgrade cannot have post-057 retries.
+  // A previously deployed 057 might; 059's tuple alone cannot prove safety.
+  const appliedDuringThisUpgrade = new Set<number>();
   for (const migration of controlPlaneMigrations()) {
     // The "already applied?" question is answered fresh inside this
     // migration's own transaction, after BEGIN IMMEDIATE's write lock is
@@ -271,12 +274,32 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
         continue;
       }
 
+      if (migration.version === 59 && !appliedDuringThisUpgrade.has(57)) {
+        const ambiguous = queryRows(
+          db,
+          `SELECT q.mission_id || ':' || q.unit_id AS id
+           FROM work_unit_verification_quarantine q
+           JOIN coding_operations o
+             ON o.mission_id = q.mission_id AND o.operation_id = q.unit_id
+           WHERE q.reason = 'migration_057_missing_verification_authority'
+             AND q.previous_status IN ('succeeded', 'cancelled')
+             AND o.status = 'failed' AND o.failure_category = 'verification_failure'
+           ORDER BY q.mission_id, q.unit_id LIMIT 50`
+        );
+        if (ambiguous.length > 0) {
+          throw new Error(
+            `migration 059 refused ambiguous terminal restoration after a prior 057 upgrade; ` +
+            `review work-unit attempts and events before manual reconciliation: ${ambiguous.join(", ")}`
+          );
+        }
+      }
       db.exec(migrationSqlForCurrentSchema(db, migration));
       db.prepare(
         `INSERT INTO schema_migrations (version, name, filename, checksum, applied_at)
            VALUES (?, ?, ?, ?, ?)`
       ).run(migration.version, migration.name, migration.filename, migration.checksum, new Date().toISOString());
       db.exec("COMMIT");
+      appliedDuringThisUpgrade.add(migration.version);
     } catch (error) {
       try {
         db.exec("ROLLBACK");
