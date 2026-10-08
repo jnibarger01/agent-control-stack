@@ -136,7 +136,8 @@ const migrationFiles = [
   { version: 54, name: "mission_runtime_generalization", filename: "054_mission_runtime_generalization.sql" },
   { version: 55, name: "work_unit_execution_contract", filename: "055_work_unit_execution_contract.sql" },
   { version: 56, name: "route_decision_enrichment", filename: "056_route_decision_enrichment.sql" },
-  { version: 57, name: "work_unit_verification_authority", filename: "057_work_unit_verification_authority.sql" }
+  { version: 57, name: "work_unit_verification_authority", filename: "057_work_unit_verification_authority.sql" },
+  { version: 58, name: "work_unit_verification_run_fencing", filename: "058_work_unit_verification_run_fencing.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {

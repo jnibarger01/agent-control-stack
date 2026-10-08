@@ -13,12 +13,7 @@ import type { CodingMissionStore, WorkUnitVerificationRequirement } from "./stor
 import type { ExecutionReceipt, ResultEnvelope } from "./worker-execution.js";
 
 export type VerificationGateOutcome =
-  | "succeeded"
-  | "failed"
-  | "retryable"
-  | "inconclusive"
-  | "not_verifying"
-  | "policy_none";
+  "succeeded" | "failed" | "retryable" | "inconclusive" | "not_verifying" | "policy_none";
 
 export interface VerificationGateResult {
   outcome: VerificationGateOutcome;
@@ -121,23 +116,39 @@ export class WorkUnitVerificationGate {
     };
     const runId = `wvr_${randomUUID().replaceAll("-", "")}`;
     const verifierEngineIds = input.verifiers.map((verifier) => verifier.engineId);
+    let verificationRunAcquired = false;
     const hold = (
       reason: string,
       results: VerificationResult[] = [],
       verdict?: VerificationResult["verdict"]
     ): VerificationGateResult =>
-      this.apply(context, runId, {
-        outcome: "inconclusive",
-        verifierEngineIds:
-          results.length > 0 ? results.map((result) => result.verifierEngineId) : verifierEngineIds,
-        reason,
-        results,
-        ...(verdict ? { verdict } : {})
-      });
+      this.apply(
+        context,
+        runId,
+        {
+          outcome: "inconclusive",
+          verifierEngineIds: results.length > 0 ? results.map((result) => result.verifierEngineId) : verifierEngineIds,
+          reason,
+          results,
+          ...(verdict ? { verdict } : {})
+        },
+        verificationRunAcquired
+      );
 
     if (input.verifiers.length === 0) return hold("no_verifier");
     if (new Set(verifierEngineIds).size !== verifierEngineIds.length) return hold("duplicate_verifier");
     if (policy === "multi_verifier" && input.verifiers.length < 2) return hold("insufficient_verifiers");
+
+    const verificationRun = this.store.acquireVerificationRun({
+      runId,
+      executionAttemptId: binding.attemptId,
+      missionId: input.missionId,
+      unitId: input.unitId,
+      unitAttempt: unit.attempt,
+      now: this.clock()
+    });
+    verificationRunAcquired = verificationRun.acquired;
+    if (!verificationRun.acquired) return hold(verificationRun.reason);
 
     const results: VerificationResult[] = [];
     let accountingReason: string | undefined;
@@ -190,8 +201,7 @@ export class WorkUnitVerificationGate {
         if (settled.reason) return hold(settled.reason, results, result.verdict);
       } catch (error) {
         const settled = this.store.settleVerificationUsage(reservationId, {}, this.clock());
-        const reason =
-          settled.reason ?? (error instanceof ControlStackError ? error.code : "verifier_error");
+        const reason = settled.reason ?? (error instanceof ControlStackError ? error.code : "verifier_error");
         return hold(reason, results);
       }
     }
@@ -204,19 +214,25 @@ export class WorkUnitVerificationGate {
           ? "pass"
           : "inconclusive";
 
-    return this.apply(context, runId, {
-      outcome: verdict === "pass" ? "succeeded" : verdict === "fail" ? "failed" : "inconclusive",
-      verdict,
-      verifierEngineIds: results.map((result) => result.verifierEngineId),
-      results,
-      ...(verdict === "fail" && accountingReason ? { reason: accountingReason } : {})
-    });
+    return this.apply(
+      context,
+      runId,
+      {
+        outcome: verdict === "pass" ? "succeeded" : verdict === "fail" ? "failed" : "inconclusive",
+        verdict,
+        verifierEngineIds: results.map((result) => result.verifierEngineId),
+        results,
+        ...(verdict === "fail" && accountingReason ? { reason: accountingReason } : {})
+      },
+      verificationRunAcquired
+    );
   }
 
   private apply(
     context: VerificationContext,
     runId: string,
-    decided: DecidedVerification
+    decided: DecidedVerification,
+    verificationRunAcquired = false
   ): VerificationGateResult {
     const decidedAt = this.clock();
     return this.store.transaction(() => {
@@ -243,6 +259,7 @@ export class WorkUnitVerificationGate {
 
       if (stale) {
         this.persistDecision(context, runId, decided, "rejected_stale", decidedAt);
+        if (verificationRunAcquired) this.store.settleVerificationRun(runId, "rejected_stale", decidedAt);
         return {
           outcome: "not_verifying",
           policy: context.policy,
@@ -298,6 +315,7 @@ export class WorkUnitVerificationGate {
       }
 
       const durablePayload = this.persistDecision(context, runId, decided, outcome, decidedAt);
+      if (verificationRunAcquired) this.store.settleVerificationRun(runId, outcome, decidedAt);
       this.store.putEvidence(
         context.missionId,
         `verification:${context.unitId}:${context.binding.unitAttempt}:${runId}`,
@@ -462,7 +480,10 @@ export class WorkUnitVerificationGate {
     }
     const report = JSON.parse(row.report_json) as ResultEnvelope;
     if (stableHash(report) !== row.report_hash) {
-      throw new ControlStackError("coding_mission_integrity", "persisted execution report hash does not match report_json");
+      throw new ControlStackError(
+        "coding_mission_integrity",
+        "persisted execution report hash does not match report_json"
+      );
     }
     if (
       report.attemptId !== row.attempt_id ||
@@ -530,12 +551,12 @@ export class WorkUnitVerificationGate {
     const now = this.clock();
     const unit = this.store.workUnits(missionId).find((candidate) => candidate.unitId === unitId);
     const executionAttempt = unit?.attempt
-      ? this.store.db
+      ? (this.store.db
           .prepare(
             `SELECT attempt_id FROM work_unit_execution_attempts
              WHERE mission_id = ? AND unit_id = ? AND unit_attempt = ?`
           )
-          .get(missionId, unitId, unit.attempt) as { attempt_id: string } | undefined
+          .get(missionId, unitId, unit.attempt) as { attempt_id: string } | undefined)
       : undefined;
     const body = {
       unitId,
@@ -544,7 +565,12 @@ export class WorkUnitVerificationGate {
       ...(unit ? { unitAttempt: unit.attempt } : {}),
       ...(executionAttempt ? { executionAttemptId: executionAttempt.attempt_id } : {})
     };
-    this.store.putEvidence(missionId, `verification_authority_denied:${unitId}:${stableHash(body).slice(0, 12)}`, body, now);
+    this.store.putEvidence(
+      missionId,
+      `verification_authority_denied:${unitId}:${stableHash(body).slice(0, 12)}`,
+      body,
+      now
+    );
     this.store.db
       .prepare(
         `INSERT INTO coding_events (mission_id, name, body_json, created_at)

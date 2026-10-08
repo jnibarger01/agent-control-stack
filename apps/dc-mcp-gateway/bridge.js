@@ -818,6 +818,52 @@ function isPidAlive(pid) {
     return !!(err && err.code === "EPERM");
   }
 }
+function linuxProcessIdentity(pid) {
+  if (process.platform !== "linux") return undefined;
+  try {
+    const bootId = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const processStartTicks = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
+    const command = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replaceAll("\u0000", " ").trim();
+    if (!/^[a-f0-9-]{36}$/.test(bootId) || !/^\d+$/.test(processStartTicks ?? "")) return undefined;
+    return { bootId, processStartTicks, command };
+  } catch {
+    return undefined;
+  }
+}
+function managedExecutorRoot(command) {
+  for (const token of command.split(/\s+/u)) {
+    if (!token.startsWith("/")) continue;
+    const resolved = path.resolve(token);
+    const parent = resolved.slice(0, resolved.lastIndexOf("/"));
+    if (parent.split("/").includes("node_modules")) continue;
+    const script = ["dist/index.js", "dist/jace-commander/cli.js", "dist/control-plane/server.js"]
+      .find((candidate) => resolved.endsWith(candidate));
+    if (script) {
+      const root = resolved.slice(0, resolved.length - script.length);
+      if (/(?:^|\/)releases\/(?:acs|dc|dc-mcp-gateway)\/[^/]+\/$/.test(root)) return root;
+    }
+    if (parent.split("/").at(-1) === "desktop-commander") return parent;
+  }
+  return undefined;
+}
+function discoverManagedExecutorRoots() {
+  try {
+    return new Set(fs.readdirSync("/proc")
+      .filter((name) => /^\d+$/.test(name))
+      .map((name) => {
+        try {
+          const command = fs.readFileSync(`/proc/${name}/cmdline`, "utf8").replaceAll("\u0000", " ").trim();
+          return command ? managedExecutorRoot(command) : undefined;
+        } catch {
+          return undefined;
+        }
+      })
+      .filter((root) => root !== undefined));
+  } catch {
+    return new Set();
+  }
+}
 function readJsonLease(file) {
   try {
     return JSON.parse(fs.readFileSync(file, "utf8"));
@@ -851,13 +897,39 @@ function executorLeaseStatus(file) {
     info.acquiredAt > 0 &&
     info.acquiredAt <= now &&
     Number.isFinite(info.expiresAt) &&
-    info.expiresAt > now;
-  if (!canonical) {
+    info.expiresAt > now &&
+    typeof info.bootId === "string" &&
+    /^[a-f0-9-]{36}$/.test(info.bootId) &&
+    typeof info.processStartTicks === "string" &&
+    /^\d+$/.test(info.processStartTicks);
+  const identity = canonical ? linuxProcessIdentity(info.pid) : undefined;
+  const holderRoot = identity ? managedExecutorRoot(identity.command) : undefined;
+  const managedRoots = discoverManagedExecutorRoots();
+  const processMatchesLease =
+    !!identity &&
+    identity.bootId === info.bootId &&
+    identity.processStartTicks === info.processStartTicks &&
+    !!holderRoot &&
+    managedRoots.size > 0 &&
+    managedRoots.size === 1 &&
+    managedRoots.has(holderRoot);
+  if (!canonical || !processMatchesLease) {
+    const reason = !canonical
+      ? "invalid lease fields or expiry"
+      : !identity
+        ? "unreadable Linux process identity"
+        : identity.bootId !== info.bootId || identity.processStartTicks !== info.processStartTicks
+          ? "lease process identity no longer matches the live PID"
+          : !holderRoot
+            ? "lease holder is not a managed executor"
+            : managedRoots.size !== 1
+              ? `managed executor topology is absent or competing (${managedRoots.size} roots)`
+              : "lease holder is not in the managed executor topology";
     return {
       active: true,
       ambiguous: true,
       pid: info.pid,
-      detail: `executor lease failed canonical identity/expiry validation: ${file}`
+      detail: `executor lease failed canonical process identity/expiry validation (${reason}): ${file}`
     };
   }
   return {

@@ -31,6 +31,13 @@ function startBridge(env) {
   return child;
 }
 
+function processIdentity(pid) {
+  const bootId = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+  const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+  const processStartTicks = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
+  return { bootId, processStartTicks };
+}
+
 async function waitHealthy(url, proc, ms = 8000) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
@@ -52,8 +59,17 @@ const bridge = startBridge({
   DC_CWD: ROOT,
   DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: stateDir,
 });
+const managedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'acs-authority-'));
+fs.mkdirSync(path.join(managedRoot, 'desktop-commander'));
+const managedExecutor = spawn(process.execPath, [
+  '-e', 'setInterval(() => {}, 1000)', path.join(managedRoot, 'desktop-commander', 'managed-stub.js'),
+], { stdio: 'ignore' });
 
 try {
+  await new Promise((resolve, reject) => {
+    managedExecutor.once('spawn', resolve);
+    managedExecutor.once('error', reject);
+  });
   await waitHealthy(BR, bridge);
 
   // /health: process-alive framing.
@@ -105,11 +121,13 @@ try {
     console.log('PASS: malformed live-PID executor lease fails closed');
   }
 
-  // Simulate a live managed executor lease -> /authority reflects 'managed'.
+  // Simulate a canonical managed executor process and matching lease.
   {
+    const identity = processIdentity(managedExecutor.pid);
     fs.writeFileSync(path.join(stateDir, 'executor.lock'), JSON.stringify({
-      pid: process.pid, instanceId: 'sim', acquiredAt: Date.now(), renews: 0,
+      pid: managedExecutor.pid, instanceId: 'sim', acquiredAt: Date.now(), renews: 0,
       expiresAt: Date.now() + 60_000, hostname: os.hostname(),
+      ...identity,
     }));
     const body = await (await fetch(`${BR}/authority`)).json();
     assert.equal(body.observedMode, 'managed');
@@ -119,8 +137,14 @@ try {
     // connected yet in this test, so it must still be false here.
     assert.equal(body.authoritative, false, 'authoritative must require a proven handshake, not just a lease file');
     const ready = await fetch(`${BR}/ready`);
-    assert.equal(ready.status, 200, 'a canonical live managed lease should satisfy execution-authority readiness');
-    console.log('PASS: /authority reflects a canonical live managed executor lease and /ready admits it');
+    if (body.executor.lease.ambiguous) {
+      assert.match(body.executor.lease.detail, /topology is absent or competing/);
+      assert.equal(ready.status, 503, 'a competing executor topology must fail readiness closed');
+      console.log('PASS: /authority rejects the managed lease when another executor topology is present');
+    } else {
+      assert.equal(ready.status, 200, 'a canonical live managed lease should satisfy execution-authority readiness');
+      console.log('PASS: /authority reflects a canonical live managed executor lease and /ready admits it');
+    }
   }
 
   // Now also simulate a live break-glass marker -> ambiguous_conflict, /ready must fail (503).
@@ -139,7 +163,9 @@ try {
   }
 
   console.log('PASS');
-} finally {
+  } finally {
   try { bridge.kill('SIGTERM'); } catch { /* noop */ }
+  try { managedExecutor.kill('SIGTERM'); } catch { /* noop */ }
   try { fs.rmSync(stateDir, { recursive: true, force: true }); } catch { /* noop */ }
+  try { fs.rmSync(managedRoot, { recursive: true, force: true }); } catch { /* noop */ }
 }

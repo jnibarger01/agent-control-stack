@@ -408,6 +408,40 @@ export class WorkUnitExecutionLedger {
       const authority = normalizedAuthority(input.authority);
       const payloadHash = stableHash(unit.payload ?? null);
       const routeHash = stableHash(unit.route ?? null);
+      // Migration-056 attempts used an identity without implementerEngineId.
+      // Reuse that durable identity for resumable policy-none work only after
+      // matching every authority and payload binding from its stored envelope.
+      if (unit.verificationPolicy === "none") {
+        const legacyAttemptId = `wua_${stableHash({
+          missionId: input.missionId,
+          unitId: input.unitId,
+          unitAttempt: unit.attempt,
+          workerId: input.workerId,
+          claimTokenHash
+        }).slice(0, 32)}`;
+        const legacy = this.row(legacyAttemptId);
+        if (legacy && legacy.implementer_engine_id === null) {
+          const stored = JSON.parse(legacy.dispatch_json) as Omit<DispatchEnvelope, "implementerEngineId">;
+          if (
+            legacy.dispatch_hash !== stableHash(stored) ||
+            legacy.claim_token_hash !== claimTokenHash ||
+            legacy.worker_id !== input.workerId ||
+            legacy.executor_lane !== input.lane ||
+            stored.missionId !== input.missionId ||
+            stored.unitId !== input.unitId ||
+            stored.unitAttempt !== unit.attempt ||
+            stored.workerId !== input.workerId ||
+            stored.lane !== input.lane ||
+            stored.claimTokenHash !== claimTokenHash ||
+            stored.payloadHash !== payloadHash ||
+            stored.routeHash !== routeHash ||
+            stableHash(stored.authority) !== stableHash(authority)
+          ) {
+            throw new ControlStackError("execution_attempt_conflict", "legacy execution attempt binding does not match");
+          }
+          return { ...stored, implementerEngineId };
+        }
+      }
       const attemptId = `wua_${stableHash({
         missionId: input.missionId,
         unitId: input.unitId,
@@ -708,7 +742,18 @@ export class WorkUnitExecutionLedger {
     if (claimTokenHash !== row.claim_token_hash || result.claimTokenHash !== row.claim_token_hash) {
       return "result claim hash does not match the persisted execution attempt";
     }
-    if (!Array.isArray(result.receipts) || result.receipts.some((receipt) => !receipt.kind || !receipt.hash)) {
+    if (
+      !Array.isArray(result.receipts) ||
+      result.receipts.some(
+        (receipt) =>
+          !receipt ||
+          typeof receipt.kind !== "string" ||
+          receipt.kind.length === 0 ||
+          typeof receipt.hash !== "string" ||
+          receipt.hash.length === 0 ||
+          Object.keys(receipt).some((key) => key !== "kind" && key !== "hash")
+      )
+    ) {
       return "result receipts are malformed";
     }
     if (result.outcome === "succeeded" && !result.result) return "successful result is missing result evidence";

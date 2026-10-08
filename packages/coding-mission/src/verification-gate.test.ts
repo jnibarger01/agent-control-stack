@@ -127,6 +127,94 @@ function gateInput(claimToken: string, verifiers: readonly Verifier[]) {
 }
 
 describe("work-unit verification gate", () => {
+  it("serializes verification calls for one durable execution attempt", async () => {
+    const { store, gate, claim, dispatch } = verifyingUnit("independent");
+    let start!: () => void;
+    let finish!: (result: VerificationResult) => void;
+    const started = new Promise<void>((resolve) => (start = resolve));
+    const pending = new Promise<VerificationResult>((resolve) => (finish = resolve));
+    const slow: Verifier = {
+      engineId: "claude",
+      async verify() {
+        start();
+        return pending;
+      }
+    };
+    const first = gate.verifyUnit(gateInput(claim.token, [slow]));
+    await started;
+    await expect(gate.verifyUnit(gateInput(claim.token, [verifier("claude", "fail")]))).resolves.toMatchObject({
+      outcome: "inconclusive",
+      reason: "verification_run_active"
+    });
+    expect(store.workUnits("m1")[0]?.status).toBe("verifying");
+    finish({
+      verdict: "pass",
+      summary: "verified",
+      criteriaResults: [{ criterionId: "c1", satisfied: true, observed: "result exists" }],
+      verifierEngineId: "claude",
+      durationMs: 1
+    });
+    await expect(first).resolves.toMatchObject({ outcome: "succeeded", verdict: "pass" });
+    expect(
+      store.db.prepare("SELECT state, outcome FROM work_unit_verification_runs WHERE run_id != ?").all("missing")
+    ).toEqual([{ state: "settled", outcome: "succeeded" }]);
+    expect(
+      store.db
+        .prepare("SELECT COUNT(*) AS n FROM work_unit_verification_runs WHERE execution_attempt_id = ?")
+        .get(dispatch.attemptId)
+    ).toEqual({ n: 1 });
+  });
+
+  it("charges an abandoned verifier reservation conservatively and keeps its run fenced", async () => {
+    if (process.platform !== "linux") return;
+    const { store, gate, claim, dispatch } = verifyingUnit("independent");
+    const acquired = store.acquireVerificationRun({
+      runId: "wvr_abandoned",
+      executionAttemptId: dispatch.attemptId,
+      missionId: "m1",
+      unitId: "u1",
+      unitAttempt: 1,
+      now: T3
+    });
+    expect(acquired).toEqual({ acquired: true });
+    expect(
+      store.reserveVerificationUsage({
+        reservationId: "wub_abandoned",
+        runId: "wvr_abandoned",
+        missionId: "m1",
+        executionAttemptId: dispatch.attemptId,
+        verifierEngineId: "claude",
+        modelTokens: 100,
+        spendMicroUsd: 25,
+        now: T3
+      })
+    ).toEqual({ ok: true });
+    store.db
+      .prepare("UPDATE work_unit_verification_runs SET owner_boot_id = ? WHERE run_id = ?")
+      .run("00000000-0000-0000-0000-000000000000", "wvr_abandoned");
+
+    await expect(gate.verifyUnit(gateInput(claim.token, [verifier("claude", "pass")]))).resolves.toMatchObject({
+      outcome: "inconclusive",
+      reason: "verification_reconciliation_required"
+    });
+    expect(
+      store.db.prepare("SELECT state FROM work_unit_verification_runs WHERE run_id = ?").get("wvr_abandoned")
+    ).toEqual({ state: "reconciliation_required" });
+    expect(
+      store.db
+        .prepare("SELECT state FROM work_unit_verification_usage_reservations WHERE reservation_id = ?")
+        .get("wub_abandoned")
+    ).toEqual({ state: "settled" });
+    expect(
+      store.db.prepare("SELECT metric, used FROM mission_budget_usage WHERE mission_id = ? ORDER BY metric").all("m1")
+    ).toEqual([
+      { metric: "model_tokens", used: 100 },
+      { metric: "spend_micro_usd", used: 25 },
+      { metric: "tool_calls", used: 1 }
+    ]);
+    expect(store.workUnits("m1")[0]?.status).toBe("verifying");
+  });
+
   it("promotes only an attempt-bound independent pass", async () => {
     const { store, gate, claim, dispatch } = verifyingUnit("independent");
 
@@ -183,11 +271,7 @@ describe("work-unit verification gate", () => {
     });
     expect(store.budget("m1")?.usage.tool_calls).toBeUndefined();
     expect(
-      (
-        store.db
-          .prepare("SELECT COUNT(*) AS n FROM work_unit_verification_usage_reservations")
-          .get() as { n: number }
-      ).n
+      (store.db.prepare("SELECT COUNT(*) AS n FROM work_unit_verification_usage_reservations").get() as { n: number }).n
     ).toBe(0);
   });
 
@@ -221,11 +305,7 @@ describe("work-unit verification gate", () => {
   it("refuses the first claim when a verified unit has no admitted rubric", () => {
     const store = new CodingMissionStore(":memory:");
     store.createGeneral({ missionId: "m1", summary: "execute", now: T0 });
-    store.addWorkUnits(
-      "m1",
-      [{ unitId: "u1", kind: "coding", title: "unit", verificationPolicy: "independent" }],
-      T0
-    );
+    store.addWorkUnits("m1", [{ unitId: "u1", kind: "coding", title: "unit", verificationPolicy: "independent" }], T0);
     store.releaseReadyUnits("m1", T0);
     expect(
       store.claimUnit("m1", "u1", {
@@ -238,14 +318,10 @@ describe("work-unit verification gate", () => {
     expect(store.workUnits("m1")[0]?.attempt).toBe(0);
   });
 
-  it("resets a migration-quarantined unit only after a new rubric is admitted", () => {
+  it("keeps every migration-quarantined attempt blocked until external state is reconciled", () => {
     const store = new CodingMissionStore(":memory:");
     store.createGeneral({ missionId: "m1", summary: "execute", now: T0 });
-    store.addWorkUnits(
-      "m1",
-      [{ unitId: "u1", kind: "coding", title: "unit", verificationPolicy: "independent" }],
-      T0
-    );
+    store.addWorkUnits("m1", [{ unitId: "u1", kind: "coding", title: "unit", verificationPolicy: "independent" }], T0);
     store.db
       .prepare(
         `UPDATE coding_operations
@@ -260,18 +336,19 @@ describe("work-unit verification gate", () => {
       )
       .run(T0);
 
-    store.setVerificationRequirement("m1", "u1", CRITERIA, T1);
+    expect(() => store.setVerificationRequirement("m1", "u1", CRITERIA, T1)).toThrow(/must be reconciled/);
 
     expect(store.workUnits("m1")[0]).toMatchObject({
-      status: "pending",
+      status: "failed",
       attempt: 1
     });
     expect(
       store.db
-        .prepare("SELECT COUNT(*) AS n FROM work_unit_verification_quarantine WHERE mission_id = 'm1' AND unit_id = 'u1'")
+        .prepare(
+          "SELECT COUNT(*) AS n FROM work_unit_verification_quarantine WHERE mission_id = 'm1' AND unit_id = 'u1'"
+        )
         .get()
-    ).toEqual({ n: 0 });
-    expect(store.events("m1").map((event) => event.name)).toContain("verification.migration_recovered");
+    ).toEqual({ n: 1 });
   });
 
   it("audits a fail-closed authority lookup failure", async () => {
@@ -299,11 +376,7 @@ describe("work-unit verification gate", () => {
   it("refuses migration recovery when the pre-057 external outcome was unknown", () => {
     const store = new CodingMissionStore(":memory:");
     store.createGeneral({ missionId: "m1", summary: "execute", now: T0 });
-    store.addWorkUnits(
-      "m1",
-      [{ unitId: "u1", kind: "coding", title: "unit", verificationPolicy: "independent" }],
-      T0
-    );
+    store.addWorkUnits("m1", [{ unitId: "u1", kind: "coding", title: "unit", verificationPolicy: "independent" }], T0);
     store.db
       .prepare(
         `UPDATE coding_operations
@@ -319,9 +392,7 @@ describe("work-unit verification gate", () => {
       )
       .run(T0);
 
-    expect(() => store.setVerificationRequirement("m1", "u1", CRITERIA, T1)).toThrow(
-      /must be reconciled/
-    );
+    expect(() => store.setVerificationRequirement("m1", "u1", CRITERIA, T1)).toThrow(/must be reconciled/);
     expect(store.workUnits("m1")[0]).toMatchObject({ status: "failed", attempt: 1 });
   });
 

@@ -103,6 +103,46 @@ describe("work-unit execution ledger", () => {
     });
   });
 
+  it("resumes a migration-056 policy-none attempt under its legacy identity", () => {
+    const { store, dispatch, claim } = claimed();
+    const claimTokenHash = stableHash(claim.token);
+    const legacyAttemptId = `wua_${stableHash({
+      missionId: "m1",
+      unitId: "u1",
+      unitAttempt: 1,
+      workerId: claim.workerId,
+      claimTokenHash
+    }).slice(0, 32)}`;
+    const { implementerEngineId: _implementerEngineId, ...legacyBase } = dispatch;
+    const legacyDispatch = { ...legacyBase, attemptId: legacyAttemptId };
+    store.db.prepare("DELETE FROM work_unit_execution_attempts WHERE attempt_id = ?").run(dispatch.attemptId);
+    store.db
+      .prepare(
+        `INSERT INTO work_unit_execution_attempts (
+           attempt_id, mission_id, unit_id, unit_attempt, worker_id, executor_lane, claim_token_hash,
+           dispatch_hash, dispatch_json, authority_json, state, started_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'started', ?)`
+      )
+      .run(
+        legacyAttemptId, "m1", "u1", 1, claim.workerId, dispatch.lane, claimTokenHash,
+        stableHash(legacyDispatch), JSON.stringify(legacyDispatch), JSON.stringify(dispatch.authority), "2026-10-06T00:00:01.000Z"
+      );
+
+    const resumed = new WorkUnitExecutionLedger(store).beginDispatch({
+      missionId: "m1",
+      unitId: "u1",
+      claimToken: claim.token,
+      workerId: claim.workerId,
+      lane: dispatch.lane,
+      authority: dispatch.authority,
+      now: "2026-10-06T00:00:02.000Z"
+    });
+
+    expect(resumed).toMatchObject({ attemptId: legacyAttemptId, implementerEngineId: "codex" });
+    expect(store.db.prepare("SELECT COUNT(*) AS n FROM work_unit_execution_attempts WHERE mission_id = 'm1'").get())
+      .toEqual({ n: 1 });
+  });
+
   it("applies a successful report under the live fence and persists receipts", () => {
     const { store, ledger, dispatch, claim } = claimed();
     expect(ledger.applyResult({ claimToken: claim.token, result: success(dispatch) })).toEqual({
@@ -127,6 +167,20 @@ describe("work-unit execution ledger", () => {
     });
     expect(store.workUnits("m1")[0]).toMatchObject({ status: "verifying", resultHash: "result-1" });
     expect(store.events("m1").map((event) => event.name)).toContain("verification.started");
+  });
+
+  it("rejects non-canonical receipt properties before persisting a worker result", () => {
+    const { store, ledger, dispatch, claim } = claimed();
+    expect(
+      ledger.applyResult({
+        claimToken: claim.token,
+        result: {
+          ...success(dispatch),
+          receipts: [{ kind: "tool_result", hash: "receipt-1", assertedSuccess: true } as never]
+        }
+      })
+    ).toMatchObject({ applied: "rejected_invalid", reason: "result receipts are malformed" });
+    expect(store.workUnits("m1")[0]?.status).toBe("running");
   });
 
   it("requires an implementer engine identity before verified dispatch", () => {

@@ -94,4 +94,27 @@ describe("migration 057: work-unit verification authority", () => {
     ).toEqual({ status: "ready", attempt: 0 });
     db.close();
   });
+
+  it("quarantines attempted units already back in pending or ready before upgrade", () => {
+    const db = databaseAt056();
+    db.exec(`
+      INSERT INTO coding_missions (
+        mission_id, repository, base_ref, base_sha, summary, state, version, branch,
+        deployment_required, deployment_action, deployment_impact, created_at, updated_at, mission_kind
+      ) VALUES (
+        'm1', 'org/repo', 'main', '${"a".repeat(40)}', 'verify', 'READY', 1, 'acs/m1',
+        0, 'none', 'none', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z', 'general'
+      );
+      INSERT INTO coding_operations (
+        mission_id, operation_id, depends_on, title, status, files_json, unit_kind, attempt, depth, verification_policy
+      ) VALUES ('m1', 'u1', '[]', 'unit', 'ready', '[]', 'coding', 2, 0, 'independent');
+    `);
+    apply057(db);
+
+    expect(db.prepare("SELECT previous_status FROM work_unit_verification_quarantine WHERE mission_id = 'm1' AND unit_id = 'u1'").get())
+      .toEqual({ previous_status: "ready" });
+    expect(db.prepare("SELECT status FROM coding_operations WHERE mission_id = 'm1' AND operation_id = 'u1'").get())
+      .toEqual({ status: "failed" });
+    db.close();
+  });
 });

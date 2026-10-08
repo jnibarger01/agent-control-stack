@@ -39,8 +39,7 @@ INSERT INTO work_unit_verification_quarantine (mission_id, unit_id, reason, prev
 SELECT mission_id, operation_id, 'migration_057_missing_verification_authority', status, datetime('now')
 FROM coding_operations
 WHERE verification_policy <> 'none'
-  AND attempt > 0
-  AND status IN ('claimed', 'running', 'checkpointed', 'verifying', 'unknown', 'retryable', 'failed');
+  AND attempt > 0;
 
 UPDATE coding_operations
 SET status = 'failed',
