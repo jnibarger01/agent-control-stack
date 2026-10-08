@@ -24,6 +24,7 @@ import {
   injectRuntimeBootstrap,
   issueRuntimeBootstrap
 } from "./managed.js";
+import { dcBridgeReady } from "./readiness.js";
 
 const ACS_CAPABILITY_META_KEY = "capability";
 const ACS_GUARD_META_KEY = "acsCapability";
@@ -831,10 +832,26 @@ function linuxProcessIdentity(pid) {
     return undefined;
   }
 }
+// The executor this bridge itself is configured to spawn (DC_ARGS[0]) is by
+// definition a managed executor root, whatever directory layout it lives in: a
+// release dir, the monorepo's vendor/desktop-commander, or a dev checkout. Without
+// this, a lease held by the bridge's own child running
+// <repo>/vendor/desktop-commander/dist/index.js matched none of the heuristics
+// below, every lease was reported ambiguous ("lease holder is not a managed
+// executor"), and /ready never passed (the post-#286 Execution-chain E2E failure).
+const CONFIGURED_EXECUTOR_ENTRYPOINT = JC
+  ? undefined
+  : path.resolve(path.isAbsolute(DC_ARGS[0]) ? DC_ARGS[0] : path.resolve(DC_CWD, DC_ARGS[0]));
+const CONFIGURED_EXECUTOR_ROOT = CONFIGURED_EXECUTOR_ENTRYPOINT
+  ? CONFIGURED_EXECUTOR_ENTRYPOINT.endsWith("/dist/index.js")
+    ? CONFIGURED_EXECUTOR_ENTRYPOINT.slice(0, -"dist/index.js".length)
+    : path.dirname(CONFIGURED_EXECUTOR_ENTRYPOINT)
+  : undefined;
 function managedExecutorRoot(command) {
   for (const token of command.split(/\s+/u)) {
     if (!token.startsWith("/")) continue;
     const resolved = path.resolve(token);
+    if (CONFIGURED_EXECUTOR_ENTRYPOINT && resolved === CONFIGURED_EXECUTOR_ENTRYPOINT) return CONFIGURED_EXECUTOR_ROOT;
     const parent = resolved.slice(0, resolved.lastIndexOf("/"));
     if (parent.split("/").includes("node_modules")) continue;
     const script = ["dist/index.js", "dist/jace-commander/cli.js", "dist/control-plane/server.js"]
@@ -1053,14 +1070,8 @@ const httpServer = http.createServer(async (req, res) => {
   }
   if (path === "/ready") {
     const authority = computeAuthority();
-    const executionAuthorityReady = MANAGED
-      ? authority.observedMode === "managed"
-      : authority.observedMode !== "none_active" && authority.observedMode !== "ambiguous_conflict";
-    const ready =
-      !!pair?.upstreamStarted &&
-      executionAuthorityReady &&
-      !authority.executor.lease.ambiguous &&
-      !authority.executor.breakGlass.ambiguous;
+    // Same predicate the public edge applies to this bridge's /authority JSON.
+    const ready = dcBridgeReady(authority, { managed: MANAGED });
     res.writeHead(ready ? 200 : 503, { "Content-Type": "application/json" });
     res.end(
       JSON.stringify({

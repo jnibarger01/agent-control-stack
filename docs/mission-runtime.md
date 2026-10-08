@@ -79,7 +79,14 @@ Verification criteria are admitted before the first execution attempt and persis
 A first claim is refused when a non-`none` policy has no rubric. Verified dispatch also requires the actual implementer
 engine/provider identity, which is persisted separately from the worker owner id. Databases upgraded with already
 in-flight verified units are quarantined fail-closed; admitting a rubric explicitly resets only that quarantined unit
-for a fresh attempt.
+for a fresh attempt. Terminal units (`succeeded`, `cancelled`) are not in flight: migration 059 restores any terminal
+unit that 057 rewrote to `failed`, provided it is unchanged since 057. It also drops that unit's quarantine row and
+records a `verification.migration_057_terminal_restored` event.
+
+The gate derives the implementer engine identity from the hashed durable dispatch. It recomputes `dispatch_hash` from
+`dispatch_json` and requires the dispatch's attempt, worker, lane, claim and engine bindings to match the attempt row
+before any verifier runs. A relabelled `implementer_engine_id` column therefore fails closed instead of enabling
+self-verification.
 
 The gate derives the unit attempt, implementer engine identity, execution-attempt id, result hash, execution-report hash,
 and verifier evidence from durable execution state. Verifier evidence is reconstructed from the persisted result and
