@@ -31,6 +31,19 @@ export type {
   BuildEvidenceManifestInput
 } from "./evidence-manifest.js";
 
+export {
+  EXECUTION_RECEIPT_SCHEMA_VERSION,
+  EXECUTION_RECEIPT_HASH_DOMAIN,
+  executionReceiptCoreSchema,
+  executionReceiptSchema,
+  receiptBindingSchema,
+  executionReceiptHash,
+  receiptDefects,
+  buildExecutionReceipt,
+  verifyExecutionReceipt
+} from "./execution-receipt.js";
+export type { ExecutionReceipt, ExecutionReceiptCore, ReceiptBinding } from "./execution-receipt.js";
+
 export { computeWorkspaceRevision, detectWorkspaceDrift } from "./workspace-revision.js";
 export type { WorkspaceRevisionResult, WorkspaceDriftResult } from "./workspace-revision.js";
 
