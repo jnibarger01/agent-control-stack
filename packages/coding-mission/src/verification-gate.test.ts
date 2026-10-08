@@ -408,6 +408,44 @@ describe("work-unit verification gate", () => {
     expect(store.workUnits("m1")[0]?.status).toBe("verifying");
   });
 
+  it("rejects an implementer_engine_id column that no longer matches the hashed dispatch", async () => {
+    const { store, gate, claim, dispatch } = verifyingUnit("independent");
+    // Only the standalone column is rewritten; dispatch_json/dispatch_hash still
+    // name the real producer ("codex"). Trusting the column would let the
+    // producer engine verify its own work.
+    store.db
+      .prepare("UPDATE work_unit_execution_attempts SET implementer_engine_id = ? WHERE attempt_id = ?")
+      .run("relabelled-engine", dispatch.attemptId);
+    let invoked = false;
+    await expect(
+      gate.verifyUnit(
+        gateInput(claim.token, [
+          verifier("codex", "pass", {
+            onVerify: () => {
+              invoked = true;
+            }
+          })
+        ])
+      )
+    ).rejects.toThrow(/not bound to the durable dispatch/);
+    expect(invoked).toBe(false);
+    expect(store.workUnits("m1")[0]?.status).toBe("verifying");
+  });
+
+  it("fails closed when the persisted dispatch envelope is tampered", async () => {
+    const { store, gate, claim, dispatch } = verifyingUnit("independent");
+    const tampered = { ...dispatch, implementerEngineId: "relabelled-engine" };
+    store.db
+      .prepare(
+        "UPDATE work_unit_execution_attempts SET implementer_engine_id = ?, dispatch_json = ? WHERE attempt_id = ?"
+      )
+      .run("relabelled-engine", JSON.stringify(tampered), dispatch.attemptId);
+    await expect(gate.verifyUnit(gateInput(claim.token, [verifier("codex", "pass")]))).rejects.toThrow(
+      /dispatch hash does not match/
+    );
+    expect(store.workUnits("m1")[0]?.status).toBe("verifying");
+  });
+
   it("fails closed when persisted receipt rows diverge from report_json", async () => {
     const { store, gate, claim, dispatch } = verifyingUnit("independent");
     store.db

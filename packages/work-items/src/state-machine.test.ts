@@ -994,6 +994,11 @@ describe("work item state machine", () => {
           version: 58,
           name: "work_unit_verification_run_fencing",
           filename: "058_work_unit_verification_run_fencing.sql"
+        },
+        {
+          version: 59,
+          name: "work_unit_verification_terminal_restore",
+          filename: "059_work_unit_verification_terminal_restore.sql"
         }
       ]);
       expect(store.listActors()).toEqual(
