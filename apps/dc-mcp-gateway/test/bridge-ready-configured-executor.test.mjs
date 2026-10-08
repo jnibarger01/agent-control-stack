@@ -112,6 +112,37 @@ try {
     assert.equal(last.status, 503);
     console.log('PASS: configured executor recognised; a persistently competing host topology fails closed');
   }
+  // Regression for #291 post-merge P1: a separate Node process can write
+  // a lease whose cmdline merely *mentions* the configured entrypoint as an
+  // inert argument to -e. This must not establish managed execution identity.
+  const impostor = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', entry], {
+    stdio: 'ignore',
+  });
+  try {
+    await sleep(200);
+    assert.equal(impostor.exitCode, null, 'spoofing process must still be alive');
+    const bootId = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    const stat = fs.readFileSync(`/proc/${impostor.pid}/stat`, 'utf8');
+    const processStartTicks = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\\s+/)[19];
+    const now = Date.now();
+    fs.writeFileSync(path.join(lockDir, 'executor.lock'), JSON.stringify({
+      pid: impostor.pid, instanceId: 'impostor-' + impostor.pid,
+      acquiredAt: now, expiresAt: now + 60000,
+      hostname: os.hostname(), bootId, processStartTicks,
+    }));
+    const rejected = await fetch(`${BR}/ready`);
+    const authority = await (await fetch(`${BR}/authority`)).json();
+    assert.equal(rejected.status, 503, 'inert argv mention must not make a spoofed lease ready');
+    assert.equal(authority.executor?.lease?.ambiguous, true);
+    assert.match(
+      authority.executor.lease.detail,
+      /lease holder is not a managed executor/,
+      'configured script must occupy the actual execution position',
+    );
+    console.log('PASS: inert argv mention and spoofed lease are rejected');
+  } finally {
+    try { impostor.kill('SIGTERM'); } catch { /* noop */ }
+  }
   console.log('PASS');
 } finally {
   try { bridge.kill('SIGTERM'); } catch { /* noop */ }
