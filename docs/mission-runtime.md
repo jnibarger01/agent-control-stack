@@ -67,20 +67,34 @@ The execution contract deliberately does **not** add swarm delegation or CUA. Th
 
 ## Not yet in this runtime
 
-Mission authority envelopes and narrowed child authority, the unified worker contract and checkpoint/resume, enriched
-route decisions, `request_child_work`, CUA, and recovery policy are separate slices. Today the
-legacy coding path has no budget row (uncapped) and the `general` kind has no driver of its own.
+Mission authority envelopes and narrowed child authority, checkpoint/resume, `request_child_work`, CUA, and recovery
+policy are separate slices. Today the legacy coding path has no budget row (uncapped) and the `general` kind has no
+driver of its own.
 
 ## Verification gate
 
 A successful execution never completes a unit whose verification policy is not `none`. The unit parks in
-`verifying` and only `WorkUnitVerificationGate` (`verification-gate.ts`) can move it: an independent verifier
-(identity different from the implementer, enforced by `runIndependentVerification`) judges typed criteria
-against the execution evidence. `lightweight` and `independent` need one verifier; `multi_verifier` needs
-two distinct verifiers and every verdict must pass; `release_gate` failure is terminal rather than
-auto-retryable. A pass promotes `verifying -> succeeded` (`succeedVerifiedUnit`, the only completion path
-out of `verifying`); a failure records `verification_failure` (retryable within the mission retry budget,
-except under `release_gate`); an inconclusive verdict — including verifier errors and identity collisions —
-holds the unit in `verifying` for re-verification or a human. It never succeeds. Every verdict is applied
-under the live claim fence, re-checked after the verifiers run, and persisted as `verification:<unit>:<attempt>`
-evidence plus a `verification.completed` event. The implementer’s claim is evidence input, never a verdict.
+`verifying` and only `WorkUnitVerificationGate` (`verification-gate.ts`) owns the verified completion transition.
+Verification criteria are admitted before the first execution attempt and persisted immutably by migration 057.
+A first claim is refused when a non-`none` policy has no rubric. Verified dispatch also requires the actual implementer
+engine/provider identity, which is persisted separately from the worker owner id. Databases upgraded with already
+in-flight verified units are quarantined fail-closed; admitting a rubric explicitly resets only that quarantined unit
+for a fresh attempt.
+
+The gate derives the unit attempt, implementer engine identity, execution-attempt id, result hash, execution-report hash,
+and verifier evidence from durable execution state. Verifier evidence is reconstructed from the persisted result and
+receipt hashes; callers cannot substitute diff text, command output, or an implementer claim after seeing the result.
+`lightweight` and `independent` need one verifier; `multi_verifier` needs two distinct verifiers and every required
+verdict must pass; `release_gate` failure is terminal rather than auto-retryable. A failure records the actual resulting
+lifecycle state (`retryable` or `failed`), while an inconclusive verdict or verifier error holds the unit in
+`verifying`. Each verification invocation has a distinct durable run id, so an inconclusive run can be retried without
+rewriting its history. A decisive failure stops further verifier calls and remains decisive even if accounting discovers
+that the provider exceeded its reserved budget.
+
+Migration 057 also records attempt-bound verification decisions and atomic verifier-usage reservations. Active
+reservations count against mission limits before a provider call starts, preventing concurrent verifiers from
+oversubscribing the same token/spend/tool-call budget. Reservations reconcile to observed usage afterward; unknown capped
+usage is conservatively charged at the reserved amount. Durable decision payloads retain bounded redacted summaries and
+hashes instead of unrestricted command stdout/stderr. Missing verification authority, stale verdicts, and budget refusals
+are auditable fail-closed outcomes. The final decision timestamp is sampled after verifier execution, and the ACS
+transaction that persists the decision is the same transaction that advances the work-unit state.

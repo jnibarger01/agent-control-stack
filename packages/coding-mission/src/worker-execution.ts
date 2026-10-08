@@ -23,6 +23,7 @@ export interface DispatchEnvelope {
   unitKind: WorkUnitKind;
   verificationPolicy: VerificationPolicy;
   workerId: string;
+  implementerEngineId: string;
   lane: ExecutorLane;
   claimTokenHash: string;
   payloadHash: string;
@@ -73,6 +74,7 @@ export interface ExecutionAttemptRecord {
   unitId: string;
   unitAttempt: number;
   workerId: string;
+  implementerEngineId: string;
   lane: ExecutorLane;
   claimTokenHash: string;
   dispatchHash: string;
@@ -98,6 +100,7 @@ interface AttemptRow {
   unit_id: string;
   unit_attempt: number;
   worker_id: string;
+  implementer_engine_id: string | null;
   executor_lane: ExecutorLane;
   claim_token_hash: string;
   dispatch_hash: string;
@@ -126,6 +129,14 @@ function boundedText(value: string, max = 500): string {
     .replace(/(?:token|password|secret)\s*[:=]\s*[^\s]+/giu, "[redacted]")
     .replace(/sk-[A-Za-z0-9_-]{12,}/gu, "[redacted]");
   return scrubbed.slice(0, max);
+}
+
+function implementerEngineIdFromRoute(route: unknown): string | undefined {
+  if (!route || typeof route !== "object" || Array.isArray(route)) return undefined;
+  const value = (route as Record<string, unknown>).implementerEngineId;
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized.length > 0 && normalized.length <= 128 ? normalized : undefined;
 }
 
 function normalizedAuthority(authority: ExecutionAuthorityRefs | undefined): ExecutionAuthorityRefs {
@@ -377,15 +388,66 @@ export class WorkUnitExecutionLedger {
       if (!EXECUTOR_LANES.includes(input.lane)) {
         throw new ControlStackError("execution_lane_invalid", "executor lane is invalid");
       }
+      if (unit.verificationPolicy !== "none" && !this.store.verificationRequirement(input.missionId, input.unitId)) {
+        throw new ControlStackError(
+          "verification_requirement_missing",
+          "verified execution cannot begin without an admitted verification requirement"
+        );
+      }
+      // Verified dispatches derive the producer engine from the route admitted
+      // with the durable claim. A beginDispatch caller cannot relabel the producer.
+      const implementerEngineId =
+        implementerEngineIdFromRoute(unit.route) ?? (unit.verificationPolicy === "none" ? `lane:${input.lane}` : "");
+      if (!implementerEngineId) {
+        throw new ControlStackError(
+          "execution_implementer_identity_required",
+          "verified execution requires an implementer engine/provider identity on the admitted route"
+        );
+      }
       const claimTokenHash = stableHash(input.claimToken);
       const authority = normalizedAuthority(input.authority);
       const payloadHash = stableHash(unit.payload ?? null);
       const routeHash = stableHash(unit.route ?? null);
+      // Migration-056 attempts used an identity without implementerEngineId.
+      // Reuse that durable identity for resumable policy-none work only after
+      // matching every authority and payload binding from its stored envelope.
+      if (unit.verificationPolicy === "none") {
+        const legacyAttemptId = `wua_${stableHash({
+          missionId: input.missionId,
+          unitId: input.unitId,
+          unitAttempt: unit.attempt,
+          workerId: input.workerId,
+          claimTokenHash
+        }).slice(0, 32)}`;
+        const legacy = this.row(legacyAttemptId);
+        if (legacy && legacy.implementer_engine_id === null) {
+          const stored = JSON.parse(legacy.dispatch_json) as Omit<DispatchEnvelope, "implementerEngineId">;
+          if (
+            legacy.dispatch_hash !== stableHash(stored) ||
+            legacy.claim_token_hash !== claimTokenHash ||
+            legacy.worker_id !== input.workerId ||
+            legacy.executor_lane !== input.lane ||
+            stored.missionId !== input.missionId ||
+            stored.unitId !== input.unitId ||
+            stored.unitAttempt !== unit.attempt ||
+            stored.workerId !== input.workerId ||
+            stored.lane !== input.lane ||
+            stored.claimTokenHash !== claimTokenHash ||
+            stored.payloadHash !== payloadHash ||
+            stored.routeHash !== routeHash ||
+            stableHash(stored.authority) !== stableHash(authority)
+          ) {
+            throw new ControlStackError("execution_attempt_conflict", "legacy execution attempt binding does not match");
+          }
+          return { ...stored, implementerEngineId };
+        }
+      }
       const attemptId = `wua_${stableHash({
         missionId: input.missionId,
         unitId: input.unitId,
         unitAttempt: unit.attempt,
         workerId: input.workerId,
+        implementerEngineId,
         claimTokenHash
       }).slice(0, 32)}`;
       const dispatch: DispatchEnvelope = {
@@ -397,6 +459,7 @@ export class WorkUnitExecutionLedger {
         unitKind: unit.kind,
         verificationPolicy: unit.verificationPolicy,
         workerId: input.workerId,
+        implementerEngineId,
         lane: input.lane,
         claimTokenHash,
         payloadHash,
@@ -412,6 +475,7 @@ export class WorkUnitExecutionLedger {
           existing.dispatch_hash !== dispatchHash ||
           existing.claim_token_hash !== claimTokenHash ||
           existing.worker_id !== input.workerId ||
+          existing.implementer_engine_id !== implementerEngineId ||
           existing.executor_lane !== input.lane
         ) {
           throw new ControlStackError("execution_attempt_conflict", "execution attempt identity already has another dispatch");
@@ -435,9 +499,9 @@ export class WorkUnitExecutionLedger {
       this.store.db
         .prepare(
           `INSERT INTO work_unit_execution_attempts (
-             attempt_id, mission_id, unit_id, unit_attempt, worker_id, executor_lane, claim_token_hash,
-             dispatch_hash, dispatch_json, authority_json, state, started_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'started', ?)`
+             attempt_id, mission_id, unit_id, unit_attempt, worker_id, implementer_engine_id,
+             executor_lane, claim_token_hash, dispatch_hash, dispatch_json, authority_json, state, started_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'started', ?)`
         )
         .run(
           attemptId,
@@ -445,6 +509,7 @@ export class WorkUnitExecutionLedger {
           input.unitId,
           unit.attempt,
           input.workerId,
+          implementerEngineId,
           input.lane,
           claimTokenHash,
           dispatchHash,
@@ -477,6 +542,7 @@ export class WorkUnitExecutionLedger {
       unitId: row.unit_id,
       unitAttempt: row.unit_attempt,
       workerId: row.worker_id,
+      implementerEngineId: row.implementer_engine_id ?? `lane:${row.executor_lane}`,
       lane: row.executor_lane,
       claimTokenHash: row.claim_token_hash,
       dispatchHash: row.dispatch_hash,
@@ -676,7 +742,18 @@ export class WorkUnitExecutionLedger {
     if (claimTokenHash !== row.claim_token_hash || result.claimTokenHash !== row.claim_token_hash) {
       return "result claim hash does not match the persisted execution attempt";
     }
-    if (!Array.isArray(result.receipts) || result.receipts.some((receipt) => !receipt.kind || !receipt.hash)) {
+    if (
+      !Array.isArray(result.receipts) ||
+      result.receipts.some(
+        (receipt) =>
+          !receipt ||
+          typeof receipt.kind !== "string" ||
+          receipt.kind.length === 0 ||
+          typeof receipt.hash !== "string" ||
+          receipt.hash.length === 0 ||
+          Object.keys(receipt).some((key) => key !== "kind" && key !== "hash")
+      )
+    ) {
       return "result receipts are malformed";
     }
     if (result.outcome === "succeeded" && !result.result) return "successful result is missing result evidence";

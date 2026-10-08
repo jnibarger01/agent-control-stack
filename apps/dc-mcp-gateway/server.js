@@ -755,7 +755,17 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, body);
       }
       // A jc bridge on UPSTREAM is a misconfiguration, never a ready DC bridge.
-      const bridgeReady = bridgeAuthority.ok && bridgeAuthority.data && bridgeAuthority.data.variant !== 'jc' && bridgeAuthority.data.observedMode !== 'ambiguous_conflict' && bridgeAuthority.data.bridge?.hasUpstreamPair;
+      const bridgeExecutionReady = MANAGED.enabled
+        ? bridgeAuthority.data?.observedMode === 'managed'
+        : bridgeAuthority.data?.observedMode === 'managed' || bridgeAuthority.data?.observedMode === 'break_glass';
+      const bridgeReady =
+        bridgeAuthority.ok &&
+        bridgeAuthority.data &&
+        bridgeAuthority.data.variant !== 'jc' &&
+        bridgeAuthority.data.observedMode !== 'ambiguous_conflict' &&
+        bridgeExecutionReady &&
+        bridgeAuthority.data.bridge?.hasUpstreamPair &&
+        bridgeAuthority.data.bridge?.upstreamStarted;
       const issuanceReady = !MANAGED.enabled || acsIssuance.reachable;
       // /ready gates the primary DC route; the JC bridge is reported, not gating.
       const jcBridgeReady = jcAuthority ? !!(jcAuthority.ok && jcAuthority.data?.variant === 'jc' && jcAuthority.data?.bridge?.hasUpstreamPair) : undefined;

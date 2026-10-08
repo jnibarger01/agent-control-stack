@@ -1,9 +1,12 @@
 import { DatabaseSync } from "node:sqlite";
+import { readFileSync } from "node:fs";
 import { ControlStackError, applyControlPlaneMigrations, stableHash } from "@agent-control-stack/shared";
+import { verificationCriterionSchema, type VerificationCriterion } from "@agent-control-stack/verification";
 import {
   BudgetDecision,
   BudgetLimits,
   BudgetMetric,
+  BudgetProjection,
   MissionBudget,
   REPORTED_METRICS,
   budgetToLimits,
@@ -46,6 +49,61 @@ export type OperationStatus = WorkUnitStatus;
 export interface ValidationEvidence {
   checks: Record<"tests" | "typecheck" | "lint" | "format" | "repository" | "review", "PASS" | "FAIL">;
   risks: string[];
+}
+
+interface VerificationProcessIdentity {
+  pid: number;
+  bootId?: string;
+  processStartTicks?: string;
+}
+
+function verificationProcessIdentity(): VerificationProcessIdentity {
+  let bootId: string | undefined;
+  let processStartTicks: string | undefined;
+  try {
+    bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+    const stat = readFileSync(`/proc/${process.pid}/stat`, "utf8");
+    const ticks = stat
+      .slice(stat.lastIndexOf(")") + 2)
+      .trim()
+      .split(/\s+/u)[19];
+    if (ticks && /^\d+$/u.test(ticks)) processStartTicks = ticks;
+  } catch {
+    // Other platforms cannot provide Linux process identity; PID liveness still
+    // lets us reconcile a definitely exited process, while ambiguity stays held.
+  }
+  return { pid: process.pid, ...(bootId ? { bootId } : {}), ...(processStartTicks ? { processStartTicks } : {}) };
+}
+
+function verificationOwnerState(owner: {
+  owner_pid: number | null;
+  owner_boot_id: string | null;
+  owner_process_start_ticks: string | null;
+}): "same_process" | "replaced_or_exited" | "unknown" {
+  if (!Number.isInteger(owner.owner_pid) || owner.owner_pid === null || owner.owner_pid <= 0) return "unknown";
+  try {
+    process.kill(owner.owner_pid, 0);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ESRCH") {
+      return "replaced_or_exited";
+    }
+    return "unknown";
+  }
+  if (!owner.owner_boot_id || !owner.owner_process_start_ticks) return "unknown";
+  try {
+    const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+    const stat = readFileSync(`/proc/${owner.owner_pid}/stat`, "utf8");
+    const processStartTicks = stat
+      .slice(stat.lastIndexOf(")") + 2)
+      .trim()
+      .split(/\s+/u)[19];
+    if (!/^\d+$/u.test(processStartTicks ?? "")) return "unknown";
+    return bootId === owner.owner_boot_id && processStartTicks === owner.owner_process_start_ticks
+      ? "same_process"
+      : "replaced_or_exited";
+  } catch {
+    return "unknown";
+  }
 }
 
 export interface CodingOperation {
@@ -167,7 +225,10 @@ export type AddWorkUnitsResult = { ok: true; created: string[]; decision: Budget
 export type ClaimUnitResult =
   | { ok: true; attempt: number; decision: BudgetDecision }
   | BudgetRefusal
-  | { ok: false; outcome: "mission_not_active" | "dependencies_unmet" | "claim_conflict" };
+  | {
+      ok: false;
+      outcome: "mission_not_active" | "dependencies_unmet" | "claim_conflict" | "verification_requirement_missing";
+    };
 export type RetryUnitResult =
   | { ok: true; attempt: number }
   | BudgetRefusal
@@ -175,6 +236,25 @@ export type RetryUnitResult =
 export type CancelMissionResult =
   | { ok: true; mission: CodingMissionRecord; alreadyCancelled: boolean; cancelled: string[]; uncertain: string[] }
   | { ok: false; outcome: "already_terminal"; state: MissionState };
+
+export interface WorkUnitVerificationRequirement {
+  missionId: string;
+  unitId: string;
+  criteria: VerificationCriterion[];
+  criteriaHash: string;
+  createdAt: string;
+}
+
+export type VerificationBudgetReservationResult =
+  { ok: true } | { ok: false; reason: "verification_budget_exhausted" | "verification_budget_unaccounted" };
+
+export type VerificationRunAcquisitionResult =
+  { acquired: true } | { acquired: false; reason: "verification_run_active" | "verification_reconciliation_required" };
+
+export interface VerificationUsageAmounts {
+  modelTokens?: number;
+  spendMicroUsd?: number;
+}
 
 function parseStringArray(value: string): string[] {
   const parsed: unknown = JSON.parse(value);
@@ -515,6 +595,15 @@ export class CodingMissionStore {
       const unit = units.find((row) => row.operation_id === operationId);
       if (!unit || (unit.status !== "pending" && unit.status !== "ready"))
         return { ok: false, outcome: "claim_conflict" };
+      if (unit.verification_policy !== "none" && !this.verificationRequirement(missionId, operationId)) {
+        this.event(
+          missionId,
+          "verification.authority_denied",
+          { unitId: operationId, reason: "missing_verification_requirement" },
+          claim.claimedAt
+        );
+        return { ok: false, outcome: "verification_requirement_missing" };
+      }
       const succeeded = new Set(units.filter((row) => row.status === "succeeded").map((row) => row.operation_id));
       if (!parseStringArray(unit.depends_on).every((dependency) => succeeded.has(dependency))) {
         return { ok: false, outcome: "dependencies_unmet" };
@@ -590,27 +679,6 @@ export class CodingMissionStore {
     });
   }
 
-  /**
-   * Promote a unit that an independent verification gate has passed. This is the only
-   * completion path out of `verifying`: the maker-facing `completeOperation` deliberately
-   * does not accept that status, so an executor can never complete its own verified unit.
-   */
-  succeedVerifiedUnit(missionId: string, operationId: string, claimToken: string, now: string): void {
-    this.transaction(() => {
-      const resultRow = this.db
-        .prepare(
-          `UPDATE coding_operations
-           SET status = 'succeeded'
-           WHERE mission_id = ? AND operation_id = ? AND status = 'verifying' AND claim_token = ?`
-        )
-        .run(missionId, operationId, claimToken);
-      if (resultRow.changes !== 1) {
-        throw new ControlStackError("coding_mission_claim_conflict", "verified completion did not match the claim");
-      }
-      this.event(missionId, "work_unit.completed", { unitId: operationId, verified: true }, now);
-    });
-  }
-
   markOperation(missionId: string, operationId: string, status: "conflict" | "unknown" | "failed"): void {
     this.transaction(() => {
       this.db
@@ -679,6 +747,113 @@ export class CodingMissionStore {
         .prepare(`DELETE FROM coding_effects WHERE mission_id = ? AND effect_kind = ? AND outcome = 'unknown'`)
         .run(missionId, kind);
     });
+  }
+
+  /**
+   * Persist the immutable verification rubric before a unit begins execution.
+   * Verification never trusts a rubric supplied after the result exists.
+   */
+  setVerificationRequirement(
+    missionId: string,
+    unitId: string,
+    criteria: readonly VerificationCriterion[],
+    now: string
+  ): WorkUnitVerificationRequirement {
+    const parsed = criteria.map((criterion) => verificationCriterionSchema.parse(criterion));
+    if (
+      parsed.length === 0 ||
+      parsed.length > 32 ||
+      new Set(parsed.map((criterion) => criterion.id)).size !== parsed.length
+    ) {
+      throw new ControlStackError(
+        "verification_requirement_invalid",
+        "verification criteria must contain 1-32 unique criterion ids"
+      );
+    }
+    const criteriaHash = stableHash(parsed);
+    const criteriaJson = JSON.stringify(parsed);
+    return this.transaction(() => {
+      const mission = this.require(missionId);
+      if (TERMINAL_MISSION_STATES.has(mission.state)) {
+        throw new ControlStackError(
+          "verification_requirement_invalid",
+          "terminal missions cannot add verification requirements"
+        );
+      }
+      const unit = this.workUnits(missionId).find((candidate) => candidate.unitId === unitId);
+      if (!unit) throw new ControlStackError("work_unit_not_found", "work unit does not exist");
+      if (unit.verificationPolicy === "none") {
+        throw new ControlStackError(
+          "verification_requirement_invalid",
+          "verification policy none cannot have a requirement"
+        );
+      }
+      const existing = this.verificationRequirement(missionId, unitId);
+      if (existing) {
+        if (existing.criteriaHash !== criteriaHash) {
+          throw new ControlStackError(
+            "verification_requirement_conflict",
+            "verification criteria are immutable once admitted"
+          );
+        }
+        return existing;
+      }
+
+      const quarantine = this.db
+        .prepare(
+          `SELECT reason, previous_status FROM work_unit_verification_quarantine
+           WHERE mission_id = ? AND unit_id = ?`
+        )
+        .get(missionId, unitId) as { reason: string; previous_status: string } | undefined;
+      if (quarantine) {
+        throw new ControlStackError(
+          "verification_migration_reconciliation_required",
+          `quarantined unit from ${quarantine.previous_status} must be reconciled before its verification authority can be restored`
+        );
+      } else if (!["pending", "ready"].includes(unit.status) || unit.attempt !== 0) {
+        throw new ControlStackError(
+          "verification_requirement_late",
+          "verification requirement must be fixed before the first execution attempt"
+        );
+      }
+
+      this.db
+        .prepare(
+          `INSERT INTO work_unit_verification_requirements
+             (mission_id, unit_id, criteria_hash, criteria_json, created_at)
+           VALUES (?, ?, ?, ?, ?)`
+        )
+        .run(missionId, unitId, criteriaHash, criteriaJson, now);
+
+      this.event(missionId, "verification.requirement_set", { unitId, criteriaHash }, now);
+      return { missionId, unitId, criteria: parsed, criteriaHash, createdAt: now };
+    });
+  }
+
+  verificationRequirement(missionId: string, unitId: string): WorkUnitVerificationRequirement | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT criteria_hash, criteria_json, created_at
+         FROM work_unit_verification_requirements
+         WHERE mission_id = ? AND unit_id = ?`
+      )
+      .get(missionId, unitId) as { criteria_hash: string; criteria_json: string; created_at: string } | undefined;
+    if (!row) return undefined;
+    const raw = JSON.parse(row.criteria_json) as unknown;
+    if (!Array.isArray(raw)) {
+      throw new ControlStackError("coding_mission_integrity", "persisted verification criteria are invalid");
+    }
+    const criteria = raw.map((criterion) => verificationCriterionSchema.parse(criterion));
+    if (stableHash(criteria) !== row.criteria_hash) {
+      throw new ControlStackError("coding_mission_integrity", "persisted verification criteria hash does not match");
+    }
+    return {
+      missionId,
+      unitId,
+      criteria,
+      criteriaHash: row.criteria_hash,
+      createdAt: row.created_at
+    };
   }
 
   putEvidence(missionId: string, kind: string, payload: unknown, now: string): void {
@@ -1056,6 +1231,334 @@ export class CodingMissionStore {
       });
       return { ok: true, mission: next, alreadyCancelled: false, cancelled, uncertain };
     });
+  }
+
+  /**
+   * Atomically reserve verifier tool/model/spend capacity before a provider call.
+   * Active reservations count against admission so concurrent verifier calls cannot
+   * all observe the same remaining budget and oversubscribe it.
+   */
+  reserveVerificationUsage(input: {
+    reservationId: string;
+    runId: string;
+    missionId: string;
+    executionAttemptId: string;
+    verifierEngineId: string;
+    modelTokens?: number;
+    spendMicroUsd?: number;
+    now: string;
+  }): VerificationBudgetReservationResult {
+    for (const value of [input.modelTokens, input.spendMicroUsd]) {
+      if (value !== undefined && (!Number.isInteger(value) || value < 0)) {
+        throw new ControlStackError("mission_usage_invalid", "verification reservations must be non-negative integers");
+      }
+    }
+    return this.transaction(() => {
+      this.require(input.missionId);
+      const existing = this.db
+        .prepare(
+          `SELECT state FROM work_unit_verification_usage_reservations
+           WHERE reservation_id = ?`
+        )
+        .get(input.reservationId) as { state: "active" | "settled" } | undefined;
+      if (existing) return { ok: true };
+
+      const budget = this.budget(input.missionId);
+      if (budget) {
+        const active = this.db
+          .prepare(
+            `SELECT COALESCE(SUM(tool_calls), 0) AS tool_calls,
+                    COALESCE(SUM(model_tokens), 0) AS model_tokens,
+                    COALESCE(SUM(spend_micro_usd), 0) AS spend_micro_usd
+             FROM work_unit_verification_usage_reservations
+             WHERE mission_id = ? AND state = 'active'`
+          )
+          .get(input.missionId) as {
+          tool_calls: number;
+          model_tokens: number;
+          spend_micro_usd: number;
+        };
+
+        const projection: BudgetProjection = {};
+        const accounted = new Set(Object.keys(budget.usage) as BudgetMetric[]);
+        if (budget.limits.tool_calls !== undefined) {
+          projection.tool_calls = (budget.usage.tool_calls ?? 0) + active.tool_calls + 1;
+          accounted.add("tool_calls");
+        }
+        if (budget.limits.model_tokens !== undefined) {
+          if (input.modelTokens === undefined) {
+            this.event(
+              input.missionId,
+              "verification.budget_refused",
+              { runId: input.runId, verifierEngineId: input.verifierEngineId, reason: "unaccounted_model_tokens" },
+              input.now
+            );
+            return { ok: false, reason: "verification_budget_unaccounted" };
+          }
+          projection.model_tokens = (budget.usage.model_tokens ?? 0) + active.model_tokens + input.modelTokens;
+          accounted.add("model_tokens");
+        }
+        if (budget.limits.spend_micro_usd !== undefined) {
+          if (input.spendMicroUsd === undefined) {
+            this.event(
+              input.missionId,
+              "verification.budget_refused",
+              { runId: input.runId, verifierEngineId: input.verifierEngineId, reason: "unaccounted_spend" },
+              input.now
+            );
+            return { ok: false, reason: "verification_budget_unaccounted" };
+          }
+          projection.spend_micro_usd =
+            (budget.usage.spend_micro_usd ?? 0) + active.spend_micro_usd + input.spendMicroUsd;
+          accounted.add("spend_micro_usd");
+        }
+        const decision = evaluateBudget(budget.limits, projection, accounted);
+        if (!decision.allowed) {
+          this.event(
+            input.missionId,
+            "budget.exhausted",
+            { operation: "verification_reserve", exhausted: decision.exhausted },
+            input.now
+          );
+          return { ok: false, reason: "verification_budget_exhausted" };
+        }
+      }
+
+      this.db
+        .prepare(
+          `INSERT INTO work_unit_verification_usage_reservations (
+             reservation_id, run_id, mission_id, execution_attempt_id, verifier_engine_id,
+             tool_calls, model_tokens, spend_micro_usd, state, created_at
+           ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, 'active', ?)`
+        )
+        .run(
+          input.reservationId,
+          input.runId,
+          input.missionId,
+          input.executionAttemptId,
+          input.verifierEngineId,
+          input.modelTokens ?? 0,
+          input.spendMicroUsd ?? 0,
+          input.now
+        );
+      this.event(
+        input.missionId,
+        "verification.budget_reserved",
+        {
+          runId: input.runId,
+          reservationId: input.reservationId,
+          verifierEngineId: input.verifierEngineId,
+          modelTokens: input.modelTokens ?? 0,
+          spendMicroUsd: input.spendMicroUsd ?? 0
+        },
+        input.now
+      );
+      return { ok: true };
+    });
+  }
+
+  /**
+   * Reconcile one active verifier reservation to observed usage. Unknown capped
+   * provider usage is conservatively charged at the reserved amount.
+   */
+  settleVerificationUsage(
+    reservationId: string,
+    actual: VerificationUsageAmounts,
+    now: string
+  ): { reason?: "verification_budget_exhausted" } {
+    return this.transaction(() => {
+      const row = this.db
+        .prepare(
+          `SELECT mission_id, tool_calls, model_tokens, spend_micro_usd, state
+           FROM work_unit_verification_usage_reservations
+           WHERE reservation_id = ?`
+        )
+        .get(reservationId) as
+        | {
+            mission_id: string;
+            tool_calls: number;
+            model_tokens: number;
+            spend_micro_usd: number;
+            state: "active" | "settled";
+          }
+        | undefined;
+      if (!row) {
+        throw new ControlStackError(
+          "verification_budget_reservation_missing",
+          "verification reservation does not exist"
+        );
+      }
+      if (row.state === "settled") return {};
+
+      this.db
+        .prepare(
+          `UPDATE work_unit_verification_usage_reservations
+           SET state = 'settled', settled_at = ?
+           WHERE reservation_id = ? AND state = 'active'`
+        )
+        .run(now, reservationId);
+
+      const charges: Array<[Extract<BudgetMetric, "tool_calls" | "model_tokens" | "spend_micro_usd">, number]> = [
+        ["tool_calls", row.tool_calls],
+        ["model_tokens", actual.modelTokens ?? row.model_tokens],
+        ["spend_micro_usd", actual.spendMicroUsd ?? row.spend_micro_usd]
+      ];
+      let exhausted = false;
+      for (const [metric, delta] of charges) {
+        if (delta === 0) continue;
+        if (!this.recordUsage(row.mission_id, metric, delta, now).decision.allowed) exhausted = true;
+      }
+      this.event(row.mission_id, "verification.budget_settled", { reservationId, exhausted }, now);
+      return exhausted ? { reason: "verification_budget_exhausted" } : {};
+    });
+  }
+
+  acquireVerificationRun(input: {
+    runId: string;
+    executionAttemptId: string;
+    missionId: string;
+    unitId: string;
+    unitAttempt: number;
+    now: string;
+  }): VerificationRunAcquisitionResult {
+    return this.transaction(() => {
+      const active = this.db
+        .prepare(
+          `SELECT run_id, mission_id, owner_pid, owner_boot_id, owner_process_start_ticks, state
+           FROM work_unit_verification_runs
+           WHERE execution_attempt_id = ? AND state IN ('active', 'reconciliation_required')`
+        )
+        .get(input.executionAttemptId) as
+        | {
+            run_id: string;
+            mission_id: string;
+            owner_pid: number | null;
+            owner_boot_id: string | null;
+            owner_process_start_ticks: string | null;
+            state: "active" | "reconciliation_required";
+          }
+        | undefined;
+      if (active) {
+        const abandoned = active.state === "active" && verificationOwnerState(active) === "replaced_or_exited";
+        if (abandoned) {
+          const now = input.now;
+          const reservations = this.db
+            .prepare(
+              `SELECT reservation_id, mission_id, tool_calls, model_tokens, spend_micro_usd
+               FROM work_unit_verification_usage_reservations
+               WHERE run_id = ? AND state = 'active'`
+            )
+            .all(active.run_id) as Array<{
+            reservation_id: string;
+            mission_id: string;
+            tool_calls: number;
+            model_tokens: number;
+            spend_micro_usd: number;
+          }>;
+          for (const reservation of reservations) {
+            this.db
+              .prepare(
+                `UPDATE work_unit_verification_usage_reservations
+                 SET state = 'settled', settled_at = ?
+                 WHERE reservation_id = ? AND state = 'active'`
+              )
+              .run(now, reservation.reservation_id);
+            for (const [metric, amount] of [
+              ["tool_calls", reservation.tool_calls],
+              ["model_tokens", reservation.model_tokens],
+              ["spend_micro_usd", reservation.spend_micro_usd]
+            ] as const) {
+              if (amount > 0) this.recordUsage(reservation.mission_id, metric, amount, now);
+            }
+          }
+          this.db
+            .prepare(
+              `UPDATE work_unit_verification_runs
+               SET state = 'reconciliation_required'
+               WHERE run_id = ? AND state = 'active'`
+            )
+            .run(active.run_id);
+          this.event(
+            active.mission_id,
+            "verification.run_reconciliation_required",
+            {
+              runId: active.run_id,
+              executionAttemptId: input.executionAttemptId,
+              reason: "verification_process_exited_with_unknown_external_outcome",
+              reservationsConservativelyCharged: reservations.map((reservation) => ({
+                reservationId: reservation.reservation_id,
+                toolCalls: reservation.tool_calls,
+                modelTokens: reservation.model_tokens,
+                spendMicroUsd: reservation.spend_micro_usd
+              }))
+            },
+            now
+          );
+        }
+        this.event(
+          input.missionId,
+          "verification.run_refused",
+          {
+            unitId: input.unitId,
+            unitAttempt: input.unitAttempt,
+            executionAttemptId: input.executionAttemptId,
+            reason:
+              abandoned || active.state === "reconciliation_required"
+                ? "verification_reconciliation_required"
+                : "verification_run_active"
+          },
+          input.now
+        );
+        return {
+          acquired: false,
+          reason:
+            abandoned || active.state === "reconciliation_required"
+              ? "verification_reconciliation_required"
+              : "verification_run_active"
+        };
+      }
+      const owner = verificationProcessIdentity();
+      this.db
+        .prepare(
+          `INSERT INTO work_unit_verification_runs
+             (run_id, execution_attempt_id, mission_id, unit_id, unit_attempt,
+              owner_pid, owner_boot_id, owner_process_start_ticks, state, started_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`
+        )
+        .run(
+          input.runId,
+          input.executionAttemptId,
+          input.missionId,
+          input.unitId,
+          input.unitAttempt,
+          owner.pid,
+          owner.bootId ?? null,
+          owner.processStartTicks ?? null,
+          input.now
+        );
+      this.event(
+        input.missionId,
+        "verification.run_started",
+        {
+          runId: input.runId,
+          unitId: input.unitId,
+          unitAttempt: input.unitAttempt,
+          executionAttemptId: input.executionAttemptId
+        },
+        input.now
+      );
+      return { acquired: true };
+    });
+  }
+
+  settleVerificationRun(runId: string, outcome: string, now: string): void {
+    this.db
+      .prepare(
+        `UPDATE work_unit_verification_runs
+         SET state = 'settled', outcome = ?, settled_at = ?
+         WHERE run_id = ? AND state = 'active'`
+      )
+      .run(outcome, now, runId);
   }
 
   /**

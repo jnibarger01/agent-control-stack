@@ -340,7 +340,10 @@ export async function startEdge(
       DESKTOP_COMMANDER_STATE_DIR: box.dcState
     },
     port,
-    "/.well-known/oauth-protected-resource"
+    // Discovery only proves the edge process is listening. Managed initialize
+    // also depends on ACS issuance readiness and a live DC bridge pair, so
+    // wait on the edge's dependency-aware readiness probe before returning.
+    "/ready"
   );
   return { ...service, origin };
 }

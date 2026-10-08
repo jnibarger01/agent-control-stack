@@ -637,7 +637,8 @@ function spawnPair() {
     routes: new Map(),
     expiredRoutes: new Set(),
     initTail: Promise.resolve(),
-    initializedOnce: false
+    initializedOnce: false,
+    upstreamStarted: false
   };
   upstream.onmessage = async (msg) => {
     if (isResponse(msg)) {
@@ -727,10 +728,15 @@ function spawnPair() {
       if (!shuttingDown) spawnPair();
     }
   };
-  next.startPromise = upstream.start().catch((e) => {
-    console.error("bridge: upstream start failed:", e?.message);
-    process.exit(1);
-  });
+  next.startPromise = upstream
+    .start()
+    .then(() => {
+      next.upstreamStarted = true;
+    })
+    .catch((e) => {
+      console.error("bridge: upstream start failed:", e?.message);
+      process.exit(1);
+    });
   spawnCount++;
   pair = next;
   console.log(
@@ -812,6 +818,52 @@ function isPidAlive(pid) {
     return !!(err && err.code === "EPERM");
   }
 }
+function linuxProcessIdentity(pid) {
+  if (process.platform !== "linux") return undefined;
+  try {
+    const bootId = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    const processStartTicks = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/)[19];
+    const command = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replaceAll("\u0000", " ").trim();
+    if (!/^[a-f0-9-]{36}$/.test(bootId) || !/^\d+$/.test(processStartTicks ?? "")) return undefined;
+    return { bootId, processStartTicks, command };
+  } catch {
+    return undefined;
+  }
+}
+function managedExecutorRoot(command) {
+  for (const token of command.split(/\s+/u)) {
+    if (!token.startsWith("/")) continue;
+    const resolved = path.resolve(token);
+    const parent = resolved.slice(0, resolved.lastIndexOf("/"));
+    if (parent.split("/").includes("node_modules")) continue;
+    const script = ["dist/index.js", "dist/jace-commander/cli.js", "dist/control-plane/server.js"]
+      .find((candidate) => resolved.endsWith(candidate));
+    if (script) {
+      const root = resolved.slice(0, resolved.length - script.length);
+      if (/(?:^|\/)releases\/(?:acs|dc|dc-mcp-gateway)\/[^/]+\/$/.test(root)) return root;
+    }
+    if (parent.split("/").at(-1) === "desktop-commander") return parent;
+  }
+  return undefined;
+}
+function discoverManagedExecutorRoots() {
+  try {
+    return new Set(fs.readdirSync("/proc")
+      .filter((name) => /^\d+$/.test(name))
+      .map((name) => {
+        try {
+          const command = fs.readFileSync(`/proc/${name}/cmdline`, "utf8").replaceAll("\u0000", " ").trim();
+          return command ? managedExecutorRoot(command) : undefined;
+        } catch {
+          return undefined;
+        }
+      })
+      .filter((root) => root !== undefined));
+  } catch {
+    return new Set();
+  }
+}
 function readJsonLease(file) {
   try {
     return JSON.parse(fs.readFileSync(file, "utf8"));
@@ -820,14 +872,85 @@ function readJsonLease(file) {
   }
 }
 /** Fail closed: a present-but-unparsable lease/marker reports active+ambiguous, never inactive. */
-function leaseStatus(file, label) {
+function basicLeaseStatus(file, label) {
   if (!fs.existsSync(file)) return { active: false, ambiguous: false, detail: `no ${label} file` };
   const info = readJsonLease(file);
-  if (!info || typeof info.pid !== "number")
+  if (!info || !Number.isInteger(info.pid) || info.pid <= 0)
     return { active: true, ambiguous: true, detail: `${label} file present but unreadable/malformed: ${file}` };
   if (!isPidAlive(info.pid))
     return { active: false, ambiguous: false, detail: `${label} stale (pid ${info.pid} not alive)` };
-  return { active: true, ambiguous: false, pid: info.pid, detail: `${label} held by pid ${info.pid}` };
+  return { active: true, ambiguous: false, pid: info.pid, info, detail: `${label} held by pid ${info.pid}` };
+}
+
+function executorLeaseStatus(file) {
+  const status = basicLeaseStatus(file, "executor lease");
+  if (!status.active || status.ambiguous) return status;
+  const info = status.info;
+  const now = Date.now();
+  const canonical =
+    typeof info.instanceId === "string" &&
+    info.instanceId.length > 0 &&
+    info.instanceId.length <= 128 &&
+    typeof info.hostname === "string" &&
+    info.hostname === os.hostname() &&
+    Number.isFinite(info.acquiredAt) &&
+    info.acquiredAt > 0 &&
+    info.acquiredAt <= now &&
+    Number.isFinite(info.expiresAt) &&
+    info.expiresAt > now &&
+    typeof info.bootId === "string" &&
+    /^[a-f0-9-]{36}$/.test(info.bootId) &&
+    typeof info.processStartTicks === "string" &&
+    /^\d+$/.test(info.processStartTicks);
+  const identity = canonical ? linuxProcessIdentity(info.pid) : undefined;
+  const holderRoot = identity ? managedExecutorRoot(identity.command) : undefined;
+  const managedRoots = discoverManagedExecutorRoots();
+  const processMatchesLease =
+    !!identity &&
+    identity.bootId === info.bootId &&
+    identity.processStartTicks === info.processStartTicks &&
+    !!holderRoot &&
+    managedRoots.size > 0 &&
+    managedRoots.size === 1 &&
+    managedRoots.has(holderRoot);
+  if (!canonical || !processMatchesLease) {
+    const reason = !canonical
+      ? "invalid lease fields or expiry"
+      : !identity
+        ? "unreadable Linux process identity"
+        : identity.bootId !== info.bootId || identity.processStartTicks !== info.processStartTicks
+          ? "lease process identity no longer matches the live PID"
+          : !holderRoot
+            ? "lease holder is not a managed executor"
+            : managedRoots.size !== 1
+              ? `managed executor topology is absent or competing (${managedRoots.size} roots)`
+              : "lease holder is not in the managed executor topology";
+    return {
+      active: true,
+      ambiguous: true,
+      pid: info.pid,
+      detail: `executor lease failed canonical process identity/expiry validation (${reason}): ${file}`
+    };
+  }
+  return {
+    active: true,
+    ambiguous: false,
+    pid: info.pid,
+    instanceId: info.instanceId,
+    expiresAt: info.expiresAt,
+    detail: `executor lease held by pid ${info.pid}`
+  };
+}
+
+function breakGlassStatus(file) {
+  const status = basicLeaseStatus(file, "break-glass marker");
+  if (!status.active || status.ambiguous) return status;
+  return {
+    active: true,
+    ambiguous: false,
+    pid: status.pid,
+    detail: `break-glass marker held by pid ${status.pid}`
+  };
 }
 function computeJcAuthority() {
   const initialized = !!(pair && pair.initializedOnce);
@@ -836,7 +959,13 @@ function computeJcAuthority() {
     configuredExecutionMode: MANAGED ? "managed" : "unmanaged_gateway",
     // The child is always started as `serve` (managed); there is no standalone path.
     childMode: "managed",
-    bridge: { hasUpstreamPair: !!pair, initialized, spawnCount, sessionCount: pair ? pair.sessions.size : 0 },
+    bridge: {
+      hasUpstreamPair: !!pair,
+      upstreamStarted: !!pair?.upstreamStarted,
+      initialized,
+      spawnCount,
+      sessionCount: pair ? pair.sessions.size : 0
+    },
     // Which build the child runs (paths only, no secrets): lets `jace-commander
     // doctor` and operators spot a bridge left on a legacy checkout.
     runtime: { dir: JC_DIR, entrypoint: DC_ARGS[0], monorepoDefault: JC_DIR === MONOREPO_DC_DIR },
@@ -850,8 +979,8 @@ function computeJcAuthority() {
 
 function computeAuthority() {
   if (JC) return computeJcAuthority();
-  const executorLease = leaseStatus(path.join(dcStateDir(), "executor.lock"), "executor lease");
-  const breakGlass = leaseStatus(path.join(dcStateDir(), "break-glass.lock"), "break-glass marker");
+  const executorLease = executorLeaseStatus(path.join(dcStateDir(), "executor.lock"));
+  const breakGlass = breakGlassStatus(path.join(dcStateDir(), "break-glass.lock"));
   const initialized = !!(pair && pair.initializedOnce);
   let observedMode;
   if (breakGlass.active && executorLease.active) observedMode = "ambiguous_conflict";
@@ -869,7 +998,13 @@ function computeAuthority() {
         ? `break_glass:pid:${breakGlass.pid}`
         : "none",
     executor: { lease: executorLease, breakGlass },
-    bridge: { hasUpstreamPair: !!pair, initialized, spawnCount, sessionCount: pair ? pair.sessions.size : 0 },
+    bridge: {
+      hasUpstreamPair: !!pair,
+      upstreamStarted: !!pair?.upstreamStarted,
+      initialized,
+      spawnCount,
+      sessionCount: pair ? pair.sessions.size : 0
+    },
     enforcement: {
       gatewayAttestationActive: !!GATEWAY_ATTESTATION_KEY,
       capabilityVerificationActive: !!PIPELINE_ACS_PUBLIC_KEY,
@@ -899,9 +1034,16 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
   if (path === "/ready" && JC) {
-    const ready = !!pair;
+    const ready = !!pair?.upstreamStarted;
     res.writeHead(ready ? 200 : 503, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ready, variant: "jc", hasUpstreamPair: !!pair }));
+    res.end(
+      JSON.stringify({
+        ready,
+        variant: "jc",
+        hasUpstreamPair: !!pair,
+        upstreamStarted: !!pair?.upstreamStarted
+      })
+    );
     return;
   }
   if (path === "/authority") {
@@ -911,13 +1053,23 @@ const httpServer = http.createServer(async (req, res) => {
   }
   if (path === "/ready") {
     const authority = computeAuthority();
+    const executionAuthorityReady = MANAGED
+      ? authority.observedMode === "managed"
+      : authority.observedMode !== "none_active" && authority.observedMode !== "ambiguous_conflict";
     const ready =
-      !!pair &&
-      authority.observedMode !== "ambiguous_conflict" &&
+      !!pair?.upstreamStarted &&
+      executionAuthorityReady &&
       !authority.executor.lease.ambiguous &&
       !authority.executor.breakGlass.ambiguous;
     res.writeHead(ready ? 200 : 503, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ready, observedMode: authority.observedMode, hasUpstreamPair: !!pair }));
+    res.end(
+      JSON.stringify({
+        ready,
+        observedMode: authority.observedMode,
+        hasUpstreamPair: !!pair,
+        upstreamStarted: !!pair?.upstreamStarted
+      })
+    );
     return;
   }
   if (path === "/debug/last-headers") {
