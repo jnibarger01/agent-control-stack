@@ -289,7 +289,7 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
         if (ambiguous.length > 0) {
           throw new Error(
             `migration 059 refused ambiguous terminal restoration after a prior 057 upgrade; ` +
-            `review work-unit attempts and events before manual reconciliation: ${ambiguous.join(", ")}`
+              `review work-unit attempts and events before manual reconciliation: ${ambiguous.join(", ")}`
           );
         }
       }
