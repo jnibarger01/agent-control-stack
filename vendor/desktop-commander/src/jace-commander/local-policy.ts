@@ -47,7 +47,11 @@ export function parseJcLocalPolicy(input: unknown): JcLocalPolicy {
     if (v !== undefined && v !== 'allow' && v !== 'approve') throw new Error('JC_POLICY_INVALID');
     if (v) classes[risk] = v;
   }
-  if (classes.privileged !== 'approve') throw new Error('JC_POLICY_PRIVILEGED_REQUIRES_APPROVAL');
+  // A root-owned policy can narrow tool access but cannot switch off human
+  // authorization for actions that mutate state or execute commands.
+  for (const risk of ['mutate', 'exec', 'network', 'privileged'] as const) {
+    if (classes[risk] !== 'approve') throw new Error('JC_POLICY_APPROVAL_REQUIRED');
+  }
   const roots = paths(input.roots);
   const deniedRoots = paths(input.deniedRoots);
   const raw = input.authorizers;
