@@ -308,7 +308,6 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
       }
       appliedDuringThisUpgrade.add(migration.version);
     } catch (error) {
-      verificationUpgradeLockHeld = false;
       try {
         db.exec("ROLLBACK");
       } catch {
