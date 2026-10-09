@@ -24,7 +24,7 @@ try {
   function assertion(p) {
     const payload = {
       approvalId: p.id, challenge: p.challenge, invocationHash: p.invocationHash,
-      operatorId: 'human-key-1', issuedAt: now, expiresAt: now + 5_000,
+      operatorId: crypto.createHash('sha256').update(operator.publicKey.export({ type: 'spki', format: 'der' })).digest('hex'), issuedAt: now, expiresAt: now + 5_000,
     };
     return { payload, signature: signature(payload) };
   }
@@ -38,7 +38,7 @@ try {
   const token = await app.approveAndIssue(assertion(p2));
   const nonces = new FileNonceStore(path.join(dir, 'nonces'));
   assert.equal(verifyJcLocalCapability(token, signer.publicKey,
-    { runtimeId: 'test-runtime', tool: 'write_file', arguments: args }, nonces, now).approverId, 'human-key-1');
+    { runtimeId: 'test-runtime', tool: 'write_file', arguments: args }, nonces, now ).approverId, crypto.createHash('sha256').update(operator.publicKey.export({ type: 'spki', format: 'der' })).digest('hex'));
   assert.throws(() => verifyJcLocalCapability(token, signer.publicKey,
     { runtimeId: 'test-runtime', tool: 'write_file', arguments: args }, nonces, now));
   const audit = readTraceFile(tracePath);
