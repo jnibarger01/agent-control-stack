@@ -22,18 +22,21 @@ const AUDIT = '/var/lib/jc-approverd/audit.jsonl';
 const MAX_REQUEST = 32 * 1024;
 const MAX_IN_FLIGHT = 20;
 function loadPrivateKey(): crypto.KeyObject {
+  const uid = process.getuid?.();
+  if (uid === undefined) throw new Error('JC_APPROVERD_UID_UNAVAILABLE');
   const st = fs.lstatSync(PRIVATE_KEY);
-  if (!st.isFile() || st.isSymbolicLink() || st.uid !== process.getuid() || (st.mode & 0o077) !== 0 || st.size > 8192)
+  if (!st.isFile() || st.isSymbolicLink() || st.uid !== uid || (st.mode & 0o077) !== 0 || st.size > 8192)
     throw new Error('JC_APPROVERD_PRIVATE_KEY_UNTRUSTED');
   return crypto.createPrivateKey(fs.readFileSync(PRIVATE_KEY));
 }
 function verifyServerIdentity(): void {
-  if (process.getuid?.() === 0 || os.userInfo().username !== 'jc-approverd')
+  const uid = process.getuid?.();
+  if (uid === undefined || uid === 0 || os.userInfo().username !== 'jc-approverd')
     throw new Error('JC_APPROVERD_WRONG_IDENTITY');
   const dir = path.dirname(SOCKET);
   const st = fs.lstatSync(dir);
   if (!st.isDirectory() || st.isSymbolicLink() || (st.mode & 0o007) !== 0 ||
-      (st.mode & 0o020) !== 0 || (st.uid !== 0 && st.uid !== process.getuid()))
+      (st.mode & 0o020) !== 0 || (st.uid !== 0 && st.uid !== uid))
     throw new Error('JC_APPROVERD_SOCKET_DIRECTORY_UNTRUSTED');
 }
 function isRecord(v: unknown): v is Record<string, unknown> {
