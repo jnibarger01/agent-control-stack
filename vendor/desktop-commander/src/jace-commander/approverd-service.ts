@@ -44,6 +44,8 @@ export class JcApproverdService {
   async approveAndIssue(signed: SignedJcHumanAssertion): Promise<JcLocalEnvelope> {
     const id = signed?.payload?.approvalId;
     const invocation = this.invocations.get(id);
+    const requiredOperatorId = crypto.createHash('sha256').update(this.operatorPublicKey.export({ type: 'spki', format: 'der' })).digest('hex');
+    if (signed?.payload?.operatorId !== requiredOperatorId) throw new Error('JC_APPROVAL_OPERATOR_MISMATCH');
     if (!invocation) throw new Error('JC_APPROVAL_UNKNOWN');
     this.invocations.delete(id);
     if (this.assertion) throw new Error('JC_APPROVAL_BUSY');
