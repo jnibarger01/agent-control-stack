@@ -402,6 +402,9 @@ describe("budgets", () => {
     expect(() => general({ maxWorkUnits: -1 })).toThrow(/non-negative/);
     expect(() => general({ maxParallelWorkUnits: 0 })).toThrow(/at least 1/);
     expect(() => general({ maxWorkUnits: 1.5 })).toThrow(/integer/);
+    expect(() => general({ maxSpendUsd: -0.0000001 })).toThrow(/non-negative/);
+    expect(() => general({ maxToolCalls: Number.MAX_SAFE_INTEGER + 1 })).toThrow(/safe integer/);
+    expect(() => general({ maxSpendUsd: Number.MAX_SAFE_INTEGER })).toThrow(/safe integer/);
   });
 
   it("caps the number of work units and reports the refusal as an explicit outcome with durable evidence", () => {
