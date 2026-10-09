@@ -1146,6 +1146,15 @@ export class CodingMissionStore {
       if (!unit) return { ok: false, outcome: "not_found" };
       if (unit.status === "unknown" || unit.status === "conflict") return { ok: false, outcome: "retry_unsafe" };
       if (unit.status !== "retryable" && unit.status !== "failed") return { ok: false, outcome: "not_retryable" };
+      // A recorded reduction is final, so a child it already accounted for can no longer be retried underneath it.
+      if (
+        unit.parent_unit_id &&
+        this.db
+          .prepare("SELECT 1 FROM work_unit_reductions WHERE mission_id = ? AND parent_unit_id = ?")
+          .get(missionId, unit.parent_unit_id)
+      ) {
+        return { ok: false, outcome: "not_retryable" };
+      }
       if (unit.failure_category && NON_RETRYABLE_FAILURES.has(unit.failure_category)) {
         return { ok: false, outcome: "not_retryable" };
       }

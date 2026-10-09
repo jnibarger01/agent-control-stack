@@ -72,6 +72,7 @@ function harness(overrides: Partial<LedgerOptions> = {}) {
     grants,
     verifyOperator: (operatorId) => operatorId === "operator-1",
     clock: () => state.now,
+    resolveActor: () => "actor:lead",
     ...overrides
   };
   return { grants, options, state, set: (ms: number) => (state.now = at(ms)) };
@@ -539,7 +540,8 @@ describe("reduction", () => {
       missionId: "m1",
       parentUnitId: "root",
       strategy,
-      ...(selectedUnitId ? { selectedUnitId } : {})
+      ...(selectedUnitId ? { selectedUnitId } : {}),
+      authorization: { kind: "parent_claim", workerId: "lead-worker", claimToken: ctx.claim.token }
     });
 
   it("waits while any child is unfinished and writes nothing", () => {
@@ -756,5 +758,187 @@ describe("review hardening", () => {
       )
     ).toEqual(["parent_authority_missing"]);
     expect(store.workUnits("m1").some((unit) => unit.unitId === "grand")).toBe(false);
+  });
+
+  it("fingerprints mission policy, so tampering with it after approval is detected", () => {
+    const { store, ledger, ask } = setup();
+    store.db.exec("DROP TRIGGER mission_authority_no_update");
+    store.db.exec(`UPDATE mission_authority SET policy_json = '{"allowPrivilegedChildren":true}'`);
+    expect(() => ledger.missionAuthority("m1")).toThrow(expect.objectContaining({ code: "authority_integrity" }));
+    expect(
+      denied(ask([child("c", { requestedAuthority: { ...ROOT, maximumPrivileges: ["process.privileged"] } })]))
+    ).toEqual(["authority_integrity_failure"]);
+  });
+
+  it("rechecks revocation of the backing grant on every request", () => {
+    const { store, ask } = setup();
+    expect(ask([child("before")])).toMatchObject({ ok: true });
+    store.db.exec("PRAGMA foreign_keys = OFF");
+    store.db.exec(
+      "CREATE TABLE IF NOT EXISTS autonomous_authority_revocations (grant_id TEXT PRIMARY KEY, actor_id TEXT, reason TEXT, audit_event_id TEXT)"
+    );
+    store.db.exec("INSERT INTO autonomous_authority_revocations VALUES ('grant-1', 'human-1', 'compromised', 'evt-9')");
+    expect(denied(ask([child("after")]))).toEqual(["grant_revoked"]);
+    expect(store.workUnits("m1").some((unit) => unit.unitId === "after")).toBe(false);
+  });
+
+  it("requires the claimant to be the actor the authority was issued to", () => {
+    const { ask } = setup({
+      ledger: { resolveActor: (workerId) => (workerId === "lead-worker" ? "actor:someone-else" : undefined) }
+    });
+    expect(denied(ask([child("c")]))).toEqual(["worker_not_authorized_for_authority"]);
+    const unmapped = setup({ ledger: { resolveActor: () => undefined } });
+    expect(denied(unmapped.ask([child("c")]))).toEqual(["worker_not_authorized_for_authority"]);
+  });
+
+  it("refuses to treat a missing intermediate authority record as a root", () => {
+    const { store, ledger, ask } = setup();
+    ask([child("c1", { requestedAuthority: narrower({ maximumPrivileges: ["fs.read"] }) })]);
+    store.releaseReadyUnits("m1", at(1500));
+    store.claimUnit("m1", "c1", { token: "ct", workerId: "w", route: {}, claimedAt: at(1600) });
+    ledger.requestChildWork({
+      missionId: "m1",
+      parentUnitId: "c1",
+      workerId: "w",
+      claimToken: "ct",
+      children: [child("g1")]
+    });
+    store.db.exec("DROP TRIGGER work_unit_authority_no_delete");
+    store.db.exec("PRAGMA foreign_keys = OFF");
+    store.db.exec("DELETE FROM work_unit_authority WHERE unit_id = 'c1'");
+    expect(() => ledger.unitAuthority("m1", "g1")).toThrow(expect.objectContaining({ code: "authority_integrity" }));
+  });
+
+  it("bounds child titles", () => {
+    const { ask, store } = setup();
+    expect(denied(ask([child("t1", { title: "x".repeat(161) })]))).toContain("t1:title_invalid");
+    expect(denied(ask([child("t2", { title: "" })]))).toContain("t2:title_invalid");
+    expect(ask([child("t3", { title: "x".repeat(160) })])).toMatchObject({ ok: true });
+    expect(store.workUnits("m1").find((unit) => unit.unitId === "t3")?.title).toHaveLength(160);
+  });
+
+  it("cancels failed descendants that a retry could still revive, but leaves final failures alone", () => {
+    const { ask, store, ledger, claim } = setup();
+    ask([child("soft"), child("hard")]);
+    store.releaseReadyUnits("m1", at(1500));
+    store.claimUnit("m1", "soft", { token: "ts", workerId: "w", route: {}, claimedAt: at(1600) });
+    store.claimUnit("m1", "hard", { token: "th", workerId: "w", route: {}, claimedAt: at(1600) });
+    store.failUnit("m1", "soft", "ts", { category: "tool_failure", retryable: false, now: at(1700) });
+    store.failUnit("m1", "hard", "th", { category: "policy_denied", retryable: false, now: at(1700) });
+    const result = ledger.cancelChildren("m1", "root", {
+      reason: "stop",
+      authorization: { kind: "parent_claim", workerId: "lead-worker", claimToken: claim.token }
+    });
+    expect(result.cancelled).toEqual(["soft"]);
+    const statuses = Object.fromEntries(store.workUnits("m1").map((unit) => [unit.unitId, unit.status]));
+    expect(statuses).toMatchObject({ soft: "cancelled", hard: "failed" });
+    expect(store.retryUnit("m1", "soft", at(1800))).toEqual({ ok: false, outcome: "not_retryable" });
+  });
+});
+
+describe("reduction authority and integrity", () => {
+  function reduced() {
+    const ctx = setup({ budget: { maxChildWorkUnits: 8 } });
+    ctx.ask([child("a"), child("b")]);
+    ctx.store.releaseReadyUnits("m1", at(1500));
+    for (const [unitId, hash] of [
+      ["a", "h1"],
+      ["b", "h2"]
+    ] as const) {
+      ctx.store.claimUnit("m1", unitId, { token: `t-${unitId}`, workerId: "w", route: {}, claimedAt: at(1600) });
+      ctx.store.completeOperation("m1", unitId, `t-${unitId}`, { resultHash: hash, files: [] });
+    }
+    return ctx;
+  }
+  const own = (ctx: ReturnType<typeof setup>) => ({
+    kind: "parent_claim" as const,
+    workerId: "lead-worker",
+    claimToken: ctx.claim.token
+  });
+
+  it("only the parent's live claim or a verified operator may record a reduction, and a refusal is evidence", () => {
+    const ctx = reduced();
+    const base = { missionId: "m1", parentUnitId: "root", strategy: "select" as const, selectedUnitId: "b" };
+    expect(() =>
+      ctx.ledger.reduceChildren({
+        ...base,
+        authorization: { kind: "parent_claim", workerId: "lead-worker", claimToken: "stale" }
+      })
+    ).toThrow(expect.objectContaining({ code: "reduce_not_authorized" }));
+    expect(() =>
+      ctx.ledger.reduceChildren({ ...base, authorization: { kind: "operator", operatorId: "nobody" } })
+    ).toThrow(expect.objectContaining({ code: "reduce_not_authorized" }));
+    expect(ctx.store.db.prepare("SELECT COUNT(*) AS n FROM work_unit_reductions").get()).toEqual({ n: 0 });
+    expect(ctx.store.events("m1").filter((event) => event.name === "authority.denied")).toHaveLength(2);
+    expect(ctx.ledger.reduceChildren({ ...base, authorization: own(ctx) })).toMatchObject({
+      status: "reduced",
+      selectedUnitId: "b",
+      recorded: true
+    });
+  });
+
+  it("makes the reduction final: nothing beneath the parent can be retried afterwards", () => {
+    const ctx = setup({ budget: { maxChildWorkUnits: 8, maxRetriesPerWorkUnit: 3 } });
+    ctx.ask([child("a"), child("b")]);
+    ctx.store.releaseReadyUnits("m1", at(1500));
+    ctx.store.claimUnit("m1", "a", { token: "ta", workerId: "w", route: {}, claimedAt: at(1600) });
+    ctx.store.completeOperation("m1", "a", "ta", { resultHash: "h1", files: [] });
+    ctx.store.claimUnit("m1", "b", { token: "tb", workerId: "w", route: {}, claimedAt: at(1600) });
+    ctx.store.failUnit("m1", "b", "tb", { category: "tool_failure", retryable: false, now: at(1700) });
+    expect(
+      ctx.ledger.reduceChildren({
+        missionId: "m1",
+        parentUnitId: "root",
+        strategy: "all_succeeded",
+        authorization: own(ctx)
+      })
+    ).toMatchObject({ status: "failed" });
+    expect(ctx.store.retryUnit("m1", "b", at(1800))).toEqual({ ok: false, outcome: "not_retryable" });
+    expect(ctx.store.workUnits("m1").find((unit) => unit.unitId === "b")?.status).toBe("failed");
+  });
+
+  it("waits for a child that is parked as retryable instead of recording a premature result", () => {
+    const ctx = setup({ budget: { maxChildWorkUnits: 8, maxRetriesPerWorkUnit: 3 } });
+    ctx.ask([child("a")]);
+    ctx.store.releaseReadyUnits("m1", at(1500));
+    ctx.store.claimUnit("m1", "a", { token: "ta", workerId: "w", route: {}, claimedAt: at(1600) });
+    ctx.store.failUnit("m1", "a", "ta", { category: "timeout", retryable: true, now: at(1700) });
+    expect(
+      ctx.ledger.reduceChildren({
+        missionId: "m1",
+        parentUnitId: "root",
+        strategy: "all_succeeded",
+        authorization: own(ctx)
+      })
+    ).toEqual({
+      status: "incomplete",
+      waitingOn: ["a"]
+    });
+  });
+
+  it("verifies a persisted reduction before returning it", () => {
+    const ctx = reduced();
+    const args = { missionId: "m1", parentUnitId: "root", strategy: "all_succeeded" as const, authorization: own(ctx) };
+    expect(ctx.ledger.reduceChildren(args)).toMatchObject({ status: "reduced", recorded: true });
+    ctx.store.db.exec("DROP TRIGGER work_unit_reductions_no_update");
+    ctx.store.db.exec("UPDATE work_unit_reductions SET outcome = 'reduced', result_hash = 'forged'");
+    expect(() => ctx.ledger.reduceChildren(args)).toThrow(expect.objectContaining({ code: "authority_integrity" }));
+  });
+
+  it("puts the selected child and result hash in the audit event", () => {
+    const ctx = reduced();
+    ctx.ledger.reduceChildren({
+      missionId: "m1",
+      parentUnitId: "root",
+      strategy: "select",
+      selectedUnitId: "a",
+      authorization: own(ctx)
+    });
+    expect(ctx.store.events("m1").find((event) => event.name === "child.reduced")?.body).toMatchObject({
+      outcome: "reduced",
+      selectedUnitId: "a",
+      resultHash: "h1",
+      by: { workerId: "lead-worker" }
+    });
   });
 });

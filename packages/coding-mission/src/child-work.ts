@@ -23,6 +23,7 @@ import {
 import { budgetToLimits, type BudgetDecision, type BudgetLimits, type MissionBudget } from "./budget.js";
 import {
   IN_FLIGHT_WORK_UNIT_STATUSES,
+  NON_RETRYABLE_FAILURES,
   TERMINAL_MISSION_STATES,
   parseWorkUnitPayload,
   type VerificationPolicy,
@@ -111,9 +112,14 @@ export interface LedgerOptions {
   verifyOperator(operatorId: string): boolean;
   /** ACS's own clock. */
   clock?: () => string;
+  /**
+   * Maps a worker id to the actor id its authority is issued to. The default is the identity, so a deployment must
+   * wire a real mapping before a worker whose id differs from its actor can exercise a grant (fail closed).
+   */
+  resolveActor?: (workerId: string) => string | undefined;
 }
 
-export type CancelAuthorization =
+export type ParentAuthorization =
   { kind: "parent_claim"; workerId: string; claimToken: string } | { kind: "operator"; operatorId: string };
 
 /** Denial reasons echo caller input, so they are redacted and bounded before they become durable evidence. */
@@ -217,14 +223,15 @@ export class MissionAuthorityLedger {
       }
       this.store.db
         .prepare(
-          `INSERT INTO mission_authority (mission_id, envelope_json, envelope_hash, policy_json, approver_id, reason, grant_id, grant_hash, policy_approved_by, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO mission_authority (mission_id, envelope_json, envelope_hash, policy_json, policy_hash, approver_id, reason, grant_id, grant_hash, policy_approved_by, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           input.missionId,
           JSON.stringify(grant.definition),
           hash,
           JSON.stringify(policy),
+          stableHash({ domain: "acs.mission-authority-policy.v1", policy }),
           grant.issuedByActorId,
           grant.reason,
           grant.grantId,
@@ -250,6 +257,13 @@ export class MissionAuthorityLedger {
     });
     if (refusal) throw refusal;
     return record!;
+  }
+
+  private grantRevoked(grantId: string): boolean {
+    return (
+      this.store.db.prepare("SELECT 1 FROM autonomous_authority_revocations WHERE grant_id = ?").get(grantId) !==
+      undefined
+    );
   }
 
   private integrity(what: string, ok: boolean): void {
@@ -290,6 +304,12 @@ export class MissionAuthorityLedger {
     } catch {
       throw new ControlStackError("authority_integrity", "mission authority policy is not valid JSON");
     }
+    // The policy controls delegation (privileged children, denials, TTL) but is not part of the grant, so it is
+    // fingerprinted on its own and any change after approval is detected.
+    this.integrity(
+      "mission authority policy",
+      stableHash({ domain: "acs.mission-authority-policy.v1", policy }) === row.policy_hash
+    );
     return {
       missionId,
       definition,
@@ -317,6 +337,13 @@ export class MissionAuthorityLedger {
     this.integrity("unit authority", definitionHash(definition) === row.envelope_hash);
     const parentUnitId = row.parent_unit_id ? String(row.parent_unit_id) : undefined;
     const parent = parentUnitId ? this.unitAuthority(missionId, parentUnitId) : undefined;
+    if (parentUnitId && !parent) {
+      // The mission grant stands in only for a verified root. A missing intermediate record is corruption, not a root.
+      const grandparent = this.store.db
+        .prepare("SELECT parent_unit_id FROM coding_operations WHERE mission_id = ? AND operation_id = ?")
+        .get(missionId, parentUnitId) as { parent_unit_id: string | null } | undefined;
+      this.integrity("unit authority ancestry", grandparent !== undefined && grandparent.parent_unit_id === null);
+    }
     const mission = this.missionAuthority(missionId);
     const parentDefinition = parent?.definition ?? mission?.definition;
     const parentHash = parent?.definitionHash ?? mission?.definitionHash;
@@ -417,6 +444,11 @@ export class MissionAuthorityLedger {
         if (parent.parentUnitId && !parentRecord) return deny(["parent_authority_missing"]);
         parentDefinition = parentRecord?.definition ?? missionAuthority.definition;
         parentHash = parentRecord?.definitionHash ?? missionAuthority.definitionHash;
+        // The grant is re-checked on every request: revoking it stops new descendants immediately.
+        if (this.grantRevoked(missionAuthority.grantId)) return deny(["grant_revoked"]);
+        // A valid claim is not enough: the claimant must be the actor this authority was issued to.
+        const actor = (this.options.resolveActor ?? ((workerId: string) => workerId))(request.workerId);
+        if (actor !== parentDefinition.executingActorId) return deny(["worker_not_authorized_for_authority"]);
       } catch (error) {
         if (error instanceof ControlStackError && error.code === "authority_integrity") {
           return deny(["authority_integrity_failure"]);
@@ -440,6 +472,12 @@ export class MissionAuthorityLedger {
           reasons.push(`${prefix}:work_type_invalid`);
         if (typeof item.purpose !== "string" || !item.purpose || item.purpose.length > 512) {
           reasons.push(`${prefix}:purpose_invalid`);
+        }
+        if (
+          item.title !== undefined &&
+          (typeof item.title !== "string" || item.title.length === 0 || item.title.length > 160)
+        ) {
+          reasons.push(`${prefix}:title_invalid`);
         }
         // Everything addWorkUnits would reject is checked here, so a bad payload or graph is a durable denial.
         if (item.workType in KIND_FOR_WORK_TYPE) {
@@ -560,7 +598,7 @@ export class MissionAuthorityLedger {
   cancelChildren(
     missionId: string,
     parentUnitId: string,
-    input: { reason: string; authorization: CancelAuthorization }
+    input: { reason: string; authorization: ParentAuthorization }
   ): { cancelled: string[]; uncertain: string[] } {
     let refusal: ControlStackError | undefined;
     const result = this.store.transaction((): { cancelled: string[]; uncertain: string[] } | undefined => {
@@ -606,7 +644,10 @@ export class MissionAuthorityLedger {
       const cancelled: string[] = [];
       const uncertain: string[] = [];
       for (const unit of units) {
-        if (!descendants.has(unit.unitId) || ["succeeded", "cancelled", "failed"].includes(unit.status)) continue;
+        if (!descendants.has(unit.unitId) || unit.status === "succeeded" || unit.status === "cancelled") continue;
+        // A failed child that retryUnit could still revive is cancelled too; only a final failure is left as it was.
+        if (unit.status === "failed" && unit.failureCategory && NON_RETRYABLE_FAILURES.has(unit.failureCategory))
+          continue;
         const inFlight = (IN_FLIGHT_WORK_UNIT_STATUSES as readonly WorkUnitStatus[]).includes(unit.status);
         this.store.db
           .prepare(
@@ -636,13 +677,16 @@ export class MissionAuthorityLedger {
   }
   /**
    * The explicit reduction step over a unit's direct children. It is deterministic (children are ordered by id, never by
-   * finish time), recorded once, and never partial: while any child is unfinished nothing is written.
+   * finish time), recorded once, and never partial: while any child is unfinished nothing is written. Recording is a
+   * permanent decision, so the caller must hold the parent's live claim or be an authenticated operator. It waits for any
+   * child still awaiting a retry, and once recorded `retryUnit` refuses further retries beneath the parent.
    */
   reduceChildren(input: {
     missionId: string;
     parentUnitId: string;
     strategy: "all_succeeded" | "select" | "majority_result";
     selectedUnitId?: string;
+    authorization: ParentAuthorization;
   }):
     | { status: "incomplete"; waitingOn: string[] }
     | {
@@ -651,12 +695,47 @@ export class MissionAuthorityLedger {
         selectedUnitId?: string;
         recorded: boolean;
       } {
-    return this.store.transaction(() => {
+    let refusal: ControlStackError | undefined;
+    const result = this.store.transaction(() => {
       const now = this.clock();
+      const allUnits = this.store.workUnits(input.missionId);
+      const parent = allUnits.find((unit) => unit.unitId === input.parentUnitId);
+      if (!parent) throw new ControlStackError("parent_unit_not_found", "parent unit does not exist");
+      const auth = input.authorization;
+      const authorized =
+        auth.kind === "operator"
+          ? this.options.verifyOperator(auth.operatorId)
+          : parent.claimToken === auth.claimToken &&
+            parent.workerId === auth.workerId &&
+            ["running", "checkpointed", "verifying"].includes(parent.status);
+      if (!authorized) {
+        this.store.recordMissionEvent(
+          input.missionId,
+          "authority.denied",
+          { parentUnitId: input.parentUnitId, reason: "reduce_not_authorized", kind: auth.kind },
+          now
+        );
+        refusal = new ControlStackError(
+          "reduce_not_authorized",
+          "reduction requires the parent's live claim or a verified operator"
+        );
+        return undefined;
+      }
       const existing = this.store.db
         .prepare("SELECT * FROM work_unit_reductions WHERE mission_id = ? AND parent_unit_id = ?")
         .get(input.missionId, input.parentUnitId) as Record<string, string | null> | undefined;
       if (existing) {
+        // A persisted reduction is only returned if it still matches its fingerprint.
+        const fingerprint = reductionFingerprint({
+          strategy: String(existing.strategy),
+          outcome: String(existing.outcome),
+          selected: existing.selected_unit_id,
+          resultHash: existing.result_hash,
+          children: String(existing.children_json)
+        });
+        if (fingerprint !== existing.reduction_hash) {
+          throw new ControlStackError("authority_integrity", "recorded reduction failed its integrity check");
+        }
         return {
           status: String(existing.outcome) as "reduced" | "failed" | "inconclusive",
           ...(existing.result_hash ? { resultHash: String(existing.result_hash) } : {}),
@@ -664,16 +743,17 @@ export class MissionAuthorityLedger {
           recorded: false
         };
       }
-      const children = this.store
-        .workUnits(input.missionId)
+      const children = allUnits
         .filter((unit) => unit.parentUnitId === input.parentUnitId)
         .sort((left, right) => left.unitId.localeCompare(right.unitId));
       if (children.length === 0)
         throw new ControlStackError("reduction_no_children", "unit has no child work to reduce");
+      // A child that is `retryable` is still awaiting its retry, so the outcome is not settled yet. A `failed` child is
+      // settled because recording the reduction makes retryUnit refuse any further retry beneath this parent.
       const waitingOn = children
         .filter((unit) => !["succeeded", "failed", "cancelled"].includes(unit.status))
         .map((unit) => unit.unitId);
-      if (waitingOn.length > 0) return { status: "incomplete", waitingOn };
+      if (waitingOn.length > 0) return { status: "incomplete" as const, waitingOn };
 
       const succeeded = children.filter((unit) => unit.status === "succeeded" && unit.resultHash);
       let outcome: "reduced" | "failed" | "inconclusive" = "failed";
@@ -703,10 +783,13 @@ export class MissionAuthorityLedger {
           selected = ranked[0][1][0];
         } else outcome = "inconclusive";
       }
+      const childrenJson = JSON.stringify(
+        children.map((unit) => ({ unitId: unit.unitId, status: unit.status, resultHash: unit.resultHash ?? null }))
+      );
       this.store.db
         .prepare(
-          `INSERT INTO work_unit_reductions (mission_id, parent_unit_id, strategy, outcome, selected_unit_id, result_hash, children_json, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO work_unit_reductions (mission_id, parent_unit_id, strategy, outcome, selected_unit_id, result_hash, children_json, reduction_hash, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           input.missionId,
@@ -715,15 +798,28 @@ export class MissionAuthorityLedger {
           outcome,
           selected ?? null,
           resultHash ?? null,
-          JSON.stringify(
-            children.map((unit) => ({ unitId: unit.unitId, status: unit.status, resultHash: unit.resultHash ?? null }))
-          ),
+          childrenJson,
+          reductionFingerprint({
+            strategy: input.strategy,
+            outcome,
+            selected: selected ?? null,
+            resultHash: resultHash ?? null,
+            children: childrenJson
+          }),
           now
         );
       this.store.recordMissionEvent(
         input.missionId,
         "child.reduced",
-        { parentUnitId: input.parentUnitId, strategy: input.strategy, outcome, children: children.length },
+        {
+          parentUnitId: input.parentUnitId,
+          strategy: input.strategy,
+          outcome,
+          children: children.length,
+          selectedUnitId: selected ?? null,
+          resultHash: resultHash ?? null,
+          by: auth.kind === "operator" ? { operatorId: auth.operatorId } : { workerId: auth.workerId }
+        },
         now
       );
       return {
@@ -733,5 +829,17 @@ export class MissionAuthorityLedger {
         recorded: true
       };
     });
+    if (refusal) throw refusal;
+    return result!;
   }
+}
+
+function reductionFingerprint(input: {
+  strategy: string;
+  outcome: string;
+  selected: string | null;
+  resultHash: string | null;
+  children: string;
+}): string {
+  return stableHash({ domain: "acs.child-reduction.v1", ...input });
 }

@@ -83,9 +83,13 @@ this mission, recomputes to its own `grantHash`, and is unexpired. The approver 
 operator (`verifyOperator`). Refusals are committed as `authority.denied` evidence before the error is thrown. The
 binding is write-once. A mission without a binding cannot create child work.
 
-**Fail closed on read.** Every read re-verifies: the stored definition must parse and recompute to its hash, the live grant
-must still match the stored grant hash and definition, and a derived unit's definition must be a subset of its parent's
-(checked at the instant it was created) and bound to the parent hash and grant it claims. Any mismatch is
+**Fail closed on read.** Every read re-verifies: the stored definition must parse and recompute to its hash, the mission
+policy (which is not part of the grant) must match its own fingerprint, the live grant must still match the stored grant
+hash and definition, and a derived unit's definition must be a subset of its parent's (checked at the instant it was
+created) and bound to the parent hash and grant it claims. A derived unit whose parent has no authority row is accepted
+only if that parent is a verified root; a missing intermediate record is corruption, not a root. Each `requestChildWork`
+also rechecks that the backing grant has not been revoked, and that the claimant resolves (`resolveActor`) to the actor
+the grant was issued to, since a valid claim alone does not say the worker may exercise this authority. Any mismatch is
 `authority_integrity`, and the request is denied. The tables are append-only including against `INSERT OR REPLACE`
 (SQLite resolves that by deleting the old row without firing DELETE triggers, so each table also has a BEFORE INSERT guard).
 
@@ -108,10 +112,14 @@ restart does not reset the caps.
   caller input are redacted and bounded first, and `child.requested` / `child.admitted` record the verified requester
   (worker, parent attempt, a fence hash, never the claim token).
 
-**Cancellation and reduction.** `cancelChildren` cancels a unit's descendants and reports in-flight ones as uncertain; it
-requires the parent's live claim or an authenticated operator, so a stale worker cannot cancel work owned by a newer
-claimant. `reduceChildren` (`all_succeeded`, `select`, `majority_result`) is deterministic (ordered by child id, not finish
-time), writes nothing while a child is unfinished, treats a tie as `inconclusive`, and is recorded once.
+**Cancellation and reduction.** `cancelChildren` cancels a unit's descendants, including failed ones a retry could still
+revive (only final failures such as `policy_denied` are left), and reports in-flight ones as uncertain. `reduceChildren`
+(`all_succeeded`, `select`, `majority_result`) is deterministic (ordered by child id, not finish time), treats a tie as
+`inconclusive`, and is recorded once with an integrity fingerprint that is verified before a stored reduction is returned.
+It waits for any child still parked as `retryable`, and once recorded `retryUnit` refuses further retries beneath that
+parent, so the append-only result cannot go stale. Both operations require the parent's live claim or an authenticated
+operator, so a stale worker cannot cancel or decide for work owned by a newer claimant; refusals are durable
+`authority.denied` evidence, and `child.reduced` records the selected child and result hash.
 
 ## Not yet in this runtime
 

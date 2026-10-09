@@ -12,6 +12,7 @@ CREATE TABLE mission_authority (
   envelope_json TEXT NOT NULL CHECK (json_valid(envelope_json)),
   envelope_hash TEXT NOT NULL CHECK (length(envelope_hash) = 64),
   policy_json TEXT NOT NULL CHECK (json_valid(policy_json)),
+  policy_hash TEXT NOT NULL CHECK (length(policy_hash) = 64),
   approver_id TEXT NOT NULL CHECK (length(approver_id) BETWEEN 1 AND 256),
   reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 4000),
   grant_id TEXT NOT NULL CHECK (length(grant_id) BETWEEN 1 AND 256),
@@ -43,6 +44,7 @@ CREATE TABLE work_unit_reductions (
   selected_unit_id TEXT,
   result_hash TEXT,
   children_json TEXT NOT NULL CHECK (json_valid(children_json)),
+  reduction_hash TEXT NOT NULL CHECK (length(reduction_hash) = 64),
   created_at TEXT NOT NULL,
   PRIMARY KEY (mission_id, parent_unit_id),
   FOREIGN KEY (mission_id, parent_unit_id) REFERENCES coding_operations (mission_id, operation_id)
