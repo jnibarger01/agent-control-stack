@@ -54,7 +54,9 @@ const safeSequenceSchema = z.number().int().nonnegative().refine(safeNumber);
 const timeTravelEventSchema = z.object({
   sequence: safeSequenceSchema,
   id: z.string().min(1).max(256),
-  name: z.string().min(1).max(256),
+  // Canonical audit events permit unbounded non-empty event names; do not
+  // reject a verified ledger only because the projection duplicates a stricter bound.
+  name: z.string().min(1),
   timeUnixNano: z.string().regex(/^\d{1,30}$/u),
   eventHash: hashSchema,
   previousHash: z.union([z.literal(""), hashSchema]),
