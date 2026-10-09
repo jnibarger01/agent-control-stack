@@ -84,7 +84,10 @@ export function startJcApproverd(): net.Server {
           if (request.op === 'request') {
             if (typeof request.tool !== 'string' || typeof request.runtimeId !== 'string' ||
                 !isRecord(request.arguments)) throw new Error('JC_APPROVERD_INVALID_REQUEST');
-            finish({ ok: true, pending: approver.request(request.tool, request.arguments, request.runtimeId) });
+            finish({ ok: true,
+              pending: approver.request(request.tool, request.arguments, request.runtimeId),
+              display: { tool: request.tool, arguments: request.arguments, runtimeId: request.runtimeId },
+            });
           } else if (request.op === 'approve') {
             if (!isRecord(request.assertion) || !isRecord(request.assertion.payload) ||
                 typeof request.assertion.signature !== 'string') throw new Error('JC_APPROVERD_INVALID_REQUEST');
