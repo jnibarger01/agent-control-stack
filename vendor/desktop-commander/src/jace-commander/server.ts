@@ -48,7 +48,7 @@ import {
   type VisualizerView,
 } from './integrations.js';
 import { JsonlTraceChain, readTraceFile, verifyChain } from './looptrace.js';
-import { checkPolicyConstraints, loadJcPolicy, type JcPolicyLoad } from './local-policy.js';
+import { checkPolicyConstraints, defaultAcsModes, loadJcPolicy, type JcPolicyLoad } from './local-policy.js';
 import { ApproverClient, ApproverUnavailable, type AuthorizeReply } from './approver-client.js';
 import { JcLocalTokenError, JcLocalTokenVerifier, type JcLocalAuthorization } from './local-token.js';
 import { jcConfigView, jcDoctor, jcPing } from './doctor.js';
@@ -58,7 +58,8 @@ import { createDirectory, editBlock, moveFile, writeFile } from './mutations.js'
 import { createProcessRegistry } from './processes.js';
 import { createSearchRegistry } from './search.js';
 import { invokePrivilegedHelper, privilegedHelperAvailable } from './privileged-client.js';
-import { assertProviderCoverage, collectProviderHealth, type JcProviderId, type JcProviderProbe } from './providers.js';
+import { JC_PROVIDER_IDS, assertProviderCoverage, collectProviderHealth, type JcAcsMode, type JcProviderId, type JcProviderProbe } from './providers.js';
+import { MirrorOutbox, type MirrorSender } from './mirror-outbox.js';
 import {
   JC_DEFAULT_CLASS_DECISIONS,
   createAuthorizerResolver,
@@ -83,6 +84,8 @@ export interface JcServerDeps {
   policy?: JcPolicyLoad;
   /** Tests only: skip the cannot-modify-it policy check. */
   skipPolicyImmutability?: boolean;
+  /** Overrides how the trace mirror ships batches (tests). Mirroring is local-preset only. */
+  mirrorSender?: MirrorSender;
   /** Overrides the approverd client the `local` preset builds from config (tests). */
   approver?: { authorize(tool: string, args: Record<string, unknown>): Promise<AuthorizeReply>; ping(): Promise<{ runtimeId: string; keyId: string }> };
   fetchImpl?: typeof fetch;
@@ -166,6 +169,12 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     : undefined;
   const resolver = createAuthorizerResolver(mode, deps.authorizerTable ?? (mode === 'local' ? policy?.effective.authorizerTable : undefined));
   const classDecisions = deps.classDecisions ?? policy?.effective.classDecisions ?? JC_DEFAULT_CLASS_DECISIONS;
+  const acsModes: Readonly<Record<JcProviderId, JcAcsMode>> = policy?.effective.acsModes ?? defaultAcsModes(undefined);
+  const acsModeOf = (provider: JcProviderId): JcAcsMode => acsModes[provider] ?? 'off';
+  /** A provider whose ACS mode is `required` makes the server's overall health depend on it. */
+  const requiredByAcsMode = (): Partial<Record<JcProviderId, boolean>> => (mode === 'local'
+    ? Object.fromEntries(JC_PROVIDER_IDS.filter((id) => acsModeOf(id) === 'required').map((id) => [id, true]))
+    : {});
   const verifier = resolver.usesAcs()
     ? new JcCapabilityVerifier({
       publicKey: config.acsPublicKey,
@@ -202,7 +211,50 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
   });
   const swarmToken = process.env.JC_SWARM_TOKEN ?? process.env.SWARM_OPERATOR_TOKEN;
 
+  // ACS readiness, cached briefly so an outage costs one probe, not one per call. Used ONLY to
+  // choose a distinct, actionable error (ADR 0026 D6); capability verification stays offline.
+  let acsReadyCache: { at: number; ok: boolean } | undefined;
+  async function acsReady(): Promise<boolean> {
+    const at = Date.now();
+    if (acsReadyCache && at - acsReadyCache.at < 5000) return acsReadyCache.ok;
+    let ok = false;
+    try {
+      const response = await requestJson(acsReadyUrl(config), { timeoutMs: Math.min(config.requestTimeoutMs, 2000), fetchImpl });
+      ok = response.status < 500;
+    } catch {
+      ok = false;
+    }
+    acsReadyCache = { at, ok };
+    return ok;
+  }
+  const acsUnavailable = (name: string, route: JcRoute, detail: string): ToolResult => fail(
+    'ACS_UNAVAILABLE',
+    `${name} needs ACS (${route.authorizer}) and ${detail}; local tools are unaffected. Nothing ran`,
+    { jaceCommanderMode: mode, ...jcAuthorizationMeta(mode, route, 'acs-unavailable') },
+  );
+
   const server = new Server({ name: 'jace-commander', version: VERSION }, { capabilities: { tools: {} } });
+
+  // Best-effort ACS mirror of the local trace (local preset only). It reads the trace on its own timer,
+  // never delays or fails a tool call, and ACS being down only leaves records queued locally.
+  const httpMirrorSender: MirrorSender = async (batch) => {
+    const token = await acsAccessToken(config.acsUrl, config.stateDir, process.env, fetchImpl);
+    const response = await requestJson(config.mirrorUrl as string, { method: 'POST', token, body: batch, timeoutMs: config.requestTimeoutMs, fetchImpl });
+    return { ok: response.status >= 200 && response.status < 300, status: response.status };
+  };
+  const mirror = mode === 'local' && (deps.mirrorSender || config.mirrorUrl)
+    ? new MirrorOutbox({
+      traceDir: path.join(config.stateDir, 'traces'),
+      stateDir: config.stateDir,
+      runtimeId: config.runtimeId,
+      policyHash: policy?.hash,
+      send: deps.mirrorSender ?? httpMirrorSender,
+      maxPending: config.mirrorMaxPending,
+    })
+    : undefined;
+  const mirrorTimer = mirror ? setInterval(() => { void mirror.pump(); }, config.mirrorIntervalMs) : undefined;
+  mirrorTimer?.unref();
+  server.onclose = () => { if (mirrorTimer) clearInterval(mirrorTimer); };
 
   // Tools the preset has never served (standalone's 12 non-read tools) are not listed.
   const listed = JC_TOOLS.filter((tool) => resolver.resolve(tool.name)?.authorizer !== 'refused');
@@ -253,13 +305,23 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
         helperCapability = outcome.token;
         routeMeta = jcAuthorizationMeta(mode, route, 'approved', { approvalId: localAuthorization.approvalId, approverId: localAuthorization.approverId, tokenId: localAuthorization.tokenId });
       }
-    } else if (verifier && name !== 'privileged_exec') {
-      try {
-        authorization = verifier.verify(name, args, capability);
-      } catch (error) {
-        const code = error instanceof JcAuthorizationError ? error.code : 'JC_CAPABILITY_MALFORMED';
-        recordTrace(trace, name, args, { ok: false, code, ...routeTrace(route) });
-        return fail(code, 'Jace Commander managed authorization rejected', { acsAuthorization: { version: 'acs.jc.v1', decision: 'denied', code }, ...routeMeta });
+    } else if (verifier) {
+      // No capability presented and ACS cannot be reached: say so, distinctly (local preset only;
+      // managed keeps JC_CAPABILITY_MISSING so its responses are unchanged). Never fall back to `local`:
+      // an ACS-authorized call that ACS cannot authorize is refused, whatever the local policy would allow.
+      if (mode === 'local' && capability === undefined && !(await acsReady())) {
+        recordTrace(trace, name, args, { ok: false, code: 'ACS_UNAVAILABLE', ...routeTrace(route) });
+        return acsUnavailable(name, route, 'ACS is not reachable');
+      }
+      // privileged_exec is verified by the root helper, not here.
+      if (name !== 'privileged_exec') {
+        try {
+          authorization = verifier.verify(name, args, capability);
+        } catch (error) {
+          const code = error instanceof JcAuthorizationError ? error.code : 'JC_CAPABILITY_MALFORMED';
+          recordTrace(trace, name, args, { ok: false, code, ...routeTrace(route) });
+          return fail(code, 'Jace Commander managed authorization rejected', { acsAuthorization: { version: 'acs.jc.v1', decision: 'denied', code }, ...routeMeta });
+        }
       }
     }
 
@@ -360,20 +422,40 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
   // MCP clients and the jace-commander CLI (itself an MCP client of /jc/mcp).
   const search = createSearchRegistry();
   const processes = createProcessRegistry();
+  /**
+   * ACS-backed tools (the `acs` provider) in the local preset: `off` refuses without touching the
+   * network; `required` fails fast when ACS is down; either way an unreachable ACS becomes the
+   * distinct ACS_UNAVAILABLE and affects no other provider. Managed behavior is unchanged.
+   */
+  async function acsGuarded(run: () => Promise<ToolResult>): Promise<ToolResult> {
+    if (mode !== 'local') return run();
+    const acsMode = acsModeOf('acs');
+    if (acsMode === 'off') return fail('ACS_DISABLED', 'ACS is switched off for this provider by the local policy; nothing ran');
+    if (acsMode === 'required' && !(await acsReady())) return fail('ACS_UNAVAILABLE', 'ACS is required for this provider and is not reachable; nothing ran');
+    try {
+      return await run();
+    } catch (error) {
+      if (error instanceof IntegrationError && (error.code === 'upstream_unreachable' || error.code === 'response_too_large')) {
+        return fail('ACS_UNAVAILABLE', 'ACS did not answer; local tools are unaffected');
+      }
+      throw error;
+    }
+  }
+
   const handlers: Readonly<Record<string, Handler>> = Object.freeze({
     jc_status: async () => ok(await status()),
-    acs_read: async (args) => {
+    acs_read: async (args) => acsGuarded(async () => {
       const response = await acsGet(acsReadUrl(config, args.view as AcsView, args.id as string | undefined, args.status as string | undefined));
       return response.status < 400 ? ok(response.body) : fail(`acs_http_${response.status}`, 'ACS rejected the request', { upstream: response.body });
-    },
-    acs_submit_mission: async (args) => {
+    }),
+    acs_submit_mission: async (args) => acsGuarded(async () => {
       const token = await acsAccessToken(config.acsUrl, config.stateDir, process.env, fetchImpl);
       if (!token) return fail('acs_not_logged_in', 'no ACS credential: run `jace-commander login` or set JC_ACS_TOKEN');
       const response = await requestJson(`${config.acsUrl}/work-items`, {
         method: 'POST', token, body: missionWorkItemBody(args as unknown as MissionInput), timeoutMs: config.requestTimeoutMs, fetchImpl,
       });
       return response.status < 400 ? ok(response.body) : fail(`acs_http_${response.status}`, 'ACS rejected the mission', { upstream: response.body });
-    },
+    }),
     swarm_read: async (args) => {
       const response = await requestJson(swarmReadUrl(config, args.view as SwarmView, args.taskId as string | undefined), {
         token: swarmToken, timeoutMs: config.requestTimeoutMs, fetchImpl,
@@ -428,7 +510,9 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       handlerNames: Object.keys(handlers),
       verifierReady: Boolean(verifier && config.acsPublicKey && config.acsKeyId),
       policy,
+      fetchImpl,
       approver: mode === 'local' ? approverHealth : undefined,
+      acsRequired: requiredByAcsMode().acs === true || Object.keys(requiredByAcsMode()).length > 0,
       privilegedHelper: () => helperAvailable(helperOptions),
     })),
     ping: async () => ok(await jcPing(config)),
@@ -522,8 +606,8 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       visualizer: { url: config.visualizerUrl ?? null, ...visualizer },
       missionRouter: { dir: config.missionRouterDir },
       privilegedHelper: { path: config.privilegedHelperPath, sudoNonInteractive: helper },
-      providers: await collectProviderHealth(probes),
-      ...(mode === 'local' ? { approver: await approverHealth() } : {}),
+      providers: await collectProviderHealth(probes, { requiredOverrides: requiredByAcsMode() }),
+      ...(mode === 'local' ? { approver: await approverHealth(), acsModes, mirror: mirror ? mirror.status() : { enabled: false } } : {}),
       ...(policy ? { policy: { state: policy.state, hash: policy.hash, immutable: policy.immutable, unsafeDev: policy.unsafeDev, sources: policy.sources, errorCount: policy.errors.length } } : {}),
     };
   }

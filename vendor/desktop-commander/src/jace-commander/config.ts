@@ -49,6 +49,10 @@ export interface JcConfig {
   /** base64url SPKI Ed25519 public key of approverd (PUBLIC material). */
   approverPublicKey: string | undefined;
   approverKeyId: string | undefined;
+  /** JC_ACS_MIRROR_URL: where the local trace is mirrored (best effort, local preset only). Unset: no mirroring. */
+  mirrorUrl: string | undefined;
+  mirrorIntervalMs: number;
+  mirrorMaxPending: number;
 }
 
 function httpUrl(raw: string, name: string): string {
@@ -61,6 +65,13 @@ function httpUrl(raw: string, name: string): string {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(`${name} must be http(s)`);
   if (url.username || url.password) throw new Error(`${name} must not embed credentials`);
   return url.toString().replace(/\/$/, '');
+}
+
+function boundedInt(raw: string | undefined, fallback: number, min: number, max: number, name: string): number {
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${name} must be an integer in [${min}, ${max}]`);
+  return value;
 }
 
 function splitRoots(raw: string | undefined): string[] {
@@ -107,5 +118,8 @@ export function loadJcConfig(env: NodeJS.ProcessEnv = process.env): JcConfig {
     approverDecideSocket: env.JC_APPROVER_DECIDE_SOCKET ? path.resolve(env.JC_APPROVER_DECIDE_SOCKET) : undefined,
     approverPublicKey: env.JC_APPROVER_PUBLIC_KEY,
     approverKeyId: env.JC_APPROVER_KEY_ID,
+    mirrorUrl: env.JC_ACS_MIRROR_URL ? httpUrl(env.JC_ACS_MIRROR_URL, 'JC_ACS_MIRROR_URL') : undefined,
+    mirrorIntervalMs: boundedInt(env.JC_ACS_MIRROR_INTERVAL_MS, 5000, 100, 3_600_000, 'JC_ACS_MIRROR_INTERVAL_MS'),
+    mirrorMaxPending: boundedInt(env.JC_ACS_MIRROR_MAX_PENDING, 5000, 10, 1_000_000, 'JC_ACS_MIRROR_MAX_PENDING'),
   };
 }

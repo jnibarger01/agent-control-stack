@@ -920,6 +920,9 @@ const server = http.createServer(async (req, res) => {
               body = Buffer.from(JSON.stringify(await rewrite(parsed)), 'utf8');
             }
           } catch (e) {
+            // Local preset: an unreachable ACS is the distinct, actionable ACS_UNAVAILABLE
+            // (managed keeps acs_http_unreachable so its responses are unchanged).
+            if (JC_LOCAL.enabled && e && e.acsCode === 'acs_http_unreachable') e.acsCode = 'ACS_UNAVAILABLE';
             const code = e && e.acsCode ? e.acsCode : 'managed_fail_closed';
             log(req.method, '/jc/mcp', 200, `managed fail-closed: ${code}`);
             return send(res, 200, managedToolErrorResponse(parsed, e));

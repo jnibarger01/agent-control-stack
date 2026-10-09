@@ -20,6 +20,15 @@ export type JcProviderId = typeof JC_PROVIDER_IDS[number];
 export const JC_RISK_CLASSES = Object.freeze(['read', 'mutate', 'network', 'exec', 'privileged'] as const);
 export type JcRiskClass = typeof JC_RISK_CLASSES[number];
 
+/**
+ * Per-provider relationship to ACS (ADR 0026 D6).
+ *   off       the provider never uses ACS (it may not be routed to an ACS authorizer)
+ *   optional  it may use ACS; an ACS failure degrades only this provider's ACS-backed calls
+ *   required  it depends on ACS; an unreachable ACS fails its calls fast and fails jc_doctor
+ */
+export const JC_ACS_MODES = Object.freeze(['off', 'optional', 'required'] as const);
+export type JcAcsMode = typeof JC_ACS_MODES[number];
+
 /** What a provider needs in order to work. Informational; drives health checks. */
 export type JcProviderNeeds = 'local' | 'root-helper' | 'none' | 'optional-services' | 'acs';
 

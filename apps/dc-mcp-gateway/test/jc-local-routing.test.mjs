@@ -221,3 +221,57 @@ test('edge: a local tool with ACS down still reaches the JC upstream; an ACS too
     assert.equal(issues(acs).length, 1);
   } finally { close(); }
 });
+
+// ---- ADR 0026 slice 6: ACS optional at the edge ----------------------------------------
+
+async function bareLane(env) {
+  const dcUp = recorder(() => ({ status: 200, body: { jsonrpc: '2.0', id: 1, result: { lane: 'dc' } } }));
+  const jcUp = recorder((req) => (req.path === '/authority'
+    ? { status: 200, body: { variant: 'jc' } }
+    : { status: 200, body: { jsonrpc: '2.0', id: 7, result: { lane: 'jc' } } }));
+  const [dcPort, jcPort] = [await dcUp.listen(), await jcUp.listen()];
+  const gw = await startGateway({ UPSTREAM: `http://127.0.0.1:${dcPort}`, JC_ENABLED: '1', JC_UPSTREAM: `http://127.0.0.1:${jcPort}`, ...env });
+  const close = () => { gw.child?.kill('SIGKILL'); dcUp.server.close(); jcUp.server.close(); };
+  return { gw, jcUp, close };
+}
+
+test('edge: JC_ACS_OPTIONAL=1 is only valid with JC_PRESET=local, otherwise the gateway refuses to start', async () => {
+  const noPreset = await startGateway({ JC_ENABLED: '1', JC_ACS_OPTIONAL: '1' });
+  assert.equal(noPreset.exitCode, 1);
+  const managedPreset = await startGateway({ JC_ENABLED: '1', JC_ACS_OPTIONAL: '1', JC_PRESET: 'managed' });
+  assert.equal(managedPreset.exitCode, 1);
+  const shared = await startGateway({ JC_ENABLED: '1', JC_ACS_OPTIONAL: '1', JC_PRESET: 'local', ACS_GATEWAY_URL: 'http://127.0.0.1:1', ACS_GATEWAY_TOKEN: 'same', ACS_JC_GATEWAY_TOKEN: 'same' });
+  assert.equal(shared.exitCode, 1);
+});
+
+test('edge: with no ACS configured at all, local tools work and ACS-routed tools fail with ACS_UNAVAILABLE without any request', async () => {
+  const file = writePolicy('optional-mixed.json', { authorizers: { default: 'local', providers: { 'jc.git': 'acs-capability' } } });
+  const { gw, jcUp, close } = await bareLane({ JC_ACS_OPTIONAL: '1', JC_PRESET: 'local', JC_POLICY_PATH: file });
+  try {
+    assert.equal(gw.exitCode, undefined, `gateway should start: ${typeof gw.stderr === 'function' ? gw.stderr() : gw.stderr}`);
+    const local = await call(gw.port, '/jc/mcp', jcToken(), toolCall('read_file', { path: '/x' }));
+    assert.deepEqual((await local.json()).result, { lane: 'jc' });
+    const before = mcpRequests(jcUp).length;
+    const gated = await call(gw.port, '/jc/mcp', jcToken(), toolCall('git_status', { repo: '/r' }));
+    const text = JSON.stringify(await gated.json());
+    assert.match(text, /ACS_UNAVAILABLE/);
+    assert.equal(mcpRequests(jcUp).length, before, 'nothing forwarded for the ACS-authorized tool');
+  } finally { close(); }
+});
+
+test('edge: an unreachable ACS is ACS_UNAVAILABLE in the local preset and acs_http_unreachable in managed (unchanged)', async () => {
+  const file = writePolicy('unreachable.json', { authorizers: { default: 'local', providers: { 'jc.git': 'acs-capability' } } });
+  const base = { ACS_GATEWAY_URL: 'http://127.0.0.1:1', ACS_JC_GATEWAY_TOKEN: 'jc-bridge-token' };
+  const local = await bareLane({ ...base, JC_PRESET: 'local', JC_POLICY_PATH: file });
+  try {
+    const text = JSON.stringify(await (await call(local.gw.port, '/jc/mcp', jcToken(), toolCall('git_status', { repo: '/r' }))).json());
+    assert.match(text, /ACS_UNAVAILABLE/);
+    assert.doesNotMatch(text, /acs_http_unreachable/);
+  } finally { local.close(); }
+  const managed = await bareLane(base);
+  try {
+    const text = JSON.stringify(await (await call(managed.gw.port, '/jc/mcp', jcToken(), toolCall('git_status', { repo: '/r' }))).json());
+    assert.match(text, /acs_http_unreachable/);
+    assert.doesNotMatch(text, /ACS_UNAVAILABLE/);
+  } finally { managed.close(); }
+});

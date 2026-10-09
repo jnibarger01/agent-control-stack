@@ -1,6 +1,6 @@
 # ADR 0026: Jace Commander provider registry, authorizers, and optional ACS
 
-Status: Accepted (implementation in progress; slices tracked in [Rollout](#rollout))
+Status: Accepted. Slices 1-6 implemented (see [Implementation notes](#implementation-notes))
 Date: 2026-10-09
 Supersedes the assumption that Jace Commander (JC) cannot operate without ACS.
 Builds on the 2026-10-05 standalone architecture draft and its 2026-10-09 review.
@@ -255,3 +255,26 @@ and carries its own tests. Order of merge: 1 → 2 → 3 → 4 → 5 → 6.
   membership rather than socket credentials; misconfigured group membership
   breaks the guarantee, so `jc_doctor` verifies socket modes, owners and that
   the server's uid cannot open `decide.sock`.
+
+## Implementation notes
+
+Deviations and facts learned while implementing, so the record matches the code:
+
+- **`approverd` identity** is filesystem-based (two sockets in separate 0750 directories owned by
+  different groups), as D4 states, because Node has no `SO_PEERCRED`.
+- **The policy denies the policy FILE, not its directory** to the fs tools (denying the directory
+  blocked workspaces that shared it).
+- **Tokens carry `approvalId`** in addition to the fields in D4, and the signature covers a
+  `jc.local.v1\n` domain prefix so an `acs.jc.v1` signature can never validate as a local token.
+- **`ACS_UNAVAILABLE` is local-preset only.** Managed keeps `JC_CAPABILITY_MISSING` /
+  `acs_http_unreachable` so its responses are unchanged (parity matrix).
+- **Mirroring needs an ACS route that does not exist yet.** The JC half and the `jc.trace.mirror.v1`
+  wire format are implemented; the ACS ingest route is a separate change and the mirror stays off
+  until `JC_ACS_MIRROR_URL` is set.
+- **Pre-existing bug fixed:** `install-privileged-helper.sh` did not copy `manifest.generated.js`
+  (imported by `contract.js`), so a fresh helper install could not start. Both installers now declare
+  one `FILES` array that a test pins to the real import closure.
+- **Not implemented:** trace checkpoint signing and automatic rotation (the reader's 32 MiB cap fails
+  closed instead), `outputCapBytes` constraints, and any ACS-side change.
+- **Needs a root operator:** creating the `jc`, `jc-approverd` accounts and groups, installing the units
+  and policy, and re-running the helper installer with the local anchor. None of that was executed.

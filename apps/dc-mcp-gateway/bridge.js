@@ -49,8 +49,9 @@ if (PROFILE !== "desktop-commander" && PROFILE !== "jace-commander") {
   process.exit(1);
 }
 const JC = PROFILE === "jace-commander";
-if (JC && !MANAGED) {
-  console.error("bridge: BRIDGE_PROFILE=jace-commander requires ACS_MANAGED_MODE=1; refusing to start");
+// ADR 0026: the `local` preset authorizes locally and may run with no ACS at all.
+if (JC && !MANAGED && process.env.JC_PRESET !== "local") {
+  console.error("bridge: BRIDGE_PROFILE=jace-commander requires ACS_MANAGED_MODE=1 (or JC_PRESET=local); refusing to start");
   process.exit(1);
 }
 const DC_CMD = process.env.DC_CMD || "/home/linuxbrew/.linuxbrew/bin/node";

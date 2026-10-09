@@ -108,3 +108,52 @@ check compares the helper's configured anchor to `JC_APPROVER_KEY_ID`.
 **Upgrade note.** The helper's installed files are a set. Re-run the installer when you
 upgrade; it now copies every module the helper imports (earlier installer versions
 omitted `manifest.generated.js`, so a fresh install could not start).
+
+## ACS is optional
+
+Under `local`, ACS is a subsystem you can leave out. Per provider the policy sets
+`acs: off | optional | required` (`"acs": {"default": "off", "providers": {"jc.git": "required"}}`).
+Defaults: the `acs` provider is `optional`, a provider whose tools you route to
+`acs-capability` / `admin-delegated` is `required`, everything else is `off`. `off` cannot be
+combined with ACS routing (the policy is then invalid). Only the system policy may set modes.
+
+| Situation                                              | Result                                                                  |
+| ------------------------------------------------------ | ----------------------------------------------------------------------- |
+| ACS down, tool authorized `local`                      | unaffected; ACS is never probed for it                                  |
+| ACS down, tool routed to ACS, **no** capability        | `ACS_UNAVAILABLE` (distinct and actionable), nothing runs               |
+| ACS down, tool routed to ACS, capability **presented** | verified offline against the pinned key and runs                        |
+| ACS up, tool routed to ACS, no capability              | `JC_CAPABILITY_MISSING`                                                 |
+| `acs_read` / `acs_submit_mission`, mode `off`          | `ACS_DISABLED`, no network                                              |
+| `acs_read` / `acs_submit_mission`, ACS unreachable     | `ACS_UNAVAILABLE`; no other provider is affected                        |
+| provider mode `required`, ACS down                     | `jc_doctor` fails (the `acs` check becomes required)                    |
+
+`admin-delegated` (opt in per provider or tool; never the default) is an ACS capability like
+`acs-capability`. It **never** degrades to `local`: with ACS down or no capability the call is
+refused even if the local policy would have allowed it. It writes the same intent/result trace
+records as local calls, labelled `authorizer: admin-delegated`. The ACS admin-mode toggle itself
+stays in ACS; JC only sees the capability ACS issues, so an indefinite admin mode does not make
+any individual authorization reusable (each capability is still single-use and at most 30 s).
+
+### Trace mirror
+
+Set `JC_ACS_MIRROR_URL` to mirror the local trace to ACS (local preset only). The local trace stays
+authoritative: the mirror only reads it, runs on its own timer (`JC_ACS_MIRROR_INTERVAL_MS`, default
+5000), and can never delay or fail a tool call. Batches are ordered, contiguous and idempotent
+(deterministic `batchId`; the cursor advances only on a confirmed success), carry `prevHash` and
+`chainHead` so ACS can verify continuity, and contain only trace events (argument digests, never raw
+arguments). Beyond `JC_ACS_MIRROR_MAX_PENDING` unsent records (default 5000) the oldest are skipped for
+delivery only and reported as explicit `gaps`; they remain in the local trace. `jc_status.mirror` shows
+`pending`, `gaps`, `failures` and `lastSuccessAt`.
+
+**The ACS ingest route for `jc.trace.mirror.v1` does not exist yet.** This repo ships the JC half
+(`mirror-outbox.ts`) and the wire format; ACS needs a route that authenticates the JC worker identity,
+verifies chain continuity and deduplicates on `(runId, seq, hash)`. Until then leave
+`JC_ACS_MIRROR_URL` unset (the default).
+
+### Edge with no ACS at all
+
+`JC_ACS_OPTIONAL=1` on the gateway (valid only with `JC_PRESET=local`) lets `/jc/mcp` run with no
+`ACS_JC_GATEWAY_TOKEN`. Tools the policy routes to ACS are refused with `ACS_UNAVAILABLE` without any
+network request. OAuth authentication is unchanged. With ACS configured but unreachable, the local
+preset reports `ACS_UNAVAILABLE`; managed keeps `acs_http_unreachable`. The bridge accepts
+`JC_PRESET=local` without `ACS_MANAGED_MODE`.

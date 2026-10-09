@@ -25,13 +25,14 @@ import path from 'node:path';
 import {
   JC_CLASS_DECISION_VALUES,
   JC_DEFAULT_CLASS_DECISIONS,
+  createAuthorizerResolver,
   validateAuthorizerTable,
   type JcAuthorizerTable,
   type JcClassDecision,
   type JcClassDecisions,
 } from './authorizers.js';
 import { canonical } from './looptrace.js';
-import { JC_RISK_CLASSES, type JcRiskClass } from './providers.js';
+import { JC_ACS_MODES, JC_PROVIDER_IDS, JC_RISK_CLASSES, isJcProviderId, jcProviderOf, type JcAcsMode, type JcProviderId, type JcRiskClass } from './providers.js';
 
 export const JC_POLICY_VERSION = 'jc.policy.v1' as const;
 export const DEFAULT_SYSTEM_POLICY_PATH = '/etc/jace-commander/policy.json';
@@ -50,6 +51,8 @@ export interface JcEffectivePolicy {
   denyCommands: string[];
   /** Undefined: any configured remote. */
   gitRemotes: string[] | undefined;
+  /** Per-provider ACS relationship. Defaults: `acs` optional, providers routed to ACS required, others off. */
+  acsModes: Readonly<Record<JcProviderId, JcAcsMode>>;
 }
 
 export type JcPolicyState = 'builtin-default' | 'loaded' | 'invalid';
@@ -90,7 +93,19 @@ export function builtinDefaultPolicy(): JcEffectivePolicy {
     allowCommands: undefined,
     denyCommands: [],
     gitRemotes: undefined,
+    acsModes: defaultAcsModes(undefined),
   };
+}
+
+/** `acs` is optional; a provider whose tools are routed to ACS authorizers needs ACS (required); the rest are off. */
+export function defaultAcsModes(table: JcAuthorizerTable | undefined): Readonly<Record<JcProviderId, JcAcsMode>> {
+  const routed = new Set<JcProviderId>();
+  if (table) {
+    for (const route of createAuthorizerResolver('local', table).routes()) {
+      if (route.authorizer === 'acs-capability' || route.authorizer === 'admin-delegated') routed.add(route.provider);
+    }
+  }
+  return Object.freeze(Object.fromEntries(JC_PROVIDER_IDS.map((id) => [id, id === 'acs' ? 'optional' : routed.has(id) ? 'required' : 'off'])) as Record<JcProviderId, JcAcsMode>);
 }
 
 export function hashEffectivePolicy(effective: JcEffectivePolicy): string {
@@ -102,6 +117,7 @@ export function hashEffectivePolicy(effective: JcEffectivePolicy): string {
     allowCommands: effective.allowCommands ? [...effective.allowCommands].sort() : null,
     denyCommands: [...effective.denyCommands].sort(),
     gitRemotes: effective.gitRemotes ? [...effective.gitRemotes].sort() : null,
+    acsModes: effective.acsModes,
   });
   return crypto.createHash('sha256').update(`${POLICY_HASH_DOMAIN}\n${body}`, 'utf8').digest('hex');
 }
@@ -114,6 +130,7 @@ interface ParsedDocument {
   allowCommands?: string[];
   denyCommands?: string[];
   gitRemotes?: string[];
+  acs?: { default?: JcAcsMode; providers: Partial<Record<JcProviderId, JcAcsMode>> };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -151,7 +168,7 @@ function parseDocument(raw: string, layer: 'system' | 'user'): ParsedDocument {
     throw new PolicyError(`${layer} policy is not valid JSON`);
   }
   if (!isRecord(json)) throw new PolicyError(`${layer} policy must be an object`);
-  requireKeys('policy', json, ['version', 'authorizers', 'classes', 'constraints']);
+  requireKeys('policy', json, ['version', 'authorizers', 'classes', 'constraints', 'acs']);
   if (json.version !== JC_POLICY_VERSION) throw new PolicyError(`policy.version must be ${JC_POLICY_VERSION}`);
   const out: ParsedDocument = {};
   if (json.authorizers !== undefined) {
@@ -166,6 +183,26 @@ function parseDocument(raw: string, layer: 'system' | 'user'): ParsedDocument {
       if (!(JC_CLASS_DECISION_VALUES as readonly unknown[]).includes(decision)) throw new PolicyError(`classes.${cls}: must be allow, approve or deny`);
       out.classes[cls as JcRiskClass] = decision as JcClassDecision;
     }
+  }
+  if (json.acs !== undefined) {
+    if (layer === 'user') throw new PolicyError('the user policy may not set acs modes');
+    if (!isRecord(json.acs)) throw new PolicyError('policy.acs must be an object');
+    requireKeys('acs', json.acs, ['default', 'providers']);
+    const modes = JC_ACS_MODES as readonly unknown[];
+    const parsed: NonNullable<ParsedDocument['acs']> = { providers: {} };
+    if (json.acs.default !== undefined) {
+      if (!modes.includes(json.acs.default)) throw new PolicyError('acs.default must be off, optional or required');
+      parsed.default = json.acs.default as JcAcsMode;
+    }
+    if (json.acs.providers !== undefined) {
+      if (!isRecord(json.acs.providers)) throw new PolicyError('acs.providers must be an object');
+      for (const [id, mode] of Object.entries(json.acs.providers)) {
+        if (!isJcProviderId(id)) throw new PolicyError(`acs.providers: unknown provider ${id}`);
+        if (!modes.includes(mode)) throw new PolicyError(`acs.providers.${id}: must be off, optional or required`);
+        parsed.providers[id] = mode as JcAcsMode;
+      }
+    }
+    out.acs = parsed;
   }
   if (json.constraints !== undefined) {
     if (!isRecord(json.constraints)) throw new PolicyError('policy.constraints must be an object');
@@ -230,6 +267,17 @@ function applySystem(doc: ParsedDocument): JcEffectivePolicy {
   const decisions: Record<JcRiskClass, JcClassDecision> = { ...JC_DEFAULT_CLASS_DECISIONS };
   for (const [cls, decision] of Object.entries(doc.classes ?? {})) decisions[cls as JcRiskClass] = decision;
   if (decisions.privileged === 'allow') throw new PolicyError('classes.privileged may not be allow');
+  const table = doc.authorizers as JcAuthorizerTable | undefined;
+  const derived = defaultAcsModes(table);
+  const acsModes: Record<JcProviderId, JcAcsMode> = { ...derived };
+  if (doc.acs?.default !== undefined) for (const id of JC_PROVIDER_IDS) acsModes[id] = doc.acs.default;
+  for (const [id, mode] of Object.entries(doc.acs?.providers ?? {})) acsModes[id as JcProviderId] = mode;
+  // A provider with ACS switched off cannot also be authorized by ACS.
+  for (const route of createAuthorizerResolver('local', table ?? validateAuthorizerTable({ default: 'local' })).routes()) {
+    if ((route.authorizer === 'acs-capability' || route.authorizer === 'admin-delegated') && acsModes[route.provider] === 'off') {
+      throw new PolicyError(`${route.tool} is routed to ${route.authorizer} but acs is off for ${route.provider}`);
+    }
+  }
   return {
     authorizerTable: doc.authorizers as JcAuthorizerTable | undefined,
     classDecisions: Object.freeze(decisions),
@@ -238,6 +286,7 @@ function applySystem(doc: ParsedDocument): JcEffectivePolicy {
     allowCommands: doc.allowCommands,
     denyCommands: doc.denyCommands ?? [],
     gitRemotes: doc.gitRemotes,
+    acsModes: Object.freeze(acsModes),
   };
 }
 

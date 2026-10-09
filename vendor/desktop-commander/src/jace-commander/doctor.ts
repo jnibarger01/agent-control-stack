@@ -33,15 +33,19 @@ export interface DoctorRuntime {
   policy?: import('./local-policy.js').JcPolicyLoad;
   /** Present for the `local` preset. */
   approver?: () => Promise<Record<string, unknown>>;
+  /** Test seam: the fetch the ACS readiness probe uses. */
+  fetchImpl?: typeof fetch;
+  /** Some provider's ACS mode is `required` (local preset): an unreachable ACS then fails the report. */
+  acsRequired?: boolean;
   privilegedHelper: () => Promise<boolean>;
 }
 
 const CODE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
-async function probe(url: string | undefined): Promise<DoctorCheck> {
+async function probe(url: string | undefined, fetchImpl: typeof fetch = fetch): Promise<DoctorCheck> {
   if (!url) return { name: 'acs', ok: false, required: false, detail: 'JC_ACS_URL is not configured' };
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(2000) });
+    const response = await fetchImpl(url, { signal: AbortSignal.timeout(2000) });
     return { name: 'acs', ok: response.ok, required: false, detail: `${url} -> HTTP ${response.status}` };
   } catch (error) {
     return { name: 'acs', ok: false, required: false, detail: `${url} unreachable: ${error instanceof Error ? error.message : 'error'}` };
@@ -163,7 +167,7 @@ export async function jcDoctor(config: JcConfig, runtime: DoctorRuntime): Promis
       : 'JC_FS_ROOTS empty; filesystem, process and git tools fail closed',
   });
   checks.push(bridgePathCheck());
-  checks.push(await probe(config.acsUrl ? acsReadyUrl(config) : undefined));
+  checks.push({ ...(await probe(config.acsUrl ? acsReadyUrl(config) : undefined, runtime.fetchImpl)), required: runtime.acsRequired === true });
   try {
     const version = (await exec('git', ['--version'], { timeout: 2000 })).stdout.trim();
     checks.push({ name: 'git backend', ok: true, required: false, detail: version });

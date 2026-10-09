@@ -161,7 +161,8 @@ await test('class decisions are honored: deny refuses, allow runs, and privilege
 
 await test('mixed table: acs-capability / admin-delegated providers still demand a capability; local ones do not', async () => {
   const table = validateAuthorizerTable({ default: 'local', providers: { 'jc.git': 'acs-capability', 'jc.fs': 'admin-delegated' } });
-  const client = await connect('local', { authorizerTable: table });
+  // ACS reachable: a missing capability is the plain JC_CAPABILITY_MISSING.
+  const client = await connect('local', { authorizerTable: table, fetchImpl: async () => new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }) });
   const noCap = await client.callTool({ name: 'read_file', arguments: { path: path.join(root, 'a.txt') } });
   assert.equal(noCap.structuredContent.error.code, 'JC_CAPABILITY_MISSING');
   const args = { path: path.join(root, 'a.txt') };
