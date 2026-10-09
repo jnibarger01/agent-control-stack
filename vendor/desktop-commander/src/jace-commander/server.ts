@@ -21,6 +21,7 @@
  *                      ACS in front of it, so there is nothing to approve with.
  */
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -30,6 +31,7 @@ import { acsAccessToken } from './device-login.js';
 import {
   IntegrationError,
   acsReadUrl,
+  acsReadyUrl,
   listMissionRouterState,
   missionWorkItemBody,
   requestJson,
@@ -49,6 +51,7 @@ import { createDirectory, editBlock, moveFile, writeFile } from './mutations.js'
 import { createProcessRegistry } from './processes.js';
 import { createSearchRegistry } from './search.js';
 import { invokePrivilegedHelper, privilegedHelperAvailable } from './privileged-client.js';
+import { assertProviderCoverage, collectProviderHealth, type JcProviderId, type JcProviderProbe } from './providers.js';
 import { JC_TOOLS } from './tool-descriptors.js';
 export { JC_TOOLS };
 import { VERSION } from '../version.js';
@@ -129,6 +132,7 @@ export const JC_STANDALONE_TOOL_NAMES: readonly string[] = Object.freeze(
 
 export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDeps = {}): Server {
   assertToolPolicyCoverage();
+  assertProviderCoverage();
   const fetchImpl = deps.fetchImpl ?? fetch;
   const invokeHelper = deps.invokeHelper ?? invokePrivilegedHelper;
   const helperAvailable = deps.helperAvailable ?? privilegedHelperAvailable;
@@ -302,6 +306,34 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
         return { configured: true, reachable: false, code: error instanceof IntegrationError ? error.code : 'error' };
       }
     };
+    // ACS is probed at /readyz (about 60 ms); the deep /health takes seconds and
+    // made a healthy ACS look unreachable (ADR 0026 section 1.5).
+    const [acs, swarm, visualizer, helper] = await Promise.all([
+      probe(acsReadyUrl(config)),
+      probe(`${config.swarmUrl}/api/v1/health`, swarmToken),
+      probe(config.visualizerUrl ? `${config.visualizerUrl}/healthz` : undefined),
+      helperAvailable(helperOptions).catch(() => false),
+    ]);
+    const reachable = (result: { configured: boolean; reachable?: boolean }) => result.configured && result.reachable === true;
+    const probes: Partial<Record<JcProviderId, JcProviderProbe>> = {
+      'jc.fs': async () => {
+        const missing = config.fsRoots.filter((root) => !fs.existsSync(root));
+        if (config.fsRoots.length === 0) return { state: 'degraded', detail: 'JC_FS_ROOTS empty; filesystem, process and git tools fail closed' };
+        return missing.length ? { state: 'degraded', detail: `missing roots: ${missing.join(', ')}` } : { state: 'ok', detail: `${config.fsRoots.length} root(s)` };
+      },
+      'jc.privileged': async () => (helper
+        ? { state: 'ok', detail: 'sudo -n helper available' }
+        : { state: 'unavailable', detail: 'privileged helper not installed or sudo -n refused' }),
+      'jc.integration': async () => {
+        const configured = [swarm, visualizer].filter((entry) => entry.configured);
+        const down = configured.filter((entry) => !reachable(entry as { configured: boolean; reachable?: boolean }));
+        if (down.length === 0) return { state: 'ok', detail: `${configured.length} service(s) reachable` };
+        return { state: 'degraded', detail: `${down.length}/${configured.length} configured service(s) unreachable` };
+      },
+      acs: async () => (reachable(acs as { configured: boolean; reachable?: boolean })
+        ? { state: 'ok', detail: 'ACS /readyz reachable' }
+        : { state: 'unavailable', detail: 'ACS /readyz not reachable' }),
+    };
     return {
       server: 'jace-commander',
       version: VERSION,
@@ -311,11 +343,12 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       managedAuthorization: mode === 'managed'
         ? { contract: 'acs.jc.v1', keyConfigured: Boolean(config.acsPublicKey && config.acsKeyId) }
         : { contract: 'none (standalone)', tools: 'read-only only', served: JC_STANDALONE_TOOL_NAMES.length },
-      acs: { url: config.acsUrl, ...(await probe(`${config.acsUrl}/health`)) },
-      swarm: { url: config.swarmUrl, ...(await probe(`${config.swarmUrl}/api/v1/health`, swarmToken)) },
-      visualizer: { url: config.visualizerUrl ?? null, ...(await probe(config.visualizerUrl ? `${config.visualizerUrl}/healthz` : undefined)) },
+      acs: { url: config.acsUrl, ...acs },
+      swarm: { url: config.swarmUrl, ...swarm },
+      visualizer: { url: config.visualizerUrl ?? null, ...visualizer },
       missionRouter: { dir: config.missionRouterDir },
-      privilegedHelper: { path: config.privilegedHelperPath, sudoNonInteractive: await helperAvailable(helperOptions) },
+      privilegedHelper: { path: config.privilegedHelperPath, sudoNonInteractive: helper },
+      providers: await collectProviderHealth(probes),
     };
   }
 
