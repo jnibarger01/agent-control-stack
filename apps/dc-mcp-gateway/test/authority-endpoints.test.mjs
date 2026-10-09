@@ -121,7 +121,7 @@ try {
     console.log('PASS: malformed live-PID executor lease fails closed');
   }
 
-  // Simulate a canonical managed executor process and matching lease.
+  // Simulate a canonical-looking lease held by a decoy process.
   {
     const identity = processIdentity(managedExecutor.pid);
     fs.writeFileSync(path.join(stateDir, 'executor.lock'), JSON.stringify({
@@ -137,14 +137,12 @@ try {
     // connected yet in this test, so it must still be false here.
     assert.equal(body.authoritative, false, 'authoritative must require a proven handshake, not just a lease file');
     const ready = await fetch(`${BR}/ready`);
-    if (body.executor.lease.ambiguous) {
-      assert.match(body.executor.lease.detail, /topology is absent or competing/);
-      assert.equal(ready.status, 503, 'a competing executor topology must fail readiness closed');
-      console.log('PASS: /authority rejects the managed lease when another executor topology is present');
-    } else {
-      assert.equal(ready.status, 200, 'a canonical live managed lease should satisfy execution-authority readiness');
-      console.log('PASS: /authority reflects a canonical live managed executor lease and /ready admits it');
-    }
+    // This decoy runs node -e: its argv only mentions a managed-looking
+    // script and does not execute it. The lease must remain ambiguous.
+    assert.equal(body.executor.lease.ambiguous, true);
+    assert.match(body.executor.lease.detail, /lease holder is not a managed executor/);
+    assert.equal(ready.status, 503, 'an inert script argument must never establish execution authority');
+    console.log('PASS: canonical-looking lease held by node -e impostor rejected');
   }
 
   // Now also simulate a live break-glass marker -> ambiguous_conflict, /ready must fail (503).
