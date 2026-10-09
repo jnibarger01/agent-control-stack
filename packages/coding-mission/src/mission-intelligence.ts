@@ -110,7 +110,8 @@ export function previewMissionIntelligence(input: unknown): MissionIntelligenceP
       title: boundedString(raw.title, "title", 256),
       kind,
       dependsOn: dependencies,
-      payload: parseWorkUnitPayload(kind, raw.payload),
+      // Parsed arrays may alias untrusted proposal memory; bind the hash to a stable snapshot.
+      payload: structuredClone(parseWorkUnitPayload(kind, raw.payload)),
       verificationPolicy: raw.verificationPolicy as VerificationPolicy,
       requiredCapabilities: stringList(raw.requiredCapabilities, "requiredCapabilities", 32, 128).sort(),
       requestedPermissions: stringList(raw.requestedPermissions, "requestedPermissions", 32, 128).sort(),
@@ -144,7 +145,8 @@ export function previewMissionIntelligence(input: unknown): MissionIntelligenceP
     stages.push({ sequence: stages.length + 1, unitIds: ready });
     for (const id of ready) remaining.delete(id);
   }
-  units.sort((left, right) => left.unitId.localeCompare(right.unitId));
+  // Code-point ordering is independent of host ICU locale.
+  units.sort((left, right) => (left.unitId < right.unitId ? -1 : left.unitId > right.unitId ? 1 : 0));
   return {
     schemaVersion: MISSION_INTELLIGENCE_SCHEMA_VERSION,
     objective,

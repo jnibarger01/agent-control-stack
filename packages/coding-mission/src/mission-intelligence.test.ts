@@ -64,4 +64,29 @@ describe("mission intelligence proposal preview", () => {
     expect(preview.units[0]!.title).toBe("diagnose");
     expect(preview.units[0]!.dependsOn).toEqual([]);
   });
+
+  it("deep-copies command and workspace payload arrays before computing the plan hash", () => {
+    const start = proposal([
+      { ...unit("code"), kind: "coding", payload: { files: ["src/safe.ts"] } },
+      { ...unit("shell"), kind: "shell", payload: { argv: ["git", "status"] } },
+      { ...unit("ui"), kind: "cua", payload: { objective: "inspect", allowedApplications: ["browser"] } }
+    ]);
+    const result = previewMissionIntelligence(start);
+    (start.units[0]!.payload as { files: string[] }).files.push("secret.txt");
+    (start.units[1]!.payload as { argv: string[] }).argv.push("--output=secret.txt");
+    (start.units[2]!.payload as { allowedApplications: string[] }).allowedApplications.push("terminal");
+    expect(result.units.find((x) => x.unitId === "code")?.payload).toEqual({ kind: "coding", files: ["src/safe.ts"] });
+    expect(result.units.find((x) => x.unitId === "shell")?.payload).toEqual({ kind: "shell", argv: ["git", "status"] });
+    expect(result.units.find((x) => x.unitId === "ui")?.payload).toEqual({
+      kind: "cua",
+      objective: "inspect",
+      allowedApplications: ["browser"]
+    });
+    expect(result.planHash).not.toBe(previewMissionIntelligence(start).planHash);
+  });
+
+  it("orders mixed-case unit IDs by code point rather than environment locale", () => {
+    const result = previewMissionIntelligence(proposal([unit("a"), unit("Z"), unit("A"), unit("z")]));
+    expect(result.units.map((item) => item.unitId)).toEqual(["A", "Z", "a", "z"]);
+  });
 });
