@@ -68,9 +68,22 @@ The execution contract deliberately does **not** add swarm delegation or CUA. Th
 
 ## Not yet in this runtime
 
-Mission authority envelopes and narrowed child authority, checkpoint/resume, `request_child_work`, CUA, and recovery
-policy are separate slices. Today the legacy coding path has no budget row (uncapped) and the `general` kind has no
-driver of its own.
+Checkpoint/resume, `request_child_work`, CUA, and recovery policy are separate slices. Today the legacy coding path
+has no budget row (uncapped) and the `general` kind has no driver of its own.
+
+## Child authority narrowing (primitive only)
+
+The mission authority envelope is the existing human-issued `AutonomousAuthorityDefinition` (migration 047): resource
+scope, tool classes, privilege ceiling, expiry, limits and executing actor. `authority-narrowing.ts` in
+`packages/work-items` adds the pure check that delegated work must satisfy: `authorityNarrowingViolations(parent,
+child, now)` lists every dimension on which a requested child definition is broader than its parent, and
+`assertAuthorityNarrowed` throws `authority_escalation` (or `authority_expired` for an expired parent). A broader
+request is refused, never trimmed to fit. A child must name the same executing actor and keep a pinned manifest hash;
+delegating to a different actor is deliberately not allowed yet and needs its own decision.
+
+Status: written and unit tested only. Nothing calls it yet. It issues no grant, persists nothing and does not change
+how any lane authorizes work; `request_child_work` is the intended first caller and must also persist the narrowed
+definition and its parent grant reference before a child unit can be admitted.
 
 ## Verification gate
 
