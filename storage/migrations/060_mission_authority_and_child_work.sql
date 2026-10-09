@@ -78,17 +78,40 @@ BEGIN SELECT RAISE(ABORT, 'work_unit_reductions: append-only'); END;
 CREATE TRIGGER work_unit_reductions_no_delete BEFORE DELETE ON work_unit_reductions
 BEGIN SELECT RAISE(ABORT, 'work_unit_reductions: append-only'); END;
 
--- A unit that has authority-managed child work (children admitted through request_child_work, which have a
--- work_unit_authority row) cannot complete or enter verification until those children have been reduced. The guard lives
--- on the table so it covers every completion path: the legacy store, the execution ledger and the verification gate.
--- Plain parent/child units added without request_child_work are not reducible, so they are deliberately not gated.
+-- When a parent's ownership advances (a retry or a released claim), the children its previous claim admitted no longer
+-- count: they are cancelled where unfinished, but a child that already succeeded is left intact for the audit trail. This
+-- marker records that such a child is superseded, so neither the reducer nor the completion guard below counts it.
+CREATE TABLE work_unit_child_supersessions (
+  mission_id TEXT NOT NULL,
+  child_unit_id TEXT NOT NULL,
+  parent_unit_id TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (mission_id, child_unit_id),
+  FOREIGN KEY (mission_id, child_unit_id) REFERENCES coding_operations (mission_id, operation_id)
+);
+CREATE TRIGGER work_unit_child_supersessions_no_update BEFORE UPDATE ON work_unit_child_supersessions
+BEGIN SELECT RAISE(ABORT, 'work_unit_child_supersessions: append-only'); END;
+CREATE TRIGGER work_unit_child_supersessions_no_delete BEFORE DELETE ON work_unit_child_supersessions
+BEGIN SELECT RAISE(ABORT, 'work_unit_child_supersessions: append-only'); END;
+
+-- A unit that has current authority-managed child work (children admitted through request_child_work, which have a
+-- work_unit_authority row and are not superseded) cannot complete or enter verification until those children have been
+-- reduced. The guard lives on the table so it covers every completion path: the legacy store, the execution ledger and
+-- the verification gate. Plain parent/child units added without request_child_work are not reducible, so they are
+-- deliberately not gated.
 CREATE TRIGGER work_unit_children_must_be_reduced
 BEFORE UPDATE OF status ON coding_operations
 WHEN NEW.status IN ('succeeded', 'verifying')
   AND OLD.status <> NEW.status
   AND EXISTS (
     SELECT 1 FROM work_unit_authority AS managed
-    WHERE managed.mission_id = NEW.mission_id AND managed.parent_unit_id = NEW.operation_id
+    WHERE managed.mission_id = NEW.mission_id
+      AND managed.parent_unit_id = NEW.operation_id
+      AND NOT EXISTS (
+        SELECT 1 FROM work_unit_child_supersessions AS gone
+        WHERE gone.mission_id = managed.mission_id AND gone.child_unit_id = managed.unit_id
+      )
   )
   AND NOT EXISTS (
     SELECT 1 FROM work_unit_reductions AS reduction

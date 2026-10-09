@@ -589,7 +589,15 @@ describe("reduction", () => {
     const other = setup({ budget: { maxChildWorkUnits: 8 } });
     other.ask([child("a"), child("b")]);
     finish(other, { a: "h1", b: "fail" });
-    expect(reduce(other, "select", "b")).toMatchObject({ status: "failed" });
+    // A bad selection is rejected, not recorded, so it cannot block the legitimate one later.
+    for (const bad of ["b", "ghost", undefined, 7 as never]) {
+      expect(() => reduce(other, "select", bad as never)).toThrow(
+        expect.objectContaining({ code: "reduction_invalid" })
+      );
+    }
+    expect(other.store.db.prepare("SELECT COUNT(*) AS n FROM work_unit_reductions").get()).toEqual({ n: 0 });
+    expect(reduce(other, "select", "a")).toMatchObject({ status: "reduced", selectedUnitId: "a", recorded: true });
+    expect(() => reduce(other, "bogus" as never)).toThrow(expect.objectContaining({ code: "reduction_invalid" }));
   });
 
   it("takes a strict majority only, and calls a tie inconclusive instead of breaking it", () => {
@@ -1341,5 +1349,93 @@ describe("review round four", () => {
     ) as Array<{ unitId: string }>;
     // "B" (0x42) sorts before "a" (0x61) by code unit; locale collation would put "a" first.
     expect(kids.map((kid) => kid.unitId)).toEqual(["B", "a"]);
+  });
+});
+
+describe("review round five", () => {
+  it("treats a revocation whose projection does not match its audit event as revoked (fails closed)", () => {
+    const { store, ask } = setup();
+    store.db.exec("PRAGMA foreign_keys = OFF");
+    store.db.exec(
+      "CREATE TABLE IF NOT EXISTS autonomous_authority_revocations (grant_id TEXT PRIMARY KEY, actor_id TEXT, reason TEXT, audit_event_id TEXT)"
+    );
+    store.db.exec("INSERT INTO autonomous_authority_revocations VALUES ('grant-1', 'human-1', 'x', 'evt-missing')");
+    expect(denied(ask([child("c")]))).toEqual(["grant_revoked"]);
+  });
+
+  it("redacts credential-shaped child ids and work types in the request event", () => {
+    const { ask, store } = setup();
+    const fake = ["sk", "live", "0123456789abcdefghijklmnop"].join("-");
+    ask([
+      { ...child("x"), unitId: fake },
+      { ...child("y"), workType: fake as never }
+    ]);
+    const events = JSON.stringify(store.events("m1"));
+    expect(events).toContain("child.requested");
+    expect(events).not.toContain(fake);
+  });
+
+  it("never stores an approver identity that was not verified, even when the policy does not need one", () => {
+    const store = new CodingMissionStore(":memory:");
+    store.createGeneral({ missionId: "m1", summary: "s", now: T0 });
+    const h = harness();
+    h.grants.grants.set("grant-1", makeGrant("m1"));
+    const ledger = new MissionAuthorityLedger(store, h.options);
+    expect(() =>
+      ledger.grantMissionAuthority({ missionId: "m1", grantId: "grant-1", policyApprovedBy: "forged-operator" })
+    ).toThrow(/verified operator/);
+    expect(ledger.missionAuthority("m1")).toBeUndefined();
+    expect(
+      ledger.grantMissionAuthority({ missionId: "m1", grantId: "grant-1", policyApprovedBy: "operator-1" })
+    ).toMatchObject({ policyApprovedBy: "operator-1" });
+  });
+
+  it("audits an attempt to rebind a mission to a different grant", () => {
+    const { ledger, h, store } = setup();
+    h.grants.grants.set("grant-2", makeGrant("m1", { ...ROOT, maximumPrivileges: ["fs.read"] }, "grant-2"));
+    expect(() => ledger.grantMissionAuthority({ missionId: "m1", grantId: "grant-2" })).toThrow(
+      expect.objectContaining({ code: "mission_authority_exists" })
+    );
+    const denials = store
+      .events("m1")
+      .filter((event) => event.name === "authority.denied")
+      .map((event) => (event.body as { reason: string }).reason);
+    expect(denials).toContain("rebind_refused");
+    expect(ledger.missionAuthority("m1")?.grantId).toBe("grant-1");
+  });
+
+  it("does not count, or block on, children superseded by a new parent claim", () => {
+    const { ask, store, ledger, claim } = setup({
+      budget: { ...DEFAULT_DELEGATION_BUDGET, maxRetriesPerWorkUnit: 3, maxChildWorkUnits: 8 }
+    });
+    ask([child("a")]);
+    store.releaseReadyUnits("m1", at(1500));
+    store.claimUnit("m1", "a", { token: "ta", workerId: "w", route: {}, claimedAt: at(1600) });
+    store.completeOperation("m1", "a", "ta", { resultHash: "h", files: [] });
+    store.failUnit("m1", "root", claim.token, { category: "timeout", retryable: true, now: at(1700) });
+    expect(store.retryUnit("m1", "root", at(1800))).toMatchObject({ ok: true });
+    // The succeeded child stays as history, but is marked superseded.
+    expect(store.workUnits("m1").find((unit) => unit.unitId === "a")?.status).toBe("succeeded");
+    expect(store.db.prepare("SELECT child_unit_id FROM work_unit_child_supersessions").all()).toEqual([
+      { child_unit_id: "a" }
+    ]);
+    store.claimUnit("m1", "root", { token: "second", workerId: "lead-worker", route: {}, claimedAt: at(1900) });
+    // The new claim has no children of its own, so it can complete without being stuck behind the old one.
+    store.completeOperation("m1", "root", "second", { resultHash: "done", files: [] });
+    expect(store.workUnits("m1").find((unit) => unit.unitId === "root")?.status).toBe("succeeded");
+    void ledger;
+  });
+
+  it("leaves directly added descendants alone when a parent's claim advances", () => {
+    const { store, claim } = setup();
+    store.addWorkUnits(
+      "m1",
+      [{ unitId: "plain", kind: "agent", title: "p", parentUnitId: "root", payload: { role: "r", prompt: "p" } }],
+      at(1000)
+    );
+    store.failUnit("m1", "root", claim.token, { category: "timeout", retryable: true, now: at(1100) });
+    store.retryUnit("m1", "root", at(1200));
+    expect(store.workUnits("m1").find((unit) => unit.unitId === "plain")?.status).toBe("pending");
+    expect(store.db.prepare("SELECT COUNT(*) AS n FROM work_unit_child_supersessions").get()).toEqual({ n: 0 });
   });
 });

@@ -88,7 +88,8 @@ policy (which is not part of the grant) must match its own fingerprint, the live
 hash and definition, and a derived unit's definition must be a subset of its parent's (checked at the instant it was
 created) and bound to the parent hash and grant it claims. A derived unit whose parent has no authority row is accepted
 only if that parent is a verified root; a missing intermediate record is corruption, not a root. Each `requestChildWork`
-also rechecks that the backing grant has not been revoked and that the mission's execution inputs still hash to the
+also rechecks that the backing grant has not been revoked (through the canonical revocation reader, which checks the projection
+against its audit event; a mismatch counts as revoked) and that the mission's execution inputs still hash to the
 grant's `subjectInputHash` (`GrantReader.currentSubjectInputHash`; unavailable means refused), and that the claimant resolves (`resolveActor`) to the actor
 the grant was issued to, since a valid claim alone does not say the worker may exercise this authority. Any mismatch is
 `authority_integrity`, and the request is denied. The tables are append-only including against `INSERT OR REPLACE`
@@ -111,9 +112,11 @@ restart does not reset the caps.
   (known privileges, bounded integer TTL, no unknown fields) before it is persisted. `verificationPolicy` and titles are
   validated before insertion so a bad value is a durable denial, not a database error.
 - Children are bound to the parent's claim by a non-reusable fence (a hash of the claim token), not by attempt number,
-  because attempt numbers repeat after a released claim. When the parent is retried or its claim released, its unfinished
-  descendants are cancelled (in-flight ones as uncertain) and a reduction only counts children admitted under the
-  current claim. Once a reduction is recorded no more children are admitted. A unit with authority-managed children
+  because attempt numbers repeat after a released claim. When the parent is retried or its claim released, the children its previous claim admitted through
+  `requestChildWork` are marked superseded (`work_unit_child_supersessions`) and their unfinished descendants are
+  cancelled (in-flight ones as uncertain). A superseded child that already succeeded stays as history but neither the
+  reducer nor the completion guard counts it, so the new claim is not stuck behind it. Units added directly, without an
+  authority row, belong to no claim and are left alone. Once a reduction is recorded no more children are admitted. A unit with authority-managed children
   cannot move to `succeeded` or `verifying` until they are reduced; that guard is a trigger on the table, so it covers the
   execution ledger and the verification gate as well as the legacy store. Plain parent/child units that were not admitted
   through `requestChildWork` are not reducible and are not gated.
@@ -134,7 +137,8 @@ restart does not reset the caps.
 revive (only final failures such as `policy_denied` are left), and reports in-flight ones as uncertain. `reduceChildren`
 (`all_succeeded`, `select`, `majority_result`) is deterministic (ordered by child id, not finish time), treats a tie as
 `inconclusive`, and is recorded once with an integrity fingerprint that is verified before a stored reduction is returned.
-It waits for any child still parked as `retryable`, and once recorded `retryUnit` refuses further retries beneath that
+The request is validated before the write-once mutation: an unknown strategy, or `select` without the id of a
+succeeded child, is rejected and nothing is recorded. It waits for any child still parked as `retryable`, and once recorded `retryUnit` refuses further retries beneath that
 parent, so the append-only result cannot go stale. Both operations require the parent's live claim or an authenticated
 operator, so a stale worker cannot cancel or decide for work owned by a newer claimant; refusals are durable
 `authority.denied` evidence, and `child.reduced` records the selected child and result hash.

@@ -32,6 +32,7 @@ export * from "./worker-identity.js";
 
 export * from "./change-set-operation-permit.js";
 export * from "./autonomous-authority.js";
+export { readAutonomousAuthorityRevocation } from "./autonomous-authority-store.js";
 export * from "./authority-narrowing.js";
 
 export * from "./change-set-progress.js";

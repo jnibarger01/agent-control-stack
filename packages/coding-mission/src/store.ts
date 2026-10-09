@@ -1136,29 +1136,41 @@ export class CodingMissionStore {
   }
 
   /**
-   * When a parent's ownership advances (a retry, or a released claim), work its previous attempt spawned no longer has a
-   * valid owner. Unfinished descendants are cancelled, and in-flight ones are reported as uncertain, so stale-attempt work
-   * can never feed the new attempt's result.
+   * When a parent's ownership advances (a retry, or a released claim), the work its previous claim admitted through
+   * request_child_work no longer has a valid owner. Those children (and their own authority-managed descendants) are
+   * marked superseded, and unfinished ones are cancelled (in-flight ones as uncertain), so stale-claim work can never feed
+   * the new claim's result. Units that were added directly, without an authority row, belong to nobody's claim and are
+   * left alone.
    */
   private cancelStaleDescendants(missionId: string, parentUnitId: string, reason: string, now: string): void {
-    const rows = this.unitRows(missionId);
+    const edges = this.db
+      .prepare("SELECT unit_id, parent_unit_id FROM work_unit_authority WHERE mission_id = ?")
+      .all(missionId) as Array<{ unit_id: string; parent_unit_id: string | null }>;
     const stale = new Set<string>();
     let grew = true;
     while (grew) {
       grew = false;
-      for (const row of rows) {
+      for (const edge of edges) {
         if (
-          row.parent_unit_id &&
-          (row.parent_unit_id === parentUnitId || stale.has(row.parent_unit_id)) &&
-          !stale.has(row.operation_id)
+          edge.parent_unit_id &&
+          (edge.parent_unit_id === parentUnitId || stale.has(edge.parent_unit_id)) &&
+          !stale.has(edge.unit_id)
         ) {
-          stale.add(row.operation_id);
+          stale.add(edge.unit_id);
           grew = true;
         }
       }
     }
+    const rows = this.unitRows(missionId);
     for (const row of rows) {
-      if (!stale.has(row.operation_id) || row.status === "succeeded" || row.status === "cancelled") continue;
+      if (!stale.has(row.operation_id)) continue;
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO work_unit_child_supersessions (mission_id, child_unit_id, parent_unit_id, reason, created_at)
+           VALUES (?, ?, ?, ?, ?)`
+        )
+        .run(missionId, row.operation_id, row.parent_unit_id ?? parentUnitId, reason, now);
+      if (row.status === "succeeded" || row.status === "cancelled") continue;
       if (row.status === "failed" && row.failure_category && NON_RETRYABLE_FAILURES.has(row.failure_category)) continue;
       const inFlight = (IN_FLIGHT_WORK_UNIT_STATUSES as readonly string[]).includes(row.status);
       this.db

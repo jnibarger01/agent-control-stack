@@ -11,6 +11,7 @@ import {
   autonomousAuthorityCoreSchema,
   autonomousAuthorityHash,
   changeSetPrivilegeSchema,
+  readAutonomousAuthorityRevocation,
   type AutonomousAuthorityGrant
 } from "@agent-control-stack/work-items";
 import {
@@ -301,6 +302,14 @@ export class MissionAuthorityLedger {
       } catch {
         return refuse("mission_authority_invalid", "mission policy is not valid", "policy_invalid");
       }
+      // An approver identity is only ever stored once it has been verified, whether or not the policy needs one.
+      if (input.policyApprovedBy !== undefined && !this.options.verifyOperator(input.policyApprovedBy)) {
+        return refuse(
+          "mission_authority_unverified",
+          "the policy approver is not a verified operator",
+          "policy_not_approved"
+        );
+      }
       if (policy.allowPrivilegedChildren === true) {
         if (!input.policyApprovedBy || !this.options.verifyOperator(input.policyApprovedBy)) {
           return refuse(
@@ -320,9 +329,10 @@ export class MissionAuthorityLedger {
         ) {
           return existing;
         }
-        throw new ControlStackError(
+        return refuse(
           "mission_authority_exists",
-          "mission authority is write-once and cannot be widened"
+          "mission authority is write-once and cannot be widened",
+          "rebind_refused"
         );
       }
       this.store.db
@@ -381,11 +391,13 @@ export class MissionAuthorityLedger {
     return parent.claimedAt !== undefined && Date.parse(now) - Date.parse(parent.claimedAt) <= ttl;
   }
 
+  /** Uses the canonical revocation reader, which checks the projection against its audit event. A mismatch counts as revoked. */
   private grantRevoked(grantId: string): boolean {
-    return (
-      this.store.db.prepare("SELECT 1 FROM autonomous_authority_revocations WHERE grant_id = ?").get(grantId) !==
-      undefined
-    );
+    try {
+      return readAutonomousAuthorityRevocation(this.store.db, grantId);
+    } catch {
+      return true;
+    }
   }
 
   private integrity(what: string, ok: boolean): void {
@@ -512,8 +524,8 @@ export class MissionAuthorityLedger {
             requester,
             // Untyped callers: the audit entry itself must never throw on a malformed child.
             children: (Array.isArray(request.children) ? request.children : []).slice(0, 16).map((child) => ({
-              unitId: isRecord(child) ? String(child.unitId).slice(0, 64) : "invalid",
-              workType: isRecord(child) ? String(child.workType).slice(0, 32) : "invalid"
+              unitId: isRecord(child) ? durableReasons([String(child.unitId).slice(0, 64)])[0] : "invalid",
+              workType: isRecord(child) ? durableReasons([String(child.workType).slice(0, 32)])[0] : "invalid"
             }))
           },
           nowIso
@@ -916,6 +928,9 @@ export class MissionAuthorityLedger {
         );
         return undefined;
       }
+      if (!(["all_succeeded", "select", "majority_result"] as const).includes(input.strategy)) {
+        throw new ControlStackError("reduction_invalid", "unknown reduction strategy");
+      }
       const existing = this.store.db
         .prepare("SELECT * FROM work_unit_reductions WHERE mission_id = ? AND parent_unit_id = ?")
         .get(input.missionId, input.parentUnitId) as Record<string, string | null> | undefined;
@@ -949,10 +964,18 @@ export class MissionAuthorityLedger {
             .all(input.missionId, input.parentUnitId) as Array<{ unit_id: string; parent_claim_fence: string }>
         ).map((row) => [row.unit_id, row.parent_claim_fence])
       );
+      const superseded = new Set(
+        (
+          this.store.db
+            .prepare("SELECT child_unit_id FROM work_unit_child_supersessions WHERE mission_id = ?")
+            .all(input.missionId) as Array<{ child_unit_id: string }>
+        ).map((row) => row.child_unit_id)
+      );
       const children = allUnits
         .filter(
           (unit) =>
             unit.parentUnitId === input.parentUnitId &&
+            !superseded.has(unit.unitId) &&
             currentFence.get(unit.unitId) === (parent.claimToken ? claimFenceOf(parent.claimToken) : undefined)
         )
         .sort((left, right) => byCodeUnit(left.unitId, right.unitId));
@@ -966,6 +989,16 @@ export class MissionAuthorityLedger {
       if (waitingOn.length > 0) return { status: "incomplete" as const, waitingOn };
 
       const succeeded = children.filter((unit) => unit.status === "succeeded" && unit.resultHash);
+      if (input.strategy === "select") {
+        // A bad selection must be rejected, not recorded: the reduction is write-once, so a mistaken one would block the
+        // legitimate selection forever.
+        if (
+          typeof input.selectedUnitId !== "string" ||
+          !succeeded.some((unit) => unit.unitId === input.selectedUnitId)
+        ) {
+          throw new ControlStackError("reduction_invalid", "select needs the id of a succeeded child");
+        }
+      }
       let outcome: "reduced" | "failed" | "inconclusive" = "failed";
       let selected: string | undefined;
       let resultHash: string | undefined;

@@ -93,6 +93,17 @@ describe("migration 060: mission authority and child work", () => {
     db.close();
   });
 
+  it("keeps the supersession marker append-only and foreign-keyed", () => {
+    const db = migrated();
+    db.exec("INSERT INTO work_unit_child_supersessions VALUES ('m1', 'u1', 'p', 'parent_retried', 't')");
+    expect(() => db.exec("UPDATE work_unit_child_supersessions SET reason = 'x'")).toThrow(/append-only/);
+    expect(() => db.exec("DELETE FROM work_unit_child_supersessions")).toThrow(/append-only/);
+    expect(() => db.exec("INSERT INTO work_unit_child_supersessions VALUES ('m1', 'ghost', 'p', 'r', 't')")).toThrow(
+      /FOREIGN KEY/
+    );
+    db.close();
+  });
+
   it("requires an approver and a reason, and constrains the reduction vocabulary", () => {
     const db = migrated();
     expect(() =>
