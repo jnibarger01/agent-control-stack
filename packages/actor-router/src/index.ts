@@ -161,6 +161,7 @@ export {
   DEFAULT_STRATEGY_CHOOSER_TIMEOUT_MS,
   MAX_ROUTE_PARALLELISM,
   ROUTE_ENRICHMENT_VERSION,
+  RouteStrategyRejectedError,
   candidateStrategies,
   deriveRouteEnrichment,
   executorClassFor,
