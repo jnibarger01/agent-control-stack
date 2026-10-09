@@ -39,9 +39,10 @@ be retried. `retryUnit` refuses `unknown`/`conflict` units (their external effec
 ## Budgets
 
 `MissionBudget` caps wall clock, tool calls, work units, parallel units, retries per unit, child depth, child units,
-tokens and spend. Limits are written once (trigger-enforced); a missing limit means uncapped, never zero. ACS measures
-work units, parallelism, retries, depth, children and wall clock from durable rows, inside the same transaction as the
-action. Tool calls, tokens and spend are worker-reported: a capped metric that was never reported is returned as
+tokens and spend. Limits must be non-negative safe integers in their stored units; dollar amounts are validated
+before conversion to micro-dollars. Limits are written once (trigger-enforced); a missing limit means uncapped, never
+zero. ACS measures work units, parallelism, retries, depth, children and wall clock from durable rows, inside the same
+transaction as the action. Tool calls, tokens and spend are worker-reported: a capped metric that was never reported is returned as
 `unaccounted`, not as zero. A refusal is an explicit `{ ok: false, outcome: "budget_exhausted", decision }` result and
 a `budget.exhausted` event. `DEFAULT_DELEGATION_BUDGET` (depth 2, parallel 4, children 8, retries 2) applies only when a
 mission asks for it, and policy can override any value.
@@ -79,7 +80,14 @@ Verification criteria are admitted before the first execution attempt and persis
 A first claim is refused when a non-`none` policy has no rubric. Verified dispatch also requires the actual implementer
 engine/provider identity, which is persisted separately from the worker owner id. Databases upgraded with already
 in-flight verified units are quarantined fail-closed; admitting a rubric explicitly resets only that quarantined unit
-for a fresh attempt.
+for a fresh attempt. Terminal units (`succeeded`, `cancelled`) are not in flight: migration 059 restores any terminal
+unit that 057 rewrote to `failed`, provided it is unchanged since 057. It also drops that unit's quarantine row and
+records a `verification.migration_057_terminal_restored` event.
+
+The gate derives the implementer engine identity from the hashed durable dispatch. It recomputes `dispatch_hash` from
+`dispatch_json` and requires the dispatch's attempt, worker, lane, claim and engine bindings to match the attempt row
+before any verifier runs. A relabelled `implementer_engine_id` column therefore fails closed instead of enabling
+self-verification.
 
 The gate derives the unit attempt, implementer engine identity, execution-attempt id, result hash, execution-report hash,
 and verifier evidence from durable execution state. Verifier evidence is reconstructed from the persisted result and

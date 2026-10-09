@@ -32,7 +32,21 @@ export const EXCEPTIONS = [
 
 const LEVELS = ['info', 'low', 'moderate', 'high', 'critical'];
 const FAIL_AT = LEVELS.indexOf('high');
-const isFailing = (severity) => LEVELS.indexOf(severity) >= FAIL_AT;
+// An unknown or missing severity is not trusted to be low.
+const isFailing = (severity) => LEVELS.indexOf(severity) === -1 || LEVELS.indexOf(severity) >= FAIL_AT;
+
+/** Returns a description when `report` cannot be a genuine npm audit report, else undefined. */
+export function reportShapeProblem(report) {
+  if (report === null || typeof report !== 'object' || Array.isArray(report)) return 'npm audit output is not a JSON object';
+  if (typeof report.auditReportVersion !== 'number') return 'npm audit output has no auditReportVersion; refusing to treat it as clean';
+  if (report.vulnerabilities === null || typeof report.vulnerabilities !== 'object' || Array.isArray(report.vulnerabilities)) {
+    return 'npm audit output has no vulnerabilities object; refusing to treat it as clean';
+  }
+  if (report.metadata === null || typeof report.metadata !== 'object' || Array.isArray(report.metadata)) {
+    return 'npm audit output has no metadata object; refusing to treat it as clean';
+  }
+  return undefined;
+}
 
 /** Every advisory behind `name`, following dependency chains (e.g. mcpb -> node-forge). */
 function advisoriesFor(report, name, seen = new Set()) {
@@ -62,6 +76,11 @@ export function patchedVersions(versions, range, semver) {
 export function evaluate(report, probes) {
   const problems = [];
   const accepted = new Map();
+
+  // Fail closed on anything that is not a real `npm audit --json` report. `{}` and other valid-but-empty JSON
+  // would otherwise read as "no vulnerabilities".
+  const shapeProblem = reportShapeProblem(report);
+  if (shapeProblem) return { problems: [shapeProblem], accepted: [], malformed: true };
 
   for (const [name, vulnerability] of Object.entries(report.vulnerabilities ?? {})) {
     if (!isFailing(vulnerability.severity)) continue;
@@ -113,12 +132,16 @@ function npm(args) {
 
 function main() {
   const report = JSON.parse(npm(['audit', '--json']));
+  if (report === null || typeof report !== 'object' || Array.isArray(report)) {
+    console.error('audit-gate: npm audit output is not a JSON object');
+    process.exit(2);
+  }
   if (report.error) {
     console.error(`audit-gate: npm audit could not run: ${report.error.summary ?? JSON.stringify(report.error)}`);
     process.exit(2);
   }
   const semver = createRequire(import.meta.url)('semver');
-  const { problems, accepted } = evaluate(report, {
+  const { problems, accepted, malformed } = evaluate(report, {
     semver,
     inProduction: (pkg) => Object.keys(JSON.parse(npm(['ls', pkg, '--omit=dev', '--json'])).dependencies ?? {}).length > 0,
     publishedVersions: (pkg) => {
@@ -128,6 +151,11 @@ function main() {
   });
   for (const exception of accepted) {
     console.log(`audit-gate: accepted ${exception.advisory} (${exception.package}): ${exception.reason}`);
+  }
+  if (malformed) {
+    console.error('audit-gate: FAILED (malformed npm audit report)');
+    for (const problem of problems) console.error(`  - ${problem}`);
+    process.exit(2);
   }
   if (problems.length > 0) {
     console.error('audit-gate: FAILED');
