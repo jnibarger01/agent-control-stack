@@ -50,6 +50,8 @@ import { createProcessRegistry } from './processes.js';
 import { createSearchRegistry } from './search.js';
 import { invokePrivilegedHelper, privilegedHelperAvailable } from './privileged-client.js';
 import { JC_TOOLS } from './tool-descriptors.js';
+import { JC_PROVIDER_REGISTRY, assertJcProviderCoverage } from './providers.js';
+import { resolveJcAuthorizer } from './authorizers.js';
 export { JC_TOOLS };
 import { VERSION } from '../version.js';
 
@@ -129,6 +131,7 @@ export const JC_STANDALONE_TOOL_NAMES: readonly string[] = Object.freeze(
 
 export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDeps = {}): Server {
   assertToolPolicyCoverage();
+  assertJcProviderCoverage(JC_TOOLS.map((tool) => tool.name));
   const fetchImpl = deps.fetchImpl ?? fetch;
   const invokeHelper = deps.invokeHelper ?? invokePrivilegedHelper;
   const helperAvailable = deps.helperAvailable ?? privilegedHelperAvailable;
@@ -163,7 +166,8 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
     const capability = (request.params._meta as Record<string, unknown> | undefined)?.acsCapability;
     if (!Object.prototype.hasOwnProperty.call(JC_TOOL_POLICIES, name)) return fail('unknown_tool', `unknown tool: ${name}`);
-    if (mode === 'standalone' && !jcStandaloneToolAllowed(name)) {
+    const effectiveAuthorizer = resolveJcAuthorizer(name, mode);
+    if (effectiveAuthorizer === 'refused') {
       // No capability exists in standalone mode, so nothing that writes,
       // executes or needs approval may run. Refused before any handler.
       recordTrace(trace, name, args, { ok: false, code: 'JC_STANDALONE_TOOL_REFUSED' });
@@ -175,7 +179,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     }
 
     let authorization: JcAuthorization | undefined;
-    if (verifier && name !== 'privileged_exec') {
+    if (effectiveAuthorizer === 'acs-capability' && verifier && name !== 'privileged_exec') {
       try {
         authorization = verifier.verify(name, args, capability);
       } catch (error) {
@@ -195,6 +199,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     }
     const meta = {
       jaceCommanderMode: mode,
+      effectiveAuthorizer,
       acsAuthorization: authorization
         ? { ...authorization, decision: 'granted' }
         : { decision: name === 'privileged_exec' ? 'delegated-to-privileged-helper' : 'not-required' },
@@ -302,6 +307,10 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
         return { configured: true, reachable: false, code: error instanceof IntegrationError ? error.code : 'error' };
       }
     };
+    const acsHealth = await probe(`${config.acsUrl}/readyz`);
+    const swarmHealth = await probe(`${config.swarmUrl}/api/v1/health`, swarmToken);
+    const visualizerHealth = await probe(config.visualizerUrl ? `${config.visualizerUrl}/healthz` : undefined);
+    const privilegedAvailable = await helperAvailable(helperOptions);
     return {
       server: 'jace-commander',
       version: VERSION,
@@ -311,11 +320,22 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       managedAuthorization: mode === 'managed'
         ? { contract: 'acs.jc.v1', keyConfigured: Boolean(config.acsPublicKey && config.acsKeyId) }
         : { contract: 'none (standalone)', tools: 'read-only only', served: JC_STANDALONE_TOOL_NAMES.length },
-      acs: { url: config.acsUrl, ...(await probe(`${config.acsUrl}/health`)) },
-      swarm: { url: config.swarmUrl, ...(await probe(`${config.swarmUrl}/api/v1/health`, swarmToken)) },
-      visualizer: { url: config.visualizerUrl ?? null, ...(await probe(config.visualizerUrl ? `${config.visualizerUrl}/healthz` : undefined)) },
+      acs: { url: config.acsUrl, ...acsHealth },
+      swarm: { url: config.swarmUrl, ...swarmHealth },
+      visualizer: { url: config.visualizerUrl ?? null, ...visualizerHealth },
+      providers: {
+        'jc.fs': { tools: JC_PROVIDER_REGISTRY['jc.fs'].length, configured: config.fsRoots.length > 0 },
+        'jc.git': { tools: JC_PROVIDER_REGISTRY['jc.git'].length, configured: config.fsRoots.length > 0 },
+        'jc.process': { tools: JC_PROVIDER_REGISTRY['jc.process'].length, configured: config.fsRoots.length > 0 },
+        'jc.privileged': { tools: JC_PROVIDER_REGISTRY['jc.privileged'].length, available: privilegedAvailable },
+        'jc.meta': { tools: JC_PROVIDER_REGISTRY['jc.meta'].length, available: true },
+        'jc.integration': {
+          tools: JC_PROVIDER_REGISTRY['jc.integration'].length, swarm: swarmHealth, visualizer: visualizerHealth,
+        },
+        acs: { tools: JC_PROVIDER_REGISTRY.acs.length, health: acsHealth, required: mode === 'managed' },
+      },
       missionRouter: { dir: config.missionRouterDir },
-      privilegedHelper: { path: config.privilegedHelperPath, sudoNonInteractive: await helperAvailable(helperOptions) },
+      privilegedHelper: { path: config.privilegedHelperPath, sudoNonInteractive: privilegedAvailable },
     };
   }
 

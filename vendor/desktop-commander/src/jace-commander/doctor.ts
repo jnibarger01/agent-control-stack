@@ -101,7 +101,7 @@ export async function jcDoctor(config: JcConfig, runtime: DoctorRuntime): Promis
       : 'JC_FS_ROOTS empty; filesystem, process and git tools fail closed',
   });
   checks.push(bridgePathCheck());
-  checks.push(await probe(config.acsUrl ? `${config.acsUrl.replace(/\/$/, '')}/health` : undefined));
+  checks.push(await probe(config.acsUrl ? `${config.acsUrl.replace(/\/$/, '')}/readyz` : undefined));
   try {
     const version = (await exec('git', ['--version'], { timeout: 2000 })).stdout.trim();
     checks.push({ name: 'git backend', ok: true, required: false, detail: version });
@@ -141,7 +141,7 @@ export async function jcDoctor(config: JcConfig, runtime: DoctorRuntime): Promis
 }
 
 export async function jcPing(config: JcConfig): Promise<Record<string, unknown>> {
-  const acs = await probe(config.acsUrl ? `${config.acsUrl.replace(/\/$/, '')}/health` : undefined);
+  const acs = await probe(config.acsUrl ? `${config.acsUrl.replace(/\/$/, '')}/readyz` : undefined);
   return { ok: true, version: VERSION, time: new Date().toISOString(), acs };
 }
 
