@@ -143,6 +143,34 @@ try {
   } finally {
     try { impostor.kill('SIGTERM'); } catch { /* noop */ }
   }
+  // A foreign runtime can execute a shell script whose filename happens to be
+  // a legacy managed-release JS entrypoint. A matching argv[1] alone cannot
+  // establish canonical executor identity.
+  const legacy = path.join(tmp, 'releases', 'dc', 'legacy-spoof', 'dist', 'index.js');
+  fs.mkdirSync(path.dirname(legacy), { recursive: true });
+  fs.writeFileSync(legacy, 'while :; do sleep 1; done\\n');
+  const foreignRuntime = spawn('/bin/sh', [legacy], { stdio: 'ignore' });
+  try {
+    await sleep(200);
+    assert.equal(foreignRuntime.exitCode, null, 'foreign runtime must remain alive for the lease probe');
+    const bootId = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    const stat = fs.readFileSync(`/proc/${foreignRuntime.pid}/stat`, 'utf8');
+    const processStartTicks = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\\s+/)[19];
+    const now = Date.now();
+    fs.writeFileSync(path.join(lockDir, 'executor.lock'), JSON.stringify({
+      pid: foreignRuntime.pid, instanceId: 'foreign-' + foreignRuntime.pid,
+      acquiredAt: now, expiresAt: now + 60000,
+      hostname: os.hostname(), bootId, processStartTicks,
+    }));
+    const rejected = await fetch(`${BR}/ready`);
+    const authority = await (await fetch(`${BR}/authority`)).json();
+    assert.equal(rejected.status, 503, 'foreign runtime must never establish managed readiness');
+    assert.equal(authority.executor?.lease?.ambiguous, true);
+    assert.match(authority.executor.lease.detail, /lease holder is not a managed executor/);
+    console.log('PASS: foreign interpreter with a legacy release-layout script path rejected');
+  } finally {
+    try { foreignRuntime.kill('SIGTERM'); } catch { /* noop */ }
+  }
   console.log('PASS');
 } finally {
   try { bridge.kill('SIGTERM'); } catch { /* noop */ }

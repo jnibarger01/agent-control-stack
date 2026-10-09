@@ -892,7 +892,10 @@ function managedExecutorRoot(invocation) {
     if (DC_ARGS.slice(1).some((arg, i) => argv[i + 2] !== arg)) return undefined;
     return CONFIGURED_EXECUTOR_ROOT;
   }
-  // Legacy release-layout discovery still requires a real script position.
+  // Legacy release layouts must also run the configured executable. A shell,
+  // Python interpreter, or other runtime can accept a .js path as argv[1]
+  // without executing the managed Node entrypoint.
+  if (!CONFIGURED_EXECUTOR_BINARY || invocation.executable !== CONFIGURED_EXECUTOR_BINARY) return undefined;
   if (!path.isAbsolute(scriptArg)) return undefined;
   const parent = path.dirname(resolved);
   if (parent.split("/").includes("node_modules")) return undefined;
