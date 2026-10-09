@@ -9563,6 +9563,49 @@ function rowToActorRoutingDecision(row: RoutingDecisionRow): ActorRoutingDecisio
   });
 }
 
+const ROUTING_ENRICHMENT_COLUMNS = [
+  "executor_class",
+  "strategy",
+  "strategy_source",
+  "model_class",
+  "parallelism",
+  "verification_required",
+  "checkpoint_policy",
+  "retry_policy",
+  "reasons_json",
+  "deterministic_evidence_json",
+  "enrichment_version"
+] as const satisfies ReadonlyArray<keyof AuthoritativeEvidenceRow>;
+
+/** Columns every enriched write populates. The rest (model_class, checkpoint_policy, retry_policy) are optional. */
+const REQUIRED_ROUTING_ENRICHMENT_COLUMNS = [
+  "executor_class",
+  "strategy",
+  "strategy_source",
+  "parallelism",
+  "verification_required",
+  "reasons_json",
+  "deterministic_evidence_json",
+  "enrichment_version"
+] as const satisfies ReadonlyArray<keyof AuthoritativeEvidenceRow>;
+
+/**
+ * Only a row with every enrichment column NULL is a legacy (pre-056) row. A partially enriched row is corrupt
+ * and fails closed rather than being silently resumed as an unenriched route.
+ */
+function routingEnrichmentState(row: AuthoritativeEvidenceRow): "legacy" | "enriched" {
+  const present = ROUTING_ENRICHMENT_COLUMNS.filter((column) => row[column] !== null);
+  if (present.length === 0) return "legacy";
+  const missing = REQUIRED_ROUTING_ENRICHMENT_COLUMNS.filter((column) => row[column] === null);
+  if (missing.length > 0) {
+    throw new ControlStackError(
+      "routing_evidence_enrichment_incomplete",
+      `routing evidence ${row.decision_id} has partial enrichment; missing ${missing.join(", ")}`
+    );
+  }
+  return "enriched";
+}
+
 function rowToAuthoritativeRoutingEvidence(row: AuthoritativeEvidenceRow): AuthoritativeRoutingEvidence {
   return authoritativeRoutingEvidenceSchema.parse({
     decisionId: row.decision_id,
@@ -9586,7 +9629,7 @@ function rowToAuthoritativeRoutingEvidence(row: AuthoritativeEvidenceRow): Autho
     candidates: JSON.parse(row.candidate_json) as string[],
     constraints: JSON.parse(row.constraints_json) as Record<string, unknown>,
     normalizedDecision: JSON.parse(row.normalized_decision_json) as Record<string, unknown>,
-    ...(row.executor_class === null || row.strategy === null || row.strategy_source === null
+    ...(routingEnrichmentState(row) === "legacy"
       ? {}
       : {
           enrichment: {
@@ -9594,16 +9637,13 @@ function rowToAuthoritativeRoutingEvidence(row: AuthoritativeEvidenceRow): Autho
             strategy: row.strategy,
             strategySource: row.strategy_source,
             ...(row.model_class === null ? {} : { modelClass: row.model_class }),
-            parallelism: row.parallelism ?? 1,
+            parallelism: row.parallelism,
             verificationRequired: row.verification_required === 1,
             ...(row.checkpoint_policy === null ? {} : { checkpointPolicy: row.checkpoint_policy }),
             ...(row.retry_policy === null ? {} : { retryPolicy: row.retry_policy }),
-            reasons: row.reasons_json === null ? [] : (JSON.parse(row.reasons_json) as unknown[]),
-            deterministicEvidence:
-              row.deterministic_evidence_json === null
-                ? []
-                : (JSON.parse(row.deterministic_evidence_json) as unknown[]),
-            version: row.enrichment_version ?? "unversioned"
+            reasons: JSON.parse(row.reasons_json!) as unknown[],
+            deterministicEvidence: JSON.parse(row.deterministic_evidence_json!) as unknown[],
+            version: row.enrichment_version
           }
         }),
     ...(row.supersedes_decision_id === null ? {} : { supersedesDecisionId: row.supersedes_decision_id }),
