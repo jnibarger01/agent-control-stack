@@ -140,6 +140,21 @@ describe("mission time travel", () => {
     }
   });
 
+  it("projects canonical audit events with names longer than 256 characters", () => {
+    const ctx = fixture();
+    try {
+      ctx.store.recordSystemEvent({
+        name: "test." + "x".repeat(300),
+        attributes: { "work_item.id": ctx.work.id }
+      });
+      const result = readMissionTimeTravel(ctx.store, ctx.work.id);
+      expect(result.events.some((event) => event.name.length > 256)).toBe(true);
+      expect(verifyMissionTimeTravel(result, ctx.store)).toBe(true);
+    } finally {
+      ctx.close();
+    }
+  });
+
   it("rejects malformed fields even if a producer recomputes the public snapshot hash", () => {
     const ctx = fixture();
     try {
