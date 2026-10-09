@@ -64,6 +64,10 @@ export interface JcServerDeps {
   invokeHelper?: typeof invokePrivilegedHelper;
   helperAvailable?: typeof privilegedHelperAvailable;
   now?: () => number;
+  /** Test-only trust injection; production loads fixed root-owned paths. */
+  localPolicy?: ReturnType<typeof loadRootControlledJcPolicy>;
+  localSigner?: crypto.KeyObject;
+  localNonces?: LocalFileNonceStore;
 }
 
 
@@ -136,13 +140,13 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
   assertJcProviderCoverage(JC_TOOLS.map((tool) => tool.name));
   // Startup is fail-closed: no user-controlled policy or signing key can
   // authorize local writes, and no permissive fallback is applied.
-  const local = mode === 'local' ? loadRootControlledJcPolicy() : undefined;
+  const local = mode === 'local' ? (deps.localPolicy ?? loadRootControlledJcPolicy()) : undefined;
   const localSigner = mode === 'local'
-    ? crypto.createPublicKey(readRootControlledJcFile('/etc/jace-commander/approverd-public.pem', 8192))
+    ? (deps.localSigner ?? crypto.createPublicKey(readRootControlledJcFile('/etc/jace-commander/approverd-public.pem', 8192)))
     : undefined;
   if (localSigner && (localSigner.type !== 'public' || localSigner.asymmetricKeyType !== 'ed25519'))
     throw new Error('JC_LOCAL_SIGNER_INVALID');
-  const localNonces = mode === 'local' ? new LocalFileNonceStore(path.join(config.stateDir, 'local-nonces')) : undefined;
+  const localNonces = mode === 'local' ? (deps.localNonces ?? new LocalFileNonceStore(path.join(config.stateDir, 'local-nonces'))) : undefined;
   const fetchImpl = deps.fetchImpl ?? fetch;
   const invokeHelper = deps.invokeHelper ?? invokePrivilegedHelper;
   const helperAvailable = deps.helperAvailable ?? privilegedHelperAvailable;
