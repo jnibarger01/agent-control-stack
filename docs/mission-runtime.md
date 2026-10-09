@@ -39,9 +39,10 @@ be retried. `retryUnit` refuses `unknown`/`conflict` units (their external effec
 ## Budgets
 
 `MissionBudget` caps wall clock, tool calls, work units, parallel units, retries per unit, child depth, child units,
-tokens and spend. Limits are written once (trigger-enforced); a missing limit means uncapped, never zero. ACS measures
-work units, parallelism, retries, depth, children and wall clock from durable rows, inside the same transaction as the
-action. Tool calls, tokens and spend are worker-reported: a capped metric that was never reported is returned as
+tokens and spend. Limits must be non-negative safe integers in their stored units; dollar amounts are validated
+before conversion to micro-dollars. Limits are written once (trigger-enforced); a missing limit means uncapped, never
+zero. ACS measures work units, parallelism, retries, depth, children and wall clock from durable rows, inside the same
+transaction as the action. Tool calls, tokens and spend are worker-reported: a capped metric that was never reported is returned as
 `unaccounted`, not as zero. A refusal is an explicit `{ ok: false, outcome: "budget_exhausted", decision }` result and
 a `budget.exhausted` event. `DEFAULT_DELEGATION_BUDGET` (depth 2, parallel 4, children 8, retries 2) applies only when a
 mission asks for it, and policy can override any value.
