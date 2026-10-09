@@ -341,6 +341,10 @@ describe("requestChildWork: authority escalation fails closed", () => {
       const denied = f.missions.events(f.missionId).filter((e) => e.name === "child.denied");
       expect(denied).toHaveLength(1);
       expect(denied[0]!.body).toMatchObject({ reason: "authority_escalation" });
+      // A denial leaves no "requested/admitted" trail behind.
+      expect(f.missions.events(f.missionId).map((e) => e.name)).not.toEqual(
+        expect.arrayContaining(["child.requested"])
+      );
     });
   }
 

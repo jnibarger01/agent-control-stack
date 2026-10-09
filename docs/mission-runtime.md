@@ -99,7 +99,8 @@ refuse a child that outlives its parent. Agent-requested work therefore cannot c
    `child.denied` events;
 6. only then are the child unit and its authority row written together.
 
-Every denial returns an explicit outcome and records a `child.denied` event. Nothing is written on denial.
+Every denial returns an explicit outcome and records a `child.denied` event (request fields are length-bounded first). No
+unit and no authority row is written on denial.
 
 **Cross-actor execution.** A child may name a different executing actor only with an explicit `assignedActorId` equal to
 that actor. That actor must claim the child itself: `claimUnit` verifies, against the child's own persisted row, that the

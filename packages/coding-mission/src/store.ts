@@ -1886,12 +1886,14 @@ export class CodingMissionStore {
     return this.transaction(() => {
       const now = request.now;
       const deny = (outcome: ChildWorkDenial, violations?: string[]): ChildWorkResult => {
+        // Request fields are caller-controlled and may be malformed, so bound them before they reach the event log.
+        const clip = (value: unknown) => String(value).slice(0, 128);
         const body = {
-          parentUnitId: request.parentUnitId,
-          unitId: request.unitId,
-          requestId: request.requestId,
+          parentUnitId: clip(request.parentUnitId),
+          unitId: clip(request.unitId),
+          requestId: clip(request.requestId),
           reason: outcome,
-          ...(violations ? { violations } : {})
+          ...(violations ? { violations: violations.slice(0, 32).map((v) => v.slice(0, 256)) } : {})
         };
         if (this.get(request.missionId)) this.event(request.missionId, "child.denied", body, now);
         return { ok: false, outcome, ...(violations ? { violations } : {}) };
@@ -1986,19 +1988,6 @@ export class CodingMissionStore {
         return this.refuse(request.missionId, "request_child_work", decision, now);
       }
 
-      this.event(
-        request.missionId,
-        "child.requested",
-        {
-          parentUnitId: request.parentUnitId,
-          unitId: request.unitId,
-          requestId: request.requestId,
-          workType: request.workType,
-          executingActorId: definition.executingActorId,
-          definitionHash
-        },
-        now
-      );
       const created = this.insertWorkUnits(
         request.missionId,
         [
@@ -2042,6 +2031,19 @@ export class CodingMissionStore {
           hashClaimToken(request.claim.token),
           now
         );
+      this.event(
+        request.missionId,
+        "child.requested",
+        {
+          parentUnitId: request.parentUnitId,
+          unitId: request.unitId,
+          requestId: request.requestId,
+          workType: request.workType,
+          executingActorId: definition.executingActorId,
+          definitionHash
+        },
+        now
+      );
       this.event(
         request.missionId,
         "child.admitted",
