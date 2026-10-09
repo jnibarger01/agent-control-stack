@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { ControlStackError } from "@agent-control-stack/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { SqliteWorkItemStore } from "./index.js";
@@ -393,5 +394,90 @@ describe("authoritative routing persistence", () => {
         undefined as never
       )
     ).toThrowError(expect.objectContaining<Partial<ControlStackError>>({ code: "policy_gate_required" }));
+  });
+});
+
+describe("routing evidence enrichment on resume (migration 056)", () => {
+  let directory: string | undefined;
+  afterEach(() => {
+    if (directory) rmSync(directory, { recursive: true, force: true });
+    directory = undefined;
+  });
+
+  function withRawEvidence(columns: Record<string, string | number>) {
+    const f = fixture();
+    directory = f.directory;
+    const decision = f.store.recordActorRoutingDecision(
+      {
+        workItemId: f.workItem.id,
+        selectedActorId: "codex-cli",
+        eligible: ["codex-cli"],
+        excluded: {},
+        scores: { "codex-cli": 1 },
+        idempotencyKey: `raw.${f.workItem.id}`
+      },
+      via
+    );
+    const names = Object.keys(columns);
+    const db = new DatabaseSync(join(f.directory, "control.db"));
+    db.prepare(
+      `INSERT INTO actor_routing_evidence (decision_id, operation_id, decision, source, reason_code, router_version,
+         prompt_version, candidate_json, constraints_json, normalized_decision_json, created_at${names.map((n) => `, ${n}`).join("")})
+       VALUES (?, ?, 'route', 'nimble', 'nimble_choice', 'r1', 'p1', '["codex-cli"]', '{}', '{}', ?${names.map(() => ", ?").join("")})`
+    ).run(decision.decisionId, f.workItem.id, now.toISOString(), ...Object.values(columns));
+    db.close();
+    return { ...f, decisionId: decision.decisionId };
+  }
+
+  it("treats a fully NULL enrichment row as a legacy unenriched route", () => {
+    const f = withRawEvidence({});
+    const [evidence] = f.store.listAuthoritativeRoutingEvidence(f.workItem.id);
+    expect(evidence).toMatchObject({ decisionId: f.decisionId, decision: "route" });
+    expect(evidence?.enrichment).toBeUndefined();
+  });
+
+  it.each([
+    ["only strategy", { strategy: "single" }],
+    ["only an optional column", { checkpoint_policy: "per_logical_action" }],
+    [
+      "everything but the version",
+      {
+        executor_class: "coding",
+        strategy: "single",
+        strategy_source: "deterministic",
+        parallelism: 1,
+        verification_required: 0,
+        reasons_json: "[]",
+        deterministic_evidence_json: "[]"
+      }
+    ]
+  ])("fails closed on a partially enriched row (%s)", (_label, columns) => {
+    const f = withRawEvidence(columns);
+    for (const read of [
+      () => f.store.listAuthoritativeRoutingEvidence(f.workItem.id),
+      () => f.store.getLatestAuthoritativeRoutingEvidence(f.workItem.id)
+    ]) {
+      expect(read).toThrowError(
+        expect.objectContaining<Partial<ControlStackError>>({ code: "routing_evidence_enrichment_incomplete" })
+      );
+    }
+  });
+
+  it("reads a fully enriched row with optional columns NULL", () => {
+    const f = withRawEvidence({
+      executor_class: "coding",
+      strategy: "plan_execute",
+      strategy_source: "model",
+      parallelism: 1,
+      verification_required: 1,
+      reasons_json: "[]",
+      deterministic_evidence_json: "[]",
+      enrichment_version: "acs-route-enrichment@1"
+    });
+    expect(f.store.getLatestAuthoritativeRoutingEvidence(f.workItem.id)?.enrichment).toMatchObject({
+      strategy: "plan_execute",
+      verificationRequired: true,
+      version: "acs-route-enrichment@1"
+    });
   });
 });
