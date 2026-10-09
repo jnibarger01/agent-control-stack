@@ -60,6 +60,10 @@ export function managedModeFromEnv(env = process.env) {
  */
 export function jcModeFromEnv(env = process.env) {
   if (env.JC_ENABLED !== '1') return { enabled: false };
+  // Explicit local authority: OAuth remains required, but ACS issuance is
+  // neither queried nor implicitly required for JC-local invocations.
+  if (env.JC_AUTHORITY === 'local') return { enabled: true, mode: 'local' };
+  if (env.JC_AUTHORITY && env.JC_AUTHORITY !== 'managed') throw new Error('JC_AUTHORITY_INVALID');
   const acsGatewayUrl = (env.ACS_GATEWAY_URL || '').replace(/\/+$/, '');
   const acsGatewayToken = env.ACS_JC_GATEWAY_TOKEN || '';
   if (!acsGatewayUrl || !acsGatewayToken) {
@@ -70,6 +74,7 @@ export function jcModeFromEnv(env = process.env) {
   }
   return {
     enabled: true,
+    mode: 'managed',
     acsGatewayUrl,
     acsGatewayToken,
     issuePath: '/jc/capability/issue',
