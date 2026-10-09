@@ -52,9 +52,8 @@ import { invokePrivilegedHelper, privilegedHelperAvailable } from './privileged-
 import { JC_TOOLS } from './tool-descriptors.js';
 import { JC_PROVIDER_REGISTRY, assertJcProviderCoverage } from './providers.js';
 import { resolveJcAuthorizer } from './authorizers.js';
-import { loadRootControlledJcPolicy, riskClassForJcTool } from './local-policy.js';
+import { loadRootControlledJcPolicy, readRootControlledJcFile, riskClassForJcTool } from './local-policy.js';
 import { verifyJcLocalCapability, FileNonceStore as LocalFileNonceStore } from './local-capability.js';
-import fs from 'node:fs';
 export { JC_TOOLS };
 import { VERSION } from '../version.js';
 
@@ -139,7 +138,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
   // authorize local writes, and no permissive fallback is applied.
   const local = mode === 'local' ? loadRootControlledJcPolicy() : undefined;
   const localSigner = mode === 'local'
-    ? crypto.createPublicKey(fs.readFileSync('/etc/jace-commander/approverd-public.pem'))
+    ? crypto.createPublicKey(readRootControlledJcFile('/etc/jace-commander/approverd-public.pem', 8192))
     : undefined;
   if (localSigner && (localSigner.type !== 'public' || localSigner.asymmetricKeyType !== 'ed25519'))
     throw new Error('JC_LOCAL_SIGNER_INVALID');
