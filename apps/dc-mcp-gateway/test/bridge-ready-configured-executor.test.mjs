@@ -148,14 +148,14 @@ try {
   // establish canonical executor identity.
   const legacy = path.join(tmp, 'releases', 'dc', 'legacy-spoof', 'dist', 'index.js');
   fs.mkdirSync(path.dirname(legacy), { recursive: true });
-  fs.writeFileSync(legacy, 'while :; do sleep 1; done\\n');
+  fs.writeFileSync(legacy, 'while :; do sleep 1; done\n');
   const foreignRuntime = spawn('/bin/sh', [legacy], { stdio: 'ignore' });
   try {
     await sleep(200);
     assert.equal(foreignRuntime.exitCode, null, 'foreign runtime must remain alive for the lease probe');
     const bootId = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
     const stat = fs.readFileSync(`/proc/${foreignRuntime.pid}/stat`, 'utf8');
-    const processStartTicks = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\\s+/)[19];
+    const processStartTicks = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
     const now = Date.now();
     fs.writeFileSync(path.join(lockDir, 'executor.lock'), JSON.stringify({
       pid: foreignRuntime.pid, instanceId: 'foreign-' + foreignRuntime.pid,
