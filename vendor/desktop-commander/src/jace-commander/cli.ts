@@ -20,6 +20,7 @@ import { JC_MANIFEST } from './manifest.generated.js';
 import { connect, forgetMcpToken, loadMcpToken, mcpAccessToken } from './mcp-auth.js';
 import { JC_EXIT, McpHttpClient, type JcCallOutcome } from './mcp-http-client.js';
 import { privilegedHelperAvailable } from './privileged-client.js';
+import { JC_PRESETS, isJcPreset, type JcPreset } from './authorizers.js';
 import { createJcServer } from './server.js';
 import { JC_TOOLS } from './tool-descriptors.js';
 import { VERSION } from '../version.js';
@@ -235,10 +236,19 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
 
   switch (command) {
     case 'serve': {
-      const mode = rest.includes('--standalone') ? 'standalone' : 'managed';
+      const requested = flagValue(rest, '--preset') ?? env.JC_PRESET;
+      if (requested !== undefined && !isJcPreset(requested)) {
+        out.stderr(`jace-commander: unknown preset ${JSON.stringify(requested)} (expected ${JC_PRESETS.join(', ')})`);
+        return JC_EXIT.invalidArguments;
+      }
+      if (rest.includes('--standalone') && requested !== undefined && requested !== 'standalone') {
+        out.stderr('jace-commander: --standalone conflicts with --preset');
+        return JC_EXIT.invalidArguments;
+      }
+      const mode: JcPreset = rest.includes('--standalone') ? 'standalone' : (requested ?? 'managed');
       if (mode === 'managed' && (!config.acsPublicKey || !config.acsKeyId)) {
         // Fail closed at startup rather than rejecting every call later.
-        out.stderr('jace-commander: managed mode requires JC_ACS_PUBLIC_KEY and JC_ACS_KEY_ID (or pass --standalone for read-only local development)');
+        out.stderr('jace-commander: managed mode requires JC_ACS_PUBLIC_KEY and JC_ACS_KEY_ID (or pass --standalone for read-only local development, or --preset local)');
         return JC_EXIT.authorityUnavailable;
       }
       const server = createJcServer(config, mode);

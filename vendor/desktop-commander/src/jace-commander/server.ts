@@ -14,6 +14,10 @@
  *                      `*.read` scope; see jcStandaloneToolAllowed). Writes,
  *                      process/git mutation, acs_submit_mission and
  *                      privileged_exec are refused before any handler runs.
+ *   --preset local    (ADR 0026) every provider authorized by the `local`
+ *                      authorizer: read class is allowed, the other classes
+ *                      follow the class decisions (default: human approval).
+ *                      Distinct from standalone; standalone is unchanged.
  *   privileged_exec    managed mode only; the capability is verified by the
  *                      root helper, not here; this process cannot grant sudo.
  *                      It is excluded from standalone even though the helper
@@ -52,13 +56,26 @@ import { createProcessRegistry } from './processes.js';
 import { createSearchRegistry } from './search.js';
 import { invokePrivilegedHelper, privilegedHelperAvailable } from './privileged-client.js';
 import { assertProviderCoverage, collectProviderHealth, type JcProviderId, type JcProviderProbe } from './providers.js';
+import {
+  JC_DEFAULT_CLASS_DECISIONS,
+  createAuthorizerResolver,
+  jcStandaloneToolAllowed,
+  type JcAuthorizerTable,
+  type JcClassDecisions,
+  type JcPreset,
+  type JcRoute,
+} from './authorizers.js';
 import { JC_TOOLS } from './tool-descriptors.js';
 export { JC_TOOLS };
 import { VERSION } from '../version.js';
 
-export type JcMode = 'managed' | 'standalone';
+export type JcMode = JcPreset;
 
 export interface JcServerDeps {
+  /** Operator authorizer table for the `local` preset (ADR 0026 D2); the other presets are fixed. */
+  authorizerTable?: JcAuthorizerTable;
+  /** Class decisions for the `local` authorizer; defaults to JC_DEFAULT_CLASS_DECISIONS. */
+  classDecisions?: JcClassDecisions;
   fetchImpl?: typeof fetch;
   invokeHelper?: typeof invokePrivilegedHelper;
   helperAvailable?: typeof privilegedHelperAvailable;
@@ -113,17 +130,7 @@ export function assertHandlerCoverage(handlerNames: readonly string[]): void {
   }
 }
 
-/**
- * Whether `name` may be served in standalone mode (no ACS capability, no
- * approval). Fail closed: unknown tools, approval-gated tools, and any tool
- * with a non-read scope (fs.write, process.exec, git.write, git.network,
- * integration.write, process.privileged) are refused.
- */
-export function jcStandaloneToolAllowed(name: string): boolean {
-  const policy = Object.prototype.hasOwnProperty.call(JC_TOOL_POLICIES, name) ? JC_TOOL_POLICIES[name] : undefined;
-  if (!policy || policy.requiresApproval || policy.scopes.length === 0) return false;
-  return policy.scopes.every((scope) => scope.endsWith('.read'));
-}
+export { jcStandaloneToolAllowed };
 
 /** Tool names served in standalone mode, derived from the manifest. */
 export const JC_STANDALONE_TOOL_NAMES: readonly string[] = Object.freeze(
@@ -137,7 +144,9 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
   const invokeHelper = deps.invokeHelper ?? invokePrivilegedHelper;
   const helperAvailable = deps.helperAvailable ?? privilegedHelperAvailable;
   const helperOptions = { sudoPath: config.sudoPath, helperPath: config.privilegedHelperPath };
-  const verifier = mode === 'managed'
+  const resolver = createAuthorizerResolver(mode, deps.authorizerTable);
+  const classDecisions = deps.classDecisions ?? JC_DEFAULT_CLASS_DECISIONS;
+  const verifier = resolver.usesAcs()
     ? new JcCapabilityVerifier({
       publicKey: config.acsPublicKey,
       keyId: config.acsKeyId,
@@ -158,34 +167,51 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
 
   const server = new Server({ name: 'jace-commander', version: VERSION }, { capabilities: { tools: {} } });
 
-  // Standalone registers (lists) only the read-only subset; managed lists the manifest.
-  const listed = mode === 'standalone' ? JC_TOOLS.filter((tool) => jcStandaloneToolAllowed(tool.name)) : JC_TOOLS;
+  // Tools the preset has never served (standalone's 12 non-read tools) are not listed.
+  const listed = JC_TOOLS.filter((tool) => resolver.resolve(tool.name)?.authorizer !== 'refused');
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listed.map((tool) => ({ ...tool })) as any }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const name = request.params.name;
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
     const capability = (request.params._meta as Record<string, unknown> | undefined)?.acsCapability;
-    if (!Object.prototype.hasOwnProperty.call(JC_TOOL_POLICIES, name)) return fail('unknown_tool', `unknown tool: ${name}`);
-    if (mode === 'standalone' && !jcStandaloneToolAllowed(name)) {
+    const route = Object.prototype.hasOwnProperty.call(JC_TOOL_POLICIES, name) ? resolver.resolve(name) : undefined;
+    if (!route) return fail('unknown_tool', `unknown tool: ${name}`);
+    const routeMeta = jcAuthorizationMeta(mode, route);
+    if (route.authorizer === 'refused') {
       // No capability exists in standalone mode, so nothing that writes,
       // executes or needs approval may run. Refused before any handler.
-      recordTrace(trace, name, args, { ok: false, code: 'JC_STANDALONE_TOOL_REFUSED' });
+      recordTrace(trace, name, args, { ok: false, code: 'JC_STANDALONE_TOOL_REFUSED', ...traceRoute(route) });
       return fail(
         'JC_STANDALONE_TOOL_REFUSED',
         `${name} is not available in standalone mode (read-only tools only); run managed behind ACS to use it`,
-        { jaceCommanderMode: mode, acsAuthorization: { decision: 'refused-standalone' } },
+        { jaceCommanderMode: mode, acsAuthorization: { decision: 'refused-standalone' }, ...routeMeta },
       );
     }
 
     let authorization: JcAuthorization | undefined;
-    if (verifier && name !== 'privileged_exec') {
+    if (route.authorizer === 'local') {
+      const decision = classDecisions[route.riskClass];
+      // A privileged class can never be `allow`; refuse rather than trust a bad table.
+      const effective = route.riskClass === 'privileged' && decision === 'allow' ? 'deny' : decision;
+      if (effective !== 'allow') {
+        const code = effective === 'deny' ? 'JC_LOCAL_DENIED' : 'JC_LOCAL_APPROVAL_UNAVAILABLE';
+        recordTrace(trace, name, args, { ok: false, code, ...traceRoute(route) });
+        return fail(
+          code,
+          effective === 'deny'
+            ? `${name} is denied by the local policy for class ${route.riskClass}`
+            : `${name} needs local human approval (class ${route.riskClass}) but no approver is available; nothing ran`,
+          { jaceCommanderMode: mode, ...jcAuthorizationMeta(mode, route, effective === 'deny' ? 'denied' : 'approval-unavailable') },
+        );
+      }
+    } else if (verifier && name !== 'privileged_exec') {
       try {
         authorization = verifier.verify(name, args, capability);
       } catch (error) {
         const code = error instanceof JcAuthorizationError ? error.code : 'JC_CAPABILITY_MALFORMED';
-        recordTrace(trace, name, args, { ok: false, code });
-        return fail(code, 'Jace Commander managed authorization rejected', { acsAuthorization: { version: 'acs.jc.v1', decision: 'denied', code } });
+        recordTrace(trace, name, args, { ok: false, code, ...traceRoute(route) });
+        return fail(code, 'Jace Commander managed authorization rejected', { acsAuthorization: { version: 'acs.jc.v1', decision: 'denied', code }, ...routeMeta });
       }
     }
 
@@ -201,9 +227,10 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       jaceCommanderMode: mode,
       acsAuthorization: authorization
         ? { ...authorization, decision: 'granted' }
-        : { decision: name === 'privileged_exec' ? 'delegated-to-privileged-helper' : 'not-required' },
+        : { decision: name === 'privileged_exec' && route.authorizer !== 'local' ? 'delegated-to-privileged-helper' : 'not-required' },
+      ...routeMeta,
     };
-    recordTrace(trace, name, args, { ok: !result.isError, workItemId: authorization?.workItemId });
+    recordTrace(trace, name, args, { ok: !result.isError, workItemId: authorization?.workItemId, ...traceRoute(route) });
     return { ...result, _meta: { ...(result._meta ?? {}), ...meta } };
   });
 
@@ -342,7 +369,9 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       publicMcpUrl: config.publicMcpUrl,
       managedAuthorization: mode === 'managed'
         ? { contract: 'acs.jc.v1', keyConfigured: Boolean(config.acsPublicKey && config.acsKeyId) }
-        : { contract: 'none (standalone)', tools: 'read-only only', served: JC_STANDALONE_TOOL_NAMES.length },
+        : mode === 'local'
+          ? { contract: 'local', classDecisions: classDecisions, served: listed.length }
+          : { contract: 'none (standalone)', tools: 'read-only only', served: JC_STANDALONE_TOOL_NAMES.length },
       acs: { url: config.acsUrl, ...acs },
       swarm: { url: config.swarmUrl, ...swarm },
       visualizer: { url: config.visualizerUrl ?? null, ...visualizer },
@@ -353,6 +382,20 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
   }
 
   return server;
+}
+
+/** Route detail for trace records (all presets). */
+function traceRoute(route: JcRoute): Record<string, unknown> {
+  return { authorizer: route.authorizer, provider: route.provider, riskClass: route.riskClass };
+}
+
+/**
+ * Per-call authorization detail surfaced to clients. Absent in `managed` so
+ * managed responses stay byte-identical to before ADR 0026.
+ */
+function jcAuthorizationMeta(mode: JcMode, route: JcRoute, decision?: string): Record<string, unknown> {
+  if (mode === 'managed') return {};
+  return { jcAuthorization: { authorizer: route.authorizer, provider: route.provider, class: route.riskClass, source: route.source, ...(decision ? { decision } : {}) } };
 }
 
 function recordTrace(trace: JsonlTraceChain, tool: string, args: unknown, outcome: Record<string, unknown>): void {
