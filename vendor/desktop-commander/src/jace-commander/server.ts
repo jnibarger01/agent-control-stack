@@ -234,7 +234,11 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
 
     let authorization: JcAuthorization | undefined;
     let localAuthorization: JcLocalAuthorization | undefined;
+    // What the privileged handler forwards to the root helper. Under the local authorizer it is
+    // ONLY ever approverd's token, never anything the client put in _meta.
+    let helperCapability: unknown = capability;
     if (route.authorizer === 'local') {
+      helperCapability = undefined;
       const decision = classDecisions[route.riskClass];
       // A privileged class can never be `allow`; refuse rather than trust a bad table.
       const effective = route.riskClass === 'privileged' && decision === 'allow' ? 'deny' : decision;
@@ -246,6 +250,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
         const outcome = await localApproval(name, args, route);
         if (!outcome.granted) return outcome.result;
         localAuthorization = outcome.authorization;
+        helperCapability = outcome.token;
         routeMeta = jcAuthorizationMeta(mode, route, 'approved', { approvalId: localAuthorization.approvalId, approverId: localAuthorization.approverId, tokenId: localAuthorization.tokenId });
       }
     } else if (verifier && name !== 'privileged_exec') {
@@ -279,7 +284,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
 
     let result: ToolResult;
     try {
-      result = await dispatch(name, args, capability);
+      result = await dispatch(name, args, helperCapability);
     } catch (error) {
       result = error instanceof IntegrationError
         ? fail(error.code, error.message)
@@ -300,15 +305,16 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
    * `approve` decisions: ask approverd. A pending approval returns a challenge the human
    * resolves with `jace-commander approve <id>`; the identical retry claims it once and
    * yields a jc.local.v1 token that THIS process verifies before running anything.
-   * Privileged calls stay unavailable until the root helper holds the local trust anchor.
+   * For privileged_exec the same token is then handed to the root helper, which verifies it
+   * again against its own root-owned local trust anchor; this process cannot grant sudo.
    */
   async function localApproval(name: string, args: Record<string, unknown>, route: JcRoute):
-    Promise<{ granted: true; authorization: JcLocalAuthorization } | { granted: false; result: ToolResult }> {
+    Promise<{ granted: true; authorization: JcLocalAuthorization; token: unknown } | { granted: false; result: ToolResult }> {
     const refuse = (code: string, message: string, decision: string, extraMeta: Record<string, unknown> = {}, extraTrace: Record<string, unknown> = {}) => {
       recordTrace(trace, name, args, { ok: false, code, ...routeTrace(route), ...extraTrace });
       return { granted: false as const, result: fail(code, message, { jaceCommanderMode: mode, ...jcAuthorizationMeta(mode, route, decision), ...extraMeta }) };
     };
-    if (!approver || !localVerifier || route.riskClass === 'privileged') {
+    if (!approver || !localVerifier) {
       return refuse('JC_LOCAL_APPROVAL_UNAVAILABLE', `${name} needs local human approval (class ${route.riskClass}) but no approver is available; nothing ran`, 'approval-unavailable');
     }
     let reply: AuthorizeReply;
@@ -331,7 +337,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       return refuse('JC_LOCAL_APPROVAL_REJECTED', `${name} was rejected by the approver (${reply.approvalId}); nothing ran`, 'approval-rejected', {}, { approvalId: reply.approvalId });
     }
     try {
-      return { granted: true, authorization: localVerifier.verify(name, args, reply.token) };
+      return { granted: true, authorization: localVerifier.verify(name, args, reply.token), token: reply.token };
     } catch (error) {
       const code = error instanceof JcLocalTokenError ? error.code : 'JC_LOCAL_TOKEN_MALFORMED';
       return refuse(code, 'the approval token was not accepted; nothing ran', 'token-rejected', {}, { approvalId: reply.approvalId });

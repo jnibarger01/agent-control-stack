@@ -12,6 +12,7 @@ import { promisify } from 'node:util';
 import type { JcConfig } from './config.js';
 import { acsReadyUrl } from './integrations.js';
 import { JC_MANIFEST } from './manifest.generated.js';
+import { DEFAULT_PRIVILEGED_CONFIG_PATH } from './privileged-core.js';
 import { VERSION } from '../version.js';
 
 const exec = promisify(execFile);
@@ -132,6 +133,25 @@ export async function jcDoctor(config: JcConfig, runtime: DoctorRuntime): Promis
               ? 'THE SERVER IDENTITY CAN OPEN decide.sock: the model could approve its own requests; fix socket group/permissions'
               : 'approverd reachable, key matches, decide.sock is not reachable by the server identity',
     });
+  }
+  if (runtime.mode === 'local' && runtime.policy?.effective.classDecisions.privileged === 'approve') {
+    // The helper reads its OWN root-owned config; a mismatch means it will reject approverd's tokens.
+    let detail: string;
+    let ok = false;
+    try {
+      const helperConfig = JSON.parse(fs.readFileSync(DEFAULT_PRIVILEGED_CONFIG_PATH, 'utf8')) as Record<string, unknown>;
+      if (typeof helperConfig.localKeyId !== 'string') {
+        detail = 'the root helper has no local trust anchor (config.localKeyId); privileged_exec under the local preset will be rejected by the helper';
+      } else if (helperConfig.localKeyId !== config.approverKeyId || helperConfig.localPublicKey !== config.approverPublicKey) {
+        detail = 'the root helper trusts a different approver key than JC_APPROVER_KEY_ID/JC_APPROVER_PUBLIC_KEY';
+      } else {
+        ok = true;
+        detail = `the root helper trusts approver key ${helperConfig.localKeyId}`;
+      }
+    } catch {
+      detail = `cannot read ${DEFAULT_PRIVILEGED_CONFIG_PATH}; the privileged helper is not installed for the local anchor`;
+    }
+    checks.push({ name: 'privileged local anchor', ok, required: false, detail });
   }
   const roots = config.fsRoots.map((root) => ({ root, exists: fs.existsSync(root) }));
   checks.push({

@@ -18,8 +18,8 @@ with JC's own policy instead of an ACS capability. `managed` (default) and
 `approve` needs a human via `approverd`. With no approver configured an `approve`
 call fails closed with `JC_LOCAL_APPROVAL_UNAVAILABLE` and nothing runs. Setting a
 class to `allow` in the policy is how you get a Desktop Commander-like mode.
-`privileged_exec` stays unavailable under `local` until the root helper holds the
-local trust anchor (slice 5).
+`privileged_exec` also needs a human approval under `local`, and is then verified
+a second time by the root helper (see below).
 
 ## Human approval (`approverd`)
 
@@ -89,3 +89,22 @@ With `JC_PRESET=local` on the edge, ACS capability **issuance** is skipped for
 tools the policy routes to `local`. OAuth authentication, audience binding and
 anti-spoofing are unchanged, and the edge fails toward ACS if the policy is
 unusable. A tool the policy routes to `acs-capability` is still issued by ACS.
+
+## Privileged execution under `local`
+
+The root helper keeps **two** trust anchors, both only in its root-owned
+`/etc/jace-commander/privileged.json` (never the environment, which the helper
+ignores as root): the ACS key (`acs.jc.v1`) and the approver key (`jc.local.v1`,
+`localPublicKey` + `localKeyId`). The envelope's `keyId` selects the anchor; the two
+keys must differ and neither can verify the other's artifact. Install the second
+anchor by re-running `install-privileged-helper.sh` with `JC_LOCAL_PUBLIC_KEY` and
+`JC_LOCAL_KEY_ID` (the values `install-approverd.sh` prints).
+
+Under the local preset the helper token comes **only** from approverd. A capability a
+client puts in `_meta` is ignored. The helper audits `authority: jc.local.v1` with the
+approval id and approver, not an ACS work item. `jc_doctor`'s **privileged local anchor**
+check compares the helper's configured anchor to `JC_APPROVER_KEY_ID`.
+
+**Upgrade note.** The helper's installed files are a set. Re-run the installer when you
+upgrade; it now copies every module the helper imports (earlier installer versions
+omitted `manifest.generated.js`, so a fresh install could not start).

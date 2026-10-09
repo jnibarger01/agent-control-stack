@@ -382,7 +382,7 @@ await test('server: approve-class call -> challenge -> human approves -> identic
   await info.daemon.stop();
 });
 
-await test('server: exec class also goes through approval; privileged stays unavailable even with an approver', async () => {
+await test('server: exec class also goes through approval; privileged now requests one too (the helper holds the anchor)', async () => {
   const info = await makeApprover();
   const client = await connectLocal(serverConfig(info));
   const marker = path.join(work, 'ran.txt');
@@ -395,8 +395,10 @@ await test('server: exec class also goes through approval; privileged stays unav
   await new Promise((resolve) => setTimeout(resolve, 400));
   assert.equal(fs.existsSync(marker), true);
   const priv = await client.callTool({ name: 'privileged_exec', arguments: { argv: ['/usr/bin/id'] } });
-  assert.equal(priv.structuredContent.error.code, 'JC_LOCAL_APPROVAL_UNAVAILABLE');
-  assert.equal(info.daemon.handleDecideOp({ op: 'list' }).pending.length, 0, 'privileged never even creates an approval yet');
+  assert.equal(priv.structuredContent.error.code, 'JC_LOCAL_APPROVAL_REQUIRED');
+  const pending = info.daemon.handleDecideOp({ op: 'list' }).pending;
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].riskClass, 'privileged');
   await client.close();
   await info.daemon.stop();
 });
