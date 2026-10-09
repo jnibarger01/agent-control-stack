@@ -48,6 +48,33 @@ describe("audit-chain freshness before store writes", () => {
     }
   });
 
+  it("rejects policy-authorized approval after post-startup corruption without changing state or audit events", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-audit-freshness-approval-"));
+    const path = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(path);
+    try {
+      const workItem = createSeed(store, "pending approval before corruption");
+      expect(store.get(workItem.id)?.status).toBe("pending_policy");
+      const connection = new DatabaseSync(path);
+      try {
+        tamperFirstAuditEvent(connection);
+        const before = connection.prepare("SELECT COUNT(*) AS count FROM audit_events").get() as { count: number };
+        expect(() => store.approveWorkItem(workItem.id, { via: "domain_service" })).toThrowError(
+          /audit integrity is stale or invalid/
+        );
+        expect(store.get(workItem.id)?.status).toBe("pending_policy");
+        const after = connection.prepare("SELECT COUNT(*) AS count FROM audit_events").get() as { count: number };
+        expect(after.count).toBe(before.count);
+        expect(store.readinessHealth().checks.auditChain.ok).toBe(false);
+      } finally {
+        connection.close();
+      }
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("accepts legitimate commits from other connections after verifying their audit chain", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-audit-freshness-concurrent-"));
     const path = join(dir, "control.db");
