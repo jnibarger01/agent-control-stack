@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ClientInfoCache, createClientObserver, extractClientInfo } from './client-attribution.js';
+import { localRoutingFromEnv, stripAuthorityMeta } from './jc-routing.js';
 import { managedModeFromEnv, jcModeFromEnv, identityAttribution, capabilityTransport, acsPost, isToolsCall, dcRuntimeIdentityFromState, issueRuntimeBootstrap, completeRuntimeBootstrap, injectRuntimeBootstrap } from './managed.js';
 import { dcBridgeReady } from './readiness.js';
 
@@ -73,6 +74,10 @@ try {
   console.error(`gateway: ${e.message}`);
   process.exit(1);
 }
+// ADR 0026: with JC_PRESET=local the edge skips ACS capability ISSUANCE for tools whose
+// effective authorizer is `local` (the JC server enforces them). Authentication is unchanged.
+const JC_LOCAL = localRoutingFromEnv();
+if (JC_LOCAL.error) console.error(`gateway: jc local routing: ${JC_LOCAL.error}`);
 // RFC 8707: each OAuth surface is bound to exactly one protected resource.
 // The JC issuer advertises root physical endpoints with an explicit lane hint
 // so hosted clients do not need path-specific DCR support.
@@ -905,8 +910,15 @@ const server = http.createServer(async (req, res) => {
             if (!jcBridge.ok || jcBridge.data?.variant !== 'jc') {
               throw Object.assign(new Error('jc upstream is not the Jace Commander bridge'), { acsCode: 'jc_bridge_mismatch' });
             }
-            const rewrite = capabilityTransport(JC, { identity: identityAttribution(auth, jcClaims), requestId: randId() });
-            body = Buffer.from(JSON.stringify(await rewrite(parsed)), 'utf8');
+            const jcToolName = typeof parsed?.params?.name === 'string' ? parsed.params.name : '';
+            if (JC_LOCAL.enabled && JC_LOCAL.isLocal(jcToolName)) {
+              // No ACS issuance; client-supplied authority metadata is still stripped.
+              body = Buffer.from(JSON.stringify(stripAuthorityMeta(parsed)), 'utf8');
+              log(req.method, '/jc/mcp', 200, `jc local: no ACS issuance for ${jcToolName}`);
+            } else {
+              const rewrite = capabilityTransport(JC, { identity: identityAttribution(auth, jcClaims), requestId: randId() });
+              body = Buffer.from(JSON.stringify(await rewrite(parsed)), 'utf8');
+            }
           } catch (e) {
             const code = e && e.acsCode ? e.acsCode : 'managed_fail_closed';
             log(req.method, '/jc/mcp', 200, `managed fail-closed: ${code}`);

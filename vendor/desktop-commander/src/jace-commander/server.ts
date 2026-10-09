@@ -48,6 +48,7 @@ import {
   type VisualizerView,
 } from './integrations.js';
 import { JsonlTraceChain, readTraceFile, verifyChain } from './looptrace.js';
+import { checkPolicyConstraints, loadJcPolicy, type JcPolicyLoad } from './local-policy.js';
 import { jcConfigView, jcDoctor, jcPing } from './doctor.js';
 import { defaultDeniedRoots, getFileInfo, listDirectory, readFile, readMultipleFiles, type JcFsPolicy } from './filesystem.js';
 import { gitAdd, gitBranch, gitCommit, gitDiff, gitFetch, gitLog, gitPush, gitShow, gitStatus } from './git-ops.js';
@@ -72,10 +73,14 @@ import { VERSION } from '../version.js';
 export type JcMode = JcPreset;
 
 export interface JcServerDeps {
-  /** Operator authorizer table for the `local` preset (ADR 0026 D2); the other presets are fixed. */
+  /** Overrides the authorizer table the `local` preset takes from the policy (tests). */
   authorizerTable?: JcAuthorizerTable;
-  /** Class decisions for the `local` authorizer; defaults to JC_DEFAULT_CLASS_DECISIONS. */
+  /** Overrides the class decisions the `local` preset takes from the policy (tests). */
   classDecisions?: JcClassDecisions;
+  /** Pre-loaded policy (tests). Otherwise loaded once at startup from config for the `local` preset. */
+  policy?: JcPolicyLoad;
+  /** Tests only: skip the cannot-modify-it policy check. */
+  skipPolicyImmutability?: boolean;
   fetchImpl?: typeof fetch;
   invokeHelper?: typeof invokePrivilegedHelper;
   helperAvailable?: typeof privilegedHelperAvailable;
@@ -144,8 +149,19 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
   const invokeHelper = deps.invokeHelper ?? invokePrivilegedHelper;
   const helperAvailable = deps.helperAvailable ?? privilegedHelperAvailable;
   const helperOptions = { sudoPath: config.sudoPath, helperPath: config.privilegedHelperPath };
-  const resolver = createAuthorizerResolver(mode, deps.authorizerTable);
-  const classDecisions = deps.classDecisions ?? JC_DEFAULT_CLASS_DECISIONS;
+  // The policy applies to the `local` preset only; managed/standalone never read it (parity).
+  const policy: JcPolicyLoad | undefined = mode === 'local'
+    ? (deps.policy ?? loadJcPolicy({
+      systemPath: config.policyPath,
+      systemPathExplicit: config.policyPathExplicit,
+      userPath: config.policyUserPath,
+      unsafeDev: config.policyUnsafeDev,
+      requireImmutable: !deps.skipPolicyImmutability,
+      baseFsRoots: config.fsRoots,
+    }))
+    : undefined;
+  const resolver = createAuthorizerResolver(mode, deps.authorizerTable ?? (mode === 'local' ? policy?.effective.authorizerTable : undefined));
+  const classDecisions = deps.classDecisions ?? policy?.effective.classDecisions ?? JC_DEFAULT_CLASS_DECISIONS;
   const verifier = resolver.usesAcs()
     ? new JcCapabilityVerifier({
       publicKey: config.acsPublicKey,
@@ -155,6 +171,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       now: deps.now,
     })
     : undefined;
+  const routeTrace = (route: JcRoute): Record<string, unknown> => ({ ...traceRoute(route), ...(policy ? { policyHash: policy.hash } : {}) });
   const runId = `jc-mcp-${process.pid}-${Date.now()}`;
   const trace = new JsonlTraceChain(path.join(config.stateDir, 'traces', `${runId}.jsonl`), runId);
 
@@ -181,12 +198,18 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     if (route.authorizer === 'refused') {
       // No capability exists in standalone mode, so nothing that writes,
       // executes or needs approval may run. Refused before any handler.
-      recordTrace(trace, name, args, { ok: false, code: 'JC_STANDALONE_TOOL_REFUSED', ...traceRoute(route) });
+      recordTrace(trace, name, args, { ok: false, code: 'JC_STANDALONE_TOOL_REFUSED', ...routeTrace(route) });
       return fail(
         'JC_STANDALONE_TOOL_REFUSED',
         `${name} is not available in standalone mode (read-only tools only); run managed behind ACS to use it`,
         { jaceCommanderMode: mode, acsAuthorization: { decision: 'refused-standalone' }, ...routeMeta },
       );
+    }
+
+    if (policy?.state === 'invalid' && route.provider !== 'jc.meta') {
+      // A configured policy that cannot be trusted denies everything but diagnostics.
+      recordTrace(trace, name, args, { ok: false, code: 'JC_POLICY_INVALID', ...routeTrace(route) });
+      return fail('JC_POLICY_INVALID', 'the configured local policy is missing, invalid or modifiable by this process; run jc_doctor', { jaceCommanderMode: mode, ...jcAuthorizationMeta(mode, route, 'policy-invalid') });
     }
 
     let authorization: JcAuthorization | undefined;
@@ -196,7 +219,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       const effective = route.riskClass === 'privileged' && decision === 'allow' ? 'deny' : decision;
       if (effective !== 'allow') {
         const code = effective === 'deny' ? 'JC_LOCAL_DENIED' : 'JC_LOCAL_APPROVAL_UNAVAILABLE';
-        recordTrace(trace, name, args, { ok: false, code, ...traceRoute(route) });
+        recordTrace(trace, name, args, { ok: false, code, ...routeTrace(route) });
         return fail(
           code,
           effective === 'deny'
@@ -210,8 +233,27 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
         authorization = verifier.verify(name, args, capability);
       } catch (error) {
         const code = error instanceof JcAuthorizationError ? error.code : 'JC_CAPABILITY_MALFORMED';
-        recordTrace(trace, name, args, { ok: false, code, ...traceRoute(route) });
+        recordTrace(trace, name, args, { ok: false, code, ...routeTrace(route) });
         return fail(code, 'Jace Commander managed authorization rejected', { acsAuthorization: { version: 'acs.jc.v1', decision: 'denied', code }, ...routeMeta });
+      }
+    }
+
+    if (policy && route.authorizer === 'local') {
+      const violation = checkPolicyConstraints(policy.effective, name, args);
+      if (violation) {
+        recordTrace(trace, name, args, { ok: false, code: 'JC_POLICY_CONSTRAINT', ...routeTrace(route) });
+        return fail('JC_POLICY_CONSTRAINT', violation, { jaceCommanderMode: mode, ...jcAuthorizationMeta(mode, route, 'constraint-violation') });
+      }
+    }
+
+    // Durable intent BEFORE the side effect for anything above read that JC itself
+    // authorized. No intent record, no execution (ADR 0026 D1.4). Managed and
+    // read-class calls keep the best-effort behavior they always had.
+    if ((route.authorizer === 'local' || route.authorizer === 'admin-delegated') && route.riskClass !== 'read') {
+      try {
+        trace.append('tool_call_started', { tool: name, argumentsSha256: argsHash(args), ...routeTrace(route) });
+      } catch {
+        return fail('JC_TRACE_UNAVAILABLE', 'the local audit trace cannot be written; refusing to run a mutating call', { jaceCommanderMode: mode, ...jcAuthorizationMeta(mode, route, 'trace-unavailable') });
       }
     }
 
@@ -230,14 +272,20 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
         : { decision: name === 'privileged_exec' && route.authorizer !== 'local' ? 'delegated-to-privileged-helper' : 'not-required' },
       ...routeMeta,
     };
-    recordTrace(trace, name, args, { ok: !result.isError, workItemId: authorization?.workItemId, ...traceRoute(route) });
+    recordTrace(trace, name, args, { ok: !result.isError, workItemId: authorization?.workItemId, ...routeTrace(route) });
     return { ...result, _meta: { ...(result._meta ?? {}), ...meta } };
   });
 
   type Handler = (args: Record<string, unknown>, capability: unknown) => Promise<ToolResult>;
   const fsPolicy: JcFsPolicy = {
-    roots: config.fsRoots,
-    deniedRoots: [...defaultDeniedRoots(config.stateDir, config.homeDir), ...config.fsDeniedRoots],
+    roots: policy?.effective.fsRoots ?? config.fsRoots,
+    deniedRoots: [
+      ...defaultDeniedRoots(config.stateDir, config.homeDir),
+      ...config.fsDeniedRoots,
+      // The model must not be able to read the policy it is governed by, or edit it.
+      ...(mode === 'local' ? [path.dirname(config.policyPath), config.policyUserPath] : []),
+      ...(policy?.effective.fsDeniedRoots ?? []),
+    ],
   };
 
   // One handler per manifest tool. The same handlers serve every caller:
@@ -311,6 +359,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       mode,
       handlerNames: Object.keys(handlers),
       verifierReady: Boolean(verifier && config.acsPublicKey && config.acsKeyId),
+      policy,
       privilegedHelper: () => helperAvailable(helperOptions),
     })),
     ping: async () => ok(await jcPing(config)),
@@ -378,6 +427,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       missionRouter: { dir: config.missionRouterDir },
       privilegedHelper: { path: config.privilegedHelperPath, sudoNonInteractive: helper },
       providers: await collectProviderHealth(probes),
+      ...(policy ? { policy: { state: policy.state, hash: policy.hash, immutable: policy.immutable, unsafeDev: policy.unsafeDev, sources: policy.sources, errorCount: policy.errors.length } } : {}),
     };
   }
 

@@ -34,6 +34,14 @@ export interface JcConfig {
   privilegedHelperPath: string;
   sudoPath: string;
   requestTimeoutMs: number;
+  /** System policy for the `local` preset (ADR 0026 D3). */
+  policyPath: string;
+  /** True when JC_POLICY_PATH named it: a missing file is then an invalid policy, not "no policy". */
+  policyPathExplicit: boolean;
+  /** Tighten-only user layer. */
+  policyUserPath: string;
+  /** JC_POLICY_UNSAFE_DEV=1: accept a policy this process can edit. Dev only; surfaced by jc_status/jc_doctor. */
+  policyUnsafeDev: boolean;
 }
 
 function httpUrl(raw: string, name: string): string {
@@ -84,5 +92,9 @@ export function loadJcConfig(env: NodeJS.ProcessEnv = process.env): JcConfig {
     privilegedHelperPath: env.JC_PRIVILEGED_HELPER ?? '/usr/local/libexec/jace-commander/jc-privileged-helper',
     sudoPath: env.JC_SUDO_PATH ?? '/usr/bin/sudo',
     requestTimeoutMs: timeout,
+    policyPath: path.resolve(env.JC_POLICY_PATH ?? '/etc/jace-commander/policy.json'),
+    policyPathExplicit: env.JC_POLICY_PATH !== undefined,
+    policyUserPath: path.join(stateDir, 'policy.user.json'),
+    policyUnsafeDev: env.JC_POLICY_UNSAFE_DEV === '1',
   };
 }

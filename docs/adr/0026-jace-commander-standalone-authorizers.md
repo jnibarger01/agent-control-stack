@@ -43,12 +43,13 @@ Verified at `b2b146a`:
    consumed by the claim. Any retry after a claim, including after a failed
    execution, needs a **new** approval. An indefinite admin-mode toggle in ACS
    does not imply reusable execution tokens.
-3. **Policy errors deny.** If a policy is configured (a path is set or a
-   `local` preset is selected) and it is missing, unreadable, invalid, or
-   fails the immutability check (D3), every `mutate`, `exec`, `network` and
-   `privileged` call is denied with `JC_POLICY_INVALID`. Reads follow the
-   built-in default only when no policy was ever configured. Defaults never
-   silently replace a configured policy, because defaults carry no denied roots.
+3. **Policy errors deny.** If a policy is configured (`JC_POLICY_PATH` is set,
+   or a policy file exists at the default path or the user layer) and it is
+   missing, unreadable, invalid, or fails the immutability check (D3), every
+   tool except the `jc.meta` diagnostics (`ping`, `get_config`, `jc_status`,
+   `jc_doctor`, `looptrace_verify`) is denied with `JC_POLICY_INVALID`, so the
+   operator can still diagnose. Built-in defaults apply only when NO policy was
+   ever configured, because defaults carry no denied roots.
 4. **Trace failure denies mutation.** For `local` and `admin-delegated`
    calls in classes above `read`, a durable *intent* record is written before
    the handler runs. If it cannot be written the call is refused with
@@ -219,7 +220,7 @@ as root (existing behavior, extended).
 | ACS down                        | unaffected                         | `ACS_UNAVAILABLE`, fail closed       | local approval path unaffected                    |
 | `approverd` down                | `allow` classes unaffected         | unaffected                           | fail closed (`JC_LOCAL_APPROVAL_UNAVAILABLE`)     |
 | Mirror outbox full / ACS slow   | unaffected, local trace intact     | unaffected                           | unaffected                                        |
-| Policy missing/invalid/writable | non-read denied (`JC_POLICY_INVALID`) | n/a                               | denied                                            |
+| Policy missing/invalid/writable | all but `jc.meta` denied (`JC_POLICY_INVALID`) | n/a                         | denied                                            |
 | Trace intent cannot be written  | non-read denied (`JC_TRACE_UNAVAILABLE`) | n/a                            | helper's own audit rule unchanged                 |
 | One provider failing            | other providers unaffected         | other providers unaffected           | n/a                                               |
 

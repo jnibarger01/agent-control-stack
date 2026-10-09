@@ -28,6 +28,8 @@ export interface DoctorRuntime {
   mode: 'managed' | 'standalone' | 'local';
   handlerNames: readonly string[];
   verifierReady: boolean;
+  /** Present for the `local` preset. */
+  policy?: import('./local-policy.js').JcPolicyLoad;
   privilegedHelper: () => Promise<boolean>;
 }
 
@@ -94,6 +96,21 @@ export async function jcDoctor(config: JcConfig, runtime: DoctorRuntime): Promis
         ? 'local: read class allowed; other classes follow the local class decisions (default: human approval)'
         : 'standalone: read-only tools only, NOT capability-checked; development only',
   });
+  if (runtime.policy) {
+    const policy = runtime.policy;
+    const loosened = Object.entries(policy.effective.classDecisions).filter(([cls, decision]) => cls !== 'read' && decision === 'allow').map(([cls]) => cls);
+    checks.push({
+      name: 'local policy',
+      ok: policy.state !== 'invalid' && !policy.unsafeDev && policy.immutable,
+      required: true,
+      detail: policy.state === 'invalid'
+        ? `INVALID, everything except jc.meta is denied: ${policy.errors.join('; ')}`
+        : policy.unsafeDev
+          ? 'JC_POLICY_UNSAFE_DEV=1: a policy this process can edit is accepted; development only'
+          : `${policy.state} (hash ${policy.hash.slice(0, 12)}${policy.sources.length ? `, ${policy.sources.join(' + ')}` : ''})`
+            + (loosened.length ? `; classes allowed without approval: ${loosened.join(', ')} (guardrails, not a sandbox: rely on the OS account and unit hardening)` : ''),
+    });
+  }
   const roots = config.fsRoots.map((root) => ({ root, exists: fs.existsSync(root) }));
   checks.push({
     name: 'filesystem roots',
