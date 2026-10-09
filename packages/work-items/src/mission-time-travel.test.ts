@@ -140,6 +140,52 @@ describe("mission time travel", () => {
     }
   });
 
+  it("rejects malformed fields even if a producer recomputes the public snapshot hash", () => {
+    const ctx = fixture();
+    try {
+      const original = readMissionTimeTravel(ctx.store, ctx.work.id);
+      for (const override of [
+        { timeUnixNano: undefined },
+        { actorIdHash: "invalid" },
+        { evidenceManifestHash: "x".repeat(200) },
+        { category: "forged" }
+      ]) {
+        const tampered = {
+          ...original,
+          events: original.events.map((event, index) => index === 0 ? { ...event, ...override } : event)
+        };
+        const { snapshotHash: _oldHash, ...body } = tampered;
+        const forged = { ...tampered, snapshotHash: domainHash(MISSION_TIME_TRAVEL_VERSION, body) };
+        expect(() => compareMissionTimeTravel(original, forged as typeof original)).toThrow("time_travel_snapshot_integrity_failed");
+      }
+    } finally {
+      ctx.close();
+    }
+  });
+
+  it("accepts an exact page-aligned historical cutoff without a false resource limit", () => {
+    const ctx = fixture();
+    try {
+      ctx.store.withTransaction(() => {
+        for (let i = 0; i < 199; i++)
+          ctx.store.recordSystemEvent({ name: "worker.progress", attributes: { "work_item.id": ctx.work.id } });
+      });
+      const unrelated = ctx.store.create({
+        title: "unrelated", intent: "outside", requester: "agent", risk: "low",
+        requestedActions: [{ kind: "fs.read", description: "read", params: {} }]
+      });
+      const cutoff = ctx.store.getMissionTrace(unrelated.id).events.at(-1)!.event.sequence;
+      ctx.store.recordSystemEvent({ name: "worker.later", attributes: { "work_item.id": ctx.work.id } });
+      const history = readMissionTimeTravel(ctx.store, ctx.work.id, { maxEvents: 200, asOfSequence: cutoff });
+      expect(history.events).toHaveLength(200);
+      expect(history.events.every((event) => event.sequence <= cutoff)).toBe(true);
+      expect(() => readMissionTimeTravel(ctx.store, ctx.work.id, { maxEvents: 200 })).toThrow("resource_limit");
+      expect(unrelated.id).not.toBe(ctx.work.id);
+    } finally {
+      ctx.close();
+    }
+  });
+
   it("refuses unbounded and partial views", () => {
     const ctx = fixture();
     try {

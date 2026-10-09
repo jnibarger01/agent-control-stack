@@ -1,4 +1,5 @@
-import { domainHash } from "@agent-control-stack/shared";
+import { ControlStackError, domainHash } from "@agent-control-stack/shared";
+import { z } from "zod";
 import type { WorkItemStore } from "./store.js";
 
 /** A read-only projection. It never executes or authorizes historical actions. */
@@ -48,35 +49,49 @@ function category(name: string): TimeTravelEvent["category"] {
   return "other";
 }
 const safeNumber = (n: number) => Number.isSafeInteger(n) && n >= 0;
+const hashSchema = z.string().regex(/^[a-f0-9]{64}$/u);
+const safeSequenceSchema = z.number().int().nonnegative().refine(safeNumber);
+const timeTravelEventSchema = z.object({
+  sequence: safeSequenceSchema,
+  id: z.string().min(1).max(256),
+  name: z.string().min(1).max(256),
+  timeUnixNano: z.string().regex(/^\d{1,30}$/u),
+  eventHash: hashSchema,
+  previousHash: z.union([z.literal(""), hashSchema]),
+  category: z.enum(["authorization", "routing", "execution", "verification", "lifecycle", "other"]),
+  actorIdHash: hashSchema.optional(),
+  attemptIdHash: hashSchema.optional(),
+  leaseIdHash: hashSchema.optional(),
+  actionHash: hashSchema.optional(),
+  evidenceManifestHash: hashSchema.optional()
+}).strict();
+const snapshotSchema = z.object({
+  schemaVersion: z.literal(MISSION_TIME_TRAVEL_VERSION),
+  missionId: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/u),
+  asOfSequence: safeSequenceSchema.nullable(),
+  auditHeadHash: hashSchema,
+  auditEventCount: safeSequenceSchema,
+  integrity: z.literal("full-chain-verified"),
+  sideEffects: z.literal("disabled"),
+  events: z.array(timeTravelEventSchema).max(2000),
+  snapshotHash: hashSchema
+}).strict();
+function fail(code: string): never {
+  throw new ControlStackError(code, code);
+}
 
 /**
  * Local shape and content-hash consistency only. An untrusted producer can
  * recalculate snapshotHash; NEVER use this predicate as historical evidence.
  */
 function locallyConsistent(value: MissionTimeTravelSnapshot): boolean {
-  if (
-    !value || typeof value !== "object" ||
-    value.schemaVersion !== MISSION_TIME_TRAVEL_VERSION ||
-    value.integrity !== "full-chain-verified" ||
-    value.sideEffects !== "disabled" ||
-    !Array.isArray(value.events) ||
-    !safeNumber(value.auditEventCount) ||
-    (value.asOfSequence !== null && !safeNumber(value.asOfSequence)) ||
-    !/^[a-f0-9]{64}$/u.test(value.auditHeadHash)
-  ) return false;
+  if (!snapshotSchema.safeParse(value).success) return false;
   let prior = 0;
   const seen = new Set<string>();
   for (const e of value.events) {
-    if (
-      !e || typeof e !== "object" ||
-      !safeNumber(e.sequence) ||
-      e.sequence <= prior ||
-      typeof e.id !== "string" || seen.has(e.id) ||
+    if (e.sequence <= prior || seen.has(e.id) ||
       (value.asOfSequence !== null && e.sequence > value.asOfSequence) ||
-      typeof e.eventHash !== "string" || !/^[a-f0-9]{64}$/u.test(e.eventHash) ||
-      (e.previousHash !== "" && !/^[a-f0-9]{64}$/u.test(e.previousHash)) ||
-      typeof e.name !== "string" || category(e.name) !== e.category
-    ) return false;
+      category(e.name) !== e.category) return false;
     prior = e.sequence;
     seen.add(e.id);
   }
@@ -115,16 +130,16 @@ export function readMissionTimeTravel(
   options: { asOfSequence?: number; maxEvents?: number } = {}
 ): MissionTimeTravelSnapshot {
   const maxEvents = options.maxEvents ?? 1000;
-  if (!/^[A-Za-z0-9._:-]{1,128}$/u.test(missionId)) throw new Error("time_travel_invalid_mission");
+  if (!/^[A-Za-z0-9._:-]{1,128}$/u.test(missionId)) fail("time_travel_invalid_mission");
   if (
     (options.asOfSequence !== undefined && !safeNumber(options.asOfSequence)) ||
     !Number.isSafeInteger(maxEvents) ||
     maxEvents < 1 ||
     maxEvents > 2000
   )
-    throw new Error("time_travel_invalid_limit");
+    fail("time_travel_invalid_limit");
   const initial = store.verifyAuditChain();
-  if (!initial.ok) throw new Error("time_travel_audit_integrity_failed");
+  if (!initial.ok) fail("time_travel_audit_integrity_failed");
 
   let afterSequence = 0;
   const seen = new Set<string>();
@@ -133,20 +148,21 @@ export function readMissionTimeTravel(
   while (!finished) {
     const page = store.getMissionTrace(missionId, {
       afterSequence,
-      limit: Math.min(200, maxEvents + 1 - events.length)
+      limit: Math.min(200, maxEvents + 1 - events.length),
+      ...(options.asOfSequence !== undefined ? { asOfSequence: options.asOfSequence } : {})
     });
     if (page.missionId !== missionId || page.schemaVersion !== "acs.mission-trace.v1")
-      throw new Error("time_travel_trace_mismatch");
+      fail("time_travel_trace_mismatch");
     for (const { event, correlation } of page.events) {
       if (!safeNumber(event.sequence) || event.sequence <= afterSequence || seen.has(event.id))
-        throw new Error("time_travel_trace_order_invalid");
+        fail("time_travel_trace_order_invalid");
       afterSequence = event.sequence;
       seen.add(event.id);
       if (options.asOfSequence !== undefined && event.sequence > options.asOfSequence) {
         finished = true;
         break;
       }
-      if (events.length >= maxEvents) throw new Error("time_travel_resource_limit");
+      if (events.length >= maxEvents) fail("time_travel_resource_limit");
       events.push({
         sequence: event.sequence,
         id: event.id,
@@ -172,12 +188,24 @@ export function readMissionTimeTravel(
     }
     if (page.nextAfterSequence === undefined) finished = true;
     else if (options.asOfSequence !== undefined && afterSequence >= options.asOfSequence) finished = true;
-    else if (page.nextAfterSequence !== afterSequence) throw new Error("time_travel_cursor_invalid");
-    else if (events.length >= maxEvents) throw new Error("time_travel_resource_limit");
+    else if (page.nextAfterSequence !== afterSequence) fail("time_travel_cursor_invalid");
+    else if (events.length >= maxEvents) {
+      // Exactly maxEvents can be a complete historical view. Inspect one
+      // additional authorized trace event before reporting a resource limit.
+      const lookahead = store.getMissionTrace(missionId, {
+        afterSequence,
+        limit: 1,
+        ...(options.asOfSequence !== undefined ? { asOfSequence: options.asOfSequence } : {})
+      });
+      const nextEvent = lookahead.events[0]?.event;
+      if (nextEvent && (options.asOfSequence === undefined || nextEvent.sequence <= options.asOfSequence))
+        fail("time_travel_resource_limit");
+      finished = true;
+    }
   }
   const final = store.verifyAuditChain();
   if (!final.ok || final.headHash !== initial.headHash || final.eventCount !== initial.eventCount)
-    throw new Error("time_travel_audit_changed_during_read");
+    fail("time_travel_audit_changed_during_read");
   const body = {
     schemaVersion: MISSION_TIME_TRAVEL_VERSION,
     missionId,
@@ -189,7 +217,7 @@ export function readMissionTimeTravel(
     events
   };
   const snapshot = { ...body, snapshotHash: domainHash(MISSION_TIME_TRAVEL_VERSION, body) };
-  if (!locallyConsistent(snapshot)) throw new Error("time_travel_projection_integrity_failed");
+  if (!locallyConsistent(snapshot)) fail("time_travel_projection_integrity_failed");
   return snapshot;
 }
 
@@ -203,7 +231,7 @@ export function compareMissionTimeTravel(
   reason?: "different_mission" | "added" | "removed" | "changed";
 } {
   if (!locallyConsistent(a) || !locallyConsistent(b))
-    throw new Error("time_travel_snapshot_integrity_failed");
+    fail("time_travel_snapshot_integrity_failed");
   if (a.missionId !== b.missionId) return { equal: false, reason: "different_mission" };
   for (let i = 0; i < Math.max(a.events.length, b.events.length); i++) {
     const left = a.events[i],
