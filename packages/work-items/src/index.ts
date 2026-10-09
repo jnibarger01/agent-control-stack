@@ -38,5 +38,5 @@ export * from "./change-set-progress.js";
 export * from "./change-set-review.js";
 
 export * from "./mission-trace.js";
-
 export * from "./mission-time-travel.js";
+export * from "./authoritative-completion-receipt.js";
