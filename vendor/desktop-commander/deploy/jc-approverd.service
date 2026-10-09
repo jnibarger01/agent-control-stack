@@ -1,0 +1,37 @@
+[Unit]
+Description=Jace Commander isolated local approval signer
+After=local-fs.target
+ConditionPathExists=/etc/jace-commander/operator-public.pem
+ConditionPathExists=/var/lib/jc-approverd/signing-private.pem
+
+[Service]
+Type=simple
+User=jc-approverd
+Group=jc-approverd
+UMask=0077
+ExecStart=/usr/bin/node /opt/jace-commander/current/dist/jace-commander/approverd-daemon.js
+Restart=on-failure
+RestartSec=2
+StateDirectory=jc-approverd
+StateDirectoryMode=0700
+RuntimeDirectory=jace-commander
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictRealtime=yes
+ReadWritePaths=/var/lib/jc-approverd /run/jace-commander
+
+[Install]
+WantedBy=multi-user.target
