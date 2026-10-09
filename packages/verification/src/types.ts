@@ -44,13 +44,23 @@ export const verificationCriterionResultSchema = z
 
 export type VerificationCriterionResult = z.infer<typeof verificationCriterionResultSchema>;
 
+export const verificationUsageSchema = z
+  .object({
+    modelTokens: z.number().int().nonnegative().optional(),
+    spendMicroUsd: z.number().int().nonnegative().optional()
+  })
+  .strict();
+
+export type VerificationUsage = z.infer<typeof verificationUsageSchema>;
+
 export const verificationResultSchema = z
   .object({
     verdict: z.enum(["pass", "fail", "inconclusive"]),
     summary: z.string().min(1).max(4_000),
     criteriaResults: z.array(verificationCriterionResultSchema),
     verifierEngineId: z.string().min(1),
-    durationMs: z.number().int().nonnegative()
+    durationMs: z.number().int().nonnegative(),
+    usage: verificationUsageSchema.optional()
   })
   .strict()
   .superRefine((value, context) => {
@@ -77,7 +87,19 @@ export type VerificationResult = z.infer<typeof verificationResultSchema>;
  * runIndependentVerification, which enforces this at the call boundary
  * rather than trusting each Verifier to self-police.
  */
+export interface VerificationUsageReservation {
+  /** Conservative upper bound used for pre-invocation mission-budget admission. */
+  maxModelTokens?: number;
+  /** Conservative upper bound used for pre-invocation mission-budget admission. */
+  maxSpendMicroUsd?: number;
+}
+
 export interface Verifier {
   readonly engineId: string;
+  /**
+   * Required whenever a mission caps model tokens or spend. A verifier that
+   * cannot provide a conservative bound is not admitted under that cap.
+   */
+  readonly usageReservation?: VerificationUsageReservation;
   verify(criteria: VerificationCriterion[], evidence: VerificationEvidence): Promise<VerificationResult>;
 }

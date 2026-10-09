@@ -111,10 +111,21 @@ setup A
 SHIM_LIVE_FAIL_FIRST=4 ACS_DEPLOY_WAIT_SEC=40 run_deploy
 expect "exit 0" test "$(exit_code)" -eq 0
 expect "new release drop-in installed" grep -q "$FINAL" "$DROPINS/40-immutable-release.conf"
-expect "dispatch drop-in installed with PATH and flags" grep -q "ACS_AGENT_DISPATCH_ENABLED=1" "$DROPINS/50-agent-dispatch.conf"
+expect "dispatch drop-in installed with PATH and dispatch OFF by default" grep -q "ACS_AGENT_DISPATCH_ENABLED=0" "$DROPINS/50-agent-dispatch.conf"
 expect "never stopped the unit" bash -c '! grep -q "systemctl --user stop" "$SANDBOX/calls.log"'
 expect "never restored the database" bash -c '! grep -q "db-ops" "$SANDBOX/calls.log"'
 expect "polled livez more than the 4 initial failures" test "$(grep -c '/livez' "$SANDBOX/calls.log")" -gt 4
+
+echo "A2: ACS_DEPLOY_DISPATCH_ENABLED=1 opts in; anything but 0/1 is refused"
+setup A2
+ACS_DEPLOY_DISPATCH_ENABLED=1 ACS_DEPLOY_WAIT_SEC=40 run_deploy
+expect "exit 0" test "$(exit_code)" -eq 0
+expect "dispatch drop-in has dispatch ON when opted in" grep -q "ACS_AGENT_DISPATCH_ENABLED=1" "$DROPINS/50-agent-dispatch.conf"
+setup A3
+ACS_DEPLOY_DISPATCH_ENABLED=yes ACS_DEPLOY_WAIT_SEC=4 run_deploy
+expect "exit 2 on an invalid switch" test "$(exit_code)" -eq 2
+expect "says the switch must be 0 or 1" grep -q "ACS_DEPLOY_DISPATCH_ENABLED must be 0 or 1" "$SANDBOX/out.log"
+expect "no service action" bash -c '! grep -q "systemctl" "$SANDBOX/calls.log"'
 
 # --- B: new release never healthy: stop, restore DB, restore drop-ins, start --------------------------------
 echo "B: unhealthy new release rolls back the database and drop-ins"
@@ -265,8 +276,19 @@ SHIM_NEW_BROKEN=1 ACS_DEPLOY_WAIT_SEC=4 run_deploy
 expect "exit 1" test "$(exit_code)" -eq 1
 expect "failed release drop-in removed (nothing existed before)" test ! -e "$DROPINS/40-immutable-release.conf"
 expect "dispatch drop-in removed" test ! -e "$DROPINS/50-agent-dispatch.conf"
-expect "unit started again on its base configuration" bash -c 'awk "/systemctl --user stop/{s=NR} /systemctl --user start/{t=NR} END{exit !(s&&t&&s<t)}" "$SANDBOX/calls.log"'
+expect "never used the NEW release's db-ops for the restore" bash -c '! grep -q "db-ops $FINAL/scripts/db-ops.mjs" "$SANDBOX/calls.log"'
+expect "no database restore without a previous release tool" bash -c '! grep -q "db-ops.mjs restore" "$SANDBOX/calls.log"'
+expect "says no previous db-ops was found and the unit is left stopped" grep -q "no previous release db-ops.*STOPPED" "$SANDBOX/out.log"
+expect "nothing was started against the possibly migrated database" bash -c '! grep -q "systemctl --user start" "$SANDBOX/calls.log"'
 expect "never restarted the failed release" bash -c '! grep -q "$FINAL/apps/gateway" "$DROPINS"/*.conf 2>/dev/null'
+
+echo "K2: a previous drop-in pointing at the new release is not a previous release"
+setup K2
+printf '[Service]\n# OLD-RELEASE\nWorkingDirectory=%s\n' "$FINAL" >"$DROPINS/40-immutable-release.conf"
+SHIM_NEW_BROKEN=1 ACS_DEPLOY_WAIT_SEC=4 run_deploy
+expect "exit 1" test "$(exit_code)" -eq 1
+expect "never used the NEW release's db-ops for the restore" bash -c '! grep -q "db-ops $FINAL/scripts/db-ops.mjs" "$SANDBOX/calls.log"'
+expect "unit left stopped" bash -c '! grep -q "systemctl --user start" "$SANDBOX/calls.log"'
 
 # --- L: restarts from an earlier incident must not look like a crash loop now ------------------------------
 echo "L: a pre-existing restart count is a baseline, not a crash loop"
