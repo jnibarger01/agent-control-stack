@@ -235,7 +235,8 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
 
   switch (command) {
     case 'serve': {
-      const mode = rest.includes('--standalone') ? 'standalone' : 'managed';
+      const mode = rest.includes('--standalone') ? 'standalone' : rest.includes('--local') ? 'local' : 'managed';
+      if (rest.includes('--standalone') && rest.includes('--local')) throw new Error('JC_MODE_INVALID');
       if (mode === 'managed' && (!config.acsPublicKey || !config.acsKeyId)) {
         // Fail closed at startup rather than rejecting every call later.
         out.stderr('jace-commander: managed mode requires JC_ACS_PUBLIC_KEY and JC_ACS_KEY_ID (or pass --standalone for read-only local development)');
