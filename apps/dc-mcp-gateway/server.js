@@ -68,7 +68,7 @@ try {
   // Equal resources would make /mcp and /jc/mcp accept each other's tokens.
   if (JC.enabled && JC_RESOURCE === RESOURCE) throw new Error('JC_RESOURCE must differ from RESOURCE; refusing to start');
   if (JC.enabled && JC_ISSUER === ISSUER) throw new Error('JC_ISSUER must differ from ISSUER; refusing to start');
-  if (JC.enabled) console.log(`gateway: Jace Commander lane enabled at /jc/mcp (resource=${JC_RESOURCE}; ACS-managed only)`);
+  if (JC.enabled) console.log(`gateway: Jace Commander lane enabled at /jc/mcp (resource=${JC_RESOURCE}; authority=${JC.mode})`);
 } catch (e) {
   console.error(`gateway: ${e.message}`);
   process.exit(1);
@@ -880,7 +880,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // ---- Jace Commander MCP proxy (auth required; ACS-managed only) ----
+    // ---- Jace Commander MCP proxy (OAuth required in either authority mode) ----
     if (pathName === '/jc/mcp' && JC.enabled) {
       const auth = checkAuth(req, JC_RESOURCE, JC_ISSUER);
       if (!auth) {
@@ -902,11 +902,25 @@ const server = http.createServer(async (req, res) => {
             // Never issue or forward a JC capability to anything but the JC
             // bridge (e.g. JC_UPSTREAM mistakenly pointed at the DC bridge).
             const jcBridge = await fetchBridgeAuthority(JC_UPSTREAM);
-            if (!jcBridge.ok || jcBridge.data?.variant !== 'jc') {
-              throw Object.assign(new Error('jc upstream is not the Jace Commander bridge'), { acsCode: 'jc_bridge_mismatch' });
+            if (!jcBridge.ok || jcBridge.data?.variant !== 'jc' ||
+                jcBridge.data?.childMode !== JC.mode) {
+              throw Object.assign(new Error('JC bridge authority does not match configured JC mode'), { acsCode: 'jc_bridge_mismatch' });
             }
-            const rewrite = capabilityTransport(JC, { identity: identityAttribution(auth, jcClaims), requestId: randId() });
-            body = Buffer.from(JSON.stringify(await rewrite(parsed)), 'utf8');
+            if (JC.mode === 'managed') {
+              const rewrite = capabilityTransport(JC, { identity: identityAttribution(auth, jcClaims), requestId: randId() });
+              body = Buffer.from(JSON.stringify(await rewrite(parsed)), 'utf8');
+            } else {
+              // The local signer and root-controlled policy, NOT ACS, decide
+              // local mutation authority. Strip all client-supplied ACS claims.
+              const meta = { ...(parsed.params?._meta || {}) };
+              for (const key of Object.keys(meta)) {
+                if (key === 'capability' || /^acs/i.test(key)) delete meta[key];
+              }
+              body = Buffer.from(JSON.stringify({
+                ...parsed,
+                params: { ...parsed.params, _meta: meta },
+              }), 'utf8');
+            }
           } catch (e) {
             const code = e && e.acsCode ? e.acsCode : 'managed_fail_closed';
             log(req.method, '/jc/mcp', 200, `managed fail-closed: ${code}`);

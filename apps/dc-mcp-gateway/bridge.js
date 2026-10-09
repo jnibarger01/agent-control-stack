@@ -38,6 +38,7 @@ const PORT = parseInt(process.env.BRIDGE_PORT || "8002", 10);
 // is refused outright (never silently stripped) so no legacy execution path
 // can exist on the managed lane.
 const MANAGED = process.env.ACS_MANAGED_MODE === "1";
+const JC_LOCAL = process.env.JC_AUTHORITY === "local";
 // BRIDGE_PROFILE=jace-commander runs the Jace Commander MCP child
 // (desktop-commander dist/jace-commander/cli.js) behind /jc/mcp instead of
 // Desktop Commander. It is always managed: the child rejects every call that
@@ -49,8 +50,8 @@ if (PROFILE !== "desktop-commander" && PROFILE !== "jace-commander") {
   process.exit(1);
 }
 const JC = PROFILE === "jace-commander";
-if (JC && !MANAGED) {
-  console.error("bridge: BRIDGE_PROFILE=jace-commander requires ACS_MANAGED_MODE=1; refusing to start");
+if (JC && MANAGED === JC_LOCAL) {
+  console.error("bridge: JC requires exactly one authority mode: ACS_MANAGED_MODE=1 or JC_AUTHORITY=local");
   process.exit(1);
 }
 const DC_CMD = process.env.DC_CMD || "/home/linuxbrew/.linuxbrew/bin/node";
@@ -69,14 +70,18 @@ const JC_DIR = path.resolve(process.env.JC_DC_DIR || MONOREPO_DC_DIR);
 const DC_ARGS = process.env.DC_ARGS
   ? process.env.DC_ARGS.split(" ")
   : JC
-    ? [path.join(JC_DIR, "dist/jace-commander/cli.js"), "serve"]
+    ? [path.join(JC_DIR, "dist/jace-commander/cli.js"), "serve", ...(JC_LOCAL ? ["--local"] : [])]
     : (() => {
         console.error(
           "bridge: DC_ARGS is required when JC_DC_DIR is not in use; refusing to guess a Desktop Commander entrypoint"
         );
         process.exit(1);
       })();
-if (MANAGED && DC_ARGS.includes("--standalone")) {
+if (JC_LOCAL && (!DC_ARGS.includes("--local") || DC_ARGS.includes("--standalone"))) {
+  console.error("bridge: local JC authority requires serve --local (never --standalone)");
+  process.exit(1);
+}
+if (MANAGED && (DC_ARGS.includes("--standalone") || DC_ARGS.includes("--local"))) {
   console.error("bridge: managed mode refuses a --standalone executor; fix DC_ARGS");
   process.exit(1);
 }
@@ -125,7 +130,7 @@ const JC_CHILD_ENV_KEYS = [
   "JC_FS_ROOTS",
   "JC_FS_DENIED_ROOTS"
 ];
-if (JC && (!process.env.JC_ACS_PUBLIC_KEY || !process.env.JC_ACS_KEY_ID || !process.env.JC_RUNTIME_ID)) {
+if (JC && !JC_LOCAL && (!process.env.JC_ACS_PUBLIC_KEY || !process.env.JC_ACS_KEY_ID || !process.env.JC_RUNTIME_ID)) {
   console.error(
     "bridge: jace-commander profile requires JC_ACS_PUBLIC_KEY, JC_ACS_KEY_ID and JC_RUNTIME_ID; refusing to start"
   );
@@ -1037,9 +1042,8 @@ function computeJcAuthority() {
   const initialized = !!(pair && pair.initializedOnce);
   return {
     variant: "jc",
-    configuredExecutionMode: MANAGED ? "managed" : "unmanaged_gateway",
-    // The child is always started as `serve` (managed); there is no standalone path.
-    childMode: "managed",
+    configuredExecutionMode: JC_LOCAL ? "local" : MANAGED ? "managed" : "unmanaged_gateway",
+    childMode: JC_LOCAL ? "local" : "managed",
     bridge: {
       hasUpstreamPair: !!pair,
       upstreamStarted: !!pair?.upstreamStarted,
