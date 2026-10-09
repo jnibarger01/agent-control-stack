@@ -2266,8 +2266,11 @@ describe("Change Set result verification", () => {
               executingActorId: "planner",
               approvalId: permit.approvalId
             };
+            // main's audit-integrity freshness gate rejects the tampered chain
+            // before receipt derivation. That is still fail-closed and must not
+            // complete the mission.
             expect(() => store.completeChangeSetMission(complete, { via: "policy_gate", actorId: "planner" })).toThrow(
-              "authoritative completion evidence is missing or inconsistent"
+              "audit integrity is stale or invalid"
             );
             expect(store.get(ctx.mission.id)!.status).not.toBe("succeeded");
             expect(store.readEvents({ name: "change_set.completed" })).toHaveLength(0);
