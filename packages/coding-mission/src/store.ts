@@ -1604,6 +1604,11 @@ export class CodingMissionStore {
     });
   }
 
+  /** Append a structured mission event. Sensitive-looking keys are scrubbed. */
+  recordMissionEvent(missionId: string, name: string, body: unknown, now: string): void {
+    this.event(missionId, name, body, now);
+  }
+
   private event(missionId: string, name: string, body: unknown, now: string): void {
     this.db
       .prepare(`INSERT INTO coding_events (mission_id, name, body_json, created_at) VALUES (?, ?, ?, ?)`)

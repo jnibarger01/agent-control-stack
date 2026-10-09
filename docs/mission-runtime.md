@@ -66,6 +66,37 @@ Mission work now has a transport-neutral execution boundary in `worker-execution
 
 The execution contract deliberately does **not** add swarm delegation or CUA. Those future executors must enter through the same dispatch/result/receipt boundary.
 
+## Mission authority and child work (migration 060)
+
+A human approves a mission's authority once (`MissionAuthorityLedger.grantMissionAuthority`): action classes, resource
+prefixes, tools, optional worker identities and an expiry, plus a policy (`allowPrivilegedChildren`, `deniedActions`,
+`maxChildTtlMs`). The approver and a reason are mandatory, the record is write-once, and `authority.granted` is audited
+with any privileged action named. A mission without an envelope cannot create child work.
+
+An agent never spawns anything. `requestChildWork` is the only way to create subordinate work, and it requires the
+live claim of a running parent unit (claim token and worker id both match). Authority is **intersection, never union**:
+
+```text
+child = parent ∩ mission policy ∩ requested ∩ global policy
+```
+
+- Anything the child _asks for_ that the parent does not hold is **denied with reasons** (`action_not_in_parent:…`,
+  `resource_not_in_parent:…`), not silently clipped, and recorded as `child.denied` / `authority.denied`.
+- No wildcards. Resource scopes compare whole path segments, so `repo/acme` does not cover `repo/acme-evil`.
+- `privileged_exec` and `admin_mode` are never inherited by default. A child gets one only if the parent holds it **and**
+  mission policy sets `allowPrivilegedChildren`.
+- A child never outlives its parent and is further bounded by `maxChildTtlMs`. A grandchild derives from its parent's
+  envelope, not the mission's. The invariant is asserted (`isSubsetOf`) after narrowing, not assumed.
+- A request is all-or-nothing, and runs in one IMMEDIATE transaction with the depth, total-children, unit and parallel
+  caps (migration 054), so two agents racing for the last slot yield one winner, and a restart does not reset the caps.
+- A requested child budget may only ask for less than the mission budget. It is recorded; per-child enforcement beyond
+  the mission-wide caps is not implemented.
+
+`cancelChildren` cancels a unit's descendants and reports in-flight ones as uncertain. `reduceChildren` is the explicit
+reduction step (`all_succeeded`, `select`, `majority_result`): it is deterministic (ordered by child id, never by finish
+time), writes nothing while a child is unfinished, treats a tie as `inconclusive`, and is recorded once so a later
+result cannot overwrite it.
+
 ## Not yet in this runtime
 
 Mission authority envelopes and narrowed child authority, checkpoint/resume, `request_child_work`, CUA, and recovery
