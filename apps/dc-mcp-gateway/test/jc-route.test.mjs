@@ -475,7 +475,7 @@ test('jc lane refuses to start when JC_RESOURCE equals RESOURCE', async () => {
 test('with the jc lane on, /mcp refuses a UPSTREAM that is the jc bridge (swapped upstreams)', async () => {
   const acs = recorder(() => ({ status: 200, body: { decision: 'allow' } }));
   const swapped = recorder((req) => (req.path === '/authority'
-    ? { status: 200, body: { variant: 'jc', bridge: { hasUpstreamPair: true } } }
+    ? { status: 200, body: { variant: 'jc', childMode: 'managed', bridge: { hasUpstreamPair: true } } }
     : { status: 200, body: { jsonrpc: '2.0', id: 1, result: {} } }));
   const [acsPort, upPort] = [await acs.listen(), await swapped.listen()];
   const gw = await startGateway({
