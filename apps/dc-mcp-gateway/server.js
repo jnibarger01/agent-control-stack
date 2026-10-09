@@ -17,6 +17,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ClientInfoCache, createClientObserver, extractClientInfo } from './client-attribution.js';
 import { managedModeFromEnv, jcModeFromEnv, identityAttribution, capabilityTransport, acsPost, isToolsCall, dcRuntimeIdentityFromState, issueRuntimeBootstrap, completeRuntimeBootstrap, injectRuntimeBootstrap } from './managed.js';
+import { dcBridgeReady } from './readiness.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -754,8 +755,11 @@ const server = http.createServer(async (req, res) => {
         log('GET', '/authority', 200);
         return send(res, 200, body);
       }
-      // A jc bridge on UPSTREAM is a misconfiguration, never a ready DC bridge.
-      const bridgeReady = bridgeAuthority.ok && bridgeAuthority.data && bridgeAuthority.data.variant !== 'jc' && bridgeAuthority.data.observedMode !== 'ambiguous_conflict' && bridgeAuthority.data.bridge?.hasUpstreamPair;
+      // The edge applies the bridge's own /ready predicate (readiness.js) to the
+      // bridge's /authority JSON, so an ambiguous, expired, malformed, or
+      // process-mismatched executor lease the bridge rejects can never make the
+      // edge ready. A jc bridge on UPSTREAM (variant !== 'dc') is never ready.
+      const bridgeReady = bridgeAuthority.ok && dcBridgeReady(bridgeAuthority.data, { managed: MANAGED.enabled });
       const issuanceReady = !MANAGED.enabled || acsIssuance.reachable;
       // /ready gates the primary DC route; the JC bridge is reported, not gating.
       const jcBridgeReady = jcAuthority ? !!(jcAuthority.ok && jcAuthority.data?.variant === 'jc' && jcAuthority.data?.bridge?.hasUpstreamPair) : undefined;

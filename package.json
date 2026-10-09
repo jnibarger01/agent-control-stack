@@ -17,10 +17,13 @@
   "scripts": {
     "build": "npm run build:chatgpt-widget && tsc -b && npm run build -w apps/public-site && npm run release:dry-run-gate",
     "build:chatgpt-widget": "npm run build -w apps/chatgpt-widget",
-    "test": "npm run test:vitest && npm run test:release-integrity && npm run test:agentos && npm run test:public-site-safety && npm run test:dc-mcp-gateway && npm run test:dc-relay && npm run test:deploy-script",
+    "test": "npm run test:vitest && npm run test:release-integrity && npm run test:agentos && npm run test:public-site-safety && npm run test:dc-mcp-gateway && npm run test:dc-relay && npm run test:deploy-script && npm run test:slice-workflow",
     "test:release-integrity": "npm test -w packages/release-integrity",
     "release:integrity": "node scripts/release-integrity.mjs",
     "test:deploy-script": "bash scripts/deploy-gateway-release.test.sh",
+    "test:slice-workflow": "bash scripts/slice-workflow.test.sh",
+    "slice:new": "bash scripts/new-slice.sh",
+    "pr:preflight": "node scripts/pr-preflight.mjs",
     "test:vitest": "vitest run",
     "test:protocol-conformance": "npm run build && vitest run apps/gateway/src/security-contract-conformance.test.ts",
     "test:agentos": "npm test -w packages/agentos-contracts",
@@ -62,15 +65,15 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/jsdom": "^30.0.0",
-    "@types/node": "^24.19.0",
+    "@types/node": "^24.19.1",
     "@vitest/coverage-v8": "^3.2.7",
-    "axe-core": "^4.13.0",
-    "eslint": "^10.11.0",
+    "axe-core": "^4.14.0",
+    "eslint": "^10.12.0",
     "jsdom": "^30.1.1",
     "prettier": "^3.9.9",
     "tsx": "^4.23.15",
     "typescript": "^5.8.3",
-    "typescript-eslint": "^8.71.0",
+    "typescript-eslint": "^8.71.1",
     "vitest": "^3.2.4"
   },
   "allowScripts": {
@@ -78,7 +81,7 @@
     "esbuild@0.28.1": true
   },
   "dependencies": {
-    "openai": "^7.23.0"
+    "openai": "^7.28.0"
   },
   "overrides": {
     "brace-expansion@^2.0.0": "2.1.7",
