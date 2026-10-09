@@ -81,7 +81,7 @@
     "esbuild@0.28.1": true
   },
   "dependencies": {
-    "openai": "^7.23.0"
+    "openai": "^7.28.0"
   },
   "overrides": {
     "brace-expansion@^2.0.0": "2.1.7",
