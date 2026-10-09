@@ -5,7 +5,7 @@
  * runs inside one IMMEDIATE transaction on the durable store, so depth, fan-out, total-children and parallel caps
  * (budget.ts) and the authority narrowing (authority.ts) cannot be bypassed by concurrency or a restart.
  */
-import { ControlStackError, stableHash } from "@agent-control-stack/shared";
+import { ControlStackError, redactValue, stableHash } from "@agent-control-stack/shared";
 import {
   canonicalEnvelope,
   envelopeHash,
@@ -18,10 +18,11 @@ import {
   type AuthorityRequest,
   type MissionAuthorityPolicy
 } from "./authority.js";
-import type { BudgetDecision, MissionBudget } from "./budget.js";
+import { budgetToLimits, type BudgetDecision, type BudgetLimits, type MissionBudget } from "./budget.js";
 import {
   IN_FLIGHT_WORK_UNIT_STATUSES,
   TERMINAL_MISSION_STATES,
+  parseWorkUnitPayload,
   type VerificationPolicy,
   type WorkUnitKind,
   type WorkUnitStatus
@@ -60,7 +61,6 @@ export interface ChildWorkRequest {
   workerId: string;
   claimToken: string;
   children: ChildWorkItem[];
-  now: string;
 }
 
 export type ChildWorkResult =
@@ -92,8 +92,55 @@ export interface UnitAuthorityRecord {
 
 const UNIT_ID = /^[A-Za-z0-9._:-]{1,128}$/u;
 
+/**
+ * Verified control-plane approval evidence. The ledger never trusts an approver id or reason asserted by its caller:
+ * the composition root supplies the verifier that checks them against the real approval / grant store.
+ */
+export interface ApprovalVerifier {
+  /** True only if `approverId` holds a live approval or grant bound to this mission and covering this envelope. */
+  verifyMissionApproval(input: {
+    missionId: string;
+    approverId: string;
+    grantId?: string;
+    envelopeHash: string;
+    privilegedActions: string[];
+  }): boolean;
+  /** True only for an authenticated operator who may cancel work they do not hold the claim for. */
+  verifyOperator(operatorId: string): boolean;
+}
+
+export type CancelAuthorization =
+  { kind: "parent_claim"; workerId: string; claimToken: string } | { kind: "operator"; operatorId: string };
+
+export interface LedgerOptions {
+  approvals: ApprovalVerifier;
+  /** ACS's own clock. Time is never taken from a request. */
+  clock?: () => string;
+}
+
+const SAFE_REASON = /^[A-Za-z0-9_.:/#-]{1,120}$/u;
+
+/** Denial reasons echo caller input, so they are redacted and bounded before they become durable evidence. */
+function durableReasons(reasons: readonly string[]): string[] {
+  return reasons.slice(0, 32).map((reason) => {
+    const redacted = (redactValue({ reason }) as { reason: string }).reason;
+    return SAFE_REASON.test(redacted) && redacted === reason
+      ? reason
+      : `${redacted.replace(/[^A-Za-z0-9_.:/#[\]-]/gu, "?").slice(0, 80)}#${stableHash(reason).slice(0, 8)}`;
+  });
+}
+
 export class MissionAuthorityLedger {
-  constructor(private readonly store: CodingMissionStore) {}
+  private readonly approvals: ApprovalVerifier;
+  private readonly clock: () => string;
+
+  constructor(
+    private readonly store: CodingMissionStore,
+    options: LedgerOptions
+  ) {
+    this.approvals = options.approvals;
+    this.clock = options.clock ?? (() => new Date().toISOString());
+  }
 
   /**
    * Record the authority a human approved for a mission. Write-once: the envelope and policy can never be widened
@@ -106,9 +153,10 @@ export class MissionAuthorityLedger {
     approverId: string;
     reason: string;
     grantId?: string;
-    now: string;
   }): MissionAuthorityRecord {
-    return this.store.transaction(() => {
+    let refusal: ControlStackError | undefined;
+    const record = this.store.transaction((): MissionAuthorityRecord | undefined => {
+      const now = this.clock();
       const mission = this.store.require(input.missionId);
       if (TERMINAL_MISSION_STATES.has(mission.state)) {
         throw new ControlStackError("mission_not_active", `mission is ${mission.state}`);
@@ -117,11 +165,34 @@ export class MissionAuthorityLedger {
         throw new ControlStackError("mission_authority_invalid", "an approver and a reason are required");
       }
       const problems = validateEnvelope(input.envelope);
-      if (isExpired(input.envelope, input.now)) problems.push("authority_expired");
+      if (isExpired(input.envelope, now)) problems.push("authority_expired");
       if (problems.length > 0) throw new ControlStackError("mission_authority_invalid", problems.join(", "));
       const envelope = canonicalEnvelope(input.envelope);
       const policy = { ...input.policy };
       const hash = envelopeHash(envelope);
+      const privilegedActions = envelope.actions.filter((action) => PRIVILEGED_ACTIONS.has(action));
+      if (
+        !this.approvals.verifyMissionApproval({
+          missionId: input.missionId,
+          approverId: input.approverId,
+          ...(input.grantId ? { grantId: input.grantId } : {}),
+          envelopeHash: hash,
+          privilegedActions
+        })
+      ) {
+        this.store.recordMissionEvent(
+          input.missionId,
+          "authority.denied",
+          { reason: "approval_not_verified", approverId: input.approverId.slice(0, 64), envelopeHash: hash },
+          now
+        );
+        // The refusal is evidence, so it is committed first and thrown after the transaction.
+        refusal = new ControlStackError(
+          "mission_authority_unverified",
+          "no verified approval covers this mission authority"
+        );
+        return undefined;
+      }
       const existing = this.missionAuthority(input.missionId);
       if (existing) {
         if (existing.envelopeHash === hash && stableHash(existing.policy) === stableHash(policy)) return existing;
@@ -143,7 +214,7 @@ export class MissionAuthorityLedger {
           input.approverId,
           input.reason,
           input.grantId ?? null,
-          input.now
+          now
         );
       this.store.recordMissionEvent(
         input.missionId,
@@ -157,21 +228,40 @@ export class MissionAuthorityLedger {
           reason: input.reason,
           grantId: input.grantId ?? null
         },
-        input.now
+        now
       );
       return this.missionAuthority(input.missionId)!;
     });
+    if (refusal) throw refusal;
+    return record!;
   }
 
+  private integrity(what: string, ok: boolean): void {
+    if (!ok) throw new ControlStackError("authority_integrity", `${what} failed its integrity check`);
+  }
+
+  /** Reads fail closed: the envelope must be well-formed and must recompute to the stored hash. */
   missionAuthority(missionId: string): MissionAuthorityRecord | undefined {
     const row = this.store.db.prepare("SELECT * FROM mission_authority WHERE mission_id = ?").get(missionId) as
       Record<string, string | null> | undefined;
     if (!row) return undefined;
+    let envelope: AuthorityEnvelope;
+    let policy: MissionAuthorityPolicy;
+    try {
+      envelope = JSON.parse(String(row.envelope_json)) as AuthorityEnvelope;
+      policy = JSON.parse(String(row.policy_json)) as MissionAuthorityPolicy;
+    } catch {
+      throw new ControlStackError("authority_integrity", "mission authority is not valid JSON");
+    }
+    this.integrity(
+      "mission authority",
+      validateEnvelope(envelope).length === 0 && envelopeHash(envelope) === row.envelope_hash
+    );
     return {
       missionId,
-      envelope: JSON.parse(String(row.envelope_json)) as AuthorityEnvelope,
+      envelope,
       envelopeHash: String(row.envelope_hash),
-      policy: JSON.parse(String(row.policy_json)) as MissionAuthorityPolicy,
+      policy,
       approverId: String(row.approver_id),
       reason: String(row.reason),
       ...(row.grant_id ? { grantId: String(row.grant_id) } : {}),
@@ -179,17 +269,38 @@ export class MissionAuthorityLedger {
     };
   }
 
-  /** The authority a unit runs under: its own derived envelope, or the mission envelope for a root unit. */
+  /**
+   * The authority a derived unit runs under. Fails closed unless the envelope recomputes to its stored hash, is a subset
+   * of its parent's, and is bound to the parent hash it claims to derive from.
+   */
   unitAuthority(missionId: string, unitId: string): UnitAuthorityRecord | undefined {
     const row = this.store.db
       .prepare("SELECT * FROM work_unit_authority WHERE mission_id = ? AND unit_id = ?")
       .get(missionId, unitId) as Record<string, string | null> | undefined;
     if (!row) return undefined;
+    let envelope: AuthorityEnvelope;
+    try {
+      envelope = JSON.parse(String(row.envelope_json)) as AuthorityEnvelope;
+    } catch {
+      throw new ControlStackError("authority_integrity", "unit authority is not valid JSON");
+    }
+    this.integrity(
+      "unit authority",
+      validateEnvelope(envelope).length === 0 && envelopeHash(envelope) === row.envelope_hash
+    );
+    const parentUnitId = row.parent_unit_id ? String(row.parent_unit_id) : undefined;
+    const parent = parentUnitId ? this.unitAuthority(missionId, parentUnitId) : undefined;
+    const parentEnvelope = parent?.envelope ?? this.missionAuthority(missionId)?.envelope;
+    const parentHash = parent?.envelopeHash ?? this.missionAuthority(missionId)?.envelopeHash;
+    this.integrity(
+      "unit authority derivation",
+      parentEnvelope !== undefined && parentHash === row.derived_from_hash && isSubsetOf(envelope, parentEnvelope)
+    );
     return {
       missionId,
       unitId,
-      ...(row.parent_unit_id ? { parentUnitId: String(row.parent_unit_id) } : {}),
-      envelope: JSON.parse(String(row.envelope_json)) as AuthorityEnvelope,
+      ...(parentUnitId ? { parentUnitId } : {}),
+      envelope,
       envelopeHash: String(row.envelope_hash),
       derivedFromHash: String(row.derived_from_hash),
       ...(row.purpose ? { purpose: String(row.purpose) } : {}),
@@ -199,27 +310,45 @@ export class MissionAuthorityLedger {
 
   /**
    * ACS-owned `request_child_work`. All-or-nothing: if any child is denied nothing is created. A denial is durable
-   * evidence (`child.denied`, `authority.denied`) so an escalation attempt can be reconstructed afterwards.
+   * evidence (`child.denied`, `authority.denied`) so an escalation attempt can be reconstructed afterwards. Time comes
+   * from ACS's clock; the request cannot supply it.
    */
   requestChildWork(request: ChildWorkRequest): ChildWorkResult {
     return this.store.transaction(() => {
-      const { missionId, parentUnitId, now } = request;
+      const { missionId, parentUnitId } = request;
+      const now = this.clock();
+      // The requester is recorded as claimed until the durable claim confirms it.
+      let requester: Record<string, unknown> = { workerId: request.workerId, verified: false };
+      let requested = false;
+      const emitRequested = () => {
+        if (requested) return;
+        requested = true;
+        this.store.recordMissionEvent(
+          missionId,
+          "child.requested",
+          {
+            parentUnitId,
+            requester,
+            children: request.children
+              .slice(0, 16)
+              .map((child) => ({ unitId: String(child.unitId).slice(0, 64), workType: child.workType }))
+          },
+          now
+        );
+      };
       const deny = (reasons: string[]): ChildWorkResult => {
-        this.store.recordMissionEvent(missionId, "child.denied", { parentUnitId, reasons }, now);
-        if (reasons.some((reason) => /authority|action_|resource_|tool_|worker_|expiry|privileged/u.test(reason))) {
-          this.store.recordMissionEvent(missionId, "authority.denied", { parentUnitId, reasons }, now);
+        emitRequested();
+        const safe = durableReasons(reasons);
+        this.store.recordMissionEvent(missionId, "child.denied", { parentUnitId, requester, reasons: safe }, now);
+        if (
+          reasons.some((reason) =>
+            /authority|action_|resource_|tool_|worker_|expiry|privileged|integrity/u.test(reason)
+          )
+        ) {
+          this.store.recordMissionEvent(missionId, "authority.denied", { parentUnitId, requester, reasons: safe }, now);
         }
         return { ok: false, outcome: "denied", reasons };
       };
-      this.store.recordMissionEvent(
-        missionId,
-        "child.requested",
-        {
-          parentUnitId,
-          children: request.children.map((child) => ({ unitId: child.unitId, workType: child.workType }))
-        },
-        now
-      );
 
       const mission = this.store.get(missionId);
       if (!mission || TERMINAL_MISSION_STATES.has(mission.state)) return deny(["mission_not_active"]);
@@ -234,39 +363,75 @@ export class MissionAuthorityLedger {
       ) {
         return deny(["claim_mismatch"]);
       }
+      requester = {
+        workerId: request.workerId,
+        verified: true,
+        parentAttempt: parent.attempt,
+        claimFence: stableHash(request.claimToken).slice(0, 16)
+      };
+      emitRequested();
       if (request.children.length === 0 || request.children.length > 16) return deny(["child_count_invalid"]);
-      const missionAuthority = this.missionAuthority(missionId);
-      if (!missionAuthority) return deny(["mission_has_no_authority"]);
-      const parentRecord = this.unitAuthority(missionId, parentUnitId);
-      const parentEnvelope = parentRecord?.envelope ?? missionAuthority.envelope;
-      const parentHash = parentRecord?.envelopeHash ?? missionAuthority.envelopeHash;
 
+      let missionAuthority: MissionAuthorityRecord | undefined;
+      let parentEnvelope: AuthorityEnvelope;
+      let parentHash: string;
+      try {
+        missionAuthority = this.missionAuthority(missionId);
+        if (!missionAuthority) return deny(["mission_has_no_authority"]);
+        // A root unit runs under the mission envelope. A derived unit must have its own verified envelope: a missing
+        // row is never treated as a root, or a unit created outside request_child_work would inherit the whole mission.
+        const parentRecord = parent.parentUnitId ? this.unitAuthority(missionId, parentUnitId) : undefined;
+        if (parent.parentUnitId && !parentRecord) return deny(["parent_authority_missing"]);
+        parentEnvelope = parentRecord?.envelope ?? missionAuthority.envelope;
+        parentHash = parentRecord?.envelopeHash ?? missionAuthority.envelopeHash;
+      } catch (error) {
+        if (error instanceof ControlStackError && error.code === "authority_integrity")
+          return deny(["authority_integrity_failure"]);
+        throw error;
+      }
+
+      const existingIds = new Set(units.map((unit) => unit.unitId));
+      const batchIds = new Set(request.children.map((child) => String(child.unitId)));
       const seen = new Set<string>();
       const derived: Array<{ item: ChildWorkItem; envelope: AuthorityEnvelope }> = [];
       const reasons: string[] = [];
       const missionBudget = this.store.budget(missionId);
       for (const item of request.children) {
-        const prefix = UNIT_ID.test(item.unitId) ? item.unitId : "invalid_unit_id";
-        if (!UNIT_ID.test(item.unitId) || seen.has(item.unitId))
+        const prefix = UNIT_ID.test(String(item.unitId)) ? item.unitId : "invalid_unit_id";
+        if (!UNIT_ID.test(String(item.unitId)) || seen.has(item.unitId) || existingIds.has(item.unitId)) {
           reasons.push(`${prefix}:child_id_invalid_or_duplicate`);
+        }
         seen.add(item.unitId);
         if (!(CHILD_WORK_TYPES as readonly string[]).includes(item.workType))
           reasons.push(`${prefix}:work_type_invalid`);
-        if (!item.purpose || item.purpose.length > 512) reasons.push(`${prefix}:purpose_invalid`);
-        if (item.requestedBudget && missionBudget) {
-          const limits = missionBudget.limits;
-          const asks: Array<[number | undefined, number | undefined, string]> = [
-            [item.requestedBudget.maxWorkUnits, limits.work_units, "work_units"],
-            [item.requestedBudget.maxToolCalls, limits.tool_calls, "tool_calls"],
-            [item.requestedBudget.maxModelTokens, limits.model_tokens, "model_tokens"],
-            [item.requestedBudget.maxChildDepth, limits.child_depth, "child_depth"],
-            [item.requestedBudget.maxChildWorkUnits, limits.child_work_units, "child_work_units"]
-          ];
-          for (const [asked, cap, name] of asks) {
-            if (asked !== undefined && (!Number.isFinite(asked) || asked < 0))
-              reasons.push(`${prefix}:budget_invalid:${name}`);
-            else if (asked !== undefined && cap !== undefined && asked > cap)
-              reasons.push(`${prefix}:budget_exceeds_mission:${name}`);
+        if (typeof item.purpose !== "string" || !item.purpose || item.purpose.length > 512)
+          reasons.push(`${prefix}:purpose_invalid`);
+        // Everything addWorkUnits would reject is checked here, so a bad payload or graph is a durable denial.
+        if (item.workType in KIND_FOR_WORK_TYPE) {
+          try {
+            parseWorkUnitPayload(KIND_FOR_WORK_TYPE[item.workType], item.payload ?? {});
+          } catch {
+            if (item.payload !== undefined || KIND_FOR_WORK_TYPE[item.workType] !== "coding")
+              reasons.push(`${prefix}:payload_invalid`);
+          }
+        }
+        for (const dependency of item.dependsOn ?? []) {
+          if (dependency === item.unitId || !(existingIds.has(dependency) || batchIds.has(dependency))) {
+            reasons.push(`${prefix}:dependency_invalid`);
+          }
+        }
+        if (item.requestedBudget) {
+          let asked: BudgetLimits | undefined;
+          try {
+            asked = budgetToLimits(item.requestedBudget);
+          } catch {
+            reasons.push(`${prefix}:budget_invalid`);
+          }
+          if (asked && missionBudget) {
+            for (const [metric, value] of Object.entries(asked) as Array<[keyof BudgetLimits, number]>) {
+              const cap = missionBudget.limits[metric];
+              if (cap !== undefined && value > cap) reasons.push(`${prefix}:budget_exceeds_mission:${metric}`);
+            }
           }
         }
         const narrowed = narrowAuthority({
@@ -285,22 +450,29 @@ export class MissionAuthorityLedger {
       }
       if (reasons.length > 0) return deny(reasons);
 
-      const created = this.store.addWorkUnits(
-        missionId,
-        derived.map(({ item }) => ({
-          unitId: item.unitId,
-          kind: KIND_FOR_WORK_TYPE[item.workType],
-          title: item.title ?? item.purpose.slice(0, 120),
-          parentUnitId,
-          ...(item.dependsOn ? { dependsOn: item.dependsOn } : {}),
-          ...(item.payload === undefined ? {} : { payload: item.payload }),
-          ...(item.verificationPolicy ? { verificationPolicy: item.verificationPolicy } : {})
-        })),
-        now
-      );
+      let created: ReturnType<CodingMissionStore["addWorkUnits"]>;
+      try {
+        created = this.store.addWorkUnits(
+          missionId,
+          derived.map(({ item }) => ({
+            unitId: item.unitId,
+            kind: KIND_FOR_WORK_TYPE[item.workType],
+            title: item.title ?? item.purpose.slice(0, 120),
+            parentUnitId,
+            ...(item.dependsOn ? { dependsOn: item.dependsOn } : {}),
+            ...(item.payload === undefined ? {} : { payload: item.payload }),
+            ...(item.verificationPolicy ? { verificationPolicy: item.verificationPolicy } : {})
+          })),
+          now
+        );
+      } catch (error) {
+        // addWorkUnits validates its whole batch before it writes anything, so these codes never leave a partial insert.
+        if (error instanceof ControlStackError && /^work_unit_/u.test(error.code)) return deny([error.code]);
+        throw error;
+      }
       if (!created.ok) {
-        // addWorkUnits already recorded budget.exhausted; add the child-level denial beside it.
-        this.store.recordMissionEvent(missionId, "child.denied", { parentUnitId, reasons: ["budget_exhausted"] }, now);
+        const safe = durableReasons(["budget_exhausted"]);
+        this.store.recordMissionEvent(missionId, "child.denied", { parentUnitId, requester, reasons: safe }, now);
         return { ok: false, outcome: "budget_exhausted", decision: created.decision };
       }
       const insert = this.store.db.prepare(
@@ -328,6 +500,7 @@ export class MissionAuthorityLedger {
             parentUnitId,
             unitId: item.unitId,
             workType: item.workType,
+            requester,
             envelopeHash: envelopeHash(envelope),
             derivedFrom: parentHash
           },
@@ -338,14 +511,42 @@ export class MissionAuthorityLedger {
     });
   }
 
-  /** Cancel every unfinished descendant of a unit. In-flight children are reported as uncertain, not rolled back. */
+  /**
+   * Cancel every unfinished descendant of a unit. The caller must either hold the parent's live claim or be an
+   * authenticated operator, so a stale worker cannot cancel work owned by a newer claimant. In-flight children are
+   * reported as uncertain, not rolled back.
+   */
   cancelChildren(
     missionId: string,
     parentUnitId: string,
-    input: { reason: string; now: string }
+    input: { reason: string; authorization: CancelAuthorization }
   ): { cancelled: string[]; uncertain: string[] } {
-    return this.store.transaction(() => {
+    let refusal: ControlStackError | undefined;
+    const result = this.store.transaction((): { cancelled: string[]; uncertain: string[] } | undefined => {
+      const now = this.clock();
       const units = this.store.workUnits(missionId);
+      const parent = units.find((unit) => unit.unitId === parentUnitId);
+      if (!parent) throw new ControlStackError("parent_unit_not_found", "parent unit does not exist");
+      const auth = input.authorization;
+      const authorized =
+        auth.kind === "operator"
+          ? this.approvals.verifyOperator(auth.operatorId)
+          : parent.claimToken === auth.claimToken &&
+            parent.workerId === auth.workerId &&
+            ["running", "checkpointed", "verifying"].includes(parent.status);
+      if (!authorized) {
+        this.store.recordMissionEvent(
+          missionId,
+          "authority.denied",
+          { parentUnitId, reason: "cancel_not_authorized", kind: auth.kind },
+          now
+        );
+        refusal = new ControlStackError(
+          "cancel_not_authorized",
+          "cancellation requires the parent's live claim or a verified operator"
+        );
+        return undefined;
+      }
       const descendants = new Set<string>();
       let grew = true;
       while (grew) {
@@ -381,13 +582,16 @@ export class MissionAuthorityLedger {
             unitId: unit.unitId,
             was: unit.status,
             externalState: inFlight ? "uncertain" : "none",
-            reason: input.reason
+            reason: durableReasons([input.reason])[0],
+            by: auth.kind === "operator" ? { operatorId: auth.operatorId } : { workerId: auth.workerId }
           },
-          input.now
+          now
         );
       }
       return { cancelled, uncertain };
     });
+    if (refusal) throw refusal;
+    return result!;
   }
 
   /**
@@ -399,7 +603,6 @@ export class MissionAuthorityLedger {
     parentUnitId: string;
     strategy: "all_succeeded" | "select" | "majority_result";
     selectedUnitId?: string;
-    now: string;
   }):
     | { status: "incomplete"; waitingOn: string[] }
     | {
@@ -409,6 +612,7 @@ export class MissionAuthorityLedger {
         recorded: boolean;
       } {
     return this.store.transaction(() => {
+      const now = this.clock();
       const existing = this.store.db
         .prepare("SELECT * FROM work_unit_reductions WHERE mission_id = ? AND parent_unit_id = ?")
         .get(input.missionId, input.parentUnitId) as Record<string, string | null> | undefined;
@@ -474,13 +678,13 @@ export class MissionAuthorityLedger {
           JSON.stringify(
             children.map((unit) => ({ unitId: unit.unitId, status: unit.status, resultHash: unit.resultHash ?? null }))
           ),
-          input.now
+          now
         );
       this.store.recordMissionEvent(
         input.missionId,
         "child.reduced",
         { parentUnitId: input.parentUnitId, strategy: input.strategy, outcome, children: children.length },
-        input.now
+        now
       );
       return {
         status: outcome,

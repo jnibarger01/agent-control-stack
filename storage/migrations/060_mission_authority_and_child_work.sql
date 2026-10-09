@@ -44,6 +44,19 @@ CREATE TABLE work_unit_reductions (
   FOREIGN KEY (mission_id, parent_unit_id) REFERENCES coding_operations (mission_id, operation_id)
 );
 
+-- INSERT OR REPLACE resolves a key conflict by deleting the old row without firing DELETE triggers (recursive_triggers
+-- is off), so write-once also needs a BEFORE INSERT guard. It fires before conflict resolution and refuses any insert
+-- whose key already exists, which closes REPLACE as well as a plain duplicate.
+CREATE TRIGGER mission_authority_write_once BEFORE INSERT ON mission_authority
+WHEN EXISTS (SELECT 1 FROM mission_authority WHERE mission_id = NEW.mission_id)
+BEGIN SELECT RAISE(ABORT, 'mission_authority: append-only'); END;
+CREATE TRIGGER work_unit_authority_write_once BEFORE INSERT ON work_unit_authority
+WHEN EXISTS (SELECT 1 FROM work_unit_authority WHERE mission_id = NEW.mission_id AND unit_id = NEW.unit_id)
+BEGIN SELECT RAISE(ABORT, 'work_unit_authority: append-only'); END;
+CREATE TRIGGER work_unit_reductions_write_once BEFORE INSERT ON work_unit_reductions
+WHEN EXISTS (SELECT 1 FROM work_unit_reductions WHERE mission_id = NEW.mission_id AND parent_unit_id = NEW.parent_unit_id)
+BEGIN SELECT RAISE(ABORT, 'work_unit_reductions: append-only'); END;
+
 CREATE TRIGGER mission_authority_no_update BEFORE UPDATE ON mission_authority
 BEGIN SELECT RAISE(ABORT, 'mission_authority: append-only'); END;
 CREATE TRIGGER mission_authority_no_delete BEFORE DELETE ON mission_authority
