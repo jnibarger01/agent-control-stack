@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  RouteStrategyRejectedError,
   candidateStrategies,
   deriveRouteEnrichment,
   executorClassFor,
@@ -53,13 +54,44 @@ describe("candidate strategies (hard policy)", () => {
     expect(candidateStrategies(unit("coding"), 2).candidates).not.toContain("cua_recovery");
   });
 
-  it("narrows to the policy allow-list and defaults to single when the list leaves nothing", () => {
+  it("narrows to the policy allow-list and fails closed when the list leaves nothing", () => {
     expect(candidateStrategies(unit("coding"), 2, { allowedStrategies: ["plan_execute"] }).candidates).toEqual([
       "plan_execute"
     ]);
-    const empty = candidateStrategies(unit("shell"), 2, { allowedStrategies: ["cua_recovery"] });
-    expect(empty.candidates).toEqual(["single"]);
-    expect(empty.reasons).toContainEqual({ code: "allowed_strategies_empty_defaulted_single" });
+    const nonMatching = candidateStrategies(unit("shell"), 2, { allowedStrategies: ["cua_recovery"] });
+    expect(nonMatching).toMatchObject({ candidates: [], rejected: true });
+    expect(nonMatching.reasons).toContainEqual({ code: "allowed_strategies_rejected", detail: "cua_recovery" });
+    const empty = candidateStrategies(unit("coding"), 2, { allowedStrategies: [] });
+    expect(empty).toMatchObject({ candidates: [], rejected: true });
+    expect(empty.reasons).toContainEqual({ code: "allowed_strategies_rejected", detail: "empty" });
+  });
+
+  it("deriveRouteEnrichment rejects instead of defaulting to single, recording any recommendation", () => {
+    for (const allowedStrategies of [[], ["cua_recovery"]] as const) {
+      let caught: unknown;
+      try {
+        deriveRouteEnrichment({
+          unit: unit("shell"),
+          eligibleCount: 2,
+          policy: { allowedStrategies },
+          recommended: "single"
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(RouteStrategyRejectedError);
+      const rejection = caught as RouteStrategyRejectedError;
+      expect(rejection.reasons.map((reason) => reason.code)).toEqual([
+        "allowed_strategies_rejected",
+        "strategy_recommendation_rejected"
+      ]);
+      expect(rejection.reasons).toContainEqual({ code: "strategy_recommendation_rejected", detail: "single" });
+      expect(rejection.deterministicEvidence).toContainEqual({ kind: "candidate_strategies", value: [] });
+      expect(rejection.deterministicEvidence).toContainEqual({
+        kind: "allowed_strategies",
+        value: [...allowedStrategies]
+      });
+    }
   });
 
   it("maps every unit kind to an executor class", () => {
