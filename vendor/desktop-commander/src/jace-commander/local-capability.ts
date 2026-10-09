@@ -61,7 +61,7 @@ export function mintJcLocalCapability(
   return { payload, signature: crypto.sign(null, Buffer.from(canon(payload)), privateKey).toString('base64url') };
 }
 export interface JcLocalNonceStore {
-  consume(nonce: string): void;
+  reserve(key: string, retainUntil: number, now: number): void;
 }
 export function verifyJcLocalCapability(
   envelope: unknown,
@@ -81,7 +81,7 @@ export function verifyJcLocalCapability(
   if (!crypto.verify(null, Buffer.from(canon(p)), publicKey, Buffer.from(envelope.signature, 'base64url')))
     throw new Error('JC_LOCAL_SIGNATURE_INVALID');
   // Must be a persistent replay store shared across restarts and workers.
-  nonces.consume(p.nonce);
+  nonces.reserve('jc.local.v1:' + p.nonce, p.expiresAt + 5000, now);
   return p;
 }
 /** Existing file-backed nonce store is suitable for a root/daemon-controlled directory. */
