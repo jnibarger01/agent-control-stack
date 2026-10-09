@@ -76,12 +76,16 @@ export function budgetToLimits(budget: MissionBudget): BudgetLimits {
   copy("child_depth", budget.maxChildDepth);
   copy("child_work_units", budget.maxChildWorkUnits);
   copy("model_tokens", budget.maxModelTokens);
+  // Validate dollars before rounding: a tiny negative amount would otherwise become negative zero.
+  if (budget.maxSpendUsd !== undefined && (!Number.isFinite(budget.maxSpendUsd) || budget.maxSpendUsd < 0)) {
+    throw new RangeError("budget spend_micro_usd must be a non-negative number");
+  }
   copy("spend_micro_usd", budget.maxSpendUsd === undefined ? undefined : Math.round(budget.maxSpendUsd * 1_000_000));
   for (const key of ["wall_clock_ms", "parallel_work_units"] as const) {
     if (limits[key] !== undefined && limits[key]! < 1) throw new RangeError(`budget ${key} must be at least 1`);
   }
   for (const [key, value] of Object.entries(limits)) {
-    if (!Number.isInteger(value)) throw new RangeError(`budget ${key} must be an integer`);
+    if (!Number.isSafeInteger(value)) throw new RangeError(`budget ${key} must be a safe integer`);
   }
   return limits;
 }

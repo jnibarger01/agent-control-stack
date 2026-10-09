@@ -1625,6 +1625,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
   private transactionDepth = 0;
   private pendingEvents: StoredAuditEvent[] = [];
   private auditChainValid = true;
+  // A cached audit result alone is not authority to write after another SQLite writer changes the DB.
+  private auditChainVerifiedDataVersion = -1;
+  private auditChainVerifiedAtMs = 0;
   private readinessDatabaseChecks!: Pick<
     StoreHealth["checks"],
     "integrity" | "foreignKeys" | "migrations" | "auditChain"
@@ -1688,9 +1691,13 @@ export class SqliteWorkItemStore implements WorkItemStore {
           PRAGMA foreign_keys = ON;
         `);
         applyControlPlaneMigrations(this.db);
+        // Capture the version *before* verification so a concurrent commit cannot be
+        // silently covered by a newer version without itself being checked.
+        this.auditChainVerifiedDataVersion = this.readAuditDataVersion();
         const initialHealth = inspectControlPlaneDatabase(this.db);
         this.auditChainValid = initialHealth.checks.auditChain.ok;
         this.readinessDatabaseChecks = { ...initialHealth.checks };
+        this.auditChainVerifiedAtMs = Date.now();
         break;
       } catch (error) {
         if (!isSqliteBusy(error) || attempt === maxLockedAttempts) {
@@ -6034,9 +6041,14 @@ export class SqliteWorkItemStore implements WorkItemStore {
   }
 
   health(): StoreHealth {
+    // The data version belongs to the state BEFORE inspection. A concurrent
+    // database commit during the inspection must force revalidation on write.
+    const version = this.readAuditDataVersion();
     const database = inspectControlPlaneDatabase(this.db);
     this.auditChainValid = database.checks.auditChain.ok;
     this.readinessDatabaseChecks = { ...database.checks };
+    this.auditChainVerifiedDataVersion = version;
+    this.auditChainVerifiedAtMs = Date.now();
     const checks = {
       read: this.readHealth(),
       write: this.writeHealth(),
@@ -9324,6 +9336,46 @@ export class SqliteWorkItemStore implements WorkItemStore {
     }
   }
 
+  private readAuditDataVersion(): number {
+    const row = this.db.prepare("PRAGMA data_version").get() as { data_version?: unknown } | undefined;
+    const version = row?.data_version;
+    if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 0) {
+      throw new ControlStackError("audit_chain_invalid", "audit integrity version cannot be established");
+    }
+    return version;
+  }
+
+  private assertAuditIntegrityFreshForWrite(): void {
+    if (!this.auditChainValid) {
+      throw new ControlStackError("audit_chain_invalid", "audit chain is invalid; writes are disabled");
+    }
+    try {
+      const version = this.readAuditDataVersion();
+      const now = Date.now();
+      const verifiedAgeMs = now - this.auditChainVerifiedAtMs;
+      // PRAGMA data_version changes when another SQLite connection commits. Recheck
+      // the complete audit history when that happens, or at least once every 30s.
+      // This method runs *inside* BEGIN IMMEDIATE, so another writer cannot
+      // change the audit chain between verification and the protected write.
+      if (version === this.auditChainVerifiedDataVersion && verifiedAgeMs >= 0 && verifiedAgeMs < 30_000) {
+        return;
+      }
+      const verified = verifyAuditChain(this.readAllEvents());
+      if (!verified.ok) {
+        throw new ControlStackError("audit_chain_invalid", "audit history failed freshness verification");
+      }
+      this.auditChainVerifiedDataVersion = version;
+      this.auditChainVerifiedAtMs = now;
+      this.readinessDatabaseChecks.auditChain = okHealth();
+    } catch {
+      // A failed or unavailable verifier is an authorization failure, not a
+      // soft readiness warning. Keep subsequent writes fenced until rechecked.
+      this.auditChainValid = false;
+      this.readinessDatabaseChecks.auditChain = failHealth("audit_chain_invalid");
+      throw new ControlStackError("audit_chain_invalid", "audit integrity is stale or invalid; writes are disabled");
+    }
+  }
+
   private write<T>(operation: () => { value: T; events: StoredAuditEvent[] }): T {
     if (!this.auditChainValid) {
       throw new ControlStackError("audit_chain_invalid", "audit chain is invalid; writes are disabled");
@@ -9339,6 +9391,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
     this.transactionDepth = 1;
     let result: { value: T; events: StoredAuditEvent[] };
     try {
+      // BEGIN IMMEDIATE fences concurrent writers across the freshness check
+      // and the protected mutation. Any external update requires a full replay.
+      this.assertAuditIntegrityFreshForWrite();
       result = operation();
       this.db.exec("COMMIT");
     } catch (error) {
