@@ -3,19 +3,21 @@
  *
  * An agent never spawns anything. It asks ACS, holding the claim of a running unit, and ACS decides. Everything here
  * runs inside one IMMEDIATE transaction on the durable store, so depth, fan-out, total-children and parallel caps
- * (budget.ts) and the authority narrowing (authority.ts) cannot be bypassed by concurrency or a restart.
+ * (budget.ts) and the authority narrowing (authority.ts, on the migration-047 grant model) cannot be bypassed by
+ * concurrency or a restart. Time comes from ACS's own clock; nothing a worker sends can set it.
  */
 import { ControlStackError, redactValue, stableHash } from "@agent-control-stack/shared";
 import {
-  canonicalEnvelope,
-  envelopeHash,
-  isExpired,
-  isSubsetOf,
-  narrowAuthority,
-  validateEnvelope,
-  PRIVILEGED_ACTIONS,
-  type AuthorityEnvelope,
-  type AuthorityRequest,
+  autonomousAuthorityCoreSchema,
+  autonomousAuthorityHash,
+  type AutonomousAuthorityGrant
+} from "@agent-control-stack/work-items";
+import {
+  PRIVILEGED_PRIVILEGES,
+  definitionHash,
+  isSubset,
+  narrowDefinition,
+  type AutonomousAuthorityDefinition,
   type MissionAuthorityPolicy
 } from "./authority.js";
 import { budgetToLimits, type BudgetDecision, type BudgetLimits, type MissionBudget } from "./budget.js";
@@ -49,7 +51,8 @@ export interface ChildWorkItem {
   payload?: unknown;
   dependsOn?: string[];
   verificationPolicy?: VerificationPolicy;
-  requestedAuthority?: AuthorityRequest;
+  /** A complete candidate definition. It must be a subset of the parent's or the whole request is denied. */
+  requestedAuthority?: AutonomousAuthorityDefinition;
   /** Recorded with the request. It can only ask for less than the mission budget, never more. */
   requestedBudget?: Partial<MissionBudget>;
 }
@@ -64,18 +67,21 @@ export interface ChildWorkRequest {
 }
 
 export type ChildWorkResult =
-  | { ok: true; created: string[]; authorities: Record<string, AuthorityEnvelope> }
+  | { ok: true; created: string[]; authorities: Record<string, AutonomousAuthorityDefinition> }
   | { ok: false; outcome: "denied"; reasons: string[] }
   | { ok: false; outcome: "budget_exhausted"; decision: BudgetDecision };
 
 export interface MissionAuthorityRecord {
   missionId: string;
-  envelope: AuthorityEnvelope;
-  envelopeHash: string;
+  definition: AutonomousAuthorityDefinition;
+  definitionHash: string;
+  grantId: string;
+  grantHash: string;
   policy: MissionAuthorityPolicy;
+  /** Taken from the verified grant (`issuedByActorId`), never asserted by the caller. */
   approverId: string;
   reason: string;
-  grantId?: string;
+  policyApprovedBy?: string;
   createdAt: string;
 }
 
@@ -83,42 +89,32 @@ export interface UnitAuthorityRecord {
   missionId: string;
   unitId: string;
   parentUnitId?: string;
-  envelope: AuthorityEnvelope;
-  envelopeHash: string;
+  definition: AutonomousAuthorityDefinition;
+  definitionHash: string;
   derivedFromHash: string;
+  grantId: string;
   purpose?: string;
   createdAt: string;
 }
 
 const UNIT_ID = /^[A-Za-z0-9._:-]{1,128}$/u;
+const SAFE_REASON = /^[A-Za-z0-9_.:/#-]{1,120}$/u;
 
-/**
- * Verified control-plane approval evidence. The ledger never trusts an approver id or reason asserted by its caller:
- * the composition root supplies the verifier that checks them against the real approval / grant store.
- */
-export interface ApprovalVerifier {
-  /** True only if `approverId` holds a live approval or grant bound to this mission and covering this envelope. */
-  verifyMissionApproval(input: {
-    missionId: string;
-    approverId: string;
-    grantId?: string;
-    envelopeHash: string;
-    privilegedActions: string[];
-  }): boolean;
-  /** True only for an authenticated operator who may cancel work they do not hold the claim for. */
+/** The existing human-issued grant store (`SqliteWorkItemStore` satisfies this). Read-only. */
+export interface GrantReader {
+  getAutonomousAuthority(grantId: string): AutonomousAuthorityGrant | undefined;
+}
+
+export interface LedgerOptions {
+  grants: GrantReader;
+  /** True only for an authenticated operator. Gates loosened mission policy and cancelling work one does not own. */
   verifyOperator(operatorId: string): boolean;
+  /** ACS's own clock. */
+  clock?: () => string;
 }
 
 export type CancelAuthorization =
   { kind: "parent_claim"; workerId: string; claimToken: string } | { kind: "operator"; operatorId: string };
-
-export interface LedgerOptions {
-  approvals: ApprovalVerifier;
-  /** ACS's own clock. Time is never taken from a request. */
-  clock?: () => string;
-}
-
-const SAFE_REASON = /^[A-Za-z0-9_.:/#-]{1,120}$/u;
 
 /** Denial reasons echo caller input, so they are redacted and bounded before they become durable evidence. */
 function durableReasons(reasons: readonly string[]): string[] {
@@ -131,28 +127,27 @@ function durableReasons(reasons: readonly string[]): string[] {
 }
 
 export class MissionAuthorityLedger {
-  private readonly approvals: ApprovalVerifier;
   private readonly clock: () => string;
 
   constructor(
     private readonly store: CodingMissionStore,
-    options: LedgerOptions
+    private readonly options: LedgerOptions
   ) {
-    this.approvals = options.approvals;
     this.clock = options.clock ?? (() => new Date().toISOString());
   }
 
   /**
-   * Record the authority a human approved for a mission. Write-once: the envelope and policy can never be widened
-   * afterwards. Privileged actions must be named explicitly, and the approver and reason are mandatory.
+   * Bind a mission to a human-issued autonomous authority grant (migration 047). The grant is loaded from the control
+   * plane and verified: it must exist, name this mission, recompute to its own hash, and be unexpired. The approver is
+   * the grant's issuer, so nothing here trusts an identity or reason asserted by the caller. Loosening mission policy
+   * (privileged children) additionally needs an authenticated operator. Write-once.
    */
   grantMissionAuthority(input: {
     missionId: string;
-    envelope: AuthorityEnvelope;
+    grantId: string;
     policy?: MissionAuthorityPolicy;
-    approverId: string;
-    reason: string;
-    grantId?: string;
+    /** Required, and verified, when the policy allows privileged children. */
+    policyApprovedBy?: string;
   }): MissionAuthorityRecord {
     let refusal: ControlStackError | undefined;
     const record = this.store.transaction((): MissionAuthorityRecord | undefined => {
@@ -161,41 +156,60 @@ export class MissionAuthorityLedger {
       if (TERMINAL_MISSION_STATES.has(mission.state)) {
         throw new ControlStackError("mission_not_active", `mission is ${mission.state}`);
       }
-      if (!input.approverId || !input.reason) {
-        throw new ControlStackError("mission_authority_invalid", "an approver and a reason are required");
-      }
-      const problems = validateEnvelope(input.envelope);
-      if (isExpired(input.envelope, now)) problems.push("authority_expired");
-      if (problems.length > 0) throw new ControlStackError("mission_authority_invalid", problems.join(", "));
-      const envelope = canonicalEnvelope(input.envelope);
-      const policy = { ...input.policy };
-      const hash = envelopeHash(envelope);
-      const privilegedActions = envelope.actions.filter((action) => PRIVILEGED_ACTIONS.has(action));
-      if (
-        !this.approvals.verifyMissionApproval({
-          missionId: input.missionId,
-          approverId: input.approverId,
-          ...(input.grantId ? { grantId: input.grantId } : {}),
-          envelopeHash: hash,
-          privilegedActions
-        })
-      ) {
+      const refuse = (code: string, message: string, reason: string): undefined => {
+        // The refusal is evidence, so it is committed first and thrown after the transaction.
         this.store.recordMissionEvent(
           input.missionId,
           "authority.denied",
-          { reason: "approval_not_verified", approverId: input.approverId.slice(0, 64), envelopeHash: hash },
+          { reason, grantId: String(input.grantId).slice(0, 96) },
           now
         );
-        // The refusal is evidence, so it is committed first and thrown after the transaction.
-        refusal = new ControlStackError(
-          "mission_authority_unverified",
-          "no verified approval covers this mission authority"
-        );
+        refusal = new ControlStackError(code, message);
         return undefined;
+      };
+      const grant = this.options.grants.getAutonomousAuthority(input.grantId);
+      if (!grant) return refuse("mission_authority_unverified", "no such authority grant", "grant_not_found");
+      if (grant.missionId !== input.missionId) {
+        return refuse("mission_authority_unverified", "the grant belongs to another mission", "grant_wrong_mission");
       }
+      const { grantHash, auditEventId, ...core } = grant;
+      void auditEventId;
+      let recomputed: string | undefined;
+      try {
+        recomputed = autonomousAuthorityHash(autonomousAuthorityCoreSchema.parse(core));
+      } catch {
+        recomputed = undefined;
+      }
+      if (recomputed !== grantHash) {
+        return refuse(
+          "mission_authority_unverified",
+          "the grant does not match its recorded hash",
+          "grant_hash_mismatch"
+        );
+      }
+      if (!(Date.parse(grant.definition.expiresAt) > Date.parse(now))) {
+        return refuse("mission_authority_unverified", "the grant has expired", "authority_expired");
+      }
+      const policy: MissionAuthorityPolicy = { ...input.policy };
+      if (policy.allowPrivilegedChildren === true) {
+        if (!input.policyApprovedBy || !this.options.verifyOperator(input.policyApprovedBy)) {
+          return refuse(
+            "mission_authority_unverified",
+            "allowing privileged children needs a verified operator",
+            "policy_not_approved"
+          );
+        }
+      }
+      const hash = definitionHash(grant.definition);
       const existing = this.missionAuthority(input.missionId);
       if (existing) {
-        if (existing.envelopeHash === hash && stableHash(existing.policy) === stableHash(policy)) return existing;
+        if (
+          existing.grantId === grant.grantId &&
+          existing.grantHash === grant.grantHash &&
+          stableHash(existing.policy) === stableHash(policy)
+        ) {
+          return existing;
+        }
         throw new ControlStackError(
           "mission_authority_exists",
           "mission authority is write-once and cannot be widened"
@@ -203,30 +217,32 @@ export class MissionAuthorityLedger {
       }
       this.store.db
         .prepare(
-          `INSERT INTO mission_authority (mission_id, envelope_json, envelope_hash, policy_json, approver_id, reason, grant_id, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO mission_authority (mission_id, envelope_json, envelope_hash, policy_json, approver_id, reason, grant_id, grant_hash, policy_approved_by, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           input.missionId,
-          JSON.stringify(envelope),
+          JSON.stringify(grant.definition),
           hash,
           JSON.stringify(policy),
-          input.approverId,
-          input.reason,
-          input.grantId ?? null,
+          grant.issuedByActorId,
+          grant.reason,
+          grant.grantId,
+          grant.grantHash,
+          input.policyApprovedBy ?? null,
           now
         );
       this.store.recordMissionEvent(
         input.missionId,
         "authority.granted",
         {
-          envelopeHash: hash,
-          actions: envelope.actions,
-          privileged: envelope.actions.filter((action) => PRIVILEGED_ACTIONS.has(action)),
-          expiresAt: envelope.expiresAt,
-          approverId: input.approverId,
-          reason: input.reason,
-          grantId: input.grantId ?? null
+          definitionHash: hash,
+          grantId: grant.grantId,
+          grantHash: grant.grantHash,
+          privileged: grant.definition.maximumPrivileges.filter((privilege) => PRIVILEGED_PRIVILEGES.has(privilege)),
+          expiresAt: grant.definition.expiresAt,
+          issuedBy: grant.issuedByActorId,
+          policyApprovedBy: input.policyApprovedBy ?? null
         },
         now
       );
@@ -240,69 +256,85 @@ export class MissionAuthorityLedger {
     if (!ok) throw new ControlStackError("authority_integrity", `${what} failed its integrity check`);
   }
 
-  /** Reads fail closed: the envelope must be well-formed and must recompute to the stored hash. */
+  private parseDefinition(json: unknown, what: string): AutonomousAuthorityDefinition {
+    try {
+      const parsed = JSON.parse(String(json)) as AutonomousAuthorityDefinition;
+      definitionHash(parsed);
+      return parsed;
+    } catch {
+      throw new ControlStackError("authority_integrity", `${what} is not a valid authority definition`);
+    }
+  }
+
+  /**
+   * Reads fail closed: the definition must parse, recompute to its stored hash, and still match the live grant it was
+   * bound to (same hash, same definition), so neither a tampered row nor a swapped grant is trusted.
+   */
   missionAuthority(missionId: string): MissionAuthorityRecord | undefined {
     const row = this.store.db.prepare("SELECT * FROM mission_authority WHERE mission_id = ?").get(missionId) as
       Record<string, string | null> | undefined;
     if (!row) return undefined;
-    let envelope: AuthorityEnvelope;
+    const definition = this.parseDefinition(row.envelope_json, "mission authority");
+    this.integrity("mission authority", definitionHash(definition) === row.envelope_hash);
+    const grant = this.options.grants.getAutonomousAuthority(String(row.grant_id));
+    this.integrity(
+      "mission authority grant binding",
+      grant !== undefined &&
+        grant.missionId === missionId &&
+        grant.grantHash === row.grant_hash &&
+        definitionHash(grant.definition) === row.envelope_hash
+    );
     let policy: MissionAuthorityPolicy;
     try {
-      envelope = JSON.parse(String(row.envelope_json)) as AuthorityEnvelope;
       policy = JSON.parse(String(row.policy_json)) as MissionAuthorityPolicy;
     } catch {
-      throw new ControlStackError("authority_integrity", "mission authority is not valid JSON");
+      throw new ControlStackError("authority_integrity", "mission authority policy is not valid JSON");
     }
-    this.integrity(
-      "mission authority",
-      validateEnvelope(envelope).length === 0 && envelopeHash(envelope) === row.envelope_hash
-    );
     return {
       missionId,
-      envelope,
-      envelopeHash: String(row.envelope_hash),
+      definition,
+      definitionHash: String(row.envelope_hash),
+      grantId: String(row.grant_id),
+      grantHash: String(row.grant_hash),
       policy,
       approverId: String(row.approver_id),
       reason: String(row.reason),
-      ...(row.grant_id ? { grantId: String(row.grant_id) } : {}),
+      ...(row.policy_approved_by ? { policyApprovedBy: String(row.policy_approved_by) } : {}),
       createdAt: String(row.created_at)
     };
   }
 
   /**
-   * The authority a derived unit runs under. Fails closed unless the envelope recomputes to its stored hash, is a subset
-   * of its parent's, and is bound to the parent hash it claims to derive from.
+   * The authority a derived unit runs under. Fails closed unless the definition recomputes to its stored hash, is a
+   * subset of its parent's (evaluated at the instant it was created), and is bound to the parent hash and grant it claims.
    */
   unitAuthority(missionId: string, unitId: string): UnitAuthorityRecord | undefined {
     const row = this.store.db
       .prepare("SELECT * FROM work_unit_authority WHERE mission_id = ? AND unit_id = ?")
       .get(missionId, unitId) as Record<string, string | null> | undefined;
     if (!row) return undefined;
-    let envelope: AuthorityEnvelope;
-    try {
-      envelope = JSON.parse(String(row.envelope_json)) as AuthorityEnvelope;
-    } catch {
-      throw new ControlStackError("authority_integrity", "unit authority is not valid JSON");
-    }
-    this.integrity(
-      "unit authority",
-      validateEnvelope(envelope).length === 0 && envelopeHash(envelope) === row.envelope_hash
-    );
+    const definition = this.parseDefinition(row.envelope_json, "unit authority");
+    this.integrity("unit authority", definitionHash(definition) === row.envelope_hash);
     const parentUnitId = row.parent_unit_id ? String(row.parent_unit_id) : undefined;
     const parent = parentUnitId ? this.unitAuthority(missionId, parentUnitId) : undefined;
-    const parentEnvelope = parent?.envelope ?? this.missionAuthority(missionId)?.envelope;
-    const parentHash = parent?.envelopeHash ?? this.missionAuthority(missionId)?.envelopeHash;
+    const mission = this.missionAuthority(missionId);
+    const parentDefinition = parent?.definition ?? mission?.definition;
+    const parentHash = parent?.definitionHash ?? mission?.definitionHash;
     this.integrity(
       "unit authority derivation",
-      parentEnvelope !== undefined && parentHash === row.derived_from_hash && isSubsetOf(envelope, parentEnvelope)
+      parentDefinition !== undefined &&
+        parentHash === row.derived_from_hash &&
+        mission?.grantId === row.grant_id &&
+        isSubset(definition, parentDefinition, new Date(String(row.created_at)))
     );
     return {
       missionId,
       unitId,
       ...(parentUnitId ? { parentUnitId } : {}),
-      envelope,
-      envelopeHash: String(row.envelope_hash),
+      definition,
+      definitionHash: String(row.envelope_hash),
       derivedFromHash: String(row.derived_from_hash),
+      grantId: String(row.grant_id),
       ...(row.purpose ? { purpose: String(row.purpose) } : {}),
       createdAt: String(row.created_at)
     };
@@ -310,15 +342,15 @@ export class MissionAuthorityLedger {
 
   /**
    * ACS-owned `request_child_work`. All-or-nothing: if any child is denied nothing is created. A denial is durable
-   * evidence (`child.denied`, `authority.denied`) so an escalation attempt can be reconstructed afterwards. Time comes
-   * from ACS's clock; the request cannot supply it.
+   * evidence (`child.denied`, `authority.denied`) so an escalation attempt can be reconstructed afterwards.
    */
   requestChildWork(request: ChildWorkRequest): ChildWorkResult {
     return this.store.transaction(() => {
       const { missionId, parentUnitId } = request;
-      const now = this.clock();
+      const nowIso = this.clock();
+      const now = new Date(nowIso);
       // The requester is recorded as claimed until the durable claim confirms it.
-      let requester: Record<string, unknown> = { workerId: request.workerId, verified: false };
+      let requester: Record<string, unknown> = { workerId: String(request.workerId).slice(0, 64), verified: false };
       let requested = false;
       const emitRequested = () => {
         if (requested) return;
@@ -333,19 +365,20 @@ export class MissionAuthorityLedger {
               .slice(0, 16)
               .map((child) => ({ unitId: String(child.unitId).slice(0, 64), workType: child.workType }))
           },
-          now
+          nowIso
         );
       };
       const deny = (reasons: string[]): ChildWorkResult => {
         emitRequested();
         const safe = durableReasons(reasons);
-        this.store.recordMissionEvent(missionId, "child.denied", { parentUnitId, requester, reasons: safe }, now);
-        if (
-          reasons.some((reason) =>
-            /authority|action_|resource_|tool_|worker_|expiry|privileged|integrity/u.test(reason)
-          )
-        ) {
-          this.store.recordMissionEvent(missionId, "authority.denied", { parentUnitId, requester, reasons: safe }, now);
+        this.store.recordMissionEvent(missionId, "child.denied", { parentUnitId, requester, reasons: safe }, nowIso);
+        if (reasons.some((reason) => /authority|escalation|privilege|expiry|integrity|policy/u.test(reason))) {
+          this.store.recordMissionEvent(
+            missionId,
+            "authority.denied",
+            { parentUnitId, requester, reasons: safe },
+            nowIso
+          );
         }
         return { ok: false, outcome: "denied", reasons };
       };
@@ -373,27 +406,28 @@ export class MissionAuthorityLedger {
       if (request.children.length === 0 || request.children.length > 16) return deny(["child_count_invalid"]);
 
       let missionAuthority: MissionAuthorityRecord | undefined;
-      let parentEnvelope: AuthorityEnvelope;
+      let parentDefinition: AutonomousAuthorityDefinition;
       let parentHash: string;
       try {
         missionAuthority = this.missionAuthority(missionId);
         if (!missionAuthority) return deny(["mission_has_no_authority"]);
-        // A root unit runs under the mission envelope. A derived unit must have its own verified envelope: a missing
-        // row is never treated as a root, or a unit created outside request_child_work would inherit the whole mission.
+        // A root unit runs under the mission grant. A derived unit must have its own verified definition: a missing row
+        // is never treated as a root, or a unit created outside request_child_work would inherit the whole mission.
         const parentRecord = parent.parentUnitId ? this.unitAuthority(missionId, parentUnitId) : undefined;
         if (parent.parentUnitId && !parentRecord) return deny(["parent_authority_missing"]);
-        parentEnvelope = parentRecord?.envelope ?? missionAuthority.envelope;
-        parentHash = parentRecord?.envelopeHash ?? missionAuthority.envelopeHash;
+        parentDefinition = parentRecord?.definition ?? missionAuthority.definition;
+        parentHash = parentRecord?.definitionHash ?? missionAuthority.definitionHash;
       } catch (error) {
-        if (error instanceof ControlStackError && error.code === "authority_integrity")
+        if (error instanceof ControlStackError && error.code === "authority_integrity") {
           return deny(["authority_integrity_failure"]);
+        }
         throw error;
       }
 
       const existingIds = new Set(units.map((unit) => unit.unitId));
       const batchIds = new Set(request.children.map((child) => String(child.unitId)));
       const seen = new Set<string>();
-      const derived: Array<{ item: ChildWorkItem; envelope: AuthorityEnvelope }> = [];
+      const derived: Array<{ item: ChildWorkItem; definition: AutonomousAuthorityDefinition }> = [];
       const reasons: string[] = [];
       const missionBudget = this.store.budget(missionId);
       for (const item of request.children) {
@@ -404,15 +438,17 @@ export class MissionAuthorityLedger {
         seen.add(item.unitId);
         if (!(CHILD_WORK_TYPES as readonly string[]).includes(item.workType))
           reasons.push(`${prefix}:work_type_invalid`);
-        if (typeof item.purpose !== "string" || !item.purpose || item.purpose.length > 512)
+        if (typeof item.purpose !== "string" || !item.purpose || item.purpose.length > 512) {
           reasons.push(`${prefix}:purpose_invalid`);
+        }
         // Everything addWorkUnits would reject is checked here, so a bad payload or graph is a durable denial.
         if (item.workType in KIND_FOR_WORK_TYPE) {
           try {
             parseWorkUnitPayload(KIND_FOR_WORK_TYPE[item.workType], item.payload ?? {});
           } catch {
-            if (item.payload !== undefined || KIND_FOR_WORK_TYPE[item.workType] !== "coding")
+            if (item.payload !== undefined || KIND_FOR_WORK_TYPE[item.workType] !== "coding") {
               reasons.push(`${prefix}:payload_invalid`);
+            }
           }
         }
         for (const dependency of item.dependsOn ?? []) {
@@ -434,19 +470,17 @@ export class MissionAuthorityLedger {
             }
           }
         }
-        const narrowed = narrowAuthority({
-          parent: parentEnvelope,
+        const narrowed = narrowDefinition({
+          parent: parentDefinition,
           policy: missionAuthority.policy,
-          ...(item.requestedAuthority ? { requested: item.requestedAuthority } : {}),
+          ...(item.requestedAuthority === undefined ? {} : { requested: item.requestedAuthority }),
           now
         });
         if (!narrowed.ok) {
           for (const reason of narrowed.reasons) reasons.push(`${prefix}:${reason}`);
           continue;
         }
-        // The invariant, asserted rather than assumed.
-        if (!isSubsetOf(narrowed.envelope, parentEnvelope)) reasons.push(`${prefix}:narrowing_invariant_violated`);
-        else derived.push({ item, envelope: narrowed.envelope });
+        derived.push({ item, definition: narrowed.definition });
       }
       if (reasons.length > 0) return deny(reasons);
 
@@ -463,7 +497,7 @@ export class MissionAuthorityLedger {
             ...(item.payload === undefined ? {} : { payload: item.payload }),
             ...(item.verificationPolicy ? { verificationPolicy: item.verificationPolicy } : {})
           })),
-          now
+          nowIso
         );
       } catch (error) {
         // addWorkUnits validates its whole batch before it writes anything, so these codes never leave a partial insert.
@@ -471,28 +505,34 @@ export class MissionAuthorityLedger {
         throw error;
       }
       if (!created.ok) {
-        const safe = durableReasons(["budget_exhausted"]);
-        this.store.recordMissionEvent(missionId, "child.denied", { parentUnitId, requester, reasons: safe }, now);
+        this.store.recordMissionEvent(
+          missionId,
+          "child.denied",
+          { parentUnitId, requester, reasons: durableReasons(["budget_exhausted"]) },
+          nowIso
+        );
         return { ok: false, outcome: "budget_exhausted", decision: created.decision };
       }
       const insert = this.store.db.prepare(
-        `INSERT INTO work_unit_authority (mission_id, unit_id, parent_unit_id, envelope_json, envelope_hash, derived_from_hash, requested_json, purpose, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO work_unit_authority (mission_id, unit_id, parent_unit_id, envelope_json, envelope_hash, derived_from_hash, grant_id, requested_json, purpose, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
-      const authorities: Record<string, AuthorityEnvelope> = {};
-      for (const { item, envelope } of derived) {
+      const authorities: Record<string, AutonomousAuthorityDefinition> = {};
+      for (const { item, definition } of derived) {
+        const hash = definitionHash(definition);
         insert.run(
           missionId,
           item.unitId,
           parentUnitId,
-          JSON.stringify(envelope),
-          envelopeHash(envelope),
+          JSON.stringify(definition),
+          hash,
           parentHash,
+          missionAuthority.grantId,
           JSON.stringify({ authority: item.requestedAuthority ?? null, budget: item.requestedBudget ?? null }),
           item.purpose,
-          now
+          nowIso
         );
-        authorities[item.unitId] = envelope;
+        authorities[item.unitId] = definition;
         this.store.recordMissionEvent(
           missionId,
           "child.admitted",
@@ -501,10 +541,11 @@ export class MissionAuthorityLedger {
             unitId: item.unitId,
             workType: item.workType,
             requester,
-            envelopeHash: envelopeHash(envelope),
-            derivedFrom: parentHash
+            definitionHash: hash,
+            derivedFrom: parentHash,
+            grantId: missionAuthority.grantId
           },
-          now
+          nowIso
         );
       }
       return { ok: true, created: created.created, authorities };
@@ -530,7 +571,7 @@ export class MissionAuthorityLedger {
       const auth = input.authorization;
       const authorized =
         auth.kind === "operator"
-          ? this.approvals.verifyOperator(auth.operatorId)
+          ? this.options.verifyOperator(auth.operatorId)
           : parent.claimToken === auth.claimToken &&
             parent.workerId === auth.workerId &&
             ["running", "checkpointed", "verifying"].includes(parent.status);
@@ -593,7 +634,6 @@ export class MissionAuthorityLedger {
     if (refusal) throw refusal;
     return result!;
   }
-
   /**
    * The explicit reduction step over a unit's direct children. It is deterministic (children are ordered by id, never by
    * finish time), recorded once, and never partial: while any child is unfinished nothing is written.

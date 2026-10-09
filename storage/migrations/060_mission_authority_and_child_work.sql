@@ -1,19 +1,22 @@
--- Mission authority envelopes, narrowed per-unit authority, and explicit child-result reduction.
+-- Mission authority, narrowed per-unit authority, and explicit child-result reduction.
 --
--- A human approves a mission's authority once (mission_authority, write-once). Every work unit that is
--- created as child work receives an envelope derived from its parent's by intersection, never union
--- (work_unit_authority, write-once). A reducer's decision over a unit's children is recorded once
--- (work_unit_reductions), so the last child to finish can never silently overwrite the result.
--- All three tables are append-only. Missions without an envelope cannot create child work (fail closed).
+-- A human approves a mission's authority once, as an autonomous authority grant (migration 047). mission_authority binds
+-- the mission to that grant (write-once) and snapshots its definition so later reads can be integrity-checked. Every work
+-- unit created as child work receives a definition derived from its parent's by intersection, never union
+-- (work_unit_authority, write-once, with the grant it traces back to). A reducer's decision over a unit's children is
+-- recorded once (work_unit_reductions), so the last child to finish can never silently overwrite the result.
+-- All three tables are append-only. Missions without an authority binding cannot create child work (fail closed).
 
 CREATE TABLE mission_authority (
   mission_id TEXT PRIMARY KEY REFERENCES coding_missions (mission_id),
   envelope_json TEXT NOT NULL CHECK (json_valid(envelope_json)),
   envelope_hash TEXT NOT NULL CHECK (length(envelope_hash) = 64),
   policy_json TEXT NOT NULL CHECK (json_valid(policy_json)),
-  approver_id TEXT NOT NULL CHECK (length(approver_id) BETWEEN 1 AND 128),
-  reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 512),
-  grant_id TEXT,
+  approver_id TEXT NOT NULL CHECK (length(approver_id) BETWEEN 1 AND 256),
+  reason TEXT NOT NULL CHECK (length(reason) BETWEEN 1 AND 4000),
+  grant_id TEXT NOT NULL CHECK (length(grant_id) BETWEEN 1 AND 256),
+  grant_hash TEXT NOT NULL CHECK (length(grant_hash) = 64),
+  policy_approved_by TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -24,6 +27,7 @@ CREATE TABLE work_unit_authority (
   envelope_json TEXT NOT NULL CHECK (json_valid(envelope_json)),
   envelope_hash TEXT NOT NULL CHECK (length(envelope_hash) = 64),
   derived_from_hash TEXT NOT NULL CHECK (length(derived_from_hash) = 64),
+  grant_id TEXT NOT NULL CHECK (length(grant_id) BETWEEN 1 AND 256),
   requested_json TEXT CHECK (requested_json IS NULL OR json_valid(requested_json)),
   purpose TEXT,
   created_at TEXT NOT NULL,

@@ -1,200 +1,185 @@
 import { describe, expect, it } from "vitest";
 import {
-  envelopeHash,
-  isSubsetOf,
-  narrowAuthority,
-  normalizeResource,
-  resourceCovered,
-  validateEnvelope,
-  type AuthorityEnvelope
+  PRIVILEGED_PRIVILEGES,
+  definitionHash,
+  isSubset,
+  narrowDefinition,
+  type AutonomousAuthorityDefinition
 } from "./authority.js";
 
-const NOW = "2026-10-09T00:00:00.000Z";
-const LATER = "2026-10-09T01:00:00.000Z";
-const parent: AuthorityEnvelope = {
-  actions: ["fs.read", "fs.write", "shell.exec", "privileged_exec"],
-  resources: ["repo/acme/app", "repo/acme/docs"],
-  tools: ["read_file", "write_file", "start_process"],
-  expiresAt: LATER
+const NOW = new Date("2026-10-09T00:00:00.000Z");
+const parent: AutonomousAuthorityDefinition = {
+  executingActorId: "actor:lead",
+  scope: [
+    { kind: "path", id: "/repo/acme/app", coverage: "descendants" },
+    { kind: "path", id: "/repo/acme/docs", coverage: "descendants" }
+  ],
+  toolClasses: [
+    { runtime: "desktop_commander", toolName: "read_file" },
+    { runtime: "desktop_commander", toolName: "write_file" }
+  ],
+  maximumPrivileges: ["fs.read", "fs.write", "process.privileged", "deploy"],
+  expiresAt: "2026-10-09T01:00:00.000Z",
+  limits: { maxOperations: 20, maxRuntimeMs: 600_000, maxParallelOperations: 4, maxAttemptsPerOperation: 3 }
 };
-
-const deny = (result: ReturnType<typeof narrowAuthority>) => {
+const ok = (result: ReturnType<typeof narrowDefinition>) => {
+  if (!result.ok) throw new Error(`expected narrowing, got ${result.reasons.join(" | ")}`);
+  return result.definition;
+};
+const no = (result: ReturnType<typeof narrowDefinition>) => {
   if (result.ok) throw new Error("expected denial");
   return result.reasons;
 };
-const allow = (result: ReturnType<typeof narrowAuthority>) => {
-  if (!result.ok) throw new Error(`expected narrowing, got ${result.reasons.join(",")}`);
-  return result.envelope;
-};
 
-describe("resource scopes", () => {
-  it("normalizes safe paths and refuses traversal, wildcards, backslashes and empties", () => {
-    expect(normalizeResource("repo//acme/app/")).toBe("repo/acme/app");
-    expect(normalizeResource("/abs/path")).toBe("/abs/path");
-    for (const bad of ["", "/", "repo/../etc", "repo/./x", "repo/*", "a\\b", "repo/\0x", "x".repeat(600)]) {
-      expect(normalizeResource(bad)).toBeUndefined();
-    }
+describe("narrowDefinition (policy on top of the shared subset check)", () => {
+  it("inherits the parent minus privileged privileges by default", () => {
+    const child = ok(narrowDefinition({ parent, now: NOW }));
+    expect(child.maximumPrivileges).toEqual(["fs.read", "fs.write"]);
+    expect(child.scope).toEqual(parent.scope);
+    expect(isSubset(child, parent, NOW)).toBe(true);
   });
 
-  it("covers by whole path segment, not by string prefix", () => {
-    expect(resourceCovered("repo/acme", "repo/acme")).toBe(true);
-    expect(resourceCovered("repo/acme", "repo/acme/app/src")).toBe(true);
-    expect(resourceCovered("repo/acme", "repo/acme-evil")).toBe(false);
-    expect(resourceCovered("repo/acme/app", "repo/acme")).toBe(false);
-  });
-});
-
-describe("narrowAuthority: child ⊆ parent", () => {
-  it("inherits a non-privileged subset by default and strips privileged actions", () => {
-    const child = allow(narrowAuthority({ parent, now: NOW }));
-    expect(child.actions).toEqual(["fs.read", "fs.write", "shell.exec"]);
-    expect(child.actions).not.toContain("privileged_exec");
-    expect(isSubsetOf(child, parent)).toBe(true);
+  it("accepts a strict subset and returns it unchanged", () => {
+    const requested = {
+      ...parent,
+      scope: [{ kind: "path" as const, id: "/repo/acme/app/src", coverage: "exact" as const }],
+      maximumPrivileges: ["fs.read" as const],
+      toolClasses: [{ runtime: "desktop_commander" as const, toolName: "read_file" }]
+    };
+    expect(ok(narrowDefinition({ parent, requested, now: NOW }))).toEqual(requested);
   });
 
-  it("grants exactly the requested subset", () => {
-    const child = allow(
-      narrowAuthority({
-        parent,
-        now: NOW,
-        requested: { actions: ["fs.read"], resources: ["repo/acme/app/src"], tools: ["read_file"] }
-      })
-    );
-    expect(child).toMatchObject({ actions: ["fs.read"], resources: ["repo/acme/app/src"], tools: ["read_file"] });
-    expect(isSubsetOf(child, parent)).toBe(true);
-  });
-
-  it("denies an escalation attempt with the reasons instead of silently clipping it", () => {
-    const reasons = deny(
-      narrowAuthority({
+  it("denies an escalation with the reasons instead of trimming it", () => {
+    const reasons = no(
+      narrowDefinition({
         parent,
         now: NOW,
         requested: {
-          actions: ["fs.read", "net.fetch"],
-          resources: ["repo/acme/app", "repo/other", "repo/acme-evil"],
-          tools: ["read_file", "kill_process"]
+          ...parent,
+          scope: [{ kind: "path", id: "/repo/other", coverage: "descendants" }],
+          toolClasses: [{ runtime: "desktop_commander", toolName: "kill_process" }],
+          limits: { ...parent.limits, maxOperations: 99 }
         }
       })
     );
-    expect(reasons).toEqual(
-      expect.arrayContaining([
-        "action_not_in_parent:net.fetch",
-        "resource_not_in_parent:repo/other",
-        "resource_not_in_parent:repo/acme-evil",
-        "tool_not_in_parent:kill_process"
-      ])
-    );
+    expect(reasons.join("\n")).toMatch(/escalation:scope path:\/repo\/other/);
+    expect(reasons.join("\n")).toMatch(/escalation:tool desktop_commander:kill_process/);
+    expect(reasons.join("\n")).toMatch(/escalation:limit maxOperations/);
   });
 
-  it("denies privileged_exec when the parent lacks it", () => {
-    const unprivileged = { ...parent, actions: ["fs.read"] };
+  it("denies a privilege the parent lacks", () => {
+    const unprivileged = { ...parent, maximumPrivileges: ["fs.read" as const] };
     expect(
-      deny(narrowAuthority({ parent: unprivileged, now: NOW, requested: { actions: ["privileged_exec"] } }))
-    ).toContain("action_not_in_parent:privileged_exec");
+      no(
+        narrowDefinition({
+          parent: unprivileged,
+          now: NOW,
+          requested: { ...unprivileged, maximumPrivileges: ["process.privileged"] }
+        })
+      ).join()
+    ).toMatch(/escalation:privilege process.privileged exceeds parent/);
   });
 
-  it("keeps privileged actions out of children unless mission policy explicitly allows them AND the parent holds them", () => {
-    expect(deny(narrowAuthority({ parent, now: NOW, requested: { actions: ["privileged_exec"] } }))).toContain(
-      "privileged_child_not_allowed:privileged_exec"
-    );
-    const allowed = allow(
-      narrowAuthority({
+  it("keeps privileged privileges out of children unless mission policy allows them AND the parent holds them", () => {
+    const withPrivilege = { ...parent, maximumPrivileges: ["fs.read" as const, "process.privileged" as const] };
+    expect(
+      no(narrowDefinition({ parent, now: NOW, requested: { ...parent, maximumPrivileges: ["process.privileged"] } }))
+    ).toContain("privileged_child_not_allowed:process.privileged");
+    const allowed = ok(
+      narrowDefinition({
         parent,
         now: NOW,
         policy: { allowPrivilegedChildren: true },
-        requested: { actions: ["privileged_exec"] }
+        requested: { ...withPrivilege, maximumPrivileges: ["process.privileged"] }
       })
     );
-    expect(allowed.actions).toEqual(["privileged_exec"]);
-    expect(allow(narrowAuthority({ parent, now: NOW, policy: { allowPrivilegedChildren: true } })).actions).toContain(
-      "privileged_exec"
-    );
-  });
-
-  it("applies mission policy denials to both requests and inheritance", () => {
-    const policy = { deniedActions: ["shell.exec"] };
-    expect(allow(narrowAuthority({ parent, now: NOW, policy })).actions).not.toContain("shell.exec");
-    expect(deny(narrowAuthority({ parent, now: NOW, policy, requested: { actions: ["shell.exec"] } }))).toContain(
-      "action_denied_by_mission_policy:shell.exec"
-    );
-  });
-
-  it("never lets a child outlive its parent and bounds it by policy TTL", () => {
-    expect(deny(narrowAuthority({ parent, now: NOW, requested: { expiresAt: "2026-10-09T05:00:00.000Z" } }))).toContain(
-      "expiry_exceeds_parent"
-    );
+    expect(allowed.maximumPrivileges).toEqual(["process.privileged"]);
     expect(
-      allow(narrowAuthority({ parent, now: NOW, requested: { expiresAt: "2026-10-09T00:30:00.000Z" } })).expiresAt
-    ).toBe("2026-10-09T00:30:00.000Z");
-    expect(allow(narrowAuthority({ parent, now: NOW, policy: { maxChildTtlMs: 60_000 } })).expiresAt).toBe(
+      ok(narrowDefinition({ parent, now: NOW, policy: { allowPrivilegedChildren: true } })).maximumPrivileges
+    ).toContain("process.privileged");
+    for (const privilege of ["process.privileged", "service.control", "deploy", "remote", "secret.read"]) {
+      expect(PRIVILEGED_PRIVILEGES.has(privilege)).toBe(true);
+    }
+  });
+
+  it("applies policy denials to requests and to inheritance", () => {
+    const policy = { deniedPrivileges: ["fs.write"] };
+    expect(ok(narrowDefinition({ parent, now: NOW, policy })).maximumPrivileges).toEqual(["fs.read"]);
+    expect(
+      no(narrowDefinition({ parent, now: NOW, policy, requested: { ...parent, maximumPrivileges: ["fs.write"] } }))
+    ).toContain("privilege_denied_by_mission_policy:fs.write");
+  });
+
+  it("bounds a child's lifetime by policy TTL and never lets it outlive its parent", () => {
+    expect(ok(narrowDefinition({ parent, now: NOW, policy: { maxChildTtlMs: 60_000 } })).expiresAt).toBe(
       "2026-10-09T00:01:00.000Z"
     );
+    expect(
+      no(
+        narrowDefinition({
+          parent,
+          now: NOW,
+          policy: { maxChildTtlMs: 60_000 },
+          requested: { ...parent, maximumPrivileges: ["fs.read"] }
+        })
+      )
+    ).toContain("expiry_exceeds_policy");
+    expect(
+      no(
+        narrowDefinition({
+          parent,
+          now: NOW,
+          requested: { ...parent, maximumPrivileges: ["fs.read"], expiresAt: "2026-10-09T05:00:00.000Z" }
+        })
+      ).join()
+    ).toMatch(/escalation:child outlives parent authority/);
   });
 
-  it("fails when the parent authority has expired", () => {
-    expect(deny(narrowAuthority({ parent: { ...parent, expiresAt: NOW }, now: NOW }))).toEqual(["authority_expired"]);
-    expect(deny(narrowAuthority({ parent: { ...parent, expiresAt: "2020-01-01T00:00:00Z" }, now: NOW }))).toEqual([
+  it("fails when the parent has expired or either side is malformed", () => {
+    expect(no(narrowDefinition({ parent: { ...parent, expiresAt: "2026-10-08T00:00:00.000Z" }, now: NOW }))).toEqual([
       "authority_expired"
+    ]);
+    expect(no(narrowDefinition({ parent: { nonsense: true }, now: NOW }))).toEqual(["parent_authority_invalid"]);
+    expect(no(narrowDefinition({ parent, now: NOW, requested: { nonsense: true } }))).toEqual([
+      "requested_authority_invalid"
     ]);
   });
 
-  it("rejects wildcards and malformed names outright", () => {
-    for (const bad of ["*", "fs.*", "FS.READ", "", "a b"]) {
-      expect(deny(narrowAuthority({ parent, now: NOW, requested: { actions: [bad] } })).length).toBeGreaterThan(0);
-    }
-    expect(deny(narrowAuthority({ parent, now: NOW, requested: { resources: ["repo/acme/*"] } }))).toContain(
-      "resource_invalid:repo/acme/*"
-    );
+  it("denies when only privileged privileges would remain", () => {
+    expect(no(narrowDefinition({ parent: { ...parent, maximumPrivileges: ["deploy"] }, now: NOW }))).toEqual([
+      "no_authority_remains"
+    ]);
   });
 
-  it("restricts and narrows worker identity", () => {
-    const bound = { ...parent, workers: ["w1", "w2"] };
-    expect(allow(narrowAuthority({ parent: bound, now: NOW })).workers).toEqual(["w1", "w2"]);
-    expect(allow(narrowAuthority({ parent: bound, now: NOW, requested: { workers: ["w2"] } })).workers).toEqual(["w2"]);
-    expect(deny(narrowAuthority({ parent: bound, now: NOW, requested: { workers: ["w3"] } }))).toContain(
-      "worker_not_in_parent:w3"
+  it("a grandchild is a subset of its parent and the root, and cannot reach back up", () => {
+    const child = ok(
+      narrowDefinition({ parent, now: NOW, requested: { ...parent, maximumPrivileges: ["fs.read", "fs.write"] } })
     );
-    // A child of an unbound parent may bind itself to a worker.
-    expect(allow(narrowAuthority({ parent, now: NOW, requested: { workers: ["w9"] } })).workers).toEqual(["w9"]);
-  });
-
-  it("denies a request that leaves nothing", () => {
-    const readOnly = { ...parent, actions: ["privileged_exec"] };
-    expect(deny(narrowAuthority({ parent: readOnly, now: NOW }))).toContain("no_authority_remains");
-  });
-
-  it("is idempotent under repeated narrowing (a grandchild is a subset of its parent and of the root)", () => {
-    const child = allow(
-      narrowAuthority({
-        parent,
-        now: NOW,
-        requested: { actions: ["fs.read", "fs.write"], resources: ["repo/acme/app"] }
-      })
-    );
-    const grandchild = allow(
-      narrowAuthority({
+    const grand = ok(
+      narrowDefinition({
         parent: child,
         now: NOW,
-        requested: { actions: ["fs.read"], resources: ["repo/acme/app/src"] }
+        requested: {
+          ...child,
+          scope: [{ kind: "path", id: "/repo/acme/app/lib", coverage: "exact" }],
+          maximumPrivileges: ["fs.read"]
+        }
       })
     );
-    expect(isSubsetOf(grandchild, child)).toBe(true);
-    expect(isSubsetOf(grandchild, parent)).toBe(true);
-    expect(isSubsetOf(parent, grandchild)).toBe(false);
-    expect(deny(narrowAuthority({ parent: grandchild, now: NOW, requested: { actions: ["fs.write"] } }))).toContain(
-      "action_not_in_parent:fs.write"
+    expect(isSubset(grand, child, NOW)).toBe(true);
+    expect(isSubset(grand, parent, NOW)).toBe(true);
+    expect(isSubset(parent, grand, NOW)).toBe(false);
+    expect(
+      no(narrowDefinition({ parent: grand, now: NOW, requested: { ...grand, maximumPrivileges: ["fs.write"] } })).join()
+    ).toMatch(/escalation:privilege fs.write/);
+  });
+
+  it("hashes definitions canonically", () => {
+    expect(definitionHash({ ...parent, maximumPrivileges: [...parent.maximumPrivileges] })).toBe(
+      definitionHash(parent)
     );
-  });
-
-  it("hashes envelopes canonically", () => {
-    const reordered = { ...parent, actions: [...parent.actions].reverse(), resources: [...parent.resources].reverse() };
-    expect(envelopeHash(reordered)).toBe(envelopeHash(parent));
-    expect(envelopeHash({ ...parent, tools: ["read_file"] })).not.toBe(envelopeHash(parent));
-  });
-
-  it("validates envelopes", () => {
-    expect(validateEnvelope(parent)).toEqual([]);
-    expect(validateEnvelope({ ...parent, actions: [] })).toContain("actions_empty");
-    expect(validateEnvelope({ ...parent, expiresAt: "soon" })).toContain("expiry_invalid");
+    expect(definitionHash({ ...parent, limits: { ...parent.limits, maxOperations: 19 } })).not.toBe(
+      definitionHash(parent)
+    );
   });
 });

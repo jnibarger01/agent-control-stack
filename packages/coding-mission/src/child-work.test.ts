@@ -1,37 +1,62 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { autonomousAuthorityHash, type AutonomousAuthorityGrant } from "@agent-control-stack/work-items";
 import { afterEach, describe, expect, it } from "vitest";
-import { isSubsetOf, type AuthorityEnvelope } from "./authority.js";
+import { isSubset, type AutonomousAuthorityDefinition } from "./authority.js";
 import { DEFAULT_DELEGATION_BUDGET, type MissionBudget } from "./budget.js";
-import { MissionAuthorityLedger, type ApprovalVerifier, type ChildWorkItem } from "./child-work.js";
+import { MissionAuthorityLedger, type ChildWorkItem, type GrantReader, type LedgerOptions } from "./child-work.js";
 import { CodingMissionStore } from "./store.js";
 
 const T0 = "2026-10-09T00:00:00.000Z";
 const at = (ms: number) => new Date(Date.parse(T0) + ms).toISOString();
-const ROOT: AuthorityEnvelope = {
-  actions: ["fs.read", "fs.write", "shell.exec", "privileged_exec"],
-  resources: ["repo/acme/app", "repo/acme/docs"],
-  tools: ["read_file", "write_file", "start_process"],
-  expiresAt: "2026-10-09T02:00:00.000Z"
-};
-let n = 0;
+const NOW = () => new Date(T0);
 
-/** A mutable ACS clock and a verifier that approves what the test says a human approved. */
-function harness(overrides: Partial<ApprovalVerifier> = {}) {
-  const state = { now: at(1000) };
-  const calls: Array<Parameters<ApprovalVerifier["verifyMissionApproval"]>[0]> = [];
-  const approvals: ApprovalVerifier = {
-    verifyMissionApproval: (input) => {
-      calls.push(input);
-      return true;
-    },
-    verifyOperator: (operatorId) => operatorId === "operator-1",
-    ...overrides
+const ROOT: AutonomousAuthorityDefinition = {
+  executingActorId: "actor:lead",
+  scope: [
+    { kind: "path", id: "/repo/acme/app", coverage: "descendants" },
+    { kind: "path", id: "/repo/acme/docs", coverage: "descendants" }
+  ],
+  toolClasses: [
+    { runtime: "desktop_commander", toolName: "read_file" },
+    { runtime: "desktop_commander", toolName: "write_file" },
+    { runtime: "jace_commander", toolName: "git_commit" }
+  ],
+  maximumPrivileges: ["fs.read", "fs.write", "git.write", "process.privileged"],
+  expiresAt: "2026-10-09T02:00:00.000Z",
+  limits: { maxOperations: 50, maxRuntimeMs: 600_000, maxParallelOperations: 4, maxAttemptsPerOperation: 3 }
+};
+const narrower = (overrides: Partial<AutonomousAuthorityDefinition>): AutonomousAuthorityDefinition => ({
+  ...ROOT,
+  maximumPrivileges: ["fs.read", "fs.write"],
+  ...overrides
+});
+
+function makeGrant(missionId: string, definition = ROOT, grantId = "grant-1"): AutonomousAuthorityGrant {
+  const core = {
+    schemaVersion: "acs.autonomous-authority.v1" as const,
+    grantId,
+    missionId,
+    subjectInputHash: "a".repeat(64),
+    issuedByActorId: "human-1",
+    requestId: "req-1",
+    definition,
+    reason: "approved by operator",
+    createdAt: T0
   };
-  return { approvals, calls, clock: () => state.now, set: (ms: number) => (state.now = at(ms)), state };
+  return { ...core, grantHash: autonomousAuthorityHash(core), auditEventId: "evt-1" };
 }
 
+/** The human-issued grant store the ledger reads. A test controls exactly what the "control plane" holds. */
+class FakeGrants implements GrantReader {
+  readonly grants = new Map<string, AutonomousAuthorityGrant>();
+  getAutonomousAuthority(grantId: string) {
+    return this.grants.get(grantId);
+  }
+}
+
+let n = 0;
 const child = (unitId: string, overrides: Partial<ChildWorkItem> = {}): ChildWorkItem => ({
   unitId,
   workType: "research",
@@ -40,13 +65,27 @@ const child = (unitId: string, overrides: Partial<ChildWorkItem> = {}): ChildWor
   ...overrides
 });
 
+function harness(overrides: Partial<LedgerOptions> = {}) {
+  const state = { now: at(1000) };
+  const grants = new FakeGrants();
+  const options: LedgerOptions = {
+    grants,
+    verifyOperator: (operatorId) => operatorId === "operator-1",
+    clock: () => state.now,
+    ...overrides
+  };
+  return { grants, options, state, set: (ms: number) => (state.now = at(ms)) };
+}
+
 function setup(
   options: {
     budget?: MissionBudget;
     grant?: boolean;
+    definition?: AutonomousAuthorityDefinition;
     policy?: Parameters<MissionAuthorityLedger["grantMissionAuthority"]>[0]["policy"];
+    policyApprovedBy?: string;
     store?: CodingMissionStore;
-    verifier?: Partial<ApprovalVerifier>;
+    ledger?: Partial<LedgerOptions>;
   } = {}
 ) {
   const store = options.store ?? new CodingMissionStore(":memory:");
@@ -61,16 +100,15 @@ function setup(
     [{ unitId: "root", kind: "agent", title: "root", payload: { role: "lead", prompt: "p" } }],
     T0
   );
-  const h = harness(options.verifier);
-  const ledger = new MissionAuthorityLedger(store, { approvals: h.approvals, clock: h.clock });
+  const h = harness(options.ledger);
+  const ledger = new MissionAuthorityLedger(store, h.options);
+  h.grants.grants.set("grant-1", makeGrant("m1", options.definition ?? ROOT));
   if (options.grant !== false) {
     ledger.grantMissionAuthority({
       missionId: "m1",
-      envelope: ROOT,
+      grantId: "grant-1",
       ...(options.policy ? { policy: options.policy } : {}),
-      approverId: "human-1",
-      reason: "approved by operator",
-      grantId: "grant-1"
+      ...(options.policyApprovedBy ? { policyApprovedBy: options.policyApprovedBy } : {})
     });
   }
   const claim = { token: `tok-${(n += 1)}`, workerId: "lead-worker", route: {}, claimedAt: T0 };
@@ -95,154 +133,198 @@ const denied = (result: ReturnType<MissionAuthorityLedger["requestChildWork"]>) 
   return result.reasons;
 };
 
-describe("mission authority", () => {
-  it("is granted once with an approver and reason, audited, and never widened", () => {
-    const { store, ledger } = setup();
-    expect(ledger.missionAuthority("m1")).toMatchObject({ approverId: "human-1", reason: "approved by operator" });
+describe("mission authority (bound to a 047 grant)", () => {
+  it("binds a mission to a verified grant, taking the approver and reason from the grant itself", () => {
+    const { store, ledger } = setup({ policy: {} });
+    expect(ledger.missionAuthority("m1")).toMatchObject({
+      grantId: "grant-1",
+      approverId: "human-1",
+      reason: "approved by operator",
+      definition: ROOT
+    });
     const granted = store.events("m1").find((event) => event.name === "authority.granted");
-    expect(granted?.body).toMatchObject({ approverId: "human-1", privileged: ["privileged_exec"] });
-    // Same grant again is idempotent; a wider one is refused.
-    expect(() =>
-      ledger.grantMissionAuthority({ missionId: "m1", envelope: ROOT, approverId: "human-1", reason: "again" })
-    ).not.toThrow();
-    expect(() =>
-      ledger.grantMissionAuthority({
-        missionId: "m1",
-        envelope: { ...ROOT, actions: [...ROOT.actions, "net.fetch"] },
-        approverId: "human-1",
-        reason: "widen"
-      })
-    ).toThrow(expect.objectContaining({ code: "mission_authority_exists" }));
+    expect(granted?.body).toMatchObject({
+      grantId: "grant-1",
+      issuedBy: "human-1",
+      privileged: ["process.privileged"]
+    });
     expect(() => store.db.exec("UPDATE mission_authority SET approver_id = 'x'")).toThrow(/append-only/);
   });
 
-  it("refuses an expired envelope, a missing approver or reason, and wildcard actions", () => {
+  it("is idempotent for the same grant and refuses to be re-bound to a wider one", () => {
+    const { ledger, h } = setup();
+    expect(() => ledger.grantMissionAuthority({ missionId: "m1", grantId: "grant-1" })).not.toThrow();
+    h.grants.grants.set(
+      "grant-2",
+      makeGrant("m1", { ...ROOT, maximumPrivileges: [...ROOT.maximumPrivileges, "deploy"] }, "grant-2")
+    );
+    expect(() => ledger.grantMissionAuthority({ missionId: "m1", grantId: "grant-2" })).toThrow(
+      expect.objectContaining({ code: "mission_authority_exists" })
+    );
+  });
+
+  it("refuses a grant that does not exist, belongs to another mission, fails its hash, or has expired — with durable evidence", () => {
     const store = new CodingMissionStore(":memory:");
     store.createGeneral({ missionId: "m1", summary: "s", now: T0 });
-    const ledger = new MissionAuthorityLedger(store, { approvals: harness().approvals, clock: () => T0 });
-    const base = { missionId: "m1", envelope: ROOT, approverId: "h", reason: "r" };
-    expect(() =>
-      ledger.grantMissionAuthority({ ...base, envelope: { ...ROOT, expiresAt: "2026-10-08T00:00:00Z" } })
-    ).toThrow(/authority_expired/);
-    expect(() => ledger.grantMissionAuthority({ ...base, approverId: "" })).toThrow(/approver/);
-    expect(() => ledger.grantMissionAuthority({ ...base, reason: "" })).toThrow(/reason/);
-    expect(() => ledger.grantMissionAuthority({ ...base, envelope: { ...ROOT, actions: ["*"] } })).toThrow(
-      /action_invalid/
-    );
+    const h = harness();
+    const ledger = new MissionAuthorityLedger(store, h.options);
+    const attempt = (grantId: string) => () => ledger.grantMissionAuthority({ missionId: "m1", grantId });
+    expect(attempt("ghost")).toThrow(expect.objectContaining({ code: "mission_authority_unverified" }));
+    h.grants.grants.set("other", makeGrant("some-other-mission", ROOT, "other"));
+    expect(attempt("other")).toThrow(/another mission/);
+    const forged = {
+      ...makeGrant("m1", ROOT, "forged"),
+      definition: { ...ROOT, maximumPrivileges: ["fs.read" as const, "deploy" as const] }
+    };
+    h.grants.grants.set("forged", forged);
+    expect(attempt("forged")).toThrow(/recorded hash/);
+    h.grants.grants.set("old", makeGrant("m1", { ...ROOT, expiresAt: "2026-10-08T00:00:00.000Z" }, "old"));
+    expect(attempt("old")).toThrow(/expired/);
     expect(ledger.missionAuthority("m1")).toBeUndefined();
+    const reasons = store
+      .events("m1")
+      .filter((event) => event.name === "authority.denied")
+      .map((event) => (event.body as { reason: string }).reason);
+    expect(reasons).toEqual(["grant_not_found", "grant_wrong_mission", "grant_hash_mismatch", "authority_expired"]);
+  });
+
+  it("needs a verified operator before mission policy may allow privileged children", () => {
+    const store = new CodingMissionStore(":memory:");
+    store.createGeneral({ missionId: "m1", summary: "s", now: T0 });
+    const h = harness();
+    h.grants.grants.set("grant-1", makeGrant("m1"));
+    const ledger = new MissionAuthorityLedger(store, h.options);
+    const loose = { allowPrivilegedChildren: true };
+    expect(() => ledger.grantMissionAuthority({ missionId: "m1", grantId: "grant-1", policy: loose })).toThrow(
+      /verified operator/
+    );
+    expect(() =>
+      ledger.grantMissionAuthority({ missionId: "m1", grantId: "grant-1", policy: loose, policyApprovedBy: "stranger" })
+    ).toThrow(/verified operator/);
+    expect(ledger.missionAuthority("m1")).toBeUndefined();
+    expect(
+      ledger.grantMissionAuthority({
+        missionId: "m1",
+        grantId: "grant-1",
+        policy: loose,
+        policyApprovedBy: "operator-1"
+      })
+    ).toMatchObject({ policyApprovedBy: "operator-1" });
   });
 });
 
 describe("request_child_work", () => {
-  it("creates children with strictly narrowed authority and records the derivation", () => {
+  it("creates children with strictly narrowed authority and records the derivation and its grant", () => {
     const { store, ledger, ask } = setup();
     const result = ask([
       child("c1", {
-        requestedAuthority: { actions: ["fs.read"], resources: ["repo/acme/app/src"], tools: ["read_file"] }
+        requestedAuthority: narrower({
+          scope: [{ kind: "path", id: "/repo/acme/app/src", coverage: "descendants" }],
+          maximumPrivileges: ["fs.read"],
+          toolClasses: [{ runtime: "desktop_commander", toolName: "read_file" }]
+        })
       }),
       child("c2", { workType: "coding", payload: { instructions: "do" } })
     ]);
     expect(result).toMatchObject({ ok: true, created: ["c1", "c2"] });
     const c1 = ledger.unitAuthority("m1", "c1")!;
     const c2 = ledger.unitAuthority("m1", "c2")!;
-    expect(c1.envelope).toMatchObject({ actions: ["fs.read"], resources: ["repo/acme/app/src"], tools: ["read_file"] });
-    expect(isSubsetOf(c1.envelope, ROOT)).toBe(true);
-    expect(isSubsetOf(c2.envelope, ROOT)).toBe(true);
-    expect(c2.envelope.actions).not.toContain("privileged_exec");
-    expect(c1.derivedFromHash).toBe(ledger.missionAuthority("m1")!.envelopeHash);
-    expect(c1).toMatchObject({ parentUnitId: "root", purpose: "purpose of c1" });
-    expect(store.workUnits("m1").filter((unit) => unit.parentUnitId === "root")).toHaveLength(2);
+    expect(c1.definition.maximumPrivileges).toEqual(["fs.read"]);
+    expect(isSubset(c1.definition, ROOT, NOW())).toBe(true);
+    expect(c2.definition.maximumPrivileges).not.toContain("process.privileged");
+    expect(c1.derivedFromHash).toBe(ledger.missionAuthority("m1")!.definitionHash);
+    expect(c1).toMatchObject({ parentUnitId: "root", purpose: "purpose of c1", grantId: "grant-1" });
     expect(store.workUnits("m1").find((unit) => unit.unitId === "c2")).toMatchObject({ kind: "coding", depth: 1 });
-    const names = store.events("m1").map((event) => event.name);
-    expect(names).toEqual(expect.arrayContaining(["child.requested", "child.admitted"]));
+    expect(store.events("m1").map((event) => event.name)).toEqual(
+      expect.arrayContaining(["child.requested", "child.admitted"])
+    );
   });
 
-  it("derives a grandchild from the child's envelope, never the mission's", () => {
+  it("derives a grandchild from the child's definition, never the mission's", () => {
     const { store, ledger, ask } = setup();
-    ask([child("c1", { requestedAuthority: { actions: ["fs.read", "fs.write"], resources: ["repo/acme/app"] } })]);
-    const token = "child-token";
+    ask([
+      child("c1", {
+        requestedAuthority: narrower({ scope: [{ kind: "path", id: "/repo/acme/app", coverage: "descendants" }] })
+      })
+    ]);
     store.releaseReadyUnits("m1", at(2000));
-    expect(store.claimUnit("m1", "c1", { token, workerId: "w-c1", route: {}, claimedAt: at(2000) })).toMatchObject({
-      ok: true
-    });
-    const grand = ledger.requestChildWork({
-      missionId: "m1",
-      parentUnitId: "c1",
-      workerId: "w-c1",
-      claimToken: token,
-      children: [child("g1", { requestedAuthority: { actions: ["fs.write"], resources: ["repo/acme/app/lib"] } })]
-    });
-    expect(grand).toMatchObject({ ok: true });
-    expect(ledger.unitAuthority("m1", "g1")!.derivedFromHash).toBe(ledger.unitAuthority("m1", "c1")!.envelopeHash);
-    // The grandchild may not reach back up for what the child never had.
-    const escalate = ledger.requestChildWork({
-      missionId: "m1",
-      parentUnitId: "c1",
-      workerId: "w-c1",
-      claimToken: token,
-      children: [child("g2", { requestedAuthority: { actions: ["shell.exec"] } })]
-    });
-    expect(denied(escalate)).toContain("g2:action_not_in_parent:shell.exec");
+    expect(
+      store.claimUnit("m1", "c1", { token: "child-token", workerId: "w-c1", route: {}, claimedAt: at(2000) })
+    ).toMatchObject({ ok: true });
+    const mk = (children: ChildWorkItem[]) =>
+      ledger.requestChildWork({
+        missionId: "m1",
+        parentUnitId: "c1",
+        workerId: "w-c1",
+        claimToken: "child-token",
+        children
+      });
+    expect(
+      mk([
+        child("g1", {
+          requestedAuthority: narrower({
+            scope: [{ kind: "path", id: "/repo/acme/app/lib", coverage: "exact" }],
+            maximumPrivileges: ["fs.write"]
+          })
+        })
+      ])
+    ).toMatchObject({ ok: true });
+    expect(ledger.unitAuthority("m1", "g1")!.derivedFromHash).toBe(ledger.unitAuthority("m1", "c1")!.definitionHash);
+    // The child never held /repo/acme/docs, so its own child cannot have it either, though the mission does.
+    expect(
+      denied(
+        mk([
+          child("g2", {
+            requestedAuthority: narrower({ scope: [{ kind: "path", id: "/repo/acme/docs", coverage: "descendants" }] })
+          })
+        ])
+      )[0]
+    ).toMatch(/^g2:escalation:scope path:\/repo\/acme\/docs/);
   });
 
-  it("DENIES a child that requests privileged_exec when the parent lacks it", () => {
-    const store = new CodingMissionStore(":memory:");
-    const { ledger, ask } = setup({ store });
-    void ledger;
-    // Narrow the mission itself: a different mission whose approved authority has no privileged action.
-    const other = new CodingMissionStore(":memory:");
-    other.createGeneral({ missionId: "m1", summary: "s", budget: { ...DEFAULT_DELEGATION_BUDGET }, now: T0 });
-    other.addWorkUnits("m1", [{ unitId: "root", kind: "agent", title: "r", payload: { role: "r", prompt: "p" } }], T0);
-    const l2 = new MissionAuthorityLedger(other, { approvals: harness().approvals, clock: () => at(1000) });
-    l2.grantMissionAuthority({
-      missionId: "m1",
-      envelope: { ...ROOT, actions: ["fs.read"] },
-      approverId: "h",
-      reason: "r"
-    });
-    other.claimUnit("m1", "root", { token: "t", workerId: "lead-worker", route: {}, claimedAt: T0 });
-    const result = l2.requestChildWork({
-      missionId: "m1",
-      parentUnitId: "root",
-      workerId: "lead-worker",
-      claimToken: "t",
-      children: [child("evil", { requestedAuthority: { actions: ["privileged_exec"] } })]
-    });
-    expect(denied(result)).toContain("evil:action_not_in_parent:privileged_exec");
-    expect(other.workUnits("m1").map((unit) => unit.unitId)).toEqual(["root"]);
-    expect(other.events("m1").map((event) => event.name)).toEqual(
+  it("DENIES a privileged privilege when the parent lacks it, and when policy forbids it even if the parent has it", () => {
+    const narrowGrant = setup({ definition: { ...ROOT, maximumPrivileges: ["fs.read", "fs.write"] } });
+    expect(
+      denied(
+        narrowGrant.ask([child("evil", { requestedAuthority: { ...ROOT, maximumPrivileges: ["process.privileged"] } })])
+      )[0]
+    ).toMatch(/evil:escalation:privilege process.privileged exceeds parent/);
+    expect(narrowGrant.store.workUnits("m1").map((unit) => unit.unitId)).toEqual(["root"]);
+    expect(narrowGrant.store.events("m1").map((event) => event.name)).toEqual(
       expect.arrayContaining(["child.denied", "authority.denied"])
     );
-    void ask;
-  });
 
-  it("denies privileged_exec even when the parent holds it, unless mission policy allows privileged children", () => {
     const { ask, ledger } = setup();
-    expect(denied(ask([child("p1", { requestedAuthority: { actions: ["privileged_exec"] } })]))).toContain(
-      "p1:privileged_child_not_allowed:privileged_exec"
-    );
+    expect(
+      denied(ask([child("p1", { requestedAuthority: { ...ROOT, maximumPrivileges: ["process.privileged"] } })]))
+    ).toContain("p1:privileged_child_not_allowed:process.privileged");
     expect(ledger.unitAuthority("m1", "p1")).toBeUndefined();
-    const allowed = setup({ policy: { allowPrivilegedChildren: true } });
-    expect(allowed.ask([child("p1", { requestedAuthority: { actions: ["privileged_exec"] } })])).toMatchObject({
-      ok: true
-    });
-    expect(allowed.ledger.unitAuthority("m1", "p1")!.envelope.actions).toEqual(["privileged_exec"]);
+    const allowed = setup({ policy: { allowPrivilegedChildren: true }, policyApprovedBy: "operator-1" });
+    expect(
+      allowed.ask([child("p1", { requestedAuthority: { ...ROOT, maximumPrivileges: ["process.privileged"] } })])
+    ).toMatchObject({ ok: true });
+    expect(allowed.ledger.unitAuthority("m1", "p1")!.definition.maximumPrivileges).toEqual(["process.privileged"]);
   });
 
   it("is all-or-nothing: one bad child creates none", () => {
     const { store, ask } = setup();
-    const result = ask([child("ok1"), child("bad", { requestedAuthority: { resources: ["repo/secrets"] } })]);
-    expect(denied(result)).toEqual(["bad:resource_not_in_parent:repo/secrets"]);
+    const result = ask([
+      child("ok1"),
+      child("bad", {
+        requestedAuthority: { ...ROOT, scope: [{ kind: "path", id: "/repo/secrets", coverage: "exact" }] }
+      })
+    ]);
+    expect(denied(result).every((reason) => reason.startsWith("bad:"))).toBe(true);
     expect(store.workUnits("m1").map((unit) => unit.unitId)).toEqual(["root"]);
   });
 
-  it("fails when the mission authority has expired", () => {
+  it("fails when the mission authority has expired, using ACS's clock", () => {
     const { ask, h } = setup();
     h.state.now = "2026-10-09T03:00:00.000Z";
     expect(denied(ask([child("late")]))).toContain("late:authority_expired");
   });
 
-  it("fails for a mission with no approved authority", () => {
+  it("fails for a mission with no authority binding", () => {
     const { ask } = setup({ grant: false });
     expect(denied(ask([child("c1")]))).toEqual(["mission_has_no_authority"]);
   });
@@ -277,22 +359,13 @@ describe("request_child_work", () => {
     expect(denied(ask([child("c", { purpose: "" })]))).toContain("c:purpose_invalid");
     expect(denied(ask([child("bad id!")]))[0]).toMatch(/invalid_unit_id/);
   });
-
-  it("rejects a requested child budget that exceeds the mission budget", () => {
-    const { ask } = setup({ budget: { ...DEFAULT_DELEGATION_BUDGET, maxToolCalls: 10 } });
-    expect(denied(ask([child("c", { requestedBudget: { maxToolCalls: 99 } })]))).toContain(
-      "c:budget_exceeds_mission:tool_calls"
-    );
-    expect(ask([child("d", { requestedBudget: { maxToolCalls: 5 } })])).toMatchObject({ ok: true });
-  });
 });
 
 describe("delegation caps (durable)", () => {
   it("enforces the total child cap and reports it as an explicit outcome", () => {
     const { ask, store } = setup({ budget: { ...DEFAULT_DELEGATION_BUDGET, maxChildWorkUnits: 2 } });
     expect(ask([child("a"), child("b")])).toMatchObject({ ok: true });
-    const refused = ask([child("c")]);
-    expect(refused).toMatchObject({
+    expect(ask([child("c")])).toMatchObject({
       ok: false,
       outcome: "budget_exhausted",
       decision: { exhausted: [expect.objectContaining({ metric: "child_work_units", limit: 2, projected: 3 })] }
@@ -308,14 +381,15 @@ describe("delegation caps (durable)", () => {
     ask([child("c1")]);
     store.releaseReadyUnits("m1", at(1500));
     store.claimUnit("m1", "c1", { token: "ct", workerId: "w", route: {}, claimedAt: at(1500) });
-    const deeper = ledger.requestChildWork({
-      missionId: "m1",
-      parentUnitId: "c1",
-      workerId: "w",
-      claimToken: "ct",
-      children: [child("g1")]
-    });
-    expect(deeper).toMatchObject({
+    expect(
+      ledger.requestChildWork({
+        missionId: "m1",
+        parentUnitId: "c1",
+        workerId: "w",
+        claimToken: "ct",
+        children: [child("g1")]
+      })
+    ).toMatchObject({
       ok: false,
       outcome: "budget_exhausted",
       decision: { exhausted: [expect.objectContaining({ metric: "child_depth" })] }
@@ -326,7 +400,6 @@ describe("delegation caps (durable)", () => {
     const { ask, store } = setup({ budget: { ...DEFAULT_DELEGATION_BUDGET, maxParallelWorkUnits: 2 } });
     ask([child("a"), child("b"), child("c")]);
     store.releaseReadyUnits("m1", at(1500));
-    // root already occupies one slot, so exactly one child may start.
     expect(store.claimUnit("m1", "a", { token: "ta", workerId: "w", route: {}, claimedAt: at(2000) })).toMatchObject({
       ok: true
     });
@@ -349,10 +422,10 @@ describe("simultaneous requests and restarts", () => {
     const one = new CodingMissionStore(path);
     const ctx = setup({ budget: { ...DEFAULT_DELEGATION_BUDGET, maxChildWorkUnits: 1 }, store: one });
     const two = new CodingMissionStore(path);
-    const ledgerTwo = new MissionAuthorityLedger(two, { approvals: harness().approvals, clock: () => at(1000) });
+    const second = new MissionAuthorityLedger(two, { ...ctx.h.options });
     const results = [
       ctx.ask([child("race-a")]),
-      ledgerTwo.requestChildWork({
+      second.requestChildWork({
         missionId: "m1",
         parentUnitId: "root",
         workerId: "lead-worker",
@@ -362,13 +435,9 @@ describe("simultaneous requests and restarts", () => {
     ];
     expect(results.filter((result) => result.ok)).toHaveLength(1);
     expect(results.find((result) => !result.ok)).toMatchObject({ outcome: "budget_exhausted" });
-    // Reopen: the cap and the stored authority survive a restart.
     one.close();
     const reopened = new CodingMissionStore(path);
-    const again = new MissionAuthorityLedger(reopened, {
-      approvals: harness().approvals,
-      clock: () => at(2000)
-    }).requestChildWork({
+    const again = new MissionAuthorityLedger(reopened, { ...ctx.h.options }).requestChildWork({
       missionId: "m1",
       parentUnitId: "root",
       workerId: "lead-worker",
@@ -405,18 +474,48 @@ describe("cancellation propagation", () => {
     expect(units.root?.status).toBe("running");
     expect(units.a).toMatchObject({ status: "cancelled", cancelExternalState: "uncertain" });
     expect(units.a1).toMatchObject({ status: "cancelled", cancelExternalState: "none" });
-    // A late result from the cancelled child is rejected.
     expect(() => store.completeOperation("m1", "a", "ta", { resultHash: "late", files: [] })).toThrow();
   });
 
   it("mission cancellation cancels child work as well", () => {
     const { ask, store } = setup();
     ask([child("a"), child("b")]);
-    const cancelled = store.cancelMission("m1", { reason: "operator", now: at(3000) });
-    expect(cancelled).toMatchObject({ ok: true });
+    expect(store.cancelMission("m1", { reason: "operator", now: at(3000) })).toMatchObject({ ok: true });
     expect(store.workUnits("m1").every((unit) => unit.status === "cancelled")).toBe(true);
-    const parent = ask([child("late")]);
-    expect(denied(parent)).toEqual(["mission_not_active"]);
+    expect(denied(ask([child("late")]))).toEqual(["mission_not_active"]);
+  });
+
+  it("only lets the parent's live claim or a verified operator cancel a subtree", () => {
+    const { ask, store, ledger, claim } = setup();
+    ask([child("a")]);
+    const cancel = (authorization: Parameters<MissionAuthorityLedger["cancelChildren"]>[2]["authorization"]) =>
+      ledger.cancelChildren("m1", "root", { reason: "r", authorization });
+    expect(() => cancel({ kind: "parent_claim", workerId: "lead-worker", claimToken: "stale" })).toThrow(
+      expect.objectContaining({ code: "cancel_not_authorized" })
+    );
+    expect(() => cancel({ kind: "parent_claim", workerId: "impostor", claimToken: claim.token })).toThrow(
+      expect.objectContaining({ code: "cancel_not_authorized" })
+    );
+    expect(() => cancel({ kind: "operator", operatorId: "nobody" })).toThrow(
+      expect.objectContaining({ code: "cancel_not_authorized" })
+    );
+    expect(store.workUnits("m1").find((unit) => unit.unitId === "a")?.status).toBe("pending");
+    expect(store.events("m1").filter((event) => event.name === "authority.denied")).toHaveLength(3);
+    expect(cancel({ kind: "operator", operatorId: "operator-1" }).cancelled).toEqual(["a"]);
+  });
+
+  it("refuses subtree cancellation by a worker whose claim was superseded", () => {
+    const { ask, store, ledger, claim } = setup();
+    ask([child("a")]);
+    store.failUnit("m1", "root", claim.token, { category: "timeout", retryable: true, now: at(1100) });
+    store.retryUnit("m1", "root", at(1200));
+    store.claimUnit("m1", "root", { token: "new-token", workerId: "w-new", route: {}, claimedAt: at(1300) });
+    expect(() =>
+      ledger.cancelChildren("m1", "root", {
+        reason: "r",
+        authorization: { kind: "parent_claim", workerId: "lead-worker", claimToken: claim.token }
+      })
+    ).toThrow(expect.objectContaining({ code: "cancel_not_authorized" }));
   });
 });
 
@@ -522,57 +621,22 @@ describe("review hardening", () => {
     expect(denied(expired.ask([child("late")], { now: "2026-10-09T00:00:01.000Z" } as never))).toContain(
       "late:authority_expired"
     );
-
     const wall = setup({ budget: { ...DEFAULT_DELEGATION_BUDGET, maxWallClockMs: 60_000 } });
     wall.h.set(10 * 60_000);
-    const result = wall.ask([child("c")], { now: at(1) } as never);
-    expect(result).toMatchObject({
+    expect(wall.ask([child("c")], { now: at(1) } as never)).toMatchObject({
       ok: false,
       outcome: "budget_exhausted",
       decision: { exhausted: [expect.objectContaining({ metric: "wall_clock_ms" })] }
     });
   });
 
-  it("refuses to record authority the control plane has not verified, and shows the verifier the privileged actions", () => {
-    const verifier = { verifyMissionApproval: () => false };
-    const { ledger, store } = setup({ grant: false, verifier });
-    expect(() =>
-      ledger.grantMissionAuthority({
-        missionId: "m1",
-        envelope: ROOT,
-        approverId: "forged-human",
-        reason: "trust me",
-        grantId: "g-fake"
-      })
-    ).toThrow(expect.objectContaining({ code: "mission_authority_unverified" }));
-    expect(ledger.missionAuthority("m1")).toBeUndefined();
-    expect(store.events("m1").find((event) => event.name === "authority.denied")?.body).toMatchObject({
-      reason: "approval_not_verified"
-    });
-
-    const accepting = setup({ grant: false });
-    accepting.ledger.grantMissionAuthority({
-      missionId: "m1",
-      envelope: ROOT,
-      approverId: "human-1",
-      reason: "ok",
-      grantId: "grant-9"
-    });
-    expect(accepting.h.calls[0]).toMatchObject({
-      missionId: "m1",
-      approverId: "human-1",
-      grantId: "grant-9",
-      privilegedActions: ["privileged_exec"],
-      envelopeHash: expect.stringMatching(/^[0-9a-f]{64}$/u)
-    });
-  });
-
-  it("fails closed when persisted authority no longer matches its hash", () => {
+  it("fails closed when the stored definition no longer matches its hash", () => {
     const { store, ledger, ask } = setup();
-    ask([child("c1", { requestedAuthority: { actions: ["fs.read"] } })]);
-    const widened = JSON.stringify({ ...ROOT, actions: [...ROOT.actions, "net.fetch"] });
+    ask([child("c1", { requestedAuthority: narrower({ maximumPrivileges: ["fs.read"] }) })]);
     store.db.exec("DROP TRIGGER mission_authority_no_update");
-    store.db.prepare("UPDATE mission_authority SET envelope_json = ? WHERE mission_id = 'm1'").run(widened);
+    store.db
+      .prepare("UPDATE mission_authority SET envelope_json = ? WHERE mission_id = 'm1'")
+      .run(JSON.stringify({ ...ROOT, maximumPrivileges: [...ROOT.maximumPrivileges, "deploy"] }));
     expect(() => ledger.missionAuthority("m1")).toThrow(expect.objectContaining({ code: "authority_integrity" }));
     expect(denied(ask([child("c2")]))).toEqual(["authority_integrity_failure"]);
     expect(
@@ -583,57 +647,38 @@ describe("review hardening", () => {
     ).toEqual(["c1", "root"]);
   });
 
-  it("detects a tampered or mis-derived unit envelope", () => {
+  it("fails closed when the grant it was bound to changes or disappears", () => {
+    const { ledger, ask, h } = setup();
+    h.grants.grants.set("grant-1", makeGrant("m1", { ...ROOT, maximumPrivileges: ["fs.read"] }));
+    expect(() => ledger.missionAuthority("m1")).toThrow(expect.objectContaining({ code: "authority_integrity" }));
+    h.grants.grants.delete("grant-1");
+    expect(denied(ask([child("c")]))).toEqual(["authority_integrity_failure"]);
+  });
+
+  it("detects a tampered or mis-derived unit definition", () => {
     const { store, ledger, ask } = setup();
-    ask([child("c1", { requestedAuthority: { actions: ["fs.read"] } })]);
+    ask([child("c1", { requestedAuthority: narrower({ maximumPrivileges: ["fs.read"] }) })]);
     store.db.exec("DROP TRIGGER work_unit_authority_no_update");
     store.db.prepare("UPDATE work_unit_authority SET derived_from_hash = ? WHERE unit_id = 'c1'").run("f".repeat(64));
     expect(() => ledger.unitAuthority("m1", "c1")).toThrow(expect.objectContaining({ code: "authority_integrity" }));
-    const wide = JSON.stringify({ ...ROOT, actions: ["fs.read", "net.fetch"] });
     store.db
       .prepare("UPDATE work_unit_authority SET envelope_json = ?, derived_from_hash = ? WHERE unit_id = 'c1'")
-      .run(wide, ledger.missionAuthority("m1")!.envelopeHash);
+      .run(
+        JSON.stringify({ ...ROOT, maximumPrivileges: ["fs.read", "deploy"] }),
+        ledger.missionAuthority("m1")!.definitionHash
+      );
     expect(() => ledger.unitAuthority("m1", "c1")).toThrow(expect.objectContaining({ code: "authority_integrity" }));
-  });
-
-  it("only lets the parent's live claim or a verified operator cancel a subtree", () => {
-    const { ask, store, ledger, claim } = setup();
-    ask([child("a")]);
-    const cancel = (authorization: Parameters<MissionAuthorityLedger["cancelChildren"]>[2]["authorization"]) =>
-      ledger.cancelChildren("m1", "root", { reason: "r", authorization });
-    expect(() => cancel({ kind: "parent_claim", workerId: "lead-worker", claimToken: "stale" })).toThrow(
-      expect.objectContaining({ code: "cancel_not_authorized" })
-    );
-    expect(() => cancel({ kind: "parent_claim", workerId: "impostor", claimToken: claim.token })).toThrow(
-      expect.objectContaining({ code: "cancel_not_authorized" })
-    );
-    expect(() => cancel({ kind: "operator", operatorId: "nobody" })).toThrow(
-      expect.objectContaining({ code: "cancel_not_authorized" })
-    );
-    expect(store.workUnits("m1").find((unit) => unit.unitId === "a")?.status).toBe("pending");
-    expect(store.events("m1").filter((event) => event.name === "authority.denied")).toHaveLength(3);
-    expect(cancel({ kind: "operator", operatorId: "operator-1" }).cancelled).toEqual(["a"]);
-  });
-
-  it("refuses subtree cancellation by a worker whose claim was superseded", () => {
-    const { ask, store, ledger, claim } = setup();
-    ask([child("a")]);
-    store.failUnit("m1", "root", claim.token, { category: "timeout", retryable: true, now: at(1100) });
-    store.retryUnit("m1", "root", at(1200));
-    store.claimUnit("m1", "root", { token: "new-token", workerId: "w-new", route: {}, claimedAt: at(1300) });
-    expect(() =>
-      ledger.cancelChildren("m1", "root", {
-        reason: "r",
-        authorization: { kind: "parent_claim", workerId: "lead-worker", claimToken: claim.token }
-      })
-    ).toThrow(expect.objectContaining({ code: "cancel_not_authorized" }));
   });
 
   it("does not persist credential-looking values from denied requests", () => {
     const { ask, store } = setup();
     const secret = "sk-live-0123456789abcdefghijklmnop";
-    ask([child("c1", { requestedAuthority: { resources: [`repo/${secret}`] } })]);
-    ask([child("c2", { requestedAuthority: { actions: ["Bearer abcdefghijklmnopqrstuvwxyz0123456789"] } })]);
+    ask([
+      child("c1", {
+        requestedAuthority: { ...ROOT, scope: [{ kind: "path", id: `/repo/${secret}`, coverage: "exact" }] }
+      })
+    ]);
+    ask([child("c2", { purpose: "Bearer abcdefghijklmnopqrstuvwxyz0123456789 " + "x".repeat(600) })]);
     const events = JSON.stringify(store.events("m1"));
     expect(events).not.toContain(secret);
     expect(events).not.toContain("abcdefghijklmnopqrstuvwxyz0123456789");
@@ -641,22 +686,24 @@ describe("review hardening", () => {
   });
 
   it("validates every requested budget dimension against the mission budget", () => {
-    const cap = { ...DEFAULT_DELEGATION_BUDGET, maxWallClockMs: 60_000, maxSpendUsd: 5, maxToolCalls: 10 };
-    const { ask } = setup({ budget: cap });
-    const reasons = (requestedBudget: MissionBudget) => denied(ask([child(`b${(n += 1)}`, { requestedBudget })]));
-    expect(reasons({ maxWallClockMs: 120_000 }).join()).toContain("budget_exceeds_mission:wall_clock_ms");
-    expect(reasons({ maxParallelWorkUnits: 9 }).join()).toContain("budget_exceeds_mission:parallel_work_units");
-    expect(reasons({ maxRetriesPerWorkUnit: 3 }).join()).toContain("budget_exceeds_mission:retries_per_work_unit");
-    expect(reasons({ maxSpendUsd: 6 }).join()).toContain("budget_exceeds_mission:spend_micro_usd");
-    expect(reasons({ maxToolCalls: -1 }).join()).toContain("budget_invalid");
-    expect(reasons({ maxToolCalls: 1.5 }).join()).toContain("budget_invalid");
-    expect(reasons({ maxSpendUsd: Number.NaN }).join()).toContain("budget_invalid");
+    const { ask } = setup({
+      budget: { ...DEFAULT_DELEGATION_BUDGET, maxWallClockMs: 60_000, maxSpendUsd: 5, maxToolCalls: 10 }
+    });
+    const reasons = (requestedBudget: MissionBudget) =>
+      denied(ask([child(`b${(n += 1)}`, { requestedBudget })])).join();
+    expect(reasons({ maxWallClockMs: 120_000 })).toContain("budget_exceeds_mission:wall_clock_ms");
+    expect(reasons({ maxParallelWorkUnits: 9 })).toContain("budget_exceeds_mission:parallel_work_units");
+    expect(reasons({ maxRetriesPerWorkUnit: 3 })).toContain("budget_exceeds_mission:retries_per_work_unit");
+    expect(reasons({ maxSpendUsd: 6 })).toContain("budget_exceeds_mission:spend_micro_usd");
+    expect(reasons({ maxToolCalls: -1 })).toContain("budget_invalid");
+    expect(reasons({ maxToolCalls: 1.5 })).toContain("budget_invalid");
+    expect(reasons({ maxSpendUsd: Number.NaN })).toContain("budget_invalid");
     expect(
       ask([child("fine", { requestedBudget: { maxWallClockMs: 30_000, maxSpendUsd: 1.25, maxRetriesPerWorkUnit: 1 } })])
     ).toMatchObject({ ok: true });
   });
 
-  it("records the verified requester, attempt and a claim-token hash — never the token", () => {
+  it("records the verified requester, attempt and a claim fence hash — never the token", () => {
     const { ask, store, claim } = setup();
     ask([child("c1")]);
     const requested = store.events("m1").find((event) => event.name === "child.requested")?.body as {
@@ -665,26 +712,23 @@ describe("review hardening", () => {
     expect(requested.requester).toMatchObject({ workerId: "lead-worker", verified: true, parentAttempt: 1 });
     expect(requested.requester.claimFence).toMatch(/^[0-9a-f]{16}$/u);
     expect(JSON.stringify(store.events("m1"))).not.toContain(claim.token);
-    expect(
-      (store.events("m1").find((event) => event.name === "child.admitted")?.body as { requester: unknown }).requester
-    ).toMatchObject({ verified: true });
-    const rejected = ask([child("c2")], { workerId: "impostor" });
-    expect(denied(rejected)).toEqual(["claim_mismatch"]);
-    const unverified = store
+    expect(denied(ask([child("c2")], { workerId: "impostor" }))).toEqual(["claim_mismatch"]);
+    const last = store
       .events("m1")
       .filter((event) => event.name === "child.requested")
       .at(-1)?.body as { requester: Record<string, unknown> };
-    expect(unverified.requester).toMatchObject({ workerId: "impostor", verified: false });
+    expect(last.requester).toMatchObject({ workerId: "impostor", verified: false });
   });
 
   it("turns invalid payloads and dependencies into durable denials instead of rolling the audit trail back", () => {
     const { ask, store } = setup();
-    const badPayload = ask([child("p", { workType: "testing", payload: { argv: [], grant: "admin" } })]);
-    expect(denied(badPayload)).toContain("p:payload_invalid");
-    const badDependency = ask([child("d", { dependsOn: ["ghost"] })]);
-    expect(denied(badDependency)).toContain("d:dependency_invalid");
-    const cyclic = ask([child("x", { dependsOn: ["y"] }), child("y", { dependsOn: ["x"] })]);
-    expect(denied(cyclic).join()).toMatch(/work_unit_graph_invalid|dependency_invalid/u);
+    expect(denied(ask([child("p", { workType: "testing", payload: { argv: [], grant: "admin" } })]))).toContain(
+      "p:payload_invalid"
+    );
+    expect(denied(ask([child("d", { dependsOn: ["ghost"] })]))).toContain("d:dependency_invalid");
+    expect(denied(ask([child("x", { dependsOn: ["y"] }), child("y", { dependsOn: ["x"] })])).join()).toMatch(
+      /dependency_invalid|work_unit_graph_invalid/u
+    );
     const names = store.events("m1").map((event) => event.name);
     expect(names.filter((name) => name === "child.requested")).toHaveLength(3);
     expect(names.filter((name) => name === "child.denied")).toHaveLength(3);
@@ -692,7 +736,7 @@ describe("review hardening", () => {
   });
 
   it("denies a unit created outside request_child_work instead of letting it inherit the whole mission", () => {
-    const { store, ledger, ask } = setup();
+    const { store, ledger } = setup();
     store.addWorkUnits(
       "m1",
       [{ unitId: "sneaky", kind: "agent", title: "s", parentUnitId: "root", payload: { role: "r", prompt: "p" } }],
@@ -700,15 +744,17 @@ describe("review hardening", () => {
     );
     store.releaseReadyUnits("m1", at(1100));
     store.claimUnit("m1", "sneaky", { token: "sneaky-token", workerId: "w-sneaky", route: {}, claimedAt: at(1200) });
-    const result = ledger.requestChildWork({
-      missionId: "m1",
-      parentUnitId: "sneaky",
-      workerId: "w-sneaky",
-      claimToken: "sneaky-token",
-      children: [child("grand")]
-    });
-    expect(denied(result)).toEqual(["parent_authority_missing"]);
+    expect(
+      denied(
+        ledger.requestChildWork({
+          missionId: "m1",
+          parentUnitId: "sneaky",
+          workerId: "w-sneaky",
+          claimToken: "sneaky-token",
+          children: [child("grand")]
+        })
+      )
+    ).toEqual(["parent_authority_missing"]);
     expect(store.workUnits("m1").some((unit) => unit.unitId === "grand")).toBe(false);
-    void ask;
   });
 });
