@@ -42,6 +42,13 @@ export interface JcConfig {
   policyUserPath: string;
   /** JC_POLICY_UNSAFE_DEV=1: accept a policy this process can edit. Dev only; surfaced by jc_status/jc_doctor. */
   policyUnsafeDev: boolean;
+  /** approverd request socket (JC_APPROVER_SOCKET); with the two below it enables local approval. */
+  approverRequestSocket: string | undefined;
+  /** approverd decide socket. The SERVER must not be able to reach it; only used by `approve` and the doctor check. */
+  approverDecideSocket: string | undefined;
+  /** base64url SPKI Ed25519 public key of approverd (PUBLIC material). */
+  approverPublicKey: string | undefined;
+  approverKeyId: string | undefined;
 }
 
 function httpUrl(raw: string, name: string): string {
@@ -96,5 +103,9 @@ export function loadJcConfig(env: NodeJS.ProcessEnv = process.env): JcConfig {
     policyPathExplicit: env.JC_POLICY_PATH !== undefined,
     policyUserPath: path.join(stateDir, 'policy.user.json'),
     policyUnsafeDev: env.JC_POLICY_UNSAFE_DEV === '1',
+    approverRequestSocket: env.JC_APPROVER_SOCKET ? path.resolve(env.JC_APPROVER_SOCKET) : undefined,
+    approverDecideSocket: env.JC_APPROVER_DECIDE_SOCKET ? path.resolve(env.JC_APPROVER_DECIDE_SOCKET) : undefined,
+    approverPublicKey: env.JC_APPROVER_PUBLIC_KEY,
+    approverKeyId: env.JC_APPROVER_KEY_ID,
   };
 }

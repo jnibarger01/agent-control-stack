@@ -127,7 +127,12 @@ const JC_CHILD_ENV_KEYS = [
   // ADR 0026: local preset and its policy path. JC_POLICY_UNSAFE_DEV is deliberately
   // NOT forwarded: a policy the child can edit is never accepted through the bridge.
   "JC_PRESET",
-  "JC_POLICY_PATH"
+  "JC_POLICY_PATH",
+  // Local approval (ADR 0026 D4): the request socket and approverd's PUBLIC key only.
+  // The decide socket path is for the operator CLI and is deliberately not forwarded.
+  "JC_APPROVER_SOCKET",
+  "JC_APPROVER_PUBLIC_KEY",
+  "JC_APPROVER_KEY_ID"
 ];
 // ADR 0026: the `local` preset authorizes locally, so ACS verification material is
 // optional there (tools the policy routes to ACS then fail closed without it).

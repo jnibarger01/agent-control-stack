@@ -22,6 +22,8 @@ import { JC_EXIT, McpHttpClient, type JcCallOutcome } from './mcp-http-client.js
 import { privilegedHelperAvailable } from './privileged-client.js';
 import { JC_PRESETS, isJcPreset, type JcPreset } from './authorizers.js';
 import { createJcServer } from './server.js';
+import { runApproveCommand } from './approve-cli.js';
+import readline from 'node:readline/promises';
 import { JC_TOOLS } from './tool-descriptors.js';
 import { VERSION } from '../version.js';
 
@@ -254,6 +256,28 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
       const server = createJcServer(config, mode);
       await server.connect(new StdioServerTransport());
       return -1; // keep running
+    }
+    case 'pending':
+    case 'approve':
+    case 'reject': {
+      const decideSocket = env.JC_APPROVER_DECIDE_SOCKET ?? config.approverDecideSocket;
+      const terminal = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+      return runApproveCommand(command, rest, {
+        decideSocket,
+        io: {
+          stdout: out.stdout,
+          stderr: out.stderr,
+          isTty: terminal,
+          prompt: async (question) => {
+            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+            try {
+              return await rl.question(question);
+            } finally {
+              rl.close();
+            }
+          },
+        },
+      });
     }
     case 'connect': {
       const url = (flagValue(rest, '--mcp-url') ?? mcpUrlFor(config, env)).replace(/\/$/, '');

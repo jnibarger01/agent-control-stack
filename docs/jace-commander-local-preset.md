@@ -15,10 +15,35 @@ with JC's own policy instead of an ACS capability. `managed` (default) and
 | `network`    | `git_fetch`, `git_push`, `acs_submit_mission`                 | `approve`  |
 | `privileged` | `privileged_exec` (never `allow`)                             | `approve`  |
 
-`approve` needs a human via `approverd` (slice 4). Until that is installed an
-`approve` call fails closed with `JC_LOCAL_APPROVAL_UNAVAILABLE` and nothing
-runs. Setting a class to `allow` in the policy is how you get a Desktop
-Commander-like mode.
+`approve` needs a human via `approverd`. With no approver configured an `approve`
+call fails closed with `JC_LOCAL_APPROVAL_UNAVAILABLE` and nothing runs. Setting a
+class to `allow` in the policy is how you get a Desktop Commander-like mode.
+`privileged_exec` stays unavailable under `local` until the root helper holds the
+local trust anchor (slice 5).
+
+## Human approval (`approverd`)
+
+Install with `sudo deploy/jace-commander/install-approverd.sh` (a root action; the
+repo never runs it for you). It creates three distinct identities: the `jc` server
+account, the `jc-approverd` signer that alone holds the signing key, and your login,
+added to `jc-approvers`.
+
+1. The model calls an `approve`-class tool. The server answers
+   `JC_LOCAL_APPROVAL_REQUIRED` with `_meta.jcApproval.approvalId` and nothing runs.
+2. On a real terminal run `jace-commander approve <id>`. It shows the exact tool and
+   arguments and requires you to type the first 8 hex characters of the invocation hash.
+   It refuses without a TTY on stdin and stdout.
+3. Retry the identical call. The approval is claimed once and approverd mints a
+   `jc.local.v1` token that lives at most 30 s; the server verifies it itself.
+
+The approval (default 15 min) and the execution token (at most 30 s) are separate.
+A claimed approval is consumed, so a retry after any outcome, or a call with changed
+arguments, needs a new approval. Identity separation is by filesystem permissions, not
+socket credentials: `request.sock` is reachable by group `jc`, `decide.sock` only by group
+`jc-approvers`, in separate 0750 directories, so the server and anything it spawns cannot
+approve. `jc_doctor`'s **local approver** check fails if the server identity can open
+`decide.sock`. Every transition is appended to approverd's own hash-chained audit; if it
+cannot be written nothing is approved or minted.
 
 ## Policy file
 

@@ -49,6 +49,8 @@ import {
 } from './integrations.js';
 import { JsonlTraceChain, readTraceFile, verifyChain } from './looptrace.js';
 import { checkPolicyConstraints, loadJcPolicy, type JcPolicyLoad } from './local-policy.js';
+import { ApproverClient, ApproverUnavailable, type AuthorizeReply } from './approver-client.js';
+import { JcLocalTokenError, JcLocalTokenVerifier, type JcLocalAuthorization } from './local-token.js';
 import { jcConfigView, jcDoctor, jcPing } from './doctor.js';
 import { defaultDeniedRoots, getFileInfo, listDirectory, readFile, readMultipleFiles, type JcFsPolicy } from './filesystem.js';
 import { gitAdd, gitBranch, gitCommit, gitDiff, gitFetch, gitLog, gitPush, gitShow, gitStatus } from './git-ops.js';
@@ -81,6 +83,8 @@ export interface JcServerDeps {
   policy?: JcPolicyLoad;
   /** Tests only: skip the cannot-modify-it policy check. */
   skipPolicyImmutability?: boolean;
+  /** Overrides the approverd client the `local` preset builds from config (tests). */
+  approver?: { authorize(tool: string, args: Record<string, unknown>): Promise<AuthorizeReply>; ping(): Promise<{ runtimeId: string; keyId: string }> };
   fetchImpl?: typeof fetch;
   invokeHelper?: typeof invokePrivilegedHelper;
   helperAvailable?: typeof privilegedHelperAvailable;
@@ -172,6 +176,22 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     })
     : undefined;
   const routeTrace = (route: JcRoute): Record<string, unknown> => ({ ...traceRoute(route), ...(policy ? { policyHash: policy.hash } : {}) });
+  // Local human approval (slice 4): enabled only in the `local` preset and only when approverd's
+  // socket AND its public trust anchor are both configured. Without them `approve` fails closed.
+  const approver = mode !== 'local' ? undefined : deps.approver ?? (
+    config.approverRequestSocket && config.approverPublicKey && config.approverKeyId
+      ? new ApproverClient(config.approverRequestSocket, config.runtimeId)
+      : undefined
+  );
+  const localVerifier = approver
+    ? new JcLocalTokenVerifier({
+      publicKey: config.approverPublicKey,
+      keyId: config.approverKeyId,
+      runtimeId: config.runtimeId,
+      nonceStore: new FileNonceStore(path.join(config.stateDir, 'local-nonces')),
+      now: deps.now,
+    })
+    : undefined;
   const runId = `jc-mcp-${process.pid}-${Date.now()}`;
   const trace = new JsonlTraceChain(path.join(config.stateDir, 'traces', `${runId}.jsonl`), runId);
 
@@ -194,7 +214,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     const capability = (request.params._meta as Record<string, unknown> | undefined)?.acsCapability;
     const route = Object.prototype.hasOwnProperty.call(JC_TOOL_POLICIES, name) ? resolver.resolve(name) : undefined;
     if (!route) return fail('unknown_tool', `unknown tool: ${name}`);
-    const routeMeta = jcAuthorizationMeta(mode, route);
+    let routeMeta = jcAuthorizationMeta(mode, route);
     if (route.authorizer === 'refused') {
       // No capability exists in standalone mode, so nothing that writes,
       // executes or needs approval may run. Refused before any handler.
@@ -213,20 +233,20 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     }
 
     let authorization: JcAuthorization | undefined;
+    let localAuthorization: JcLocalAuthorization | undefined;
     if (route.authorizer === 'local') {
       const decision = classDecisions[route.riskClass];
       // A privileged class can never be `allow`; refuse rather than trust a bad table.
       const effective = route.riskClass === 'privileged' && decision === 'allow' ? 'deny' : decision;
-      if (effective !== 'allow') {
-        const code = effective === 'deny' ? 'JC_LOCAL_DENIED' : 'JC_LOCAL_APPROVAL_UNAVAILABLE';
-        recordTrace(trace, name, args, { ok: false, code, ...routeTrace(route) });
-        return fail(
-          code,
-          effective === 'deny'
-            ? `${name} is denied by the local policy for class ${route.riskClass}`
-            : `${name} needs local human approval (class ${route.riskClass}) but no approver is available; nothing ran`,
-          { jaceCommanderMode: mode, ...jcAuthorizationMeta(mode, route, effective === 'deny' ? 'denied' : 'approval-unavailable') },
-        );
+      if (effective === 'deny') {
+        recordTrace(trace, name, args, { ok: false, code: 'JC_LOCAL_DENIED', ...routeTrace(route) });
+        return fail('JC_LOCAL_DENIED', `${name} is denied by the local policy for class ${route.riskClass}`, { jaceCommanderMode: mode, ...jcAuthorizationMeta(mode, route, 'denied') });
+      }
+      if (effective === 'approve') {
+        const outcome = await localApproval(name, args, route);
+        if (!outcome.granted) return outcome.result;
+        localAuthorization = outcome.authorization;
+        routeMeta = jcAuthorizationMeta(mode, route, 'approved', { approvalId: localAuthorization.approvalId, approverId: localAuthorization.approverId, tokenId: localAuthorization.tokenId });
       }
     } else if (verifier && name !== 'privileged_exec') {
       try {
@@ -251,7 +271,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     // read-class calls keep the best-effort behavior they always had.
     if ((route.authorizer === 'local' || route.authorizer === 'admin-delegated') && route.riskClass !== 'read') {
       try {
-        trace.append('tool_call_started', { tool: name, argumentsSha256: argsHash(args), ...routeTrace(route) });
+        trace.append('tool_call_started', { tool: name, argumentsSha256: argsHash(args), ...routeTrace(route), ...approvalTrace(localAuthorization) });
       } catch {
         return fail('JC_TRACE_UNAVAILABLE', 'the local audit trace cannot be written; refusing to run a mutating call', { jaceCommanderMode: mode, ...jcAuthorizationMeta(mode, route, 'trace-unavailable') });
       }
@@ -272,9 +292,51 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
         : { decision: name === 'privileged_exec' && route.authorizer !== 'local' ? 'delegated-to-privileged-helper' : 'not-required' },
       ...routeMeta,
     };
-    recordTrace(trace, name, args, { ok: !result.isError, workItemId: authorization?.workItemId, ...routeTrace(route) });
+    recordTrace(trace, name, args, { ok: !result.isError, workItemId: authorization?.workItemId, ...routeTrace(route), ...approvalTrace(localAuthorization) });
     return { ...result, _meta: { ...(result._meta ?? {}), ...meta } };
   });
+
+  /**
+   * `approve` decisions: ask approverd. A pending approval returns a challenge the human
+   * resolves with `jace-commander approve <id>`; the identical retry claims it once and
+   * yields a jc.local.v1 token that THIS process verifies before running anything.
+   * Privileged calls stay unavailable until the root helper holds the local trust anchor.
+   */
+  async function localApproval(name: string, args: Record<string, unknown>, route: JcRoute):
+    Promise<{ granted: true; authorization: JcLocalAuthorization } | { granted: false; result: ToolResult }> {
+    const refuse = (code: string, message: string, decision: string, extraMeta: Record<string, unknown> = {}, extraTrace: Record<string, unknown> = {}) => {
+      recordTrace(trace, name, args, { ok: false, code, ...routeTrace(route), ...extraTrace });
+      return { granted: false as const, result: fail(code, message, { jaceCommanderMode: mode, ...jcAuthorizationMeta(mode, route, decision), ...extraMeta }) };
+    };
+    if (!approver || !localVerifier || route.riskClass === 'privileged') {
+      return refuse('JC_LOCAL_APPROVAL_UNAVAILABLE', `${name} needs local human approval (class ${route.riskClass}) but no approver is available; nothing ran`, 'approval-unavailable');
+    }
+    let reply: AuthorizeReply;
+    try {
+      reply = await approver.authorize(name, args);
+    } catch (error) {
+      const detail = error instanceof ApproverUnavailable ? error.message : 'approver error';
+      return refuse('JC_LOCAL_APPROVAL_UNAVAILABLE', `${name} needs local human approval but approverd is unavailable (${detail}); nothing ran`, 'approval-unavailable');
+    }
+    if (reply.state === 'pending') {
+      return refuse(
+        'JC_LOCAL_APPROVAL_REQUIRED',
+        `${name} needs human approval ${reply.approvalId}: run \`jace-commander approve ${reply.approvalId}\` on a terminal, then retry the identical call (the approval is single-use)`,
+        'approval-required',
+        { jcApproval: { approvalId: reply.approvalId, expiresAt: reply.expiresAt, command: `jace-commander approve ${reply.approvalId}` } },
+        { approvalId: reply.approvalId },
+      );
+    }
+    if (reply.state === 'rejected') {
+      return refuse('JC_LOCAL_APPROVAL_REJECTED', `${name} was rejected by the approver (${reply.approvalId}); nothing ran`, 'approval-rejected', {}, { approvalId: reply.approvalId });
+    }
+    try {
+      return { granted: true, authorization: localVerifier.verify(name, args, reply.token) };
+    } catch (error) {
+      const code = error instanceof JcLocalTokenError ? error.code : 'JC_LOCAL_TOKEN_MALFORMED';
+      return refuse(code, 'the approval token was not accepted; nothing ran', 'token-rejected', {}, { approvalId: reply.approvalId });
+    }
+  }
 
   type Handler = (args: Record<string, unknown>, capability: unknown) => Promise<ToolResult>;
   const fsPolicy: JcFsPolicy = {
@@ -283,7 +345,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       ...defaultDeniedRoots(config.stateDir, config.homeDir),
       ...config.fsDeniedRoots,
       // The model must not be able to read the policy it is governed by, or edit it.
-      ...(mode === 'local' ? [path.dirname(config.policyPath), config.policyUserPath] : []),
+      ...(mode === 'local' ? [config.policyPath, config.policyUserPath] : []),
       ...(policy?.effective.fsDeniedRoots ?? []),
     ],
   };
@@ -360,6 +422,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       handlerNames: Object.keys(handlers),
       verifierReady: Boolean(verifier && config.acsPublicKey && config.acsKeyId),
       policy,
+      approver: mode === 'local' ? approverHealth : undefined,
       privilegedHelper: () => helperAvailable(helperOptions),
     })),
     ping: async () => ok(await jcPing(config)),
@@ -370,6 +433,33 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
   async function dispatch(name: string, args: Record<string, unknown>, capability: unknown): Promise<ToolResult> {
     const handler = Object.prototype.hasOwnProperty.call(handlers, name) ? handlers[name] : undefined;
     return handler ? handler(args, capability) : fail('unknown_tool', `unknown tool: ${name}`);
+  }
+
+  /** Whether approverd is configured, reachable and the one we trust; and that WE cannot reach decide.sock. */
+  async function approverHealth(): Promise<Record<string, unknown>> {
+    const configured = Boolean(approver);
+    let reachable = false;
+    let keyMatches = false;
+    if (approver) {
+      try {
+        const pong = await approver.ping();
+        reachable = true;
+        keyMatches = pong.keyId === config.approverKeyId && pong.runtimeId === config.runtimeId;
+      } catch {
+        reachable = false;
+      }
+    }
+    // The server identity must NOT be able to open the decide socket (ADR 0026 D4).
+    let serverCanDecide: boolean | undefined;
+    if (config.approverDecideSocket) {
+      try {
+        fs.accessSync(config.approverDecideSocket, fs.constants.R_OK | fs.constants.W_OK);
+        serverCanDecide = true;
+      } catch {
+        serverCanDecide = false;
+      }
+    }
+    return { configured, reachable, keyMatches, serverCanDecide };
   }
 
   async function status(): Promise<Record<string, unknown>> {
@@ -427,6 +517,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       missionRouter: { dir: config.missionRouterDir },
       privilegedHelper: { path: config.privilegedHelperPath, sudoNonInteractive: helper },
       providers: await collectProviderHealth(probes),
+      ...(mode === 'local' ? { approver: await approverHealth() } : {}),
       ...(policy ? { policy: { state: policy.state, hash: policy.hash, immutable: policy.immutable, unsafeDev: policy.unsafeDev, sources: policy.sources, errorCount: policy.errors.length } } : {}),
     };
   }
@@ -443,9 +534,14 @@ function traceRoute(route: JcRoute): Record<string, unknown> {
  * Per-call authorization detail surfaced to clients. Absent in `managed` so
  * managed responses stay byte-identical to before ADR 0026.
  */
-function jcAuthorizationMeta(mode: JcMode, route: JcRoute, decision?: string): Record<string, unknown> {
+function jcAuthorizationMeta(mode: JcMode, route: JcRoute, decision?: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
   if (mode === 'managed') return {};
-  return { jcAuthorization: { authorizer: route.authorizer, provider: route.provider, class: route.riskClass, source: route.source, ...(decision ? { decision } : {}) } };
+  return { jcAuthorization: { authorizer: route.authorizer, provider: route.provider, class: route.riskClass, source: route.source, ...(decision ? { decision } : {}), ...extra } };
+}
+
+/** Approval identifiers for trace records (ids only; never the token). */
+function approvalTrace(auth: JcLocalAuthorization | undefined): Record<string, unknown> {
+  return auth ? { approvalId: auth.approvalId, approverId: auth.approverId, tokenId: auth.tokenId } : {};
 }
 
 function recordTrace(trace: JsonlTraceChain, tool: string, args: unknown, outcome: Record<string, unknown>): void {

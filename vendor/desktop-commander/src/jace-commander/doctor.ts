@@ -30,6 +30,8 @@ export interface DoctorRuntime {
   verifierReady: boolean;
   /** Present for the `local` preset. */
   policy?: import('./local-policy.js').JcPolicyLoad;
+  /** Present for the `local` preset. */
+  approver?: () => Promise<Record<string, unknown>>;
   privilegedHelper: () => Promise<boolean>;
 }
 
@@ -109,6 +111,26 @@ export async function jcDoctor(config: JcConfig, runtime: DoctorRuntime): Promis
           ? 'JC_POLICY_UNSAFE_DEV=1: a policy this process can edit is accepted; development only'
           : `${policy.state} (hash ${policy.hash.slice(0, 12)}${policy.sources.length ? `, ${policy.sources.join(' + ')}` : ''})`
             + (loosened.length ? `; classes allowed without approval: ${loosened.join(', ')} (guardrails, not a sandbox: rely on the OS account and unit hardening)` : ''),
+    });
+  }
+  if (runtime.approver && runtime.policy) {
+    const health = await runtime.approver();
+    const needed = Object.values(runtime.policy.effective.classDecisions).includes('approve');
+    const separated = health.serverCanDecide !== true;
+    checks.push({
+      name: 'local approver',
+      ok: health.configured === true && health.reachable === true && health.keyMatches === true && separated,
+      // Only an error when the policy actually sends calls to a human.
+      required: needed,
+      detail: !health.configured
+        ? 'approverd is not configured (JC_APPROVER_SOCKET, JC_APPROVER_PUBLIC_KEY, JC_APPROVER_KEY_ID); approve-class calls fail closed'
+        : !health.reachable
+          ? 'approverd is configured but not reachable; approve-class calls fail closed'
+          : !health.keyMatches
+            ? 'approverd answered with a different key id or runtime id than configured'
+            : !separated
+              ? 'THE SERVER IDENTITY CAN OPEN decide.sock: the model could approve its own requests; fix socket group/permissions'
+              : 'approverd reachable, key matches, decide.sock is not reachable by the server identity',
     });
   }
   const roots = config.fsRoots.map((root) => ({ root, exists: fs.existsSync(root) }));
