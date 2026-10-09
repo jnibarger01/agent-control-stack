@@ -106,6 +106,12 @@ const SAFE_REASON = /^[A-Za-z0-9_.:/#-]{1,120}$/u;
 /** The existing human-issued grant store (`SqliteWorkItemStore` satisfies this). Read-only. */
 export interface GrantReader {
   getAutonomousAuthority(grantId: string): AutonomousAuthorityGrant | undefined;
+  /**
+   * The current subject-input hash of the mission's execution inputs (`executionPlanSubjectInputHash`), or undefined if it
+   * cannot be determined. A grant is only honored while it still equals the grant's `subjectInputHash`, so approval of
+   * one set of inputs cannot authorize child work after those inputs changed. Unavailable means refused.
+   */
+  currentSubjectInputHash(missionId: string): string | undefined;
 }
 
 export interface LedgerOptions {
@@ -183,6 +189,38 @@ function durableReasons(reasons: readonly string[]): string[] {
   });
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** Untyped callers: every field that is later used as a string, array or enum is checked before it is relied on. */
+function childShapeProblems(item: unknown, index: number): string[] {
+  const tag = `child[${index}]`;
+  if (!isRecord(item)) return [`${tag}:not_an_object`];
+  const problems: string[] = [];
+  if (typeof item.unitId !== "string") problems.push(`${tag}:unit_id_not_a_string`);
+  if (typeof item.workType !== "string") problems.push(`${tag}:work_type_not_a_string`);
+  if (typeof item.purpose !== "string") problems.push(`${tag}:purpose_not_a_string`);
+  if (item.title !== undefined && typeof item.title !== "string") problems.push(`${tag}:title_not_a_string`);
+  if (item.verificationPolicy !== undefined && typeof item.verificationPolicy !== "string") {
+    problems.push(`${tag}:verification_policy_not_a_string`);
+  }
+  if (item.dependsOn !== undefined) {
+    const list = item.dependsOn;
+    if (!Array.isArray(list) || list.length > 32 || list.some((entry) => typeof entry !== "string")) {
+      problems.push(`${tag}:depends_on_not_a_string_array`);
+    }
+  }
+  if (item.requestedBudget !== undefined && !isRecord(item.requestedBudget))
+    problems.push(`${tag}:budget_not_an_object`);
+  return problems;
+}
+
+/** A non-reusable identity for one claim: attempt numbers can repeat after a released claim, a token cannot. */
+const claimFenceOf = (claimToken: string): string => stableHash(claimToken).slice(0, 16);
+
+/** Code-unit ordering. Locale collation differs across hosts, and reductions must hash identically everywhere. */
+const byCodeUnit = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
+
 export class MissionAuthorityLedger {
   private readonly clock: () => string;
 
@@ -218,7 +256,7 @@ export class MissionAuthorityLedger {
         this.store.recordMissionEvent(
           input.missionId,
           "authority.denied",
-          { reason, grantId: String(input.grantId).slice(0, 96) },
+          { reason, grantId: durableReasons([String(input.grantId)])[0] },
           now
         );
         refusal = new ControlStackError(code, message);
@@ -242,6 +280,16 @@ export class MissionAuthorityLedger {
           "mission_authority_unverified",
           "the grant does not match its recorded hash",
           "grant_hash_mismatch"
+        );
+      }
+      if (this.grantRevoked(grant.grantId)) {
+        return refuse("mission_authority_unverified", "the grant has been revoked", "grant_revoked");
+      }
+      if (this.options.grants.currentSubjectInputHash(input.missionId) !== grant.subjectInputHash) {
+        return refuse(
+          "mission_authority_unverified",
+          "the grant no longer matches the mission's execution inputs",
+          "grant_subject_changed"
         );
       }
       if (!(Date.parse(grant.definition.expiresAt) > Date.parse(now))) {
@@ -462,9 +510,11 @@ export class MissionAuthorityLedger {
           {
             parentUnitId,
             requester,
-            children: request.children
-              .slice(0, 16)
-              .map((child) => ({ unitId: String(child.unitId).slice(0, 64), workType: child.workType }))
+            // Untyped callers: the audit entry itself must never throw on a malformed child.
+            children: (Array.isArray(request.children) ? request.children : []).slice(0, 16).map((child) => ({
+              unitId: isRecord(child) ? String(child.unitId).slice(0, 64) : "invalid",
+              workType: isRecord(child) ? String(child.workType).slice(0, 32) : "invalid"
+            }))
           },
           nowIso
         );
@@ -485,7 +535,10 @@ export class MissionAuthorityLedger {
       };
 
       const mission = this.store.get(missionId);
-      if (!mission || TERMINAL_MISSION_STATES.has(mission.state)) return deny(["mission_not_active"]);
+      // Nothing is written for a mission that does not exist: the event sink is mission-scoped and unauthenticated callers
+      // must not be able to grow it under invented ids.
+      if (!mission) return { ok: false, outcome: "denied", reasons: ["mission_not_active"] };
+      if (TERMINAL_MISSION_STATES.has(mission.state)) return deny(["mission_not_active"]);
       const units = this.store.workUnits(missionId);
       const parent = units.find((unit) => unit.unitId === parentUnitId);
       if (!parent) return deny(["parent_unit_not_found"]);
@@ -509,10 +562,14 @@ export class MissionAuthorityLedger {
         workerId: request.workerId,
         verified: true,
         parentAttempt: parent.attempt,
-        claimFence: stableHash(request.claimToken).slice(0, 16)
+        claimFence: claimFenceOf(request.claimToken)
       };
       emitRequested();
-      if (request.children.length === 0 || request.children.length > 16) return deny(["child_count_invalid"]);
+      if (!Array.isArray(request.children) || request.children.length === 0 || request.children.length > 16) {
+        return deny(["child_count_invalid"]);
+      }
+      const shapeProblems = request.children.flatMap((item, index) => childShapeProblems(item, index));
+      if (shapeProblems.length > 0) return deny(shapeProblems);
 
       let missionAuthority: MissionAuthorityRecord | undefined;
       let parentDefinition: AutonomousAuthorityDefinition;
@@ -528,6 +585,12 @@ export class MissionAuthorityLedger {
         parentHash = parentRecord?.definitionHash ?? missionAuthority.definitionHash;
         // The grant is re-checked on every request: revoking it stops new descendants immediately.
         if (this.grantRevoked(missionAuthority.grantId)) return deny(["grant_revoked"]);
+        if (
+          this.options.grants.currentSubjectInputHash(missionId) !==
+          this.options.grants.getAutonomousAuthority(missionAuthority.grantId)?.subjectInputHash
+        ) {
+          return deny(["grant_subject_changed"]);
+        }
         // A valid claim is not enough: the claimant must be the actor this authority was issued to.
         const actor = (this.options.resolveActor ?? ((workerId: string) => workerId))(request.workerId);
         if (actor !== parentDefinition.executingActorId) return deny(["worker_not_authorized_for_authority"]);
@@ -681,8 +744,8 @@ export class MissionAuthorityLedger {
         return { ok: false, outcome: "budget_exhausted", decision: created.decision };
       }
       const insert = this.store.db.prepare(
-        `INSERT INTO work_unit_authority (mission_id, unit_id, parent_unit_id, envelope_json, envelope_hash, derived_from_hash, grant_id, parent_attempt, requested_json, purpose, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO work_unit_authority (mission_id, unit_id, parent_unit_id, envelope_json, envelope_hash, derived_from_hash, grant_id, parent_attempt, parent_claim_fence, requested_json, purpose, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
       const authorities: Record<string, AutonomousAuthorityDefinition> = {};
       for (const { item, definition } of derived) {
@@ -696,6 +759,7 @@ export class MissionAuthorityLedger {
           parentHash,
           missionAuthority.grantId,
           parent.attempt,
+          claimFenceOf(request.claimToken),
           JSON.stringify({ authority: item.requestedAuthority ?? null, budget: item.requestedBudget ?? null }),
           item.purpose,
           nowIso
@@ -829,6 +893,11 @@ export class MissionAuthorityLedger {
       const allUnits = this.store.workUnits(input.missionId);
       const parent = allUnits.find((unit) => unit.unitId === input.parentUnitId);
       if (!parent) throw new ControlStackError("parent_unit_not_found", "parent unit does not exist");
+      const reducingMission = this.store.get(input.missionId);
+      if (!reducingMission || TERMINAL_MISSION_STATES.has(reducingMission.state)) {
+        // A terminal mission's history is closed: nothing, including an operator's reduction, may be appended to it.
+        throw new ControlStackError("mission_not_active", "mission is no longer active");
+      }
       const auth = input.authorization;
       const authorized =
         auth.kind === "operator"
@@ -869,22 +938,24 @@ export class MissionAuthorityLedger {
           recorded: false
         };
       }
-      // Only children admitted under the parent's current attempt count; work from an earlier attempt was cancelled when
-      // ownership advanced and must not feed this result.
-      const currentAttempt = new Map(
+      // Only children admitted under the parent's current claim count; work from an earlier claim was cancelled when
+      // ownership advanced and must not feed this result. A claim token is never reused, unlike an attempt number.
+      const currentFence = new Map(
         (
           this.store.db
             .prepare(
-              "SELECT unit_id, parent_attempt FROM work_unit_authority WHERE mission_id = ? AND parent_unit_id = ?"
+              "SELECT unit_id, parent_claim_fence FROM work_unit_authority WHERE mission_id = ? AND parent_unit_id = ?"
             )
-            .all(input.missionId, input.parentUnitId) as Array<{ unit_id: string; parent_attempt: number }>
-        ).map((row) => [row.unit_id, row.parent_attempt])
+            .all(input.missionId, input.parentUnitId) as Array<{ unit_id: string; parent_claim_fence: string }>
+        ).map((row) => [row.unit_id, row.parent_claim_fence])
       );
       const children = allUnits
         .filter(
-          (unit) => unit.parentUnitId === input.parentUnitId && currentAttempt.get(unit.unitId) === parent.attempt
+          (unit) =>
+            unit.parentUnitId === input.parentUnitId &&
+            currentFence.get(unit.unitId) === (parent.claimToken ? claimFenceOf(parent.claimToken) : undefined)
         )
-        .sort((left, right) => left.unitId.localeCompare(right.unitId));
+        .sort((left, right) => byCodeUnit(left.unitId, right.unitId));
       if (children.length === 0)
         throw new ControlStackError("reduction_no_children", "unit has no child work to reduce");
       // A child that is `retryable` is still awaiting its retry, so the outcome is not settled yet. A `failed` child is
@@ -914,7 +985,7 @@ export class MissionAuthorityLedger {
         const counts = new Map<string, string[]>();
         for (const unit of succeeded)
           counts.set(unit.resultHash!, [...(counts.get(unit.resultHash!) ?? []), unit.unitId]);
-        const ranked = [...counts.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+        const ranked = [...counts.entries()].sort((a, b) => b[1].length - a[1].length || byCodeUnit(a[0], b[0]));
         // A strict majority of all children, otherwise there is no result: ties are never broken arbitrarily.
         if (ranked[0] && ranked[0][1].length * 2 > children.length) {
           outcome = "reduced";

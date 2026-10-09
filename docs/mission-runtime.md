@@ -88,7 +88,8 @@ policy (which is not part of the grant) must match its own fingerprint, the live
 hash and definition, and a derived unit's definition must be a subset of its parent's (checked at the instant it was
 created) and bound to the parent hash and grant it claims. A derived unit whose parent has no authority row is accepted
 only if that parent is a verified root; a missing intermediate record is corruption, not a root. Each `requestChildWork`
-also rechecks that the backing grant has not been revoked, and that the claimant resolves (`resolveActor`) to the actor
+also rechecks that the backing grant has not been revoked and that the mission's execution inputs still hash to the
+grant's `subjectInputHash` (`GrantReader.currentSubjectInputHash`; unavailable means refused), and that the claimant resolves (`resolveActor`) to the actor
 the grant was issued to, since a valid claim alone does not say the worker may exercise this authority. Any mismatch is
 `authority_integrity`, and the request is denied. The tables are append-only including against `INSERT OR REPLACE`
 (SQLite resolves that by deleting the old row without firing DELETE triggers, so each table also has a BEFORE INSERT guard).
@@ -109,13 +110,18 @@ restart does not reset the caps.
   would already recover cannot keep creating, cancelling or reducing children. Mission policy is validated strictly
   (known privileges, bounded integer TTL, no unknown fields) before it is persisted. `verificationPolicy` and titles are
   validated before insertion so a bad value is a durable denial, not a database error.
-- Children are bound to the parent's attempt (`parent_attempt`). When the parent is retried or its claim released, its
-  unfinished descendants are cancelled (in-flight ones as uncertain) and a reduction only counts children admitted under
-  the current attempt. Once a reduction is recorded no more children are admitted. A unit with children cannot move to
-  `succeeded` or `verifying` until they are reduced; that guard is a trigger on the table, so it covers the execution
-  ledger and the verification gate as well as the legacy store.
+- Children are bound to the parent's claim by a non-reusable fence (a hash of the claim token), not by attempt number,
+  because attempt numbers repeat after a released claim. When the parent is retried or its claim released, its unfinished
+  descendants are cancelled (in-flight ones as uncertain) and a reduction only counts children admitted under the
+  current claim. Once a reduction is recorded no more children are admitted. A unit with authority-managed children
+  cannot move to `succeeded` or `verifying` until they are reduced; that guard is a trigger on the table, so it covers the
+  execution ledger and the verification gate as well as the legacy store. Plain parent/child units that were not admitted
+  through `requestChildWork` are not reducible and are not gated.
 - A child never outlives its parent and is further bounded by `maxChildTtlMs`. A grandchild derives from its parent's
   definition, not the mission's.
+- Untyped input is shape-checked before anything is used: ids and enums must be strings, dependencies a string array,
+  and a malformed child is a durable denial. A request naming a mission that does not exist writes nothing. An explicitly
+  requested authority that is already expired is denied, and reductions are refused once the mission is terminal.
 - A derived unit with no authority row is **denied**, never treated as a root, so a unit created outside
   `requestChildWork` cannot hand its descendants the whole mission authority.
 - A requested child budget is validated on every dimension with the canonical budget conversion and may only ask for

@@ -35,7 +35,7 @@ describe("migration 060: mission authority and child work", () => {
       `INSERT INTO mission_authority (mission_id, envelope_json, envelope_hash, policy_json, policy_hash, approver_id, reason, grant_id, grant_hash, created_at) VALUES ('m1', '{}', '${"a".repeat(64)}', '{}', '${"p".repeat(64)}', 'h', 'r', 'g1', '${"e".repeat(64)}', 't')`
     );
     db.exec(
-      `INSERT INTO work_unit_authority (mission_id, unit_id, envelope_json, envelope_hash, derived_from_hash, grant_id, parent_attempt, created_at) VALUES ('m1', 'u1', '{}', '${"b".repeat(64)}', '${"a".repeat(64)}', 'g1', 1, 't')`
+      `INSERT INTO work_unit_authority (mission_id, unit_id, envelope_json, envelope_hash, derived_from_hash, grant_id, parent_attempt, parent_claim_fence, created_at) VALUES ('m1', 'u1', '{}', '${"b".repeat(64)}', '${"a".repeat(64)}', 'g1', 1, 'fence-0001', 't')`
     );
     db.exec(
       `INSERT INTO work_unit_reductions (mission_id, parent_unit_id, strategy, outcome, children_json, reduction_hash, created_at) VALUES ('m1', 'u1', 'all_succeeded', 'reduced', '[]', '${"r".repeat(64)}', 't')`
@@ -51,7 +51,7 @@ describe("migration 060: mission authority and child work", () => {
     ).toThrow(/FOREIGN KEY/);
     expect(() =>
       db.exec(
-        `INSERT INTO work_unit_authority (mission_id, unit_id, envelope_json, envelope_hash, derived_from_hash, grant_id, parent_attempt, created_at) VALUES ('m1', 'ghost', '{}', '${"b".repeat(64)}', '${"a".repeat(64)}', 'g1', 1, 't')`
+        `INSERT INTO work_unit_authority (mission_id, unit_id, envelope_json, envelope_hash, derived_from_hash, grant_id, parent_attempt, parent_claim_fence, created_at) VALUES ('m1', 'ghost', '{}', '${"b".repeat(64)}', '${"a".repeat(64)}', 'g1', 1, 'fence-0001', 't')`
       )
     ).toThrow(/FOREIGN KEY/);
     db.close();
@@ -63,7 +63,7 @@ describe("migration 060: mission authority and child work", () => {
       `INSERT INTO mission_authority (mission_id, envelope_json, envelope_hash, policy_json, policy_hash, approver_id, reason, grant_id, grant_hash, created_at) VALUES ('m1', '{"v":1}', '${"a".repeat(64)}', '{}', '${"p".repeat(64)}', 'h', 'r', 'g1', '${"e".repeat(64)}', 't')`
     );
     db.exec(
-      `INSERT INTO work_unit_authority (mission_id, unit_id, envelope_json, envelope_hash, derived_from_hash, grant_id, parent_attempt, created_at) VALUES ('m1', 'u1', '{"v":1}', '${"b".repeat(64)}', '${"a".repeat(64)}', 'g1', 1, 't')`
+      `INSERT INTO work_unit_authority (mission_id, unit_id, envelope_json, envelope_hash, derived_from_hash, grant_id, parent_attempt, parent_claim_fence, created_at) VALUES ('m1', 'u1', '{"v":1}', '${"b".repeat(64)}', '${"a".repeat(64)}', 'g1', 1, 'fence-0001', 't')`
     );
     db.exec(
       `INSERT INTO work_unit_reductions (mission_id, parent_unit_id, strategy, outcome, children_json, reduction_hash, created_at) VALUES ('m1', 'u1', 'all_succeeded', 'reduced', '[]', '${"r".repeat(64)}', 't')`
@@ -75,7 +75,7 @@ describe("migration 060: mission authority and child work", () => {
     ).toThrow(/append-only/);
     expect(() =>
       db.exec(
-        `INSERT OR REPLACE INTO work_unit_authority (mission_id, unit_id, envelope_json, envelope_hash, derived_from_hash, grant_id, parent_attempt, created_at) VALUES ('m1', 'u1', '{"v":2}', '${"c".repeat(64)}', '${"a".repeat(64)}', 'g1', 1, 't')`
+        `INSERT OR REPLACE INTO work_unit_authority (mission_id, unit_id, envelope_json, envelope_hash, derived_from_hash, grant_id, parent_attempt, parent_claim_fence, created_at) VALUES ('m1', 'u1', '{"v":2}', '${"c".repeat(64)}', '${"a".repeat(64)}', 'g1', 1, 'fence-0001', 't')`
       )
     ).toThrow(/append-only/);
     expect(() =>

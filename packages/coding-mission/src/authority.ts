@@ -75,6 +75,8 @@ export function narrowDefinition(input: {
         reasons.push(`privileged_child_not_allowed:${privilege}`);
     }
     if (ttlCeiling !== undefined && Date.parse(candidate.expiresAt) > ttlCeiling) reasons.push("expiry_exceeds_policy");
+    // Authority that is already invalid when issued would consume child capacity and never be usable.
+    if (!(Date.parse(candidate.expiresAt) > input.now.getTime())) reasons.push("requested_authority_expired");
   } else {
     const privileges = parent.maximumPrivileges.filter(
       (privilege) => !denied.has(privilege) && !(PRIVILEGED_PRIVILEGES.has(privilege) && !privilegedAllowed)

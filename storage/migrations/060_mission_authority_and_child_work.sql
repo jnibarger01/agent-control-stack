@@ -30,6 +30,7 @@ CREATE TABLE work_unit_authority (
   derived_from_hash TEXT NOT NULL CHECK (length(derived_from_hash) = 64),
   grant_id TEXT NOT NULL CHECK (length(grant_id) BETWEEN 1 AND 256),
   parent_attempt INTEGER NOT NULL CHECK (parent_attempt >= 0),
+  parent_claim_fence TEXT NOT NULL CHECK (length(parent_claim_fence) BETWEEN 8 AND 64),
   requested_json TEXT CHECK (requested_json IS NULL OR json_valid(requested_json)),
   purpose TEXT,
   created_at TEXT NOT NULL,
@@ -77,15 +78,17 @@ BEGIN SELECT RAISE(ABORT, 'work_unit_reductions: append-only'); END;
 CREATE TRIGGER work_unit_reductions_no_delete BEFORE DELETE ON work_unit_reductions
 BEGIN SELECT RAISE(ABORT, 'work_unit_reductions: append-only'); END;
 
--- A unit that has child work cannot complete (or enter verification) until its children have been reduced. The guard
--- lives on the table so it covers every completion path: the legacy store, the execution ledger and the verification gate.
+-- A unit that has authority-managed child work (children admitted through request_child_work, which have a
+-- work_unit_authority row) cannot complete or enter verification until those children have been reduced. The guard lives
+-- on the table so it covers every completion path: the legacy store, the execution ledger and the verification gate.
+-- Plain parent/child units added without request_child_work are not reducible, so they are deliberately not gated.
 CREATE TRIGGER work_unit_children_must_be_reduced
 BEFORE UPDATE OF status ON coding_operations
 WHEN NEW.status IN ('succeeded', 'verifying')
   AND OLD.status <> NEW.status
   AND EXISTS (
-    SELECT 1 FROM coding_operations AS child
-    WHERE child.mission_id = NEW.mission_id AND child.parent_unit_id = NEW.operation_id
+    SELECT 1 FROM work_unit_authority AS managed
+    WHERE managed.mission_id = NEW.mission_id AND managed.parent_unit_id = NEW.operation_id
   )
   AND NOT EXISTS (
     SELECT 1 FROM work_unit_reductions AS reduction
