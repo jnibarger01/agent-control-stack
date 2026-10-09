@@ -11,6 +11,9 @@ assert.equal(riskClassForJcTool('write_file'), 'mutate');
 assert.equal(riskClassForJcTool('privileged_exec'), 'privileged');
 assert.equal(riskClassForJcTool('git_push'), 'network');
 assert.throws(() => parseJcLocalPolicy({ ...input(), classes: { privileged: 'allow' } }));
+for (const risk of ['mutate', 'exec', 'network']) {
+  assert.throws(() => parseJcLocalPolicy({ ...input(), classes: { [risk]: 'allow' } }), /JC_POLICY_APPROVAL_REQUIRED/);
+}
 assert.throws(() => parseJcLocalPolicy({ ...input(), authorizers: { defaultAuthorizer: 'admin-delegated' } }));
 assert.throws(() => parseJcLocalPolicy({ ...input(), authorizers: { perTool: { made_up: 'local' } } }));
 assert.throws(() => parseJcLocalPolicy({ ...input(), unexpected: true }));
