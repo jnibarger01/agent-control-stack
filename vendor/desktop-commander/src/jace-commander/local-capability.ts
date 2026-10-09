@@ -39,7 +39,8 @@ function validate(payload: unknown, now: number): asserts payload is JcLocalPayl
     throw new Error('JC_LOCAL_MALFORMED');
   if (typeof payload.nonce !== 'string' || !/^[a-zA-Z0-9_-]{43}$/.test(payload.nonce))
     throw new Error('JC_LOCAL_MALFORMED');
-  if (!Number.isSafeInteger(payload.issuedAt) || !Number.isSafeInteger(payload.expiresAt) ||
+  if (typeof payload.issuedAt !== 'number' || typeof payload.expiresAt !== 'number' ||
+      !Number.isSafeInteger(payload.issuedAt) || !Number.isSafeInteger(payload.expiresAt) ||
       payload.expiresAt <= payload.issuedAt || payload.expiresAt - payload.issuedAt > JC_LOCAL_MAX_TTL_MS ||
       payload.issuedAt > now + 5000 || payload.expiresAt < now) throw new Error('JC_LOCAL_EXPIRED');
 }
@@ -78,7 +79,7 @@ export function verifyJcLocalCapability(
   if (p.runtimeId !== expected.runtimeId || p.tool !== expected.tool ||
       p.invocationHash !== computeJcInvocationHash(expected.tool, expected.arguments))
     throw new Error('JC_LOCAL_INVOCATION_MISMATCH');
-  if (!crypto.verify(null, Buffer.from(canon(p)), publicKey, Buffer.from(envelope.signature, 'base64url')))
+  if (!crypto.verify(null, Buffer.from(canon(p)), publicKey, Buffer.from(envelope.signature as string, 'base64url')))
     throw new Error('JC_LOCAL_SIGNATURE_INVALID');
   // Must be a persistent replay store shared across restarts and workers.
   nonces.reserve('jc.local.v1:' + p.nonce, p.expiresAt + 5000, now);
