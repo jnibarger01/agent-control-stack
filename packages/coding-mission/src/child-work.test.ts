@@ -25,11 +25,13 @@ const ROOT: AutonomousAuthorityDefinition = {
   ],
   maximumPrivileges: ["fs.read", "fs.write", "git.write", "process.privileged"],
   expiresAt: "2026-10-09T02:00:00.000Z",
-  limits: { maxOperations: 50, maxRuntimeMs: 600_000, maxParallelOperations: 4, maxAttemptsPerOperation: 3 }
+  limits: { maxOperations: 500, maxRuntimeMs: 600_000, maxParallelOperations: 32, maxAttemptsPerOperation: 3 }
 };
+const LEAN = { maxOperations: 10, maxRuntimeMs: 600_000, maxParallelOperations: 1, maxAttemptsPerOperation: 3 };
 const narrower = (overrides: Partial<AutonomousAuthorityDefinition>): AutonomousAuthorityDefinition => ({
   ...ROOT,
   maximumPrivileges: ["fs.read", "fs.write"],
+  limits: LEAN,
   ...overrides
 });
 
@@ -62,6 +64,7 @@ const child = (unitId: string, overrides: Partial<ChildWorkItem> = {}): ChildWor
   workType: "research",
   purpose: `purpose of ${unitId}`,
   payload: { role: "researcher", prompt: "look into it" },
+  requestedAuthority: narrower({}),
   ...overrides
 });
 
@@ -320,7 +323,7 @@ describe("request_child_work", () => {
   });
 
   it("fails when the mission authority has expired, using ACS's clock", () => {
-    const { ask, h } = setup();
+    const { ask, h } = setup({ ledger: { claimTtlMs: 86_400_000 } });
     h.state.now = "2026-10-09T03:00:00.000Z";
     expect(denied(ask([child("late")]))).toContain("late:authority_expired");
   });
@@ -618,12 +621,15 @@ describe("reduction", () => {
 
 describe("review hardening", () => {
   it("takes time from ACS's clock: a request cannot backdate itself past an expired authority or wall-clock budget", () => {
-    const expired = setup();
+    const expired = setup({ ledger: { claimTtlMs: 86_400_000 } });
     expired.h.state.now = "2026-10-09T03:00:00.000Z";
     expect(denied(expired.ask([child("late")], { now: "2026-10-09T00:00:01.000Z" } as never))).toContain(
       "late:authority_expired"
     );
-    const wall = setup({ budget: { ...DEFAULT_DELEGATION_BUDGET, maxWallClockMs: 60_000 } });
+    const wall = setup({
+      budget: { ...DEFAULT_DELEGATION_BUDGET, maxWallClockMs: 60_000 },
+      ledger: { claimTtlMs: 86_400_000 }
+    });
     wall.h.set(10 * 60_000);
     expect(wall.ask([child("c")], { now: at(1) } as never)).toMatchObject({
       ok: false,
@@ -796,13 +802,19 @@ describe("review hardening", () => {
     ask([child("c1", { requestedAuthority: narrower({ maximumPrivileges: ["fs.read"] }) })]);
     store.releaseReadyUnits("m1", at(1500));
     store.claimUnit("m1", "c1", { token: "ct", workerId: "w", route: {}, claimedAt: at(1600) });
-    ledger.requestChildWork({
-      missionId: "m1",
-      parentUnitId: "c1",
-      workerId: "w",
-      claimToken: "ct",
-      children: [child("g1")]
-    });
+    expect(
+      ledger.requestChildWork({
+        missionId: "m1",
+        parentUnitId: "c1",
+        workerId: "w",
+        claimToken: "ct",
+        children: [
+          child("g1", {
+            requestedAuthority: narrower({ maximumPrivileges: ["fs.read"], limits: { ...LEAN, maxOperations: 5 } })
+          })
+        ]
+      })
+    ).toMatchObject({ ok: true });
     store.db.exec("DROP TRIGGER work_unit_authority_no_delete");
     store.db.exec("PRAGMA foreign_keys = OFF");
     store.db.exec("DELETE FROM work_unit_authority WHERE unit_id = 'c1'");
@@ -940,5 +952,204 @@ describe("reduction authority and integrity", () => {
       resultHash: "h1",
       by: { workerId: "lead-worker" }
     });
+  });
+});
+
+describe("review round three", () => {
+  it("rejects child requests, cancellation and reduction from a parent claim that has outlived its TTL", () => {
+    const { ask, ledger, claim, h } = setup({ ledger: { claimTtlMs: 60_000 } });
+    expect(ask([child("early")])).toMatchObject({ ok: true });
+    h.set(1000 + 61_000);
+    expect(denied(ask([child("stale")]))).toEqual(["claim_expired"]);
+    const own = { kind: "parent_claim" as const, workerId: "lead-worker", claimToken: claim.token };
+    expect(() => ledger.cancelChildren("m1", "root", { reason: "r", authorization: own })).toThrow(
+      expect.objectContaining({ code: "cancel_not_authorized" })
+    );
+    expect(() =>
+      ledger.reduceChildren({ missionId: "m1", parentUnitId: "root", strategy: "all_succeeded", authorization: own })
+    ).toThrow(expect.objectContaining({ code: "reduce_not_authorized" }));
+    // An authenticated operator is not bound to the parent's claim.
+    expect(
+      ledger.cancelChildren("m1", "root", {
+        reason: "r",
+        authorization: { kind: "operator", operatorId: "operator-1" }
+      }).cancelled
+    ).toEqual(["early"]);
+  });
+
+  it("validates mission policy strictly before persisting it", () => {
+    const attempt = (policy: unknown) => () => setup({ policy: policy as never });
+    for (const bad of [
+      { maxChildTtlMs: "60000" },
+      { maxChildTtlMs: 0 },
+      { maxChildTtlMs: 1.5 },
+      { maxChildTtlMs: 99_999_999_999 },
+      { deniedPrivileges: "fs.write" },
+      { deniedPrivileges: ["not-a-privilege"] },
+      { allowPrivilegedChildren: "yes" },
+      { surprise: true },
+      []
+    ]) {
+      expect(attempt(bad)).toThrow(expect.objectContaining({ code: "mission_authority_invalid" }));
+    }
+    const { ledger } = setup({ policy: { deniedPrivileges: ["fs.write", "fs.write"], maxChildTtlMs: 60_000 } });
+    expect(ledger.missionAuthority("m1")?.policy).toEqual({ deniedPrivileges: ["fs.write"], maxChildTtlMs: 60_000 });
+  });
+
+  it("denies an invalid verification policy as a durable denial, not a database error", () => {
+    const { ask, store } = setup();
+    expect(denied(ask([child("v", { verificationPolicy: "skip" as never })]))).toContain(
+      "v:verification_policy_invalid"
+    );
+    expect(ask([child("v2", { verificationPolicy: "independent" })])).toMatchObject({ ok: true });
+    expect(store.events("m1").filter((event) => event.name === "child.requested")).toHaveLength(2);
+  });
+
+  it("shares the parent's operation and parallelism limits among children instead of cloning them", () => {
+    const tight: AutonomousAuthorityDefinition = {
+      ...ROOT,
+      limits: { maxOperations: 10, maxRuntimeMs: 600_000, maxParallelOperations: 2, maxAttemptsPerOperation: 3 }
+    };
+    const { ask, ledger } = setup({ definition: tight });
+    // Two inheriting children split what the parent holds; each gets a share, not the whole.
+    expect(
+      ask([child("a", { requestedAuthority: undefined }), child("b", { requestedAuthority: undefined })])
+    ).toMatchObject({ ok: true });
+    const a = ledger.unitAuthority("m1", "a")!.definition.limits;
+    const b = ledger.unitAuthority("m1", "b")!.definition.limits;
+    expect(a.maxOperations + b.maxOperations).toBeLessThanOrEqual(10);
+    expect(a.maxParallelOperations + b.maxParallelOperations).toBeLessThanOrEqual(2);
+    expect(a.maxOperations).toBe(5);
+    // Nothing is left for a third.
+    expect(denied(ask([child("c", { requestedAuthority: undefined })])).join()).toMatch(/parent_limit_exhausted/);
+    expect(
+      denied(ask([child("d", { requestedAuthority: narrower({ limits: { ...LEAN, maxOperations: 1 } }) })])).join()
+    ).toMatch(/parent_limit_exhausted/);
+  });
+
+  it("charges explicit requests against the parent's limits too, and a cancelled sibling frees its share", () => {
+    const tight: AutonomousAuthorityDefinition = {
+      ...ROOT,
+      limits: { maxOperations: 10, maxRuntimeMs: 600_000, maxParallelOperations: 4, maxAttemptsPerOperation: 3 }
+    };
+    const { ask, ledger, claim } = setup({ definition: tight });
+    expect(
+      denied(ask([child("x", { requestedAuthority: narrower({ limits: { ...LEAN, maxOperations: 11 } }) })])).join()
+    ).toMatch(/escalation:limit maxOperations/);
+    expect(
+      ask([child("a", { requestedAuthority: narrower({ limits: { ...LEAN, maxOperations: 7 } }) })])
+    ).toMatchObject({ ok: true });
+    expect(
+      denied(ask([child("b", { requestedAuthority: narrower({ limits: { ...LEAN, maxOperations: 4 } }) })])).join()
+    ).toMatch(/parent_limit_exhausted:maxOperations/);
+    ledger.cancelChildren("m1", "root", {
+      reason: "free",
+      authorization: { kind: "parent_claim", workerId: "lead-worker", claimToken: claim.token }
+    });
+    expect(
+      ask([child("b2", { requestedAuthority: narrower({ limits: { ...LEAN, maxOperations: 4 } }) })])
+    ).toMatchObject({ ok: true });
+  });
+
+  it("refuses new children once a reduction is recorded", () => {
+    const { ask, store, ledger, claim } = setup();
+    ask([child("a")]);
+    store.releaseReadyUnits("m1", at(1500));
+    store.claimUnit("m1", "a", { token: "ta", workerId: "w", route: {}, claimedAt: at(1600) });
+    store.completeOperation("m1", "a", "ta", { resultHash: "h", files: [] });
+    ledger.reduceChildren({
+      missionId: "m1",
+      parentUnitId: "root",
+      strategy: "all_succeeded",
+      authorization: { kind: "parent_claim", workerId: "lead-worker", claimToken: claim.token }
+    });
+    expect(denied(ask([child("late")]))).toEqual(["reduction_recorded"]);
+    expect(store.workUnits("m1").some((unit) => unit.unitId === "late")).toBe(false);
+  });
+
+  it("will not let a parent complete (or enter verification) until its children are reduced", () => {
+    const { ask, store, ledger, claim } = setup();
+    ask([child("a")]);
+    expect(() => store.completeOperation("m1", "root", claim.token, { resultHash: "early", files: [] })).toThrow(
+      /must be reduced/
+    );
+    expect(() =>
+      store.db.exec("UPDATE coding_operations SET status = 'verifying' WHERE operation_id = 'root'")
+    ).toThrow(/must be reduced/);
+    expect(store.workUnits("m1").find((unit) => unit.unitId === "root")?.status).toBe("running");
+    store.releaseReadyUnits("m1", at(1500));
+    store.claimUnit("m1", "a", { token: "ta", workerId: "w", route: {}, claimedAt: at(1600) });
+    store.completeOperation("m1", "a", "ta", { resultHash: "h", files: [] });
+    ledger.reduceChildren({
+      missionId: "m1",
+      parentUnitId: "root",
+      strategy: "all_succeeded",
+      authorization: { kind: "parent_claim", workerId: "lead-worker", claimToken: claim.token }
+    });
+    store.completeOperation("m1", "root", claim.token, { resultHash: "final", files: [] });
+    expect(store.workUnits("m1").find((unit) => unit.unitId === "root")?.status).toBe("succeeded");
+    // A parent that failed or was cancelled is not blocked, only completion is.
+    const other = setup();
+    other.ask([child("a")]);
+    expect(
+      other.store.failUnit("m1", "root", other.claim.token, {
+        category: "tool_failure",
+        retryable: false,
+        now: at(1700)
+      })
+    ).toBe("failed");
+  });
+
+  it("binds children to the parent's attempt: a retry cancels the old attempt's work and reduction ignores it", () => {
+    const { ask, store, ledger, claim } = setup({
+      budget: { ...DEFAULT_DELEGATION_BUDGET, maxRetriesPerWorkUnit: 3, maxChildWorkUnits: 8 }
+    });
+    ask([child("old")]);
+    store.releaseReadyUnits("m1", at(1500));
+    store.claimUnit("m1", "old", { token: "to", workerId: "w", route: {}, claimedAt: at(1600) });
+    store.failUnit("m1", "root", claim.token, { category: "timeout", retryable: true, now: at(1700) });
+    expect(store.retryUnit("m1", "root", at(1800))).toMatchObject({ ok: true });
+    const old = store.workUnits("m1").find((unit) => unit.unitId === "old")!;
+    expect(old).toMatchObject({ status: "cancelled", cancelExternalState: "uncertain" });
+    expect(() => store.completeOperation("m1", "old", "to", { resultHash: "stale", files: [] })).toThrow();
+
+    const fresh = { token: "fresh", workerId: "lead-worker", route: {}, claimedAt: at(1900) };
+    expect(store.claimUnit("m1", "root", fresh)).toMatchObject({ ok: true, attempt: 2 });
+    expect(
+      ledger.requestChildWork({
+        missionId: "m1",
+        parentUnitId: "root",
+        workerId: "lead-worker",
+        claimToken: "fresh",
+        children: [child("new")]
+      })
+    ).toMatchObject({ ok: true });
+    store.releaseReadyUnits("m1", at(2000));
+    store.claimUnit("m1", "new", { token: "tn", workerId: "w", route: {}, claimedAt: at(2000) });
+    store.completeOperation("m1", "new", "tn", { resultHash: "hn", files: [] });
+    const reduction = ledger.reduceChildren({
+      missionId: "m1",
+      parentUnitId: "root",
+      strategy: "all_succeeded",
+      authorization: { kind: "parent_claim", workerId: "lead-worker", claimToken: "fresh" }
+    });
+    expect(reduction).toMatchObject({ status: "reduced", recorded: true });
+    const children = JSON.parse(
+      String(
+        (store.db.prepare("SELECT children_json FROM work_unit_reductions").get() as { children_json: string })
+          .children_json
+      )
+    ) as Array<{ unitId: string }>;
+    expect(children.map((entry) => entry.unitId)).toEqual(["new"]);
+    expect(store.db.prepare("SELECT parent_attempt FROM work_unit_authority WHERE unit_id = 'new'").get()).toEqual({
+      parent_attempt: 2
+    });
+  });
+
+  it("cancels a released claim's descendants too", () => {
+    const { ask, store } = setup();
+    ask([child("a")]);
+    store.resetClaim("m1", "root");
+    expect(store.workUnits("m1").find((unit) => unit.unitId === "a")?.status).toBe("cancelled");
   });
 });

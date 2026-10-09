@@ -654,6 +654,7 @@ export class CodingMissionStore {
       if (result.changes !== 1) {
         throw new ControlStackError("coding_mission_claim_conflict", "operation claim could not be released");
       }
+      this.cancelStaleDescendants(missionId, operationId, "claim_released", new Date().toISOString());
     });
   }
 
@@ -1135,6 +1136,53 @@ export class CodingMissionStore {
   }
 
   /**
+   * When a parent's ownership advances (a retry, or a released claim), work its previous attempt spawned no longer has a
+   * valid owner. Unfinished descendants are cancelled, and in-flight ones are reported as uncertain, so stale-attempt work
+   * can never feed the new attempt's result.
+   */
+  private cancelStaleDescendants(missionId: string, parentUnitId: string, reason: string, now: string): void {
+    const rows = this.unitRows(missionId);
+    const stale = new Set<string>();
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const row of rows) {
+        if (
+          row.parent_unit_id &&
+          (row.parent_unit_id === parentUnitId || stale.has(row.parent_unit_id)) &&
+          !stale.has(row.operation_id)
+        ) {
+          stale.add(row.operation_id);
+          grew = true;
+        }
+      }
+    }
+    for (const row of rows) {
+      if (!stale.has(row.operation_id) || row.status === "succeeded" || row.status === "cancelled") continue;
+      if (row.status === "failed" && row.failure_category && NON_RETRYABLE_FAILURES.has(row.failure_category)) continue;
+      const inFlight = (IN_FLIGHT_WORK_UNIT_STATUSES as readonly string[]).includes(row.status);
+      this.db
+        .prepare(
+          `UPDATE coding_operations SET status = 'cancelled', cancel_external_state = ?, failure_category = 'cancelled'
+           WHERE mission_id = ? AND operation_id = ?`
+        )
+        .run(inFlight ? "uncertain" : "none", missionId, row.operation_id);
+      this.event(
+        missionId,
+        "work_unit.cancelled",
+        {
+          unitId: row.operation_id,
+          was: row.status,
+          externalState: inFlight ? "uncertain" : "none",
+          reason,
+          parentUnitId
+        },
+        now
+      );
+    }
+  }
+
+  /**
    * Schedule another attempt. The retry cap is checked from the durable attempt counter, so a restart or a racing
    * retry cannot exceed it. `unknown` and `conflict` units are never retried here: their external effect is unproven.
    */
@@ -1187,6 +1235,7 @@ export class CodingMissionStore {
         )
         .run(missionId, unitId);
       if (result.changes !== 1) return { ok: false, outcome: "not_retryable" };
+      this.cancelStaleDescendants(missionId, unitId, "parent_retried", now);
       this.event(missionId, "work_unit.retry_scheduled", { unitId, attempt: unit.attempt }, now);
       return { ok: true, attempt: unit.attempt };
     });

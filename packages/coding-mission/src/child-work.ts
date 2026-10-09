@@ -10,6 +10,7 @@ import { ControlStackError, redactValue, stableHash } from "@agent-control-stack
 import {
   autonomousAuthorityCoreSchema,
   autonomousAuthorityHash,
+  changeSetPrivilegeSchema,
   type AutonomousAuthorityGrant
 } from "@agent-control-stack/work-items";
 import {
@@ -25,6 +26,7 @@ import {
   IN_FLIGHT_WORK_UNIT_STATUSES,
   NON_RETRYABLE_FAILURES,
   TERMINAL_MISSION_STATES,
+  VERIFICATION_POLICIES,
   parseWorkUnitPayload,
   type VerificationPolicy,
   type WorkUnitKind,
@@ -117,6 +119,55 @@ export interface LedgerOptions {
    * wire a real mapping before a worker whose id differs from its actor can exercise a grant (fail closed).
    */
   resolveActor?: (workerId: string) => string | undefined;
+  /**
+   * How long after it was taken a claim still counts as live for child-work operations. Default 5 minutes. A parent
+   * that has been silent longer must be re-claimed first, so an owner the controller would already recover is not
+   * treated as live.
+   */
+  claimTtlMs?: number;
+}
+
+export const DEFAULT_CLAIM_TTL_MS = 300_000;
+
+const MAX_CHILD_TTL_MS = 86_400_000;
+const KNOWN_PRIVILEGES = new Set<string>(changeSetPrivilegeSchema.options);
+
+/** Strictly parse mission policy: unknown keys, wrong types and unknown privileges are rejected, not stored. */
+export function parseMissionPolicy(raw: unknown): MissionAuthorityPolicy {
+  const bad = (why: string): never => {
+    throw new ControlStackError("mission_authority_invalid", `mission policy ${why}`);
+  };
+  if (raw === undefined) return {};
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return bad("must be an object");
+  const input = raw as Record<string, unknown>;
+  for (const key of Object.keys(input)) {
+    if (!["allowPrivilegedChildren", "deniedPrivileges", "maxChildTtlMs"].includes(key))
+      bad(`has unknown field ${key}`);
+  }
+  const policy: MissionAuthorityPolicy = {};
+  if (input.allowPrivilegedChildren !== undefined) {
+    if (typeof input.allowPrivilegedChildren !== "boolean") bad("allowPrivilegedChildren must be a boolean");
+    policy.allowPrivilegedChildren = input.allowPrivilegedChildren as boolean;
+  }
+  if (input.deniedPrivileges !== undefined) {
+    const list = input.deniedPrivileges;
+    if (
+      !Array.isArray(list) ||
+      list.length > 32 ||
+      list.some((entry) => typeof entry !== "string" || !KNOWN_PRIVILEGES.has(entry))
+    ) {
+      bad("deniedPrivileges must list known privileges");
+    }
+    policy.deniedPrivileges = [...new Set(list as string[])].sort();
+  }
+  if (input.maxChildTtlMs !== undefined) {
+    const ttl = input.maxChildTtlMs;
+    if (typeof ttl !== "number" || !Number.isSafeInteger(ttl) || ttl < 1 || ttl > MAX_CHILD_TTL_MS) {
+      bad("maxChildTtlMs must be an integer between 1 and 86400000");
+    }
+    policy.maxChildTtlMs = ttl as number;
+  }
+  return policy;
 }
 
 export type ParentAuthorization =
@@ -196,7 +247,12 @@ export class MissionAuthorityLedger {
       if (!(Date.parse(grant.definition.expiresAt) > Date.parse(now))) {
         return refuse("mission_authority_unverified", "the grant has expired", "authority_expired");
       }
-      const policy: MissionAuthorityPolicy = { ...input.policy };
+      let policy: MissionAuthorityPolicy;
+      try {
+        policy = parseMissionPolicy(input.policy);
+      } catch {
+        return refuse("mission_authority_invalid", "mission policy is not valid", "policy_invalid");
+      }
       if (policy.allowPrivilegedChildren === true) {
         if (!input.policyApprovedBy || !this.options.verifyOperator(input.policyApprovedBy)) {
           return refuse(
@@ -257,6 +313,24 @@ export class MissionAuthorityLedger {
     });
     if (refusal) throw refusal;
     return record!;
+  }
+
+  /** True if `auth` is the parent's live claim: matching token and worker, a live status, and not past its TTL. */
+  private claimLive(
+    parent: { claimToken?: string; workerId?: string; status: string; claimedAt?: string },
+    auth: { workerId: string; claimToken: string },
+    now: string,
+    statuses: readonly string[] = ["running", "checkpointed"]
+  ): boolean {
+    if (
+      parent.claimToken !== auth.claimToken ||
+      parent.workerId !== auth.workerId ||
+      !statuses.includes(parent.status)
+    ) {
+      return false;
+    }
+    const ttl = this.options.claimTtlMs ?? DEFAULT_CLAIM_TTL_MS;
+    return parent.claimedAt !== undefined && Date.parse(now) - Date.parse(parent.claimedAt) <= ttl;
   }
 
   private grantRevoked(grantId: string): boolean {
@@ -416,12 +490,20 @@ export class MissionAuthorityLedger {
       const parent = units.find((unit) => unit.unitId === parentUnitId);
       if (!parent) return deny(["parent_unit_not_found"]);
       // Only the worker holding the parent's live claim may ask. A stale, wrong or forged identity is refused.
+      if (!this.claimLive(parent, request, nowIso)) {
+        const expired =
+          parent.claimToken === request.claimToken &&
+          parent.workerId === request.workerId &&
+          ["running", "checkpointed"].includes(parent.status);
+        return deny([expired ? "claim_expired" : "claim_mismatch"]);
+      }
+      // A recorded reduction is final: admitting more children afterwards would leave them out of the result for good.
       if (
-        (parent.status !== "running" && parent.status !== "checkpointed") ||
-        parent.claimToken !== request.claimToken ||
-        parent.workerId !== request.workerId
+        this.store.db
+          .prepare("SELECT 1 FROM work_unit_reductions WHERE mission_id = ? AND parent_unit_id = ?")
+          .get(missionId, parentUnitId)
       ) {
-        return deny(["claim_mismatch"]);
+        return deny(["reduction_recorded"]);
       }
       requester = {
         workerId: request.workerId,
@@ -479,6 +561,12 @@ export class MissionAuthorityLedger {
         ) {
           reasons.push(`${prefix}:title_invalid`);
         }
+        if (
+          item.verificationPolicy !== undefined &&
+          !(VERIFICATION_POLICIES as readonly string[]).includes(item.verificationPolicy)
+        ) {
+          reasons.push(`${prefix}:verification_policy_invalid`);
+        }
         // Everything addWorkUnits would reject is checked here, so a bad payload or graph is a durable denial.
         if (item.workType in KIND_FOR_WORK_TYPE) {
           try {
@@ -522,6 +610,47 @@ export class MissionAuthorityLedger {
       }
       if (reasons.length > 0) return deny(reasons);
 
+      // The parent's operation and parallelism limits are shared by all its children, not copied into each. Explicit
+      // requests are charged first; children that inherit split what is left, so the aggregate never exceeds the parent.
+      let usedOperations = 0;
+      let usedParallel = 0;
+      for (const unit of units) {
+        if (unit.parentUnitId !== parentUnitId) continue;
+        const sibling = this.unitAuthority(missionId, unit.unitId);
+        if (!sibling || ["cancelled"].includes(unit.status)) continue;
+        usedOperations += sibling.definition.limits.maxOperations;
+        usedParallel += sibling.definition.limits.maxParallelOperations;
+      }
+      const budgetFor = (key: "maxOperations" | "maxParallelOperations", used: number) =>
+        parentDefinition.limits[key] - used;
+      for (const entry of derived.filter(({ item }) => item.requestedAuthority !== undefined)) {
+        usedOperations += entry.definition.limits.maxOperations;
+        usedParallel += entry.definition.limits.maxParallelOperations;
+      }
+      const inheriting = derived.filter(({ item }) => item.requestedAuthority === undefined);
+      if (inheriting.length > 0) {
+        const opsEach = Math.floor(budgetFor("maxOperations", usedOperations) / inheriting.length);
+        const parEach = Math.floor(budgetFor("maxParallelOperations", usedParallel) / inheriting.length);
+        for (const entry of inheriting) {
+          entry.definition = {
+            ...entry.definition,
+            limits: {
+              ...entry.definition.limits,
+              maxOperations: Math.min(entry.definition.limits.maxOperations, opsEach),
+              maxParallelOperations: Math.min(entry.definition.limits.maxParallelOperations, parEach)
+            }
+          };
+          usedOperations += entry.definition.limits.maxOperations;
+          usedParallel += entry.definition.limits.maxParallelOperations;
+          if (opsEach < 1) reasons.push(`${entry.item.unitId}:parent_limit_exhausted:maxOperations`);
+          if (parEach < 1) reasons.push(`${entry.item.unitId}:parent_limit_exhausted:maxParallelOperations`);
+        }
+      }
+      if (usedOperations > parentDefinition.limits.maxOperations) reasons.push("parent_limit_exhausted:maxOperations");
+      if (usedParallel > parentDefinition.limits.maxParallelOperations)
+        reasons.push("parent_limit_exhausted:maxParallelOperations");
+      if (reasons.length > 0) return deny(reasons);
+
       let created: ReturnType<CodingMissionStore["addWorkUnits"]>;
       try {
         created = this.store.addWorkUnits(
@@ -552,8 +681,8 @@ export class MissionAuthorityLedger {
         return { ok: false, outcome: "budget_exhausted", decision: created.decision };
       }
       const insert = this.store.db.prepare(
-        `INSERT INTO work_unit_authority (mission_id, unit_id, parent_unit_id, envelope_json, envelope_hash, derived_from_hash, grant_id, requested_json, purpose, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO work_unit_authority (mission_id, unit_id, parent_unit_id, envelope_json, envelope_hash, derived_from_hash, grant_id, parent_attempt, requested_json, purpose, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
       const authorities: Record<string, AutonomousAuthorityDefinition> = {};
       for (const { item, definition } of derived) {
@@ -566,6 +695,7 @@ export class MissionAuthorityLedger {
           hash,
           parentHash,
           missionAuthority.grantId,
+          parent.attempt,
           JSON.stringify({ authority: item.requestedAuthority ?? null, budget: item.requestedBudget ?? null }),
           item.purpose,
           nowIso
@@ -610,9 +740,7 @@ export class MissionAuthorityLedger {
       const authorized =
         auth.kind === "operator"
           ? this.options.verifyOperator(auth.operatorId)
-          : parent.claimToken === auth.claimToken &&
-            parent.workerId === auth.workerId &&
-            ["running", "checkpointed", "verifying"].includes(parent.status);
+          : this.claimLive(parent, auth, now, ["running", "checkpointed", "verifying"]);
       if (!authorized) {
         this.store.recordMissionEvent(
           missionId,
@@ -705,9 +833,7 @@ export class MissionAuthorityLedger {
       const authorized =
         auth.kind === "operator"
           ? this.options.verifyOperator(auth.operatorId)
-          : parent.claimToken === auth.claimToken &&
-            parent.workerId === auth.workerId &&
-            ["running", "checkpointed", "verifying"].includes(parent.status);
+          : this.claimLive(parent, auth, now, ["running", "checkpointed", "verifying"]);
       if (!authorized) {
         this.store.recordMissionEvent(
           input.missionId,
@@ -743,8 +869,21 @@ export class MissionAuthorityLedger {
           recorded: false
         };
       }
+      // Only children admitted under the parent's current attempt count; work from an earlier attempt was cancelled when
+      // ownership advanced and must not feed this result.
+      const currentAttempt = new Map(
+        (
+          this.store.db
+            .prepare(
+              "SELECT unit_id, parent_attempt FROM work_unit_authority WHERE mission_id = ? AND parent_unit_id = ?"
+            )
+            .all(input.missionId, input.parentUnitId) as Array<{ unit_id: string; parent_attempt: number }>
+        ).map((row) => [row.unit_id, row.parent_attempt])
+      );
       const children = allUnits
-        .filter((unit) => unit.parentUnitId === input.parentUnitId)
+        .filter(
+          (unit) => unit.parentUnitId === input.parentUnitId && currentAttempt.get(unit.unitId) === parent.attempt
+        )
         .sort((left, right) => left.unitId.localeCompare(right.unitId));
       if (children.length === 0)
         throw new ControlStackError("reduction_no_children", "unit has no child work to reduce");

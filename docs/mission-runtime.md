@@ -102,6 +102,18 @@ restart does not reset the caps.
   recorded as `child.denied` / `authority.denied`. With no request, a child inherits the parent minus privileged privileges.
 - Privileged privileges (`process.privileged`, `service.control`, `deploy`, `remote`, `secret.read`) are never inherited
   by default. A child gets one only if the parent holds it **and** mission policy allows privileged children.
+- The parent's `maxOperations` and `maxParallelOperations` are **shared** by its children, not copied into each: explicit
+  requests are charged first, children that inherit split what is left, and a request that would push the aggregate past
+  the parent is denied (`parent_limit_exhausted`). A cancelled child frees its share.
+- A parent's claim only counts as live for `claimTtlMs` (default 5 minutes) after it was taken, so an owner the controller
+  would already recover cannot keep creating, cancelling or reducing children. Mission policy is validated strictly
+  (known privileges, bounded integer TTL, no unknown fields) before it is persisted. `verificationPolicy` and titles are
+  validated before insertion so a bad value is a durable denial, not a database error.
+- Children are bound to the parent's attempt (`parent_attempt`). When the parent is retried or its claim released, its
+  unfinished descendants are cancelled (in-flight ones as uncertain) and a reduction only counts children admitted under
+  the current attempt. Once a reduction is recorded no more children are admitted. A unit with children cannot move to
+  `succeeded` or `verifying` until they are reduced; that guard is a trigger on the table, so it covers the execution
+  ledger and the verification gate as well as the legacy store.
 - A child never outlives its parent and is further bounded by `maxChildTtlMs`. A grandchild derives from its parent's
   definition, not the mission's.
 - A derived unit with no authority row is **denied**, never treated as a root, so a unit created outside
