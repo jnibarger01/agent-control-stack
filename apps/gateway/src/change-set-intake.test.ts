@@ -15,6 +15,10 @@ import {
   type ChangeSetDefinition
 } from "@agent-control-stack/work-items";
 import { SqliteWorkItemStore } from "../../../packages/work-items/src/store.js";
+import {
+  authoritativeReceiptBundleHash,
+  buildAuthoritativeCompletionReceipts
+} from "../../../packages/work-items/src/authoritative-completion-receipt.js";
 import { buildGateway } from "./server.js";
 import { evaluateChangeSetPolicy } from "@agent-control-stack/policy-gate";
 import { resolveChangeSetRuntimePolicy } from "./change-set-runtime-policy.js";
@@ -316,9 +320,14 @@ describe("authenticated Change Set intake", () => {
       // A mission with no declared cwd fails closed rather than borrowing one.
       const noMissionCwd = { ...ctx.mission, target: {} };
       expect(() =>
-        resolve({ allowedRoots: [ctx.root], deniedRoots: [] }, noMissionCwd, {
-          path: join(ctx.root, "a")
-        }, "read_file")
+        resolve(
+          { allowedRoots: [ctx.root], deniedRoots: [] },
+          noMissionCwd,
+          {
+            path: join(ctx.root, "a")
+          },
+          "read_file"
+        )
       ).toThrow("explicit or mission-declared cwd");
       // A command without any cwd binding is refused outright rather than
       // borrowing the first allow root.
@@ -1870,12 +1879,20 @@ describe("Change Set result verification", () => {
     "tampered result",
     "valid readback",
     "mission completion",
+    "audit-chain corruption before completion",
     "persisted result tampering"
   ])("enforces approved verification for %s", async (scenario) => {
     const ctx = fixture();
     try {
       const { permit } = await approveAndPermit(ctx, "a", (definition) => {
-        if (["mission completion", "persisted result tampering", "completion before verification"].includes(scenario)) {
+        if (
+          [
+            "mission completion",
+            "audit-chain corruption before completion",
+            "persisted result tampering",
+            "completion before verification"
+          ].includes(scenario)
+        ) {
           definition.operations = [definition.operations[0]!];
           definition.verification[0]!.operationIds = ["a"];
         }
@@ -1987,6 +2004,7 @@ describe("Change Set result verification", () => {
           "tampered result",
           "valid readback",
           "mission completion",
+          "audit-chain corruption before completion",
           "persisted result tampering",
           "independent review",
           "missing evidence",
@@ -2230,6 +2248,34 @@ describe("Change Set result verification", () => {
           expect(progress.operations[0]!.evidenceManifestHash).toBe(
             store.getVerificationDecision(body.attemptId)!.evidenceManifestHash
           );
+          if (scenario === "audit-chain corruption before completion") {
+            // This event is unrelated to the selected Change Set audit rows.
+            // A merely local/sparse event verifier would miss the tampering.
+            store.recordSystemEvent({ name: "test.unrelated", attributes: {}, body: { value: "untampered" } });
+            const tamperDb = new DatabaseSync(ctx.dbPath);
+            try {
+              tamperDb
+                .prepare("UPDATE audit_events SET body = ? WHERE name = ?")
+                .run(JSON.stringify({ value: "modified after hashing" }), "test.unrelated");
+            } finally {
+              tamperDb.close();
+            }
+            const complete = {
+              missionId: ctx.mission.id,
+              expectedManifestHash: permit.manifestHash,
+              executingActorId: "planner",
+              approvalId: permit.approvalId
+            };
+            // main's audit-integrity freshness gate rejects the tampered chain
+            // before receipt derivation. That is still fail-closed and must not
+            // complete the mission.
+            expect(() => store.completeChangeSetMission(complete, { via: "policy_gate", actorId: "planner" })).toThrow(
+              "audit integrity is stale or invalid"
+            );
+            expect(store.get(ctx.mission.id)!.status).not.toBe("succeeded");
+            expect(store.readEvents({ name: "change_set.completed" })).toHaveLength(0);
+            return;
+          }
           if (["mission completion", "completion before verification"].includes(scenario)) {
             const complete = {
               missionId: ctx.mission.id,
@@ -2262,7 +2308,42 @@ describe("Change Set result verification", () => {
             } finally {
               db.close();
             }
+            // The receipt gate must fail closed against untrusted or stale
+            // projections; only the canonical persisted state can complete.
+            const source = store.getChangeSet(ctx.mission.id)!;
+            const persisted = store.getChangeSetProgress(ctx.mission.id);
+            const altered = structuredClone(persisted);
+            altered.operations[0]!.resultPayloadHash = "0".repeat(64);
+            const verifierDb = new DatabaseSync(ctx.dbPath);
+            try {
+              expect(() => buildAuthoritativeCompletionReceipts(verifierDb, store, source, altered)).toThrow(
+                "authoritative completion evidence is missing or inconsistent"
+              );
+              const missingVerification = structuredClone(persisted);
+              delete missingVerification.operations[0]!.evidenceManifestHash;
+              expect(() =>
+                buildAuthoritativeCompletionReceipts(verifierDb, store, source, missingVerification)
+              ).toThrow("authoritative completion evidence is missing or inconsistent");
+            } finally {
+              verifierDb.close();
+            }
             const receipt = store.completeChangeSetMission(complete, options);
+            expect(receipt.operationReceipts).toHaveLength(1);
+            const operationReceipt = receipt.operationReceipts![0]!;
+            expect(operationReceipt).toMatchObject({
+              missionId: ctx.mission.id,
+              changeSetManifestHash: permit.manifestHash,
+              operationId: "a",
+              permitId: permit.permitId,
+              attemptId: body.attemptId,
+              resultPayloadHash: persisted.operations[0]!.resultPayloadHash,
+              evidenceManifestHash: persisted.operations[0]!.evidenceManifestHash
+            });
+            expect(operationReceipt.receiptHash).toMatch(/^[a-f0-9]{64}$/u);
+            expect(operationReceipt.verificationAuditEventHash).toMatch(/^[a-f0-9]{64}$/u);
+            expect(store.readEvents({ name: "change_set.completed" })[0]!.body.receiptBundleHash).toBe(
+              authoritativeReceiptBundleHash(receipt.operationReceipts!)
+            );
             expect(store.get(ctx.mission.id)!.status).toBe("succeeded");
             expect(store.completeChangeSetMission(complete, options)).toEqual(receipt);
             expect(() => store.completeChangeSetMission({ ...complete, approvalId: "different" }, options)).toThrow(
@@ -2326,6 +2407,26 @@ describe("Change Set result verification", () => {
             });
             expect(replay.statusCode, replay.body).toBe(200);
             expect(replay.json()).toEqual(receipt);
+            // Simulate privileged on-disk modification of a terminal receipt.
+            // Readback must refuse a mismatch even though completion succeeded.
+            const corruptDb = new DatabaseSync(ctx.dbPath);
+            try {
+              corruptDb.exec("DROP TRIGGER IF EXISTS work_items_terminal_immutable_guard");
+              corruptDb.exec("DROP TRIGGER IF EXISTS work_items_result_immutable_guard");
+              const row = corruptDb.prepare("SELECT result_json FROM work_items WHERE id = ?").get(ctx.mission.id) as {
+                result_json: string;
+              };
+              const forged = JSON.parse(row.result_json) as {
+                operationReceipts: Array<{ receiptHash: string }>;
+              };
+              forged.operationReceipts[0]!.receiptHash = "0".repeat(64);
+              corruptDb
+                .prepare("UPDATE work_items SET result_json = ? WHERE id = ?")
+                .run(JSON.stringify(forged), ctx.mission.id);
+            } finally {
+              corruptDb.close();
+            }
+            expect(() => store.getChangeSetProgress(ctx.mission.id)).toThrow(/integrity|evidence/u);
           } else if (scenario === "persisted result tampering") {
             const db = new DatabaseSync(ctx.dbPath);
             try {
@@ -2695,8 +2796,18 @@ describe("Change Set operation permits", () => {
       // dependency would double the cost of this single permit check.
       const definition = structuredClone(ctx.payload.definition);
       definition.operations = [
-        { ...definition.operations[0]!, operationId: "op-a", dependsOn: [], retry: { maxAttempts: 1, idempotencyKey: "a" } },
-        { ...definition.operations[1]!, operationId: "op-b", dependsOn: [], retry: { maxAttempts: 1, idempotencyKey: "b" } },
+        {
+          ...definition.operations[0]!,
+          operationId: "op-a",
+          dependsOn: [],
+          retry: { maxAttempts: 1, idempotencyKey: "a" }
+        },
+        {
+          ...definition.operations[1]!,
+          operationId: "op-b",
+          dependsOn: [],
+          retry: { maxAttempts: 1, idempotencyKey: "b" }
+        },
         {
           ...definition.operations[0]!,
           operationId: "op-c",
