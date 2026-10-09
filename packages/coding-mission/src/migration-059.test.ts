@@ -1,4 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { applyControlPlaneMigrations, controlPlaneMigrations } from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
 
@@ -7,8 +10,8 @@ import { describe, expect, it } from "vitest";
  * runner: schema through 056 plus canonical schema_migrations rows, so
  * applyControlPlaneMigrations upgrades it through 057+ the way a real deploy would.
  */
-function databaseAt056(): DatabaseSync {
-  const db = new DatabaseSync(":memory:");
+function databaseAt056(filename = ":memory:"): DatabaseSync {
+  const db = new DatabaseSync(filename);
   db.exec("PRAGMA foreign_keys = ON");
   db.exec(`CREATE TABLE schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -96,6 +99,53 @@ describe("migration 059: restore terminal units rewritten by migration 057", () 
       { mission_id: "m-done", restored: "succeeded" }
     ]);
     db.close();
+  });
+
+  it("keeps an exclusive writer boundary from 057 quarantine through 059 restoration", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-057-059-lock-"));
+    const filename = join(dir, "upgrade.sqlite");
+    const db = databaseAt056(filename);
+    const competitor = new DatabaseSync(filename);
+    try {
+      seedMission(db, "m-done", "COMPLETED");
+      seedUnit(db, "m-done", "u-succeeded", "succeeded", null);
+      competitor.exec("PRAGMA busy_timeout = 0");
+      let quarantinedInThisRun = false;
+      let restorationReached = false;
+      let competingWriteRefused = false;
+      const monitored = {
+        prepare: (sql: string) => db.prepare(sql),
+        exec: (sql: string) => {
+          if (sql === "COMMIT" && quarantinedInThisRun && !restorationReached) {
+            throw new Error("writer lock released between migration 057 and 059");
+          }
+          db.exec(sql);
+          if (sql.includes("CREATE TABLE work_unit_verification_quarantine")) {
+            quarantinedInThisRun = true;
+          }
+          if (sql.includes("CREATE TABLE work_unit_verification_runs")) {
+            // Probe at 058, after the 057 update: a live retry from another
+            // SQLite connection must be refused by the still-held write lock.
+            expect(() => competitor.exec(
+              "UPDATE coding_operations SET title = 'concurrent retry' WHERE mission_id = 'm-done'"
+            )).toThrow();
+            competingWriteRefused = true;
+          }
+          if (sql.includes("verification.migration_057_terminal_restored")) {
+            restorationReached = true;
+          }
+        }
+      };
+      applyControlPlaneMigrations(monitored);
+      expect(quarantinedInThisRun).toBe(true);
+      expect(competingWriteRefused).toBe(true);
+      expect(restorationReached).toBe(true);
+      expect(unit(db, "m-done", "u-succeeded")).toEqual({ status: "succeeded", failure_category: null });
+    } finally {
+      competitor.close();
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("refuses ambiguous restoration when 057 ran before this upgrade", () => {

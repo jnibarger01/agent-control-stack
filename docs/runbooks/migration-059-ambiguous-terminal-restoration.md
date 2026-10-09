@@ -10,11 +10,15 @@ Migration 059 originally restored any matching unit when the quarantine recorded
 A live mission can retry after 057, genuinely fail verification again, and return to that same
 failure tuple. 059 then mistakenly restores the later failure as old success.
 
-The guard in `applyControlPlaneMigrations` allows 057→058→059 in one controlled upgrade,
-but refuses automatic 059 restoration of matching quarantined terminal units if 057 was applied
-in an **earlier migration invocation**. This is conservative: it blocks some legitimate
-restorations because the available row lacks the original attempt identity. It does **not**
-edit the applied 057 or 059 SQL files or their checksums.
+The runner holds one SQLite `BEGIN IMMEDIATE` transaction and writer lock across
+migrations 057, 058, and 059, including the 059 restoration. A competing SQLite
+writer cannot retry an operation between quarantine and restoration. A new 057→059
+upgrade can therefore repair its own quarantined terminal units safely.
+If 057 was applied in an **earlier migration invocation**, the runner instead
+refuses ambiguous restoration: the original unit attempt identity was not
+recorded, so a subsequent failure cannot be distinguished from the 057 tuple.
+This conservatively blocks some legitimate restorations. Neither 057 nor 059
+SQL files or deployed migration checksums are modified.
 
 ## Operator response if the guard stops a migration
 
@@ -43,7 +47,8 @@ production SQLite data.
 - This protects the repository's `applyControlPlaneMigrations` entrypoint, not alternative
   SQLite migration runners that directly execute migration files.
 - It does not make a previous 059 repair trustworthy and does not automatically amend units.
-- In a single running upgrade, another process must not dispatch/claim units concurrently
-  between migrations 057 and 059. Quiesce writers under the deployment runbook.
+- The runner holds a writer lock across 057–059. Other processes cannot commit
+  concurrent retries in that window, but deployment should still quiesce
+  independent dispatchers for consistent operational recovery.
 - Keep this PR in draft until migrations have been tested on clean, historical and
   idempotent upgrade paths, and an independent database-integrity reviewer signs off.
