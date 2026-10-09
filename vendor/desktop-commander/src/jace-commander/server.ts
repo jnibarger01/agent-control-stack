@@ -167,6 +167,12 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     const capability = (request.params._meta as Record<string, unknown> | undefined)?.acsCapability;
     if (!Object.prototype.hasOwnProperty.call(JC_TOOL_POLICIES, name)) return fail('unknown_tool', `unknown tool: ${name}`);
     const effectiveAuthorizer = resolveJcAuthorizer(name, mode);
+    // Selection is not authorization. Until an independently verified,
+    // operator-enabled ACS admin delegation protocol ships, reject this path.
+    if (effectiveAuthorizer === 'admin-delegated') {
+      recordTrace(trace, name, args, { ok: false, code: 'JC_ADMIN_DELEGATION_UNAVAILABLE' });
+      return fail('JC_ADMIN_DELEGATION_UNAVAILABLE', 'admin delegation has not been configured and verified');
+    }
     if (effectiveAuthorizer === 'refused') {
       // No capability exists in standalone mode, so nothing that writes,
       // executes or needs approval may run. Refused before any handler.

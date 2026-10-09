@@ -14,6 +14,8 @@ assert.equal(providerForTool('write_file'), 'jc.fs');
 assert.equal(providerForTool('git_push'), 'jc.git');
 assert.equal(providerForTool('privileged_exec'), 'jc.privileged');
 assert.equal(providerForTool('acs_read'), 'acs');
+assert.equal(providerForTool('mission_router_list'), 'jc.integration');
+assert.equal(providerForTool('looptrace_verify'), 'jc.meta');
 assert.equal(providerForTool('made_up'), undefined);
 for (const tool of JC_MANIFEST.tools) {
   assert.equal(resolveJcAuthorizer(tool.name, 'managed'), 'acs-capability', tool.name);

@@ -27,8 +27,18 @@ export function providerForGroup(group: string): JcProviderId {
   return GROUP_PROVIDER[group];
 }
 
+// The manifest's historical "mission" group contains both local trace tools
+// and one optional integration. Preserve the architecture's explicit split.
+const TOOL_PROVIDER_OVERRIDES: Readonly<Record<string, JcProviderId>> = Object.freeze({
+  mission_router_list: 'jc.integration',
+});
+
 export const JC_TOOL_PROVIDERS: Readonly<Record<string, JcProviderId>> = Object.freeze(
-  Object.fromEntries(JC_MANIFEST.tools.map((tool) => [tool.name, providerForGroup(tool.group)])) as Record<string, JcProviderId>,
+  Object.fromEntries(JC_MANIFEST.tools.map((tool) => [
+    tool.name,
+    Object.prototype.hasOwnProperty.call(TOOL_PROVIDER_OVERRIDES, tool.name)
+      ? TOOL_PROVIDER_OVERRIDES[tool.name] : providerForGroup(tool.group),
+  ])) as Record<string, JcProviderId>,
 );
 
 export const JC_PROVIDER_REGISTRY: Readonly<Record<JcProviderId, readonly string[]>> = Object.freeze(
