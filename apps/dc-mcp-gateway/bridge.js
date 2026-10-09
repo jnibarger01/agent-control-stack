@@ -827,9 +827,11 @@ function linuxProcessInvocation(pid) {
     const raw = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
     if (!raw.endsWith("\u0000")) return undefined;
     const argv = raw.slice(0, -1).split("\u0000");
-    if (argv.length < 2 || argv.some((arg) => arg.length === 0)) return undefined;
+    // Empty trailing arguments are valid and must still match DC_ARGS exactly.
+    if (argv.length < 2 || !argv[0]) return undefined;
     const executable = fs.realpathSync(`/proc/${pid}/exe`);
-    return { argv, executable };
+    const cwd = fs.realpathSync(`/proc/${pid}/cwd`);
+    return { argv, executable, cwd };
   } catch {
     return undefined;
   }
@@ -865,7 +867,9 @@ const CONFIGURED_EXECUTOR_ROOT = CONFIGURED_EXECUTOR_ENTRYPOINT
 function configuredBinaryPath() {
   const candidates = path.isAbsolute(DC_CMD)
     ? [DC_CMD]
-    : (process.env.PATH || "").split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, DC_CMD));
+    : DC_CMD.includes("/") || DC_CMD.includes(path.sep)
+      ? [path.resolve(DC_CWD, DC_CMD)]
+      : (process.env.PATH || "").split(path.delimiter).filter(Boolean).map((dir) => path.join(dir, DC_CMD));
   for (const candidate of candidates) {
     try {
       const executable = fs.realpathSync(candidate);
@@ -877,19 +881,42 @@ function configuredBinaryPath() {
   return undefined;
 }
 const CONFIGURED_EXECUTOR_BINARY = !JC ? configuredBinaryPath() : undefined;
+// Admit only known runtime switches that cannot evaluate a different script,
+// load an arbitrary module, or change how the script is selected.
+// An unknown switch is ambiguous, never a reason to silently skip a live process.
+const SAFE_NODE_RUNTIME_FLAGS = new Set([
+  "--enable-source-maps",
+  "--no-warnings",
+  "--trace-warnings",
+  "--trace-deprecation",
+  "--pending-deprecation",
+  "--no-deprecation"
+]);
+function managedNodeScriptIndex(argv) {
+  for (let i = 1; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (!arg) return undefined;
+    if (arg === "--") return argv[i + 1] && !argv[i + 1].startsWith("-") ? i + 1 : undefined;
+    if (!arg.startsWith("-")) return i;
+    // Especially refuse -e/--eval, -p/--print, -r/--require and any
+    // option that consumes another argv entry or executes injected code.
+    if (!SAFE_NODE_RUNTIME_FLAGS.has(arg)) return undefined;
+  }
+  return undefined;
+}
 function managedExecutorRoot(invocation) {
   const argv = invocation?.argv;
-  if (!Array.isArray(argv) || argv.length < 2) return undefined;
-  // argv[1] is the script argument of the directly spawned node runtime.
-  // node -e '<script>' /configured/entrypoint and shell wrappers do not
-  // execute the entrypoint in that position, even if the path appears later.
-  const scriptArg = argv[1];
-  if (!scriptArg || scriptArg.startsWith("-")) return undefined;
-  const resolved = path.isAbsolute(scriptArg) ? path.resolve(scriptArg) : path.resolve(DC_CWD, scriptArg);
-  if (CONFIGURED_EXECUTOR_ENTRYPOINT && resolved === CONFIGURED_EXECUTOR_ENTRYPOINT) {
+  if (!Array.isArray(argv) || argv.length < 2 || !invocation.cwd) return undefined;
+  const scriptIndex = managedNodeScriptIndex(argv);
+  if (scriptIndex === undefined) return undefined;
+  const scriptArg = argv[scriptIndex];
+  // Resolve against the process actually inspected, not the bridge's DC_CWD:
+  // another process may use identical relative argv from another directory.
+  const resolved = path.resolve(invocation.cwd, scriptArg);
+  if (CONFIGURED_EXECUTOR_ENTRYPOINT && scriptIndex === 1 && resolved === CONFIGURED_EXECUTOR_ENTRYPOINT) {
     if (!CONFIGURED_EXECUTOR_BINARY || invocation.executable !== CONFIGURED_EXECUTOR_BINARY) return undefined;
     if (argv.length !== DC_ARGS.length + 1) return undefined;
-    if (DC_ARGS.slice(1).some((arg, i) => argv[i + 2] !== arg)) return undefined;
+    if (DC_ARGS.some((arg, i) => argv[i + 1] !== arg)) return undefined;
     return CONFIGURED_EXECUTOR_ROOT;
   }
   // Legacy release layouts must also run the configured executable. A shell,

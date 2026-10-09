@@ -57,6 +57,12 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
 });
 `);
 fs.writeFileSync(path.join(path.dirname(entry), 'package.json'), '{"type":"module"}');
+// Both a relative script and a path-bearing runtime command are supported.
+// Preserve an empty argv element to exercise the exact /proc argv comparison.
+const relativeEntry = path.relative(tmp, entry);
+const binDir = path.join(tmp, 'bin');
+fs.mkdirSync(binDir);
+fs.symlinkSync(process.execPath, path.join(binDir, 'node'));
 
 const port = await freePort();
 const BR = `http://127.0.0.1:${port}`;
@@ -66,8 +72,8 @@ const bridge = spawn(process.execPath, [path.join(ROOT, 'bridge.js')], {
     PATH: process.env.PATH ?? '',
     HOME: tmp,
     BRIDGE_PORT: String(port),
-    DC_CMD: process.execPath,
-    DC_ARGS: `${entry} --no-onboarding`,
+    DC_CMD: './bin/node',
+    DC_ARGS: `${relativeEntry}  --no-onboarding`,
     DC_CWD: tmp,
     DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: lockDir,
   },
@@ -111,6 +117,37 @@ try {
     assert.match(last.lease.detail ?? '', /topology is absent or competing/, `bridge /ready never admitted its own executor: ${JSON.stringify(last)}`);
     assert.equal(last.status, 503);
     console.log('PASS: configured executor recognised; a persistently competing host topology fails closed');
+  }
+  const legitimateLease = fs.readFileSync(path.join(lockDir, 'executor.lock'));
+  // A different checkout can pass exactly the same relative argv. Process
+  // cwd, not the bridge configuration, must select which script actually ran.
+  const foreignCwd = path.join(tmp, 'foreign');
+  const foreignEntry = path.join(foreignCwd, relativeEntry);
+  fs.mkdirSync(path.dirname(foreignEntry), { recursive: true });
+  fs.writeFileSync(foreignEntry, 'setInterval(() => {}, 1000);\n');
+  const relativeImpostor = spawn(process.execPath, [relativeEntry, '', '--no-onboarding'], {
+    cwd: foreignCwd, stdio: 'ignore',
+  });
+  try {
+    await sleep(250);
+    assert.equal(relativeImpostor.exitCode, null);
+    const bootId = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    const stat = fs.readFileSync(`/proc/${relativeImpostor.pid}/stat`, 'utf8');
+    const processStartTicks = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
+    const now = Date.now();
+    fs.writeFileSync(path.join(lockDir, 'executor.lock'), JSON.stringify({
+      pid: relativeImpostor.pid, instanceId: 'relative-impostor-' + relativeImpostor.pid,
+      acquiredAt: now, expiresAt: now + 60000, hostname: os.hostname(), bootId, processStartTicks,
+    }));
+    const ready = await fetch(`${BR}/ready`);
+    const authority = await (await fetch(`${BR}/authority`)).json();
+    assert.equal(ready.status, 503, 'matching relative argv with different cwd must fail closed');
+    assert.equal(authority.executor?.lease?.ambiguous, true);
+    assert.match(authority.executor.lease.detail, /lease holder is not a managed executor/);
+    console.log('PASS: relative script in foreign cwd cannot spoof configured executor');
+  } finally {
+    relativeImpostor.kill('SIGTERM');
+    fs.writeFileSync(path.join(lockDir, 'executor.lock'), legitimateLease);
   }
   // Regression for #291 post-merge P1: a separate Node process can write
   // a lease whose cmdline merely *mentions* the configured entrypoint as an
@@ -170,6 +207,25 @@ try {
     console.log('PASS: foreign interpreter with a legacy release-layout script path rejected');
   } finally {
     try { foreignRuntime.kill('SIGTERM'); } catch { /* noop */ }
+  }
+  // A real competing legacy Node executor with runtime flags is still part
+  // of the managed topology; ignoring it would silently admit two executors.
+  fs.writeFileSync(path.join(lockDir, 'executor.lock'), legitimateLease);
+  const legacyNode = path.join(tmp, 'releases', 'dc', 'competing', 'dist', 'index.js');
+  fs.mkdirSync(path.dirname(legacyNode), { recursive: true });
+  fs.writeFileSync(legacyNode, 'setInterval(() => {}, 1000);\n');
+  const competitor = spawn(process.execPath, ['--enable-source-maps', legacyNode], { stdio: 'ignore' });
+  try {
+    await sleep(200);
+    assert.equal(competitor.exitCode, null, 'legacy Node process must be live');
+    const ready = await fetch(`${BR}/ready`);
+    const authority = await (await fetch(`${BR}/authority`)).json();
+    assert.equal(ready.status, 503, 'a competing executor must block readiness');
+    assert.equal(authority.executor?.lease?.ambiguous, true);
+    assert.match(authority.executor.lease.detail, /topology is absent or competing/);
+    console.log('PASS: legacy Node runtime flags cannot hide a competing executor');
+  } finally {
+    competitor.kill('SIGTERM');
   }
   console.log('PASS');
 } finally {
