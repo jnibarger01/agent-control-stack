@@ -105,6 +105,23 @@ describe("authority narrowing", () => {
     expect(authorityNarrowingViolations(pinned, child({ manifestHash: hashA }), NOW)).toEqual([]);
   });
 
+  it("allows a different executing actor only when the caller opts in, and still enforces everything else", () => {
+    const other = child({ executingActorId: "actor:other" });
+    expect(authorityNarrowingViolations(parent(), other, NOW)).toHaveLength(1);
+    expect(authorityNarrowingViolations(parent(), other, NOW, { allowActorChange: true })).toEqual([]);
+    expect(
+      authorityNarrowingViolations(
+        parent(),
+        child({ executingActorId: "actor:other", maximumPrivileges: ["deploy"] }),
+        NOW,
+        {
+          allowActorChange: true
+        }
+      )
+    ).toEqual(["privilege deploy exceeds parent"]);
+    expect(assertAuthorityNarrowed(parent(), other, NOW, { allowActorChange: true })).toEqual(other);
+  });
+
   it("treats malformed input as a violation, never as an empty list", () => {
     expect(authorityNarrowingViolations(parent(), { ...child(), extra: true }, NOW)).toEqual([
       "child authority is not a valid definition"

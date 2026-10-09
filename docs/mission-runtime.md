@@ -68,22 +68,61 @@ The execution contract deliberately does **not** add swarm delegation or CUA. Th
 
 ## Not yet in this runtime
 
-Checkpoint/resume, `request_child_work`, CUA, and recovery policy are separate slices. Today the legacy coding path
-has no budget row (uncapped) and the `general` kind has no driver of its own.
+Checkpoint/resume, CUA, recovery policy and any HTTP or MCP route for `request_child_work` are separate slices. Today
+the legacy coding path has no budget row (uncapped) and the `general` kind has no driver of its own.
 
-## Child authority narrowing (primitive only)
+## Child work and per-unit authority
 
-The mission authority envelope is the existing human-issued `AutonomousAuthorityDefinition` (migration 047): resource
-scope, tool classes, privilege ceiling, expiry, limits and executing actor. `authority-narrowing.ts` in
-`packages/work-items` adds the pure check that delegated work must satisfy: `authorityNarrowingViolations(parent,
-child, now)` lists every dimension on which a requested child definition is broader than its parent, and
-`assertAuthorityNarrowed` throws `authority_escalation` (or `authority_expired` for an expired parent). A broader
-request is refused, never trimmed to fit. A child must name the same executing actor and keep a pinned manifest hash;
-delegating to a different actor is deliberately not allowed yet and needs its own decision.
+`request_child_work` is `CodingMissionStore.requestChildWork`. An agent asks; ACS decides. Nothing is spawned by the
+agent and no authority is minted by it.
 
-Status: written and unit tested only. Nothing calls it yet. It issues no grant, persists nothing and does not change
-how any lane authorizes work; `request_child_work` is the intended first caller and must also persist the narrowed
-definition and its parent grant reference before a child unit can be admitted.
+**Authority model (migration 060, `work_unit_authority`).** One immutable, append-only row per unit that carries
+authority. A `root` row binds a top-level, unclaimed unit to a human-issued autonomous authority grant (migration 047) and
+can only be written by `bindRootAuthority`, an operator-side call that re-verifies the grant (hash, audit event, expiry,
+revocation), requires the grant to be issued for the same mission id, refuses self-binding, and refuses a unit that has
+already been claimed. A `child` row is written only by `requestChildWork`, stores the narrowed definition, its parent row,
+the shared root grant and the requester's claim evidence (worker, attempt, a hash of the claim token; the raw token is never
+stored). Triggers make rows immutable, require a child to chain to a parent row in the same mission and root grant, and
+refuse a child that outlives its parent. Agent-requested work therefore cannot create or widen a root.
+
+**Admission, in one `BEGIN IMMEDIATE` transaction:**
+
+1. mission active; the parent holds a live claim (token compared in constant time, worker matches, attempt matches the fence);
+2. an identical retry of a `requestId` replays; a changed request under the same id is `request_conflict`;
+3. the parent's persisted authority verifies: intact hash, every ancestor unexpired, root grant live, and the requester is
+   the actor that authority names;
+4. the requested authority is a subset of the parent's (`authority-narrowing.ts`). A broader request is `authority_escalation`
+   and is never trimmed;
+5. depth, total children, live parallel children and unit totals stay inside the caps. Limits come from the mission budget;
+   where a mission budget leaves a delegation limit unset, fallback caps apply (depth 2, parallel 4, children 8), so
+   delegation is never uncapped. A refusal is an explicit `budget_exhausted` outcome plus `budget.exhausted` and
+   `child.denied` events;
+6. only then are the child unit and its authority row written together.
+
+Every denial returns an explicit outcome and records a `child.denied` event. Nothing is written on denial.
+
+**Cross-actor execution.** A child may name a different executing actor only with an explicit `assignedActorId` equal to
+that actor. That actor must claim the child itself: `claimUnit` verifies, against the child's own persisted row, that the
+claimant is the assigned actor, every authority up the chain is unexpired and the root grant is live. The executing actor
+never inherits the parent's permissions: a grandchild request from it is checked against the child's narrowed authority.
+
+**Governed missions.** A mission with any persisted unit authority is governed. In it every claim must verify, and
+`addWorkUnits` refuses a direct child (`child_work_requires_request`). Missions with no authority rows behave exactly as before.
+
+**Admin mode.** Nothing in this path reads execution mode or admin mode (a test pins that), so admin mode cannot
+override authority scope, claim or fence checks.
+
+Status: implemented and tested locally at store level, including a multi-process race (distinct requests for the last
+slots, and an identical request racing itself) and a restart test. No gateway or MCP route calls it yet, so no agent can
+reach it today. A root grant must have been issued for the same mission id as the coding mission; a mapping from other
+ids is not built.
+
+## Child authority narrowing
+
+`authority-narrowing.ts` in `packages/work-items` is the pure subset check used above:
+`authorityNarrowingViolations(parent, child, now, { allowActorChange })` lists every dimension on which a requested
+definition is broader than its parent (scope, tool classes, privileges, expiry, limits, manifest pin; actor unless the
+caller opts in). `assertAuthorityNarrowed` throws `authority_escalation`, or `authority_expired` for an expired parent.
 
 ## Verification gate
 

@@ -18,6 +18,11 @@ import { autonomousAuthorityDefinitionSchema } from "./autonomous-authority.js";
 export type AutonomousAuthorityDefinition = z.infer<typeof autonomousAuthorityDefinitionSchema>;
 type AuthorityResource = AutonomousAuthorityDefinition["scope"][number];
 
+export interface AuthorityNarrowingOptions {
+  /** Permit the child to name a different executing actor. Default false: same actor only. */
+  allowActorChange?: boolean;
+}
+
 const FILESYSTEM_KINDS = new Set(["path", "repository"]);
 
 /** True when `parent` grants at least everything `child` asks for on one resource. */
@@ -33,7 +38,12 @@ function resourceWithin(parent: AuthorityResource, child: AuthorityResource): bo
  * Every way `child` is broader than `parent` at `now`, or an empty list when it is a subset. Malformed input is
  * reported as a violation too, so the caller can never mistake a parse failure for "no violations".
  */
-export function authorityNarrowingViolations(parentInput: unknown, childInput: unknown, now: Date): string[] {
+export function authorityNarrowingViolations(
+  parentInput: unknown,
+  childInput: unknown,
+  now: Date,
+  options: AuthorityNarrowingOptions = {}
+): string[] {
   const parent = autonomousAuthorityDefinitionSchema.safeParse(parentInput);
   if (!parent.success) return ["parent authority is not a valid definition"];
   const child = autonomousAuthorityDefinitionSchema.safeParse(childInput);
@@ -44,7 +54,10 @@ export function authorityNarrowingViolations(parentInput: unknown, childInput: u
 
   if (!(Date.parse(p.expiresAt) > now.getTime())) violations.push("parent authority has expired");
   if (Date.parse(c.expiresAt) > Date.parse(p.expiresAt)) violations.push("child outlives parent authority");
-  if (c.executingActorId !== p.executingActorId) violations.push("child names a different executing actor");
+  // A different executing actor is an explicit assignment. The caller opts in and must still prove the assignment
+  // (claim, fence and authority verification) where the child is claimed; narrowing alone never widens who may act.
+  if (c.executingActorId !== p.executingActorId && options.allowActorChange !== true)
+    violations.push("child names a different executing actor");
   // An unpinned parent manifest allows any child manifest; a pinned parent must stay pinned to the same hash.
   if (p.manifestHash !== undefined && c.manifestHash !== p.manifestHash)
     violations.push("child does not keep the parent manifest binding");
@@ -65,8 +78,13 @@ export function authorityNarrowingViolations(parentInput: unknown, childInput: u
 }
 
 /** Fail-closed assertion form of {@link authorityNarrowingViolations}. */
-export function assertAuthorityNarrowed(parent: unknown, child: unknown, now: Date): AutonomousAuthorityDefinition {
-  const violations = authorityNarrowingViolations(parent, child, now);
+export function assertAuthorityNarrowed(
+  parent: unknown,
+  child: unknown,
+  now: Date,
+  options: AuthorityNarrowingOptions = {}
+): AutonomousAuthorityDefinition {
+  const violations = authorityNarrowingViolations(parent, child, now, options);
   if (violations.length > 0)
     throw new ControlStackError(
       violations.includes("parent authority has expired") ? "authority_expired" : "authority_escalation",

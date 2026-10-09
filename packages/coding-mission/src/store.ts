@@ -3,6 +3,12 @@ import { readFileSync } from "node:fs";
 import { ControlStackError, applyControlPlaneMigrations, stableHash } from "@agent-control-stack/shared";
 import { verificationCriterionSchema, type VerificationCriterion } from "@agent-control-stack/verification";
 import {
+  assertAuthorityNarrowed,
+  autonomousAuthorityDefinitionSchema,
+  authorityNarrowingViolations,
+  type AutonomousAuthorityDefinition
+} from "@agent-control-stack/work-items";
+import {
   BudgetDecision,
   BudgetLimits,
   BudgetMetric,
@@ -12,6 +18,22 @@ import {
   budgetToLimits,
   evaluateBudget
 } from "./budget.js";
+import {
+  CHILD_WORK_FALLBACK_LIMITS,
+  CHILD_WORK_UNIT_KIND,
+  LIVE_CHILD_STATUSES,
+  authorityDefinitionHash,
+  authorityIdFor,
+  childWorkRequestHash,
+  childWorkRequestProblem,
+  claimTokensEqual,
+  hashClaimToken,
+  verifyRootGrant,
+  type AuthorityVerdictFailure,
+  type ChildWorkDenial,
+  type ChildWorkRequest,
+  type WorkUnitAuthorityRecord
+} from "./child-work.js";
 import {
   IN_FLIGHT_WORK_UNIT_STATUSES,
   NON_RETRYABLE_FAILURES,
@@ -210,6 +232,29 @@ interface UnitRow {
   cancel_external_state: "none" | "uncertain" | null;
 }
 
+interface AuthorityRow {
+  authority_id: string;
+  mission_id: string;
+  unit_id: string;
+  kind: "root" | "child";
+  parent_authority_id: string | null;
+  root_grant_id: string;
+  definition_json: string;
+  definition_hash: string;
+  executing_actor_id: string;
+  expires_at: string;
+  request_id: string;
+  request_hash: string;
+  purpose: string | null;
+  work_type: string | null;
+  requested_by_unit_id: string | null;
+  requested_by_worker_id: string | null;
+  requested_by_attempt: number | null;
+  requested_claim_hash: string | null;
+  bound_by_actor_id: string | null;
+  created_at: string;
+}
+
 export interface NewWorkUnit {
   unitId: string;
   kind: WorkUnitKind;
@@ -228,7 +273,31 @@ export type ClaimUnitResult =
   | {
       ok: false;
       outcome: "mission_not_active" | "dependencies_unmet" | "claim_conflict" | "verification_requirement_missing";
+    }
+  | { ok: false; outcome: "authority_denied"; reason: AuthorityVerdictFailure };
+
+export type ChildWorkResult =
+  | { ok: true; unitId: string; authorityId: string; replay: boolean }
+  | { ok: false; outcome: ChildWorkDenial; violations?: string[] }
+  | BudgetRefusal;
+
+export type BindRootAuthorityResult =
+  | { ok: true; authorityId: string }
+  | {
+      ok: false;
+      outcome:
+        | "mission_not_active"
+        | "unit_not_bindable"
+        | "root_authority_exists"
+        | "grant_invalid"
+        | "grant_revoked"
+        | "authority_expired"
+        | "grant_mission_mismatch"
+        | "self_bind";
     };
+
+export type AuthorityVerdict =
+  { ok: true; record: WorkUnitAuthorityRecord } | { ok: false; outcome: AuthorityVerdictFailure };
 export type RetryUnitResult =
   | { ok: true; attempt: number }
   | BudgetRefusal
@@ -607,6 +676,21 @@ export class CodingMissionStore {
       const succeeded = new Set(units.filter((row) => row.status === "succeeded").map((row) => row.operation_id));
       if (!parseStringArray(unit.depends_on).every((dependency) => succeeded.has(dependency))) {
         return { ok: false, outcome: "dependencies_unmet" };
+      }
+      // A mission with any persisted unit authority is governed: every unit it claims must verify against that
+      // authority (claimant is the assigned actor, the chain is unexpired, the root grant is live). Missions with no
+      // authority rows keep their legacy behaviour.
+      if (this.isGoverned(missionId)) {
+        const verdict = this.verifyUnitAuthority(missionId, operationId, claim.workerId, claim.claimedAt);
+        if (!verdict.ok) {
+          this.event(
+            missionId,
+            "authority.denied",
+            { unitId: operationId, workerId: claim.workerId, reason: verdict.outcome },
+            claim.claimedAt
+          );
+          return { ok: false, outcome: "authority_denied", reason: verdict.outcome };
+        }
       }
       const budget = this.budget(missionId);
       let decision: BudgetDecision = { allowed: true, exhausted: [], unaccounted: [] };
@@ -1001,6 +1085,19 @@ export class CodingMissionStore {
    * batch) and form no cycle. Unit, depth and child-count caps are checked in the same transaction as the insert.
    */
   addWorkUnits(missionId: string, units: readonly NewWorkUnit[], now: string): AddWorkUnitsResult {
+    return this.transaction(() => {
+      // In a governed mission a child can only come from requestChildWork, which narrows and persists its authority.
+      if (units.some((unit) => unit.parentUnitId !== undefined) && this.isGoverned(missionId)) {
+        throw new ControlStackError(
+          "child_work_requires_request",
+          "child work in a governed mission must be created through requestChildWork"
+        );
+      }
+      return this.insertWorkUnits(missionId, units, now);
+    });
+  }
+
+  private insertWorkUnits(missionId: string, units: readonly NewWorkUnit[], now: string): AddWorkUnitsResult {
     return this.transaction(() => {
       const mission = this.require(missionId);
       if (TERMINAL_MISSION_STATES.has(mission.state)) {
@@ -1601,6 +1698,364 @@ export class CodingMissionStore {
         this.event(missionId, "budget.threshold_reached", { metric, used, limit }, now);
       }
       return { used, decision };
+    });
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Work-unit authority (migration 060) and request_child_work
+  // ---------------------------------------------------------------------------------------------------------------
+
+  /** True once any unit in the mission carries persisted authority. Governed missions fail closed on every claim. */
+  isGoverned(missionId: string): boolean {
+    return (
+      this.db.prepare("SELECT 1 AS present FROM work_unit_authority WHERE mission_id = ? LIMIT 1").get(missionId) !==
+      undefined
+    );
+  }
+
+  /** Read one unit's persisted authority, verifying its hash and denormalized columns. Throws on tampering. */
+  workUnitAuthority(missionId: string, unitId: string): WorkUnitAuthorityRecord | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM work_unit_authority WHERE mission_id = ? AND unit_id = ?")
+      .get(missionId, unitId) as AuthorityRow | undefined;
+    return row ? this.mapAuthority(row) : undefined;
+  }
+
+  private authorityById(authorityId: string): WorkUnitAuthorityRecord | undefined {
+    const row = this.db.prepare("SELECT * FROM work_unit_authority WHERE authority_id = ?").get(authorityId) as
+      AuthorityRow | undefined;
+    return row ? this.mapAuthority(row) : undefined;
+  }
+
+  private mapAuthority(row: AuthorityRow): WorkUnitAuthorityRecord {
+    const parsed = autonomousAuthorityDefinitionSchema.safeParse(JSON.parse(row.definition_json));
+    if (
+      !parsed.success ||
+      authorityDefinitionHash(parsed.data) !== row.definition_hash ||
+      parsed.data.executingActorId !== row.executing_actor_id ||
+      parsed.data.expiresAt !== row.expires_at
+    ) {
+      throw new ControlStackError("work_unit_authority_integrity_mismatch", "work unit authority failed verification");
+    }
+    return {
+      authorityId: row.authority_id,
+      missionId: row.mission_id,
+      unitId: row.unit_id,
+      kind: row.kind,
+      ...(row.parent_authority_id ? { parentAuthorityId: row.parent_authority_id } : {}),
+      rootGrantId: row.root_grant_id,
+      definition: parsed.data,
+      definitionHash: row.definition_hash,
+      executingActorId: row.executing_actor_id,
+      expiresAt: row.expires_at,
+      requestId: row.request_id,
+      requestHash: row.request_hash,
+      ...(row.purpose ? { purpose: row.purpose } : {}),
+      ...(row.work_type ? { workType: row.work_type } : {}),
+      ...(row.requested_by_unit_id ? { requestedByUnitId: row.requested_by_unit_id } : {}),
+      ...(row.requested_by_worker_id ? { requestedByWorkerId: row.requested_by_worker_id } : {}),
+      ...(row.requested_by_attempt !== null ? { requestedByAttempt: row.requested_by_attempt } : {}),
+      ...(row.bound_by_actor_id ? { boundByActorId: row.bound_by_actor_id } : {}),
+      createdAt: row.created_at
+    };
+  }
+
+  /**
+   * Verify that `actorId` may act on `unitId` at `now`: the unit has persisted authority naming that actor as the
+   * executor (the persisted row, never the parent's), every authority up the chain is intact and unexpired, and the
+   * root grant is still live. Admin mode, approvals and routing are not consulted: none of them widen this.
+   */
+  verifyUnitAuthority(missionId: string, unitId: string, actorId: string, now: string): AuthorityVerdict {
+    const nowMs = Date.parse(now);
+    if (!Number.isFinite(nowMs)) return { ok: false, outcome: "authority_integrity" };
+    let record: WorkUnitAuthorityRecord | undefined;
+    try {
+      record = this.workUnitAuthority(missionId, unitId);
+    } catch {
+      return { ok: false, outcome: "authority_integrity" };
+    }
+    if (!record) return { ok: false, outcome: "authority_missing" };
+    if (record.executingActorId !== actorId) return { ok: false, outcome: "actor_mismatch" };
+    let cursor: WorkUnitAuthorityRecord = record;
+    for (let hops = 0; ; hops += 1) {
+      if (hops > 16) return { ok: false, outcome: "authority_integrity" };
+      if (!(Date.parse(cursor.expiresAt) > nowMs)) return { ok: false, outcome: "authority_expired" };
+      if (cursor.rootGrantId !== record.rootGrantId || cursor.missionId !== missionId)
+        return { ok: false, outcome: "authority_integrity" };
+      if (!cursor.parentAuthorityId) break;
+      let parent: WorkUnitAuthorityRecord | undefined;
+      try {
+        parent = this.authorityById(cursor.parentAuthorityId);
+      } catch {
+        return { ok: false, outcome: "authority_integrity" };
+      }
+      if (!parent) return { ok: false, outcome: "authority_integrity" };
+      cursor = parent;
+    }
+    const root = verifyRootGrant(this.db, record.rootGrantId, nowMs);
+    if (!root.ok) return { ok: false, outcome: root.outcome };
+    return { ok: true, record };
+  }
+
+  /**
+   * Operator-side bind of a top-level unit to a human-issued grant. This is the only way a root authority row exists:
+   * request_child_work only ever writes child rows, so agent-requested work cannot create or widen a root. The grant is
+   * re-verified (integrity, audit event, expiry, revocation), must have been issued for this mission, and may not be
+   * bound by the actor it empowers. Only an unclaimed unit can be bound, so authority is never granted retroactively.
+   */
+  bindRootAuthority(input: {
+    missionId: string;
+    unitId: string;
+    grantId: string;
+    boundByActorId: string;
+    requestId: string;
+    now: string;
+  }): BindRootAuthorityResult {
+    return this.transaction(() => {
+      const deny = (outcome: Exclude<BindRootAuthorityResult, { ok: true }>["outcome"]): BindRootAuthorityResult => {
+        this.event(
+          input.missionId,
+          "authority.denied",
+          { unitId: input.unitId, grantId: input.grantId, reason: outcome, operation: "bind_root" },
+          input.now
+        );
+        return { ok: false, outcome };
+      };
+      const mission = this.get(input.missionId);
+      if (!mission || TERMINAL_MISSION_STATES.has(mission.state)) return deny("mission_not_active");
+      const unit = this.unitRows(input.missionId).find((row) => row.operation_id === input.unitId);
+      if (!unit || unit.parent_unit_id !== null || (unit.status !== "pending" && unit.status !== "ready"))
+        return deny("unit_not_bindable");
+      if (this.workUnitAuthority(input.missionId, input.unitId)) return deny("root_authority_exists");
+      const verified = verifyRootGrant(this.db, input.grantId, Date.parse(input.now));
+      if (!verified.ok) return deny(verified.outcome);
+      const grant = verified.grant;
+      if (grant.missionId !== input.missionId) return deny("grant_mission_mismatch");
+      if (input.boundByActorId === grant.definition.executingActorId) return deny("self_bind");
+      const definition = grant.definition;
+      const definitionHash = authorityDefinitionHash(definition);
+      const authorityId = authorityIdFor(input.missionId, input.unitId);
+      this.db
+        .prepare(
+          `INSERT INTO work_unit_authority (authority_id, mission_id, unit_id, kind, parent_authority_id, root_grant_id,
+             definition_json, definition_hash, executing_actor_id, expires_at, request_id, request_hash, bound_by_actor_id,
+             created_at)
+           VALUES (?, ?, ?, 'root', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          authorityId,
+          input.missionId,
+          input.unitId,
+          grant.grantId,
+          JSON.stringify(definition),
+          definitionHash,
+          definition.executingActorId,
+          definition.expiresAt,
+          input.requestId,
+          stableHash({ domain: "acs.root-authority-bind.v1", grantId: grant.grantId, unitId: input.unitId }),
+          input.boundByActorId,
+          input.now
+        );
+      this.event(
+        input.missionId,
+        "authority.granted",
+        { unitId: input.unitId, authorityId, grantId: grant.grantId, kind: "root", boundBy: input.boundByActorId },
+        input.now
+      );
+      return { ok: true, authorityId };
+    });
+  }
+
+  /**
+   * An agent asks ACS for subordinate work. Everything below is decided in one IMMEDIATE transaction, so concurrent
+   * requests (from other connections or processes) serialize and cannot both take the last slot:
+   *
+   *   1. the mission is active and the parent holds a live claim (token, worker and attempt/fence all match);
+   *   2. a retry of an identical request replays; a changed request under the same id is refused;
+   *   3. the parent's persisted authority verifies (chain intact, unexpired, root grant live, requester is its actor);
+   *   4. the requested authority is a subset of the parent's, never trimmed; a different executing actor needs an
+   *      explicit assignment naming it;
+   *   5. depth, child count, live parallel children and unit totals stay inside the caps (fallback caps apply when the
+   *      mission budget leaves a delegation limit unset);
+   *   6. only then the child unit and its immutable authority row are written together.
+   *
+   * Denials are returned as explicit outcomes and recorded as `child.denied` events; they never throw and never write
+   * a unit. The executing actor of a cross-actor child is verified again, against the persisted row, when it claims.
+   */
+  requestChildWork(request: ChildWorkRequest): ChildWorkResult {
+    return this.transaction(() => {
+      const now = request.now;
+      const deny = (outcome: ChildWorkDenial, violations?: string[]): ChildWorkResult => {
+        const body = {
+          parentUnitId: request.parentUnitId,
+          unitId: request.unitId,
+          requestId: request.requestId,
+          reason: outcome,
+          ...(violations ? { violations } : {})
+        };
+        if (this.get(request.missionId)) this.event(request.missionId, "child.denied", body, now);
+        return { ok: false, outcome, ...(violations ? { violations } : {}) };
+      };
+      if (childWorkRequestProblem(request) !== undefined) return deny("invalid_request");
+      const mission = this.get(request.missionId);
+      if (!mission || TERMINAL_MISSION_STATES.has(mission.state)) return deny("mission_not_active");
+      const units = this.unitRows(request.missionId);
+      const parent = units.find((row) => row.operation_id === request.parentUnitId);
+      if (!parent) return deny("parent_unit_unknown");
+      if (
+        (parent.status !== "running" && parent.status !== "checkpointed") ||
+        parent.worker_id !== request.claim.workerId ||
+        !claimTokensEqual(parent.claim_token, request.claim.token)
+      )
+        return deny("stale_claim");
+      if (parent.attempt !== request.claim.attempt) return deny("stale_fence");
+
+      const parentAuthority = this.verifyUnitAuthority(
+        request.missionId,
+        request.parentUnitId,
+        request.claim.workerId,
+        now
+      );
+      if (!parentAuthority.ok) return deny(parentAuthority.outcome);
+
+      const requestedDefinition = autonomousAuthorityDefinitionSchema.safeParse(request.requestedAuthority);
+      if (!requestedDefinition.success) return deny("invalid_request");
+      const definition: AutonomousAuthorityDefinition = requestedDefinition.data;
+      const definitionHash = authorityDefinitionHash(definition);
+      const requestHash = childWorkRequestHash(request, definitionHash);
+
+      const prior = this.db
+        .prepare(
+          "SELECT unit_id, request_hash, authority_id FROM work_unit_authority WHERE mission_id = ? AND request_id = ?"
+        )
+        .get(request.missionId, request.requestId) as
+        { unit_id: string; request_hash: string; authority_id: string } | undefined;
+      if (prior) {
+        if (prior.request_hash !== requestHash) return deny("request_conflict");
+        return { ok: true, unitId: prior.unit_id, authorityId: prior.authority_id, replay: true };
+      }
+      if (units.some((row) => row.operation_id === request.unitId)) return deny("unit_conflict");
+
+      const parentDefinition = parentAuthority.record.definition;
+      const crossActor = definition.executingActorId !== parentDefinition.executingActorId;
+      if (
+        crossActor !== (request.assignedActorId !== undefined) ||
+        (request.assignedActorId !== undefined && request.assignedActorId !== definition.executingActorId)
+      )
+        return deny("assignment_required");
+      const violations = authorityNarrowingViolations(parentDefinition, definition, new Date(now), {
+        allowActorChange: crossActor
+      });
+      if (violations.length > 0) {
+        return deny(
+          violations.includes("parent authority has expired") ? "authority_expired" : "authority_escalation",
+          violations
+        );
+      }
+      // Same check in assertion form: the persisted definition is exactly what the narrowing function returns.
+      assertAuthorityNarrowed(parentDefinition, definition, new Date(now), { allowActorChange: crossActor });
+
+      const budget = this.budget(request.missionId);
+      const limits: BudgetLimits = {
+        child_depth: budget?.limits.child_depth ?? CHILD_WORK_FALLBACK_LIMITS.child_depth,
+        parallel_work_units: budget?.limits.parallel_work_units ?? CHILD_WORK_FALLBACK_LIMITS.parallel_work_units,
+        child_work_units: budget?.limits.child_work_units ?? CHILD_WORK_FALLBACK_LIMITS.child_work_units,
+        ...(budget?.limits.work_units !== undefined ? { work_units: budget.limits.work_units } : {}),
+        ...(budget?.limits.wall_clock_ms !== undefined ? { wall_clock_ms: budget.limits.wall_clock_ms } : {})
+      };
+      const children = units.filter((row) => row.parent_unit_id !== null);
+      const decision = evaluateBudget(limits, {
+        child_depth: parent.depth + 1,
+        child_work_units: children.length + 1,
+        parallel_work_units: children.filter((row) => LIVE_CHILD_STATUSES.includes(row.status)).length + 1,
+        work_units: units.length + 1,
+        wall_clock_ms: Math.max(0, Date.parse(now) - Date.parse(mission.createdAt))
+      });
+      if (!decision.allowed) {
+        this.event(
+          request.missionId,
+          "child.denied",
+          {
+            parentUnitId: request.parentUnitId,
+            unitId: request.unitId,
+            requestId: request.requestId,
+            reason: "budget_exhausted"
+          },
+          now
+        );
+        return this.refuse(request.missionId, "request_child_work", decision, now);
+      }
+
+      this.event(
+        request.missionId,
+        "child.requested",
+        {
+          parentUnitId: request.parentUnitId,
+          unitId: request.unitId,
+          requestId: request.requestId,
+          workType: request.workType,
+          executingActorId: definition.executingActorId,
+          definitionHash
+        },
+        now
+      );
+      const created = this.insertWorkUnits(
+        request.missionId,
+        [
+          {
+            unitId: request.unitId,
+            kind: CHILD_WORK_UNIT_KIND[request.workType],
+            title: request.title,
+            parentUnitId: request.parentUnitId,
+            verificationPolicy: request.verificationPolicy ?? "none"
+          }
+        ],
+        now
+      );
+      if (!created.ok) return created;
+      const authorityId = authorityIdFor(request.missionId, request.unitId);
+      this.db
+        .prepare(
+          `INSERT INTO work_unit_authority (authority_id, mission_id, unit_id, kind, parent_authority_id, root_grant_id,
+             definition_json, definition_hash, executing_actor_id, expires_at, request_id, request_hash, purpose,
+             work_type, requested_by_unit_id, requested_by_worker_id, requested_by_attempt, requested_claim_hash,
+             created_at)
+           VALUES (?, ?, ?, 'child', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          authorityId,
+          request.missionId,
+          request.unitId,
+          parentAuthority.record.authorityId,
+          parentAuthority.record.rootGrantId,
+          JSON.stringify(definition),
+          definitionHash,
+          definition.executingActorId,
+          definition.expiresAt,
+          request.requestId,
+          requestHash,
+          request.purpose,
+          request.workType,
+          request.parentUnitId,
+          request.claim.workerId,
+          request.claim.attempt,
+          hashClaimToken(request.claim.token),
+          now
+        );
+      this.event(
+        request.missionId,
+        "child.admitted",
+        {
+          parentUnitId: request.parentUnitId,
+          unitId: request.unitId,
+          authorityId,
+          parentAuthorityId: parentAuthority.record.authorityId,
+          executingActorId: definition.executingActorId,
+          crossActor
+        },
+        now
+      );
+      return { ok: true, unitId: request.unitId, authorityId, replay: false };
     });
   }
 
