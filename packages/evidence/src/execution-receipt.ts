@@ -23,7 +23,8 @@ export const executionReceiptCoreSchema = z
     manifest: evidenceManifestSchema,
     authorization: z
       .object({
-        actorId: id,
+        // ACS registry accepts non-empty actor identities, including external IDs with @ or /.
+        actorId: z.string().trim().min(1).max(4096),
         workerId: id,
         attemptId: id,
         actionHash: hash,
@@ -104,6 +105,8 @@ export const receiptBindingSchema = z
     workerId: id,
     actionHash: hash,
     admittedPlanHash: hash,
+    /** Independently sourced from the verified canonical evidence store. */
+    manifestHash: hash,
     leaseId: id,
     claimTokenHash: hash,
     capabilityId: id,
@@ -128,6 +131,7 @@ export function verifyExecutionReceipt(receipt: unknown, expected: unknown): { o
   if (m.workerId !== b.workerId) defects.push("worker_binding_mismatch");
   if (m.actionHash !== b.actionHash) defects.push("action_binding_mismatch");
   if (m.admittedPlanHash !== b.admittedPlanHash) defects.push("plan_binding_mismatch");
+  if (m.manifestHash !== b.manifestHash) defects.push("manifest_binding_mismatch");
   if (a.leaseId !== b.leaseId) defects.push("lease_mismatch");
   if (a.claimTokenHash !== b.claimTokenHash) defects.push("claim_mismatch");
   if (a.capabilityId !== b.capabilityId) defects.push("capability_mismatch");

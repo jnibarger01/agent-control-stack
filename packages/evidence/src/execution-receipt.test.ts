@@ -71,6 +71,7 @@ const expected = (): ReceiptBinding => ({
   workerId: "worker_1",
   actionHash: H("c"),
   admittedPlanHash: H("a"),
+  manifestHash: buildEvidenceManifest(manifestInput).manifestHash,
   leaseId: "lease_1",
   claimTokenHash: H("4"),
   capabilityId: "cap_1",
@@ -194,11 +195,25 @@ describe("proof-of-execution receipt integrity", () => {
     ["workItemId", "different"],
     ["attemptId", "different"],
     ["workerId", "different"],
+    ["manifestHash", H("8")],
     ["policyAuditEventHash", H("8")],
     ["verificationAuditEventHash", H("8")],
     ["readbackAuditEventHash", H("8")]
   ] as const)("rejects reuse against different %s", (field, value) => {
     expect(verifyExecutionReceipt(buildExecutionReceipt(core()), { ...expected(), [field]: value }).ok).toBe(false);
+  });
+  it("rejects self-consistent forged evidence even with a recomputed receipt hash", () => {
+    const changed = core();
+    changed.manifest = buildEvidenceManifest({ ...manifestInput, changedPaths: ["src/forged.ts"] });
+    changed.verification.manifestHash = changed.manifest.manifestHash;
+    const forged = buildExecutionReceipt(changed);
+    expect(forged.receiptHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(verifyExecutionReceipt(forged, expected()).defects).toContain("manifest_binding_mismatch");
+  });
+  it("accepts an independently valid actor identity containing email and path characters", () => {
+    const valid = core();
+    valid.authorization.actorId = "service-account@example.com/team/service";
+    expect(buildExecutionReceipt(valid).authorization.actorId).toBe(valid.authorization.actorId);
   });
   it("rejects untrusted approval claims and unknown fields", () => {
     const receipt = buildExecutionReceipt(core());
