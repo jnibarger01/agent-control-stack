@@ -425,6 +425,34 @@ describe("governed CUA browser execution", () => {
     expect(page.closed).toBe(true);
   });
 
+  it("returns unknown when an open page leaves the allowlist before the next action", async () => {
+    const { adapter, dispatch, page, checkpoints } = harness(
+      script([
+        { type: "navigate", url: `${ORIGIN}/inbox` },
+        { type: "click", selector: "#go" }
+      ])
+    );
+    const readUrl = page.url.bind(page);
+    let reads = 0;
+    page.url = () => {
+      const value = readUrl();
+      reads += 1;
+      if (reads === 1) page.current = "https://evil.example/drift";
+      return value;
+    };
+    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+      outcome: "unknown",
+      externalStateUncertain: true,
+      receipts: [expect.objectContaining({ kind: "cua_navigate" })],
+      failure: { category: "unknown", nativeCode: "cua_external_state_uncertain", retrySafe: false }
+    });
+    expect(checkpoints().map((row) => [row.action_type, row.state, row.origin])).toEqual([
+      ["navigate", "committed", ORIGIN]
+    ]);
+    expect(page.calls).toEqual(["open:browser", `goto:${ORIGIN}/inbox`]);
+    expect(page.current).toBe("https://evil.example/drift");
+  });
+
   it("refuses a click on the fresh about:blank page before opening", async () => {
     const { adapter, dispatch, page, checkpoints, opens } = harness(script([{ type: "click", selector: "#go" }]));
     page.current = `${ORIGIN}/inbox`;
@@ -449,5 +477,21 @@ describe("governed CUA browser execution", () => {
     expect(opened).toBe(page);
     await opened.close();
     expect(page.closed).toBe(true);
+  });
+
+  it("closes the page when the about:blank reset throws and still rethrows that error", async () => {
+    const page = new FakePage();
+    page.goto = async (url: string) => {
+      page.calls.push(`goto:${url}`);
+      throw new Error("about:blank reset failed");
+    };
+    page.close = async () => {
+      page.closed = true;
+      throw new Error("close failed");
+    };
+    const browser = new PlaywrightCuaBrowser(async () => page);
+    await expect(browser.open("browser")).rejects.toThrow("about:blank reset failed");
+    expect(page.closed).toBe(true);
+    expect(page.calls).toEqual(["goto:about:blank"]);
   });
 });

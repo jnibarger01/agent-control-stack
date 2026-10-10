@@ -40,7 +40,16 @@ export class PlaywrightCuaBrowser implements CuaBrowserProvider {
 
   async open(application: string): Promise<CuaPage> {
     const page = await this.connect(application);
-    await page.goto("about:blank");
+    try {
+      await page.goto("about:blank");
+    } catch (error) {
+      try {
+        await page.close();
+      } catch {
+        // A close failure must not hide the about:blank reset error.
+      }
+      throw error;
+    }
     return page;
   }
 }
@@ -174,13 +183,28 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
       for (const [sequence, action] of actions.entries()) {
         if (signal?.aborted) return this.cancelled(dispatch, committedMutation, receipts);
         const hash = stableHash(action);
+        if (page) {
+          let liveUrl: string;
+          try {
+            liveUrl = page.url();
+          } catch {
+            return this.unknownResult(dispatch, receipts);
+          }
+          const freshBlank = liveUrl === "about:blank" && !requireAllowlisted;
+          const navigateFromBlank = action.type === "navigate" && freshBlank;
+          if (!navigateFromBlank && landingUncertain(action.type, liveUrl, origins, requireAllowlisted)) {
+            return this.unknownResult(dispatch, receipts);
+          }
+        }
         const refusal = this.refusal(action, origins);
         if (refusal) {
           return this.failed(dispatch, "policy_denied", refusal, "CUA action refused", receipts);
         }
-        // A fresh open is about:blank. Refuse click, type, and scroll before planning them.
-        const knownUrl = page ? page.url() : "about:blank";
-        if (action.type !== "navigate" && !this.pageAllows(action.type, knownUrl, origins, requireAllowlisted)) {
+        if (
+          !page &&
+          action.type !== "navigate" &&
+          landingUncertain(action.type, "about:blank", origins, requireAllowlisted)
+        ) {
           return this.failed(
             dispatch,
             "policy_denied",
@@ -237,15 +261,6 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
         }
       }
     }
-  }
-
-  private pageAllows(
-    type: CuaActionType,
-    url: string,
-    origins: readonly string[],
-    requireAllowlisted: boolean
-  ): boolean {
-    return !landingUncertain(type, url, origins, requireAllowlisted);
   }
 
   private refusal(action: CuaAction, origins: readonly string[]): string | undefined {
