@@ -55,6 +55,16 @@ if (JC && !MANAGED && process.env.JC_PRESET !== "local") {
   process.exit(1);
 }
 const DC_CMD = process.env.DC_CMD || "/home/linuxbrew/.linuxbrew/bin/node";
+// A command the model starts runs as the JC child's uid. If that is the bridge's uid, it can read
+// the bridge's secrets from /proc/<pid>/environ (gateway execution token, ACS tokens) and forge
+// attestations. The local preset therefore requires the child to drop to a DIFFERENT uid
+// (DC_CMD=setpriv/runuser with the bridge holding only CAP_SETUID/CAP_SETGID); same-uid is an
+// explicit, development-only opt-out.
+if (JC && process.env.JC_PRESET === "local" && process.env.JC_ALLOW_SAME_UID_CHILD !== "1"
+    && !["setpriv", "runuser"].includes(path.basename(DC_CMD))) {
+  console.error("bridge: JC_PRESET=local requires the executor to run as a different uid (DC_CMD=setpriv or runuser, see the local unit example); set JC_ALLOW_SAME_UID_CHILD=1 only for development; refusing to start");
+  process.exit(1);
+}
 // Resolved once so a relative JC_DC_DIR is not applied twice (as cwd and
 // again inside the script path).
 // Default: this monorepo's own Desktop Commander build (vendor/desktop-commander,
@@ -175,6 +185,8 @@ const CHILD_ENV = {
   ...(process.env.DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR
     ? { DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: process.env.DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR }
     : {}),
+  // Only the bridge, which force-overwrites _meta.gateway, may vouch for it (local preset requires attestation).
+  ...(JC && process.env.JC_PRESET === "local" ? { JC_GATEWAY_META_TRUSTED: "1" } : {}),
   ...(JC
     ? Object.fromEntries(JC_CHILD_ENV_KEYS.filter((key) => process.env[key]).map((key) => [key, process.env[key]]))
     : {}),

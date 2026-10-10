@@ -50,6 +50,7 @@ for f in "${FILES[@]}"; do install -o root -g root -m 0644 "$SRC/$f" "/opt/jace-
 printf '{"type":"module","private":true}\n' > /opt/jace-commander/package.json
 chmod 0644 /opt/jace-commander/package.json
 
+install -d -o root -g root -m 0711 /var/lib/jace-commander
 install -d -o jc-approverd -g jc-approverd -m 0700 /var/lib/jace-commander/approverd /var/lib/jace-commander/approverd-key
 install -d -o root -g root -m 0755 /etc/jace-commander
 umask 022

@@ -395,7 +395,7 @@ export class Approverd {
    */
   private loadRecords(): void {
     const auditPath = path.join(this.config.stateDir, 'audit.jsonl');
-    const requested = new Map<string, string>();
+    const requested = new Map<string, { hash: string; principal: string }>();
     const decided = new Map<string, Map<string, string>>();
     if (fs.existsSync(auditPath)) {
       const parsed = readTraceFile(auditPath);
@@ -404,7 +404,7 @@ export class Approverd {
         const id = event.payload.approvalId;
         const hash = event.payload.invocationHash;
         if (typeof id !== 'string' || typeof hash !== 'string') continue;
-        if (event.type === 'approval_requested') requested.set(id, hash);
+        if (event.type === 'approval_requested') requested.set(id, { hash, principal: typeof event.payload.principal === 'string' ? event.payload.principal : '' });
         if (event.type === 'approval_decision' && typeof event.payload.action === 'string') {
           const actions = decided.get(id) ?? new Map<string, string>();
           actions.set(event.payload.action, hash);
@@ -426,7 +426,7 @@ export class Approverd {
     }
   }
 
-  private persistedRecordValid(record: ApprovalRecord, requested: Map<string, string>, decided: Map<string, Map<string, string>>): boolean {
+  private persistedRecordValid(record: ApprovalRecord, requested: Map<string, { hash: string; principal: string }>, decided: Map<string, Map<string, string>>): boolean {
     if (!record || typeof record !== 'object') return false;
     if (typeof record.id !== 'string' || !ID_PATTERN.test(record.id)) return false;
     if (record.runtimeId !== this.config.runtimeId) return false;
@@ -442,7 +442,8 @@ export class Approverd {
     }
     if (record.invocationHash !== expected) return false;
     // Every record needs its request in the audit; approved/rejected/claimed need that decision too.
-    if (requested.get(record.id) !== record.invocationHash) return false;
+    const asked = requested.get(record.id);
+    if (!asked || asked.hash !== record.invocationHash || asked.principal !== (record.principal ?? '')) return false;
     const needed = record.status === 'approved' ? 'approved' : record.status === 'rejected' ? 'rejected' : record.status === 'claimed' ? 'claimed' : undefined;
     if (needed && decided.get(record.id)?.get(needed) !== record.invocationHash) return false;
     return true;

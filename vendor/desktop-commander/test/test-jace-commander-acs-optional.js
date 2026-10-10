@@ -209,9 +209,21 @@ await test('required ACS makes jc_doctor fail when ACS is down; optional does no
 
 function seedTrace(dir, runId, count) {
   const chain = new JsonlTraceChain(path.join(dir, `${runId}.jsonl`), runId);
-  for (let i = 0; i < count; i += 1) chain.append('tool_call_finished', { tool: 'ping', n: i, argumentsSha256: 'a'.repeat(64) });
+  for (let i = 0; i < count; i += 1) chain.append('tool_call_finished', { tool: 'ping', n: i, argumentsSha256: 'a'.repeat(64), policyHash: `${runId}`.padEnd(64, 'p') });
 }
 const bytesOf = (dir) => fs.readdirSync(dir).sort().map((f) => `${f}:${fs.readFileSync(path.join(dir, f), 'utf8')}`).join('\n');
+
+await test('mirror: runs are ordered by when they started, not by file name', async () => {
+  const dir = path.join(root, 'm0', 'traces');
+  const newerLow = new JsonlTraceChain(path.join(dir, 'jc-mcp-100-2.jsonl'), 'run-newer');
+  newerLow.append('tool_call_finished', { tool: 'ping' }, '2026-10-10T10:00:00.000Z');
+  const olderHigh = new JsonlTraceChain(path.join(dir, 'jc-mcp-999-1.jsonl'), 'run-older');
+  olderHigh.append('tool_call_finished', { tool: 'ping' }, '2026-10-09T10:00:00.000Z');
+  const sent = [];
+  const outbox = new MirrorOutbox({ traceDir: dir, stateDir: path.join(root, 'm0'), runtimeId: 'jc-x', send: async (b) => { sent.push(b); return { ok: true }; }, batchSize: 1 });
+  assert.equal(await outbox.pump(), true);
+  assert.equal(sent[0].runs[0].runId, 'run-older');
+});
 
 await test('mirror: ordered, contiguous, idempotent batches; the cursor advances only on confirmed success', async () => {
   const dir = path.join(root, 'm1', 'traces');
@@ -221,7 +233,7 @@ await test('mirror: ordered, contiguous, idempotent batches; the cursor advances
   const sent = [];
   let healthy = false;
   const send = async (batch) => { sent.push(batch); return { ok: healthy, status: healthy ? 200 : 503 }; };
-  const outbox = new MirrorOutbox({ traceDir: dir, stateDir, runtimeId: 'jc-x', policyHash: 'p'.repeat(64), send, batchSize: 2 });
+  const outbox = new MirrorOutbox({ traceDir: dir, stateDir, runtimeId: 'jc-x', send, batchSize: 2 });
 
   assert.equal(await outbox.pump(), false);
   assert.equal(outbox.status().failures, 1);
@@ -229,7 +241,8 @@ await test('mirror: ordered, contiguous, idempotent batches; the cursor advances
   assert.equal(await outbox.pump(), false);
   assert.equal(sent[0].batchId, sent[1].batchId, 'a retry resends the identical batch');
   assert.equal(sent[0].schema, MIRROR_SCHEMA);
-  assert.equal(sent[0].policyHash, 'p'.repeat(64));
+  assert.equal(sent[0].runs[0].policyHash, 'run-aaaaaa'.padEnd(64, 'p'), 'each run carries its own policy hash');
+  assert.equal(sent[0].policyHash, undefined);
 
   healthy = true;
   assert.equal(await outbox.pump(), true);

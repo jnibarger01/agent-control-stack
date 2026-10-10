@@ -17,8 +17,8 @@
  *    (the trace stores argument digests, never raw arguments).
  *
  * Wire format `jc.trace.mirror.v1` (the ACS ingest route is a separate ACS change):
- *   POST <JC_ACS_MIRROR_URL>  { schema, runtimeId, policyHash?, batchId,
- *                               runs: [{ runId, fromSeq, prevHash, chainHead, events: [...] }],
+ *   POST <JC_ACS_MIRROR_URL>  { schema, runtimeId, batchId,
+ *                               runs: [{ runId, policyHash?, fromSeq, prevHash, chainHead, events: [...] }],
  *                               gaps: [{ runId, fromSeq, toSeq }] }
  */
 import crypto from 'node:crypto';
@@ -35,9 +35,9 @@ export interface MirrorGap { runId: string; fromSeq: number; toSeq: number }
 export interface MirrorBatch {
   schema: typeof MIRROR_SCHEMA;
   runtimeId: string;
-  policyHash?: string;
   batchId: string;
-  runs: Array<{ runId: string; fromSeq: number; prevHash: string; chainHead: string; events: LoopTraceEvent[] }>;
+  /** policyHash is each run's own (taken from its trace), never the policy loaded now. */
+  runs: Array<{ runId: string; policyHash?: string; fromSeq: number; prevHash: string; chainHead: string; events: LoopTraceEvent[] }>;
   gaps: MirrorGap[];
 }
 
@@ -57,7 +57,6 @@ export interface MirrorOutboxOptions {
   traceDir: string;
   stateDir: string;
   runtimeId: string;
-  policyHash?: string;
   send: MirrorSender;
   maxPending?: number;
   batchSize?: number;
@@ -136,7 +135,7 @@ export class MirrorOutbox {
   private scan(): Array<{ runId: string; events: LoopTraceEvent[] }> {
     let files: string[];
     try {
-      files = fs.readdirSync(this.options.traceDir).filter((name) => name.endsWith('.jsonl')).sort();
+      files = fs.readdirSync(this.options.traceDir).filter((name) => name.endsWith('.jsonl'));
     } catch {
       return [];
     }
@@ -150,7 +149,8 @@ export class MirrorOutbox {
         // An unreadable trace file is skipped for mirroring only; the local chain is unaffected.
       }
     }
-    return runs;
+    // Oldest run first by when it started (file names embed a pid, which says nothing about age).
+    return runs.sort((a, b) => Date.parse(a.events[0].ts) - Date.parse(b.events[0].ts) || a.runId.localeCompare(b.runId));
   }
 
   /** Over the bound: skip the oldest unsent records for delivery and record explicit gaps. */
@@ -180,8 +180,10 @@ export class MirrorOutbox {
       const from = this.state.runs[run.runId] ?? 0;
       const events = run.events.slice(from, from + room);
       if (events.length === 0) continue;
+      const policyHash = run.events.map((event) => event.payload?.policyHash).find((value): value is string => typeof value === 'string');
       batchRuns.push({
         runId: run.runId,
+        ...(policyHash ? { policyHash } : {}),
         fromSeq: from,
         prevHash: from === 0 ? GENESIS : run.events[from - 1].hash,
         chainHead: events[events.length - 1].hash,
@@ -197,7 +199,6 @@ export class MirrorOutbox {
     return {
       schema: MIRROR_SCHEMA,
       runtimeId: this.options.runtimeId,
-      ...(this.options.policyHash ? { policyHash: this.options.policyHash } : {}),
       batchId,
       runs: batchRuns,
       gaps,

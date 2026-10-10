@@ -522,9 +522,11 @@ await test('review hardening: overlapping request/decide groups refuse startup; 
 
 await test('review hardening: approvals are bound to the caller; restart trusts only audit-backed, hash-consistent records', async () => {
   const { callerPrincipal } = await import('../dist/jace-commander/server.js');
-  assert.equal(callerPrincipal(undefined), undefined);
-  assert.equal(callerPrincipal({ gateway: { sub: 'alice', client_id: 'c1' } }), 'alice|c1');
-  assert.equal(callerPrincipal({ gateway: { sub: '' } }), undefined);
+  assert.equal(callerPrincipal(undefined, true), undefined);
+  assert.equal(callerPrincipal({ gateway: { sub: 'alice', client_id: 'c1' } }, true), 'alice|c1');
+  assert.equal(callerPrincipal({ gateway: { sub: '' } }, true), undefined);
+  // Over direct stdio the client writes _meta itself: never believed unless the bridge vouches.
+  assert.equal(callerPrincipal({ gateway: { sub: 'alice', client_id: 'c1' } }, false), undefined);
 
   const info = await makeApprover();
   const client = new ApproverClient(info.config.requestSocket, RUNTIME, 2000);
@@ -560,12 +562,15 @@ await test('review hardening: approvals are bound to the caller; restart trusts 
   assert.equal(reverted.status, 'claimed');
   reverted.status = 'approved';
   fs.writeFileSync(path.join(dir, `${alice.approvalId}.json`), JSON.stringify(reverted));
+  // Swapping the principal of an otherwise-valid record must not restore it either.
+  const swapped = { ...JSON.parse(fs.readFileSync(bobFile, 'utf8')), principal: 'mallory|c9' };
+  fs.writeFileSync(bobFile, JSON.stringify(swapped));
   const again = new Approverd(info.config, { now });
   await again.start();
   const view = (id) => again.handleDecideOp({ op: 'show', id });
   assert.equal(view('apr-forged').ok, false);
   assert.equal(view('apr-mismatch').ok, false);
-  assert.equal(view(bob.approvalId).approval.status, 'pending');
+  assert.equal(view(bob.approvalId).ok, false, 'a record whose principal differs from the audit is dropped');
   assert.equal(view(alice.approvalId).approval.status, 'claimed');
   assert.notEqual(again.handleRequestOp({ op: 'authorize', runtimeId: RUNTIME, tool: 'write_file', arguments: args, principal: 'alice|c1' }).state, 'granted');
   await again.stop();
@@ -575,7 +580,7 @@ await test('review hardening: approvals are bound to the caller; restart trusts 
   fs.appendFileSync(auditFile, '{"not":"a chain event"}\n');
   const broken = new Approverd(info.config, { now });
   await broken.start();
-  assert.equal(broken.handleDecideOp({ op: 'show', id: bob.approvalId }).ok, false);
+  assert.equal(broken.handleDecideOp({ op: 'show', id: alice.approvalId }).ok, false);
   await broken.stop();
 });
 

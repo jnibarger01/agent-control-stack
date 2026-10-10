@@ -149,7 +149,9 @@ export { jcStandaloneToolAllowed };
  * `_meta.gateway`). An approval is bound to this identity so it cannot be claimed by another
  * principal. Absent (stdio) means "no principal".
  */
-export function callerPrincipal(meta: Record<string, unknown> | undefined): string | undefined {
+export function callerPrincipal(meta: Record<string, unknown> | undefined, trusted: boolean): string | undefined {
+  // Over direct stdio the client writes _meta itself, so it is only believed when the bridge says it stamped it.
+  if (!trusted) return undefined;
   const gateway = meta?.gateway;
   if (!gateway || typeof gateway !== 'object') return undefined;
   const { sub, client_id: clientId } = gateway as Record<string, unknown>;
@@ -261,7 +263,6 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       traceDir: path.join(config.stateDir, 'traces'),
       stateDir: config.stateDir,
       runtimeId: config.runtimeId,
-      policyHash: policy?.hash,
       send: deps.mirrorSender ?? httpMirrorSender,
       maxPending: config.mirrorMaxPending,
     })
@@ -278,7 +279,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     const name = request.params.name;
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
     const capability = (request.params._meta as Record<string, unknown> | undefined)?.acsCapability;
-    const principal = callerPrincipal(request.params._meta as Record<string, unknown> | undefined);
+    const principal = callerPrincipal(request.params._meta as Record<string, unknown> | undefined, config.gatewayMetaTrusted);
     const route = Object.prototype.hasOwnProperty.call(JC_TOOL_POLICIES, name) ? resolver.resolve(name) : undefined;
     if (!route) return fail('unknown_tool', `unknown tool: ${name}`);
     let routeMeta = jcAuthorizationMeta(mode, route);

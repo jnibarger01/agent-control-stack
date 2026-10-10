@@ -82,7 +82,10 @@ cat > /etc/jace-commander/privileged.json <<CFG
 CFG
 chown root:root /etc/jace-commander/privileged.json
 chmod 0644 /etc/jace-commander/privileged.json   # public key only; must not be writable by others
-install -d -o root -g root -m 0700 /var/lib/jace-commander /var/lib/jace-commander/nonces /var/log/jace-commander
+# The parent is root-owned but traversable (0711, not listable) so jc-approverd can reach its own
+# 0700 subdirectories; only the helper's nonce directory is private to root.
+install -d -o root -g root -m 0711 /var/lib/jace-commander
+install -d -o root -g root -m 0700 /var/lib/jace-commander/nonces /var/log/jace-commander
 
 tmp="$(mktemp)"
 sed "s/@AGENT_USER@/$AGENT_USER/" "$REPO/deploy/jace-commander/sudoers.jace-commander" > "$tmp"

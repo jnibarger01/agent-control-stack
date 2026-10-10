@@ -53,6 +53,8 @@ export interface JcConfig {
   mirrorUrl: string | undefined;
   mirrorIntervalMs: number;
   mirrorMaxPending: number;
+  /** JC_GATEWAY_META_TRUSTED=1 (set only by the OAuth bridge): `_meta.gateway` is bridge-stamped, not client-written. */
+  gatewayMetaTrusted: boolean;
 }
 
 function httpUrl(raw: string, name: string): string {
@@ -120,6 +122,7 @@ export function loadJcConfig(env: NodeJS.ProcessEnv = process.env): JcConfig {
     approverKeyId: env.JC_APPROVER_KEY_ID,
     mirrorUrl: env.JC_ACS_MIRROR_URL ? httpUrl(env.JC_ACS_MIRROR_URL, 'JC_ACS_MIRROR_URL') : undefined,
     mirrorIntervalMs: boundedInt(env.JC_ACS_MIRROR_INTERVAL_MS, 5000, 100, 3_600_000, 'JC_ACS_MIRROR_INTERVAL_MS'),
+    gatewayMetaTrusted: env.JC_GATEWAY_META_TRUSTED === '1',
     mirrorMaxPending: boundedInt(env.JC_ACS_MIRROR_MAX_PENDING, 5000, 10, 1_000_000, 'JC_ACS_MIRROR_MAX_PENDING'),
   };
 }
