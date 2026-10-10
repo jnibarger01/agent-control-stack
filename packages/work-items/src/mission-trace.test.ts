@@ -130,6 +130,24 @@ describe("mission audit projection", () => {
     }
   });
 
+  it("coerces HTTP as-of query parameters and excludes future trace projections", () => {
+    const ctx = fixture();
+    try {
+      ctx.store.recordSystemEvent({ name: "test.before", attributes: { "work_item.id": ctx.mission.id } });
+      const cutoff = ctx.store.getMissionTrace(ctx.mission.id).events.at(-1)!.event.sequence;
+      ctx.store.recordSystemEvent({ name: "test.after", attributes: { "work_item.id": ctx.mission.id } });
+      const historical = ctx.store.getMissionTrace(ctx.mission.id, { asOfSequence: String(cutoff) });
+      expect(historical.events.length).toBeGreaterThan(0);
+      expect(historical.events.every(({ event }) => event.sequence <= cutoff)).toBe(true);
+      expect(historical.events.some(({ event }) => event.name === "test.after")).toBe(false);
+      // These current-state projections lack audit-sequence anchors.
+      expect(historical.traceIds).toEqual([]);
+      expect(historical.observations).toEqual([]);
+    } finally {
+      ctx.close();
+    }
+  });
+
   it("bounds input and rejects unknown missions", () => {
     const ctx = fixture();
     try {

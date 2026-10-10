@@ -7,7 +7,8 @@ import { readVerifiedChangeSetAuthorityEvent } from "./change-set-approval-store
 export const missionTraceQuerySchema = z
   .object({
     afterSequence: z.coerce.number().int().nonnegative().default(0),
-    limit: z.coerce.number().int().min(1).max(200).default(100)
+    limit: z.coerce.number().int().min(1).max(200).default(100),
+    asOfSequence: z.coerce.number().int().nonnegative().optional()
   })
   .strict();
 export type MissionTraceQuery = z.input<typeof missionTraceQuerySchema>;
@@ -49,11 +50,14 @@ export function readMissionTrace(
   missionId: string,
   query: MissionTraceQuery = {}
 ): MissionTrace {
-  const { afterSequence, limit } = missionTraceQuerySchema.parse(query);
+  const { afterSequence, limit, asOfSequence } = missionTraceQuerySchema.parse(query);
   if (!store.get(missionId)) throw new ControlStackError("work_item_not_found", "mission not found");
   const rows = db
-    .prepare(`SELECT permit_id FROM change_set_operation_permits WHERE mission_id = ? LIMIT 2049`)
-    .all(missionId) as Array<{ permit_id: string }>;
+    .prepare(`SELECT p.permit_id FROM change_set_operation_permits p
+      JOIN audit_events permit_event ON permit_event.id = p.audit_event_id
+      WHERE p.mission_id = ? AND (? IS NULL OR permit_event.sequence <= ?)
+      ORDER BY permit_event.sequence LIMIT 2049`)
+    .all(missionId, asOfSequence ?? null, asOfSequence ?? null) as Array<{ permit_id: string }>;
   if (rows.length > 2048)
     throw new ControlStackError("mission_trace_resource_limit", "too many historical operation links");
   const operations = rows.map((row): Link => {
@@ -120,7 +124,7 @@ export function readMissionTrace(
   const selected = db
     .prepare(
       `SELECT id, sequence, previous_hash, event_hash FROM audit_events
-    WHERE sequence > ? AND (
+    WHERE sequence > ? AND (? IS NULL OR sequence <= ?) AND (
       json_extract(attributes, '$."work_item.id"') IN (SELECT value FROM json_each(?)) OR
       json_extract(attributes, '$."execution.work_item_id"') IN (SELECT value FROM json_each(?)) OR
       json_extract(body, '$.workItemId') IN (SELECT value FROM json_each(?)) OR
@@ -131,7 +135,7 @@ export function readMissionTrace(
         WHERE work_item_id IN (SELECT value FROM json_each(?)))
     ) ORDER BY sequence ASC LIMIT ?`
     )
-    .all(afterSequence, workIds, workIds, workIds, missionId, workIds, workIds, limit + 1) as Array<{
+    .all(afterSequence, asOfSequence ?? null, asOfSequence ?? null, workIds, workIds, workIds, missionId, workIds, workIds, limit + 1) as Array<{
     id: string;
     sequence: number;
     previous_hash: string;
@@ -215,8 +219,10 @@ export function readMissionTrace(
     integrity: "selected-events-and-predecessor-links",
     globalChainVerified: false,
     operations,
-    traceIds,
-    observations,
+    // Current projection rows have no historical audit anchor: never present
+    // them as historical facts when an as-of cutoff was requested.
+    traceIds: asOfSequence === undefined ? traceIds : [],
+    observations: asOfSequence === undefined ? observations : [],
     events,
     ...(selected.length > limit ? { nextAfterSequence: selected[limit - 1]!.sequence } : {})
   };
