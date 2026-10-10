@@ -171,11 +171,19 @@ verifier yet, and the real grant reader is only wired in tests.
 
 ## Not yet in this runtime
 
-- Production composition roots that construct the authority ledger with the real grant store and operator
-  verification, and the dispatch ledger with that verifier.
+- A caller of the composition root. `createGovernedExecution` exists and is tested, but no controller, gateway route
+  or CLI constructs it yet, so nothing in production dispatches through it today.
 - Checkpoint/resume as worker adapters on the execution ledger, the CUA worker, and recovery policy.
 - A driver for the `general` mission kind. The legacy coding path has no budget row (uncapped).
 - Delegating to a different executing actor (`authorityNarrowingViolations` refuses it deliberately and it needs its own decision).
+
+## Composition root
+
+`createGovernedExecution({ dbPath, verifyOperator, resolveActor })` (`governed-runtime.ts`) opens the work-item store
+and the mission store on one database and returns the authority ledger plus a dispatch ledger already wired to it, so
+a dispatcher built this way cannot run a governed mission unchecked. `verifyOperator` and `resolveActor` are required
+on purpose: there is no default that trusts a caller-supplied identity. Grants must be issued under the same id as the
+coding mission. Tests drive claim, dispatch, result, revocation and a process restart through this root only.
 
 ## Verification gate
 
