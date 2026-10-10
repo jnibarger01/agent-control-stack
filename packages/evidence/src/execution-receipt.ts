@@ -3,9 +3,14 @@ import { z } from "zod";
 import { evidenceManifestSchema, verifyEvidenceManifestHash } from "./evidence-manifest.js";
 
 /**
- * Content-addressed attempt receipt. Machine facts and audit references MUST
- * come from trusted ACS state. Hash agreement alone cannot prove provenance.
- * This module cannot authorize work or transition a mission to COMPLETED.
+ * Content-addressed attempt receipt. A receipt is EVIDENCE, not authority.
+ *
+ * It records what canonical ACS state decided (policy decision, approval grant, verification
+ * requirement outcome) and what ran (manifest, reviews, readback). Every claim is valid only when
+ * `verifyExecutionReceipt` matches it against a `ReceiptBinding` the caller obtained from canonical
+ * state (verified audit chain plus attempt and lease records). Hash agreement alone proves nothing,
+ * and a receipt never grants, extends or replaces an approval. This module cannot authorize work or
+ * transition a mission to COMPLETED.
  */
 export const EXECUTION_RECEIPT_SCHEMA_VERSION = "acs.execution-receipt.v1" as const;
 export const EXECUTION_RECEIPT_HASH_DOMAIN = "acs:execution-receipt:v1" as const;
@@ -15,7 +20,48 @@ const id = z
   .min(1)
   .max(128)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
+/** Engine and provider identifiers. The canonical verification contract accepts any non-empty id. */
+const engineId = z.string().min(1).max(256);
+/** Actor identities. The ACS registry accepts any non-empty id, including external ids with @ or /. */
+const actorId = z.string().trim().min(1).max(4096);
+const isoTimestamp = z.string().refine((value) => !Number.isNaN(Date.parse(value)), "invalid timestamp");
 const auditRef = z.object({ eventId: id, eventHash: hash }).strict();
+/** The canonical approval grant that authorized the attempt, with its own audit reference. */
+const approvalRef = z
+  .object({
+    approvalId: id,
+    /** Canonical approval request fingerprint, bound to the action. */
+    requestHash: hash,
+    /** approvalGrantHash over the canonical grant record. */
+    grantHash: hash,
+    approverActorId: actorId,
+    grantedAt: isoTimestamp,
+    expiresAt: isoTimestamp,
+    audit: auditRef
+  })
+  .strict();
+/** One independent reviewer whose canonical verification passed. */
+const reviewerRef = z
+  .object({
+    verifierEngineId: engineId,
+    verifierProviderId: engineId,
+    verdict: z.literal("pass"),
+    audit: auditRef
+  })
+  .strict();
+const policyDecisionSchema = z.enum(["allow", "require_approval"]);
+
+function requireApprovalMatchesDecision(
+  value: { policyDecision: "allow" | "require_approval"; approval?: unknown },
+  context: z.RefinementCtx
+): void {
+  if (value.policyDecision === "require_approval" && value.approval === undefined) {
+    context.addIssue({ code: "custom", path: ["approval"], message: "require_approval needs a canonical grant" });
+  }
+  if (value.policyDecision === "allow" && value.approval !== undefined) {
+    context.addIssue({ code: "custom", path: ["approval"], message: "allow carries no approval grant" });
+  }
+}
 
 export const executionReceiptCoreSchema = z
   .object({
@@ -23,8 +69,7 @@ export const executionReceiptCoreSchema = z
     manifest: evidenceManifestSchema,
     authorization: z
       .object({
-        // ACS registry accepts non-empty actor identities, including external IDs with @ or /.
-        actorId: z.string().trim().min(1).max(4096),
+        actorId,
         workerId: id,
         attemptId: id,
         actionHash: hash,
@@ -32,14 +77,17 @@ export const executionReceiptCoreSchema = z
         capabilityId: id,
         leaseId: id,
         claimTokenHash: hash,
-        policyDecision: z.enum(["allow", "approved"]),
+        policyDecision: policyDecisionSchema,
+        approval: approvalRef.optional(),
         audit: auditRef
       })
-      .strict(),
+      .strict()
+      .superRefine(requireApprovalMatchesDecision),
     verification: z
       .object({
-        verifierEngineId: id,
-        implementerEngineId: id,
+        implementerEngineId: engineId,
+        implementerProviderId: engineId,
+        reviewers: z.array(reviewerRef).min(1).max(8),
         verdict: z.literal("pass"),
         manifestHash: hash,
         criteriaPassed: z.number().int().positive().max(512),
@@ -64,7 +112,7 @@ export function executionReceiptHash(core: ExecutionReceiptCore): string {
   return domainHash(EXECUTION_RECEIPT_HASH_DOMAIN, core);
 }
 
-/** Fail-closed completeness checks; not an independent source attestation. */
+/** Internal consistency and completeness checks. These need no canonical state. */
 export function receiptDefects(core: ExecutionReceiptCore): string[] {
   const { manifest: m, authorization: a, verification: v, readback: r } = core;
   const defects: string[] = [];
@@ -74,14 +122,31 @@ export function receiptDefects(core: ExecutionReceiptCore): string[] {
   if (m.actionHash !== a.actionHash) defects.push("action_mismatch");
   if (m.admittedPlanHash !== a.admittedPlanHash) defects.push("admitted_plan_mismatch");
   if (v.manifestHash !== m.manifestHash) defects.push("verification_manifest_mismatch");
-  if (v.implementerEngineId === v.verifierEngineId) defects.push("verifier_not_independent");
   if (!m.testEvidence || !m.testEvidence.passed || m.testEvidence.checksPassed < 1 || m.testEvidence.checksFailed !== 0)
     defects.push("tests_not_proven");
+  // A test claim without a durable validation run cannot be retrieved or audited, so it proves nothing.
+  if (m.testEvidence && !m.testEvidence.validationRunId) defects.push("validation_run_missing");
   if (m.commands.length === 0 || m.commands.some((c) => c.exitCode !== 0)) defects.push("command_execution_not_proven");
   if (r.resultWorkspaceRevision !== m.resultWorkspaceRevision || r.diffHash !== m.diffHash)
     defects.push("readback_mismatch");
   if (Date.parse(m.startedAt) > Date.parse(m.finishedAt)) defects.push("inverted_execution_time");
-  if (new Set([a.audit.eventId, v.audit.eventId, r.audit.eventId]).size !== 3) defects.push("audit_event_reused");
+  if (a.approval) {
+    // The grant must have existed when the attempt was claimed, and must not have expired by then.
+    if (Date.parse(a.approval.grantedAt) > Date.parse(m.startedAt)) defects.push("approval_granted_after_start");
+    if (Date.parse(m.startedAt) >= Date.parse(a.approval.expiresAt)) defects.push("approval_expired_at_start");
+  }
+  const reviewerIds = v.reviewers.map((reviewer) => reviewer.verifierEngineId);
+  if (new Set(reviewerIds).size !== reviewerIds.length) defects.push("reviewer_not_distinct");
+  if (v.reviewers.some((reviewer) => reviewer.verifierEngineId === v.implementerEngineId))
+    defects.push("verifier_not_independent");
+  const eventIds = [
+    a.audit.eventId,
+    ...(a.approval ? [a.approval.audit.eventId] : []),
+    v.audit.eventId,
+    ...v.reviewers.map((reviewer) => reviewer.audit.eventId),
+    r.audit.eventId
+  ];
+  if (new Set(eventIds).size !== eventIds.length) defects.push("audit_event_reused");
   return defects;
 }
 
@@ -94,28 +159,70 @@ export function buildExecutionReceipt(input: unknown): ExecutionReceipt {
 }
 
 /**
- * Binding expectations must be obtained independently from a VERIFIED
- * canonical audit chain and current attempt/lease state. Never use values
- * copied from the receipt as their own proof.
+ * Binding expectations must be obtained independently from a VERIFIED canonical audit chain and
+ * current attempt, lease and verification-requirement state. Never use values copied from the
+ * receipt as their own proof. `reviewersRequired` and `requireIndependentProvider` are the canonical
+ * VerificationRequirement for this action (policy-gate evaluateVerificationRequirement).
  */
 export const receiptBindingSchema = z
   .object({
     workItemId: id,
     attemptId: id,
     workerId: id,
+    actorId,
     actionHash: hash,
     admittedPlanHash: hash,
-    /** Independently sourced from the verified canonical evidence store. */
     manifestHash: hash,
+    validationRunId: id,
     leaseId: id,
     claimTokenHash: hash,
     capabilityId: id,
-    policyAuditEventHash: hash,
-    verificationAuditEventHash: hash,
-    readbackAuditEventHash: hash
+    policyDecision: policyDecisionSchema,
+    approval: approvalRef.optional(),
+    policyAudit: auditRef,
+    implementerEngineId: engineId,
+    implementerProviderId: engineId,
+    reviewers: z.array(reviewerRef).min(1).max(8),
+    reviewersRequired: z.number().int().min(0).max(8),
+    requireIndependentProvider: z.boolean(),
+    criteriaPassed: z.number().int().positive().max(512),
+    verificationAudit: auditRef,
+    readbackAudit: auditRef
   })
-  .strict();
+  .strict()
+  .superRefine(requireApprovalMatchesDecision);
 export type ReceiptBinding = z.infer<typeof receiptBindingSchema>;
+
+const sameRef = (x: { eventId: string; eventHash: string }, y: { eventId: string; eventHash: string }) =>
+  x.eventId === y.eventId && x.eventHash === y.eventHash;
+
+function sameApproval(x: ReceiptBinding["approval"], y: ReceiptBinding["approval"]): boolean {
+  if (x === undefined || y === undefined) return x === y;
+  return (
+    x.approvalId === y.approvalId &&
+    x.requestHash === y.requestHash &&
+    x.grantHash === y.grantHash &&
+    x.approverActorId === y.approverActorId &&
+    x.grantedAt === y.grantedAt &&
+    x.expiresAt === y.expiresAt &&
+    sameRef(x.audit, y.audit)
+  );
+}
+
+type Reviewer = z.infer<typeof reviewerRef>;
+const reviewerKey = (reviewer: Reviewer) => `${reviewer.verifierEngineId}\u0000${reviewer.audit.eventId}`;
+function sameReviewers(x: readonly Reviewer[], y: readonly Reviewer[]): boolean {
+  if (x.length !== y.length) return false;
+  const left = [...x].sort((a, b) => reviewerKey(a).localeCompare(reviewerKey(b)));
+  const right = [...y].sort((a, b) => reviewerKey(a).localeCompare(reviewerKey(b)));
+  return left.every(
+    (reviewer, index) =>
+      reviewer.verifierEngineId === right[index]?.verifierEngineId &&
+      reviewer.verifierProviderId === right[index]?.verifierProviderId &&
+      reviewer.verdict === right[index]?.verdict &&
+      sameRef(reviewer.audit, right[index]?.audit ?? { eventId: "", eventHash: "" })
+  );
+}
 
 export function verifyExecutionReceipt(receipt: unknown, expected: unknown): { ok: boolean; defects: string[] } {
   const parsed = executionReceiptSchema.safeParse(receipt);
@@ -126,17 +233,40 @@ export function verifyExecutionReceipt(receipt: unknown, expected: unknown): { o
   if (executionReceiptHash(core) !== receiptHash) defects.push("receipt_hash_invalid");
   const { manifest: m, authorization: a, verification: v, readback: r } = core;
   const b = binding.data;
-  if (m.workItemId !== b.workItemId) defects.push("work_item_binding_mismatch");
-  if (m.attemptId !== b.attemptId) defects.push("attempt_binding_mismatch");
-  if (m.workerId !== b.workerId) defects.push("worker_binding_mismatch");
-  if (m.actionHash !== b.actionHash) defects.push("action_binding_mismatch");
-  if (m.admittedPlanHash !== b.admittedPlanHash) defects.push("plan_binding_mismatch");
-  if (m.manifestHash !== b.manifestHash) defects.push("manifest_binding_mismatch");
-  if (a.leaseId !== b.leaseId) defects.push("lease_mismatch");
-  if (a.claimTokenHash !== b.claimTokenHash) defects.push("claim_mismatch");
-  if (a.capabilityId !== b.capabilityId) defects.push("capability_mismatch");
-  if (a.audit.eventHash !== b.policyAuditEventHash) defects.push("policy_audit_mismatch");
-  if (v.audit.eventHash !== b.verificationAuditEventHash) defects.push("verification_audit_mismatch");
-  if (r.audit.eventHash !== b.readbackAuditEventHash) defects.push("readback_audit_mismatch");
+  const check = (holds: boolean, defect: string) => {
+    if (!holds) defects.push(defect);
+  };
+
+  check(m.workItemId === b.workItemId, "work_item_binding_mismatch");
+  check(m.attemptId === b.attemptId, "attempt_binding_mismatch");
+  check(m.workerId === b.workerId, "worker_binding_mismatch");
+  check(m.actionHash === b.actionHash, "action_binding_mismatch");
+  check(m.admittedPlanHash === b.admittedPlanHash, "plan_binding_mismatch");
+  check(m.manifestHash === b.manifestHash, "manifest_binding_mismatch");
+  check(m.testEvidence?.validationRunId === b.validationRunId, "validation_run_binding_mismatch");
+
+  check(a.actorId === b.actorId, "actor_binding_mismatch");
+  check(a.leaseId === b.leaseId, "lease_mismatch");
+  check(a.claimTokenHash === b.claimTokenHash, "claim_mismatch");
+  check(a.capabilityId === b.capabilityId, "capability_mismatch");
+  check(a.policyDecision === b.policyDecision, "policy_decision_mismatch");
+  check(sameApproval(a.approval, b.approval), "approval_binding_mismatch");
+  check(sameRef(a.audit, b.policyAudit), "policy_audit_mismatch");
+
+  check(v.implementerEngineId === b.implementerEngineId, "implementer_binding_mismatch");
+  check(v.implementerProviderId === b.implementerProviderId, "implementer_provider_binding_mismatch");
+  check(sameReviewers(v.reviewers, b.reviewers), "reviewer_binding_mismatch");
+  check(b.reviewers.length >= b.reviewersRequired, "canonical_reviewers_insufficient");
+  check(v.reviewers.length >= b.reviewersRequired, "insufficient_reviewers");
+  if (b.requireIndependentProvider) {
+    const providers = v.reviewers.map((reviewer) => reviewer.verifierProviderId);
+    check(
+      new Set(providers).size === providers.length && !providers.includes(v.implementerProviderId),
+      "provider_not_independent"
+    );
+  }
+  check(v.criteriaPassed === b.criteriaPassed, "criteria_binding_mismatch");
+  check(sameRef(v.audit, b.verificationAudit), "verification_audit_mismatch");
+  check(sameRef(r.audit, b.readbackAudit), "readback_audit_mismatch");
   return { ok: defects.length === 0, defects };
 }
