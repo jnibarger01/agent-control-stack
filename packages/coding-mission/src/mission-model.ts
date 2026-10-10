@@ -181,7 +181,13 @@ export type WorkUnitPayload =
   | { kind: "shell"; argv: string[]; cwd?: string }
   | { kind: "tool"; toolName: string; argsHash?: string }
   | { kind: "desktop"; objective: string }
-  | { kind: "cua"; objective: string; allowedApplications?: string[] }
+  | {
+      kind: "cua";
+      objective: string;
+      allowedApplications?: string[];
+      allowedOrigins?: string[];
+      actions?: CuaAction[];
+    }
   | { kind: "verification"; targetUnitId: string }
   | { kind: "agent"; role: string; prompt: string }
   | {
@@ -198,6 +204,66 @@ const isString = (value: unknown, max = 4096): value is string =>
 const isStringList = (value: unknown, max = 256): value is string[] =>
   Array.isArray(value) && value.length <= max && value.every((entry) => isString(entry));
 
+export const CUA_ACTION_TYPES = ["observe", "click", "type", "scroll", "navigate"] as const;
+export type CuaActionType = (typeof CUA_ACTION_TYPES)[number];
+
+/** Browser actions a CUA work unit may already carry. No script, shell, or evaluate. */
+export type CuaAction =
+  | { type: "observe" }
+  | { type: "click"; selector: string }
+  | { type: "type"; selector: string; text: string }
+  | { type: "scroll"; dx: number; dy: number }
+  | { type: "navigate"; url: string };
+
+const CUA_ACTION_FIELDS: Record<CuaActionType, readonly string[]> = {
+  observe: ["type"],
+  click: ["type", "selector"],
+  type: ["type", "selector", "text"],
+  scroll: ["type", "dx", "dy"],
+  navigate: ["type", "url"]
+};
+
+function parseExactHttpOrigin(value: unknown): string | undefined {
+  if (!isString(value, 256) || /[\s*\\]/u.test(value)) return undefined;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username !== "" || url.password !== "") {
+    return undefined;
+  }
+  return value === url.origin ? url.origin : undefined;
+}
+
+function parseCuaAction(value: unknown): CuaAction | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.type !== "string" ||
+    !(CUA_ACTION_TYPES as readonly string[]).includes(value.type)
+  ) {
+    return undefined;
+  }
+  const type = value.type as CuaActionType;
+  if (Object.keys(value).some((key) => !CUA_ACTION_FIELDS[type].includes(key))) return undefined;
+  if (type === "observe") return { type };
+  if (type === "click") return isString(value.selector, 512) ? { type, selector: value.selector } : undefined;
+  if (type === "type") {
+    return isString(value.selector, 512) && isString(value.text, 4096)
+      ? { type, selector: value.selector, text: value.text }
+      : undefined;
+  }
+  if (type === "scroll") {
+    const bounded = (entry: unknown) =>
+      typeof entry === "number" && Number.isInteger(entry) && Math.abs(entry) <= 1_000_000;
+    return bounded(value.dx) && bounded(value.dy)
+      ? { type, dx: value.dx as number, dy: value.dy as number }
+      : undefined;
+  }
+  return isString(value.url, 2048) ? { type, url: value.url } : undefined;
+}
+
 /** Validate an untrusted payload for a unit kind. Unknown fields are rejected so a payload cannot smuggle authority. */
 export function parseWorkUnitPayload(kind: WorkUnitKind, value: unknown): WorkUnitPayload {
   const invalid = (reason: string): never => {
@@ -210,7 +276,7 @@ export function parseWorkUnitPayload(kind: WorkUnitKind, value: unknown): WorkUn
     shell: ["argv", "cwd"],
     tool: ["toolName", "argsHash"],
     desktop: ["objective"],
-    cua: ["objective", "allowedApplications"],
+    cua: ["objective", "allowedApplications", "allowedOrigins", "actions"],
     verification: ["targetUnitId"],
     agent: ["role", "prompt"],
     swarm: ["strategy", "fanOut"],
@@ -252,18 +318,43 @@ export function parseWorkUnitPayload(kind: WorkUnitKind, value: unknown): WorkUn
     case "desktop":
       if (!isString(value.objective, 8192)) return invalid("requires objective");
       return { kind, objective: value.objective };
-    case "cua":
+    case "cua": {
       if (!isString(value.objective, 8192)) return invalid("requires objective");
       if (value.allowedApplications !== undefined && !isStringList(value.allowedApplications, 64)) {
         return invalid("has bad allowedApplications");
+      }
+      let allowedOrigins: string[] | undefined;
+      if (value.allowedOrigins !== undefined) {
+        if (!Array.isArray(value.allowedOrigins) || value.allowedOrigins.length > 64) {
+          return invalid("has bad allowedOrigins");
+        }
+        allowedOrigins = [];
+        for (const origin of value.allowedOrigins) {
+          const parsed = parseExactHttpOrigin(origin);
+          if (!parsed) return invalid("has bad allowedOrigins");
+          allowedOrigins.push(parsed);
+        }
+      }
+      let actions: CuaAction[] | undefined;
+      if (value.actions !== undefined) {
+        if (!Array.isArray(value.actions) || value.actions.length > 32) return invalid("has bad actions");
+        actions = [];
+        for (const action of value.actions) {
+          const parsed = parseCuaAction(action);
+          if (!parsed) return invalid("has bad actions");
+          actions.push(parsed);
+        }
       }
       return {
         kind,
         objective: value.objective,
         ...(value.allowedApplications === undefined
           ? {}
-          : { allowedApplications: value.allowedApplications as string[] })
+          : { allowedApplications: value.allowedApplications as string[] }),
+        ...(allowedOrigins === undefined ? {} : { allowedOrigins }),
+        ...(actions === undefined ? {} : { actions })
       };
+    }
     case "verification":
       if (!isString(value.targetUnitId, 128)) return invalid("requires targetUnitId");
       return { kind, targetUnitId: value.targetUnitId };

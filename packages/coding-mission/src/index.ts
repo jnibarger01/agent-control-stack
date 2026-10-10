@@ -36,6 +36,7 @@ export type {
 } from "./store.js";
 
 export * from "./worker-execution.js";
+export * from "./cua-execution.js";
 export * from "./verification-gate.js";
 export * from "./authority.js";
 export * from "./child-work.js";
