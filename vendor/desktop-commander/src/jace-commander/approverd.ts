@@ -187,6 +187,13 @@ export class Approverd {
   async start(): Promise<void> {
     fs.mkdirSync(this.approvalsDir, { recursive: true, mode: 0o700 });
     this.privateKey = loadPrivateKey(this.config.keyPath);
+    // The request group (the server identity) and the decide group (humans) must be disjoint,
+    // or the model could reach decide.sock and approve its own requests.
+    const requestGid = resolveGid(this.config.requestGroup);
+    const decideGid = resolveGid(this.config.decideGroup);
+    if (requestGid !== undefined && requestGid === decideGid) {
+      throw new Error('requestGroup and decideGroup resolve to the same group; refusing to start');
+    }
     this.loadRecords();
     this.servers = [
       await this.listen(this.config.requestSocket, this.config.requestGroup, (message) => this.handleRequestOp(message)),
@@ -268,7 +275,13 @@ export class Approverd {
     record.status = 'claimed';
     record.claimedAt = new Date(now).toISOString();
     record.tokenId = tokenId;
-    this.persist(record);
+    // The claimed state must be durable BEFORE authority leaves the daemon; otherwise a crash
+    // could revert the file to `approved` and let the same approval mint a second token.
+    try {
+      this.persist(record);
+    } catch {
+      return { ok: false, code: 'PERSIST_UNAVAILABLE' };
+    }
     const token = signLocalToken({
       privateKey: this.privateKey as crypto.KeyObject,
       keyId: this.config.keyId,
@@ -352,8 +365,20 @@ export class Approverd {
   private persist(record: ApprovalRecord): void {
     const target = path.join(this.approvalsDir, `${record.id}.json`);
     const temp = `${target}.${process.pid}.tmp`;
-    fs.writeFileSync(temp, JSON.stringify(record), { mode: 0o600 });
+    const fd = fs.openSync(temp, 'w', 0o600);
+    try {
+      fs.writeFileSync(fd, JSON.stringify(record));
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
     fs.renameSync(temp, target);
+    const dirFd = fs.openSync(this.approvalsDir, 'r');
+    try {
+      fs.fsyncSync(dirFd);
+    } finally {
+      fs.closeSync(dirFd);
+    }
   }
 
   private loadRecords(): void {

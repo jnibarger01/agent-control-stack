@@ -93,6 +93,13 @@ if (!JC && !process.env.DC_CWD) {
 }
 const DC_CWD = JC ? JC_DIR : process.env.DC_CWD || path.dirname(DC_ARGS[0]);
 const EXECUTION_TOKEN = process.env.DC_GATEWAY_EXECUTION_TOKEN || "";
+// ADR 0026: under the local preset nothing but the authenticated gateway may reach the
+// child (no ACS capability stands behind read:allow), so gateway attestation is mandatory.
+const JC_LOCAL = JC && process.env.JC_PRESET === "local";
+if (JC_LOCAL && !EXECUTION_TOKEN) {
+  console.error("bridge: JC_PRESET=local requires DC_GATEWAY_EXECUTION_TOKEN so gateway attestation can be enforced; refusing to start");
+  process.exit(1);
+}
 const GATEWAY_ATTESTATION_KEY = process.env.DC_GATEWAY_ATTESTATION_KEY || "";
 const PIPELINE_ACS_PUBLIC_KEY = process.env.DC_ACS_CAPABILITY_PUBLIC_KEY || "";
 const PIPELINE_ACS_KEY_ID = process.env.DC_ACS_CAPABILITY_KEY_ID || "";
@@ -133,7 +140,11 @@ const JC_CHILD_ENV_KEYS = [
   // The decide socket path is for the operator CLI and is deliberately not forwarded.
   "JC_APPROVER_SOCKET",
   "JC_APPROVER_PUBLIC_KEY",
-  "JC_APPROVER_KEY_ID"
+  "JC_APPROVER_KEY_ID",
+  // Best-effort trace mirror (ADR 0026 D5); off unless the URL is set.
+  "JC_ACS_MIRROR_URL",
+  "JC_ACS_MIRROR_INTERVAL_MS",
+  "JC_ACS_MIRROR_MAX_PENDING"
 ];
 // ADR 0026: the `local` preset authorizes locally, so ACS verification material is
 // optional there (tools the policy routes to ACS then fail closed without it).
@@ -1114,6 +1125,11 @@ const httpServer = http.createServer(async (req, res) => {
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "not_found" }));
     return;
+  }
+
+  if (JC_LOCAL && !verifyAttestation(req.headers["x-dc-attestation"] || "", req.headers["x-dc-agent"])) {
+    console.error("bridge: local preset requires a valid gateway attestation; rejecting without forward");
+    return sendJsonRpcError(res, 401, -32001, "gateway attestation required");
   }
 
   if (EXECUTION_TOKEN && req.method === "POST") {

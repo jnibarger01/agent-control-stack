@@ -8,7 +8,7 @@
  */
 import os from 'node:os';
 import { approverCall, ApproverUnavailable } from './approver-client.js';
-import { redactSecrets } from './looptrace.js';
+import { redactArgv, redactSecrets } from './looptrace.js';
 
 export interface ApproveIo {
   stdout(text: string): void;
@@ -30,7 +30,14 @@ const ID = /^[A-Za-z0-9._:-]{1,128}$/;
 
 function displayArgs(args: unknown): string {
   // Display only: the approval binds the exact bytes via the invocation hash.
-  return redactSecrets(JSON.stringify(args, null, 2)).text;
+  // argv is redacted entry-aware first: a secret in the entry AFTER `--password` is invisible to
+  // a text pass over the serialized object.
+  let shown = args;
+  if (args && typeof args === 'object' && Array.isArray((args as { argv?: unknown }).argv)
+      && (args as { argv: unknown[] }).argv.every((entry) => typeof entry === 'string')) {
+    shown = { ...(args as Record<string, unknown>), argv: redactArgv((args as { argv: string[] }).argv) };
+  }
+  return redactSecrets(JSON.stringify(shown, null, 2)).text;
 }
 
 export async function runApproveCommand(command: 'approve' | 'reject' | 'pending', args: string[], deps: ApproveDeps): Promise<number> {

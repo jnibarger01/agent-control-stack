@@ -486,5 +486,39 @@ await test('doctor/status: approver health, and a server that can open decide.so
   await info.daemon.stop();
 });
 
+await test('review hardening: overlapping request/decide groups refuse startup; argv secrets are redacted in the approval display; claim is durable', async () => {
+  const gid = process.getgid();
+  await assert.rejects(makeApprover({ requestGroup: gid, decideGroup: gid }), /same group/);
+
+
+  const info = await makeApprover();
+  const client = new ApproverClient(info.config.requestSocket, RUNTIME, 2000);
+  const args = { argv: ['/usr/bin/tool', '--password', 'hunter2'], cwd: root };
+  const pending = await client.authorize('start_process', args);
+  assert.equal(pending.state, 'pending');
+  const hash = computeLocalInvocationHash(RUNTIME, 'start_process', args);
+  const out = [];
+  const code = await runApproveCommand('approve', [pending.approvalId], {
+    decideSocket: info.config.decideSocket,
+    approverId: 'tester',
+    io: { stdout: (t) => out.push(t), stderr: (t) => out.push(t), isTty: true, prompt: async () => 'no' },
+  });
+  assert.notEqual(code, APPROVE_EXIT.ok);
+  const shown = out.join('\n');
+  assert.doesNotMatch(shown, /hunter2/);
+  assert.match(shown, /REDACTED/);
+
+  // Claimed state is on disk before the token is returned.
+  await runApproveCommand('approve', [pending.approvalId], {
+    decideSocket: info.config.decideSocket, approverId: 'tester',
+    io: { stdout() {}, stderr() {}, isTty: true, prompt: async () => hash.slice(0, 8) },
+  });
+  const granted = await client.authorize('start_process', args);
+  assert.equal(granted.state, 'granted');
+  const onDisk = JSON.parse(fs.readFileSync(path.join(info.config.stateDir, 'approvals', `${pending.approvalId}.json`), 'utf8'));
+  assert.equal(onDisk.status, 'claimed');
+  await info.daemon.stop();
+});
+
 fs.rmSync(root, { recursive: true, force: true });
 console.log(`\njace-commander approval: ${passed} passed`);

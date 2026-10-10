@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { JcConfig } from './config.js';
+import { createAuthorizerResolver } from './authorizers.js';
 import { acsReadyUrl } from './integrations.js';
 import { JC_MANIFEST } from './manifest.generated.js';
 import { DEFAULT_PRIVILEGED_CONFIG_PATH } from './privileged-core.js';
@@ -120,7 +121,10 @@ export async function jcDoctor(config: JcConfig, runtime: DoctorRuntime): Promis
   }
   if (runtime.approver && runtime.policy) {
     const health = await runtime.approver();
-    const needed = Object.values(runtime.policy.effective.classDecisions).includes('approve');
+    // Only calls that are routed to the LOCAL authorizer AND decided `approve` ever reach a human.
+    const decisions = runtime.policy.effective.classDecisions as Record<string, string>;
+    const needed = createAuthorizerResolver('local', runtime.policy.effective.authorizerTable)
+      .routes().some((route) => route.authorizer === 'local' && decisions[route.riskClass] === 'approve');
     const separated = health.serverCanDecide !== true;
     checks.push({
       name: 'local approver',
