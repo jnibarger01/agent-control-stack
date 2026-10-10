@@ -258,20 +258,47 @@ export function gateWorkerClaim(
   return store.withTransaction(() => gateWorkerClaimInTransaction(store, policy, parsed));
 }
 
+/**
+ * Claim-time re-evaluation said the item now needs approval, but it was approved earlier (for example
+ * under the command-blind read-only rule). Send it back to `needs_approval` so a human sees it again.
+ * The policy decision itself is already on the audit chain via `evaluateAndRecordPolicy`. Approved has
+ * no direct edge to needs_approval, so this goes approved -> blocked -> pending_policy -> needs_approval,
+ * each step an audited status event. It is never left blocked and never dropped.
+ */
+function returnApprovedItemToApproval(store: WorkItemStore, id: string): void {
+  store.blockWorkItem(id, policyTransition);
+  store.unblockWorkItem(id, policyTransition);
+  store.transition(id, "needs_approval", policyTransition);
+}
+
 function gateWorkerClaimInTransaction(
   store: WorkItemStore,
   policy: PolicyEngine,
   parsed: z.infer<typeof claimInputSchema>
 ): ClaimedWorkItem | undefined {
-  const candidate = store
+  const candidates = store
     .list({ status: "approved" })
     .filter((workItem) => store.isWorkItemEligibleForWorker(workItem, parsed.workerId, ACS_ADMIN_APPROVER))
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
-    .find((workItem) => authoritativeRouteAllows(store, workItem.id, parsed.workerId));
-  if (!candidate) {
-    return undefined;
+    .filter((workItem) => authoritativeRouteAllows(store, workItem.id, parsed.workerId));
+  for (const candidate of candidates) {
+    const outcome = claimSelectedCandidate(store, policy, parsed, candidate);
+    // A stale candidate was returned to needs_approval. Later approved items may still be executable, so
+    // keep scanning instead of spending this one-shot claim on the stale item.
+    if (outcome !== REQUEUED) return outcome;
   }
+  return undefined;
+}
 
+/** Sentinel: the selected candidate was returned to approval, so the caller should try the next one. */
+const REQUEUED = Symbol("requeued");
+
+function claimSelectedCandidate(
+  store: WorkItemStore,
+  policy: PolicyEngine,
+  parsed: z.infer<typeof claimInputSchema>,
+  candidate: WorkItem
+): ClaimedWorkItem | undefined | typeof REQUEUED {
   const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, candidate, parsed.workerId, "claim");
   const plan = ensureExecutionPlan(store, candidate, parsed.workerId);
   const policyDecisionHash = stableHash({
@@ -301,6 +328,10 @@ function gateWorkerClaimInTransaction(
   const planApprovals = required.map((evaluation) =>
     store.getExecutionPlanApproval(candidate.id, plan.planHash, evaluation.actionHash)
   );
+  if (decision.decision === "require_approval" && (missing || planApprovals.some((approval) => !approval))) {
+    returnApprovedItemToApproval(store, candidate.id);
+    return REQUEUED;
+  }
   if (decision.decision === "deny" || !admission || missing || planApprovals.some((approval) => !approval)) {
     const blocked = store.blockWorkItem(candidate.id, policyTransition);
     return {
@@ -418,6 +449,10 @@ function gateWorkerClaimByIdInTransaction(
   const planApprovals = required.map((evaluation) =>
     store.getExecutionPlanApproval(candidate.id, plan.planHash, evaluation.actionHash)
   );
+  if (decision.decision === "require_approval" && (missing || planApprovals.some((approval) => !approval))) {
+    returnApprovedItemToApproval(store, candidate.id);
+    return undefined;
+  }
   if (decision.decision === "deny" || !admission || missing || planApprovals.some((approval) => !approval)) {
     const blocked = store.blockWorkItem(candidate.id, policyTransition);
     return {
