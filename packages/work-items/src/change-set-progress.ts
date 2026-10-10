@@ -13,6 +13,11 @@ import {
 } from "./change-set-operation-permit.js";
 import { assertChangeSetEvidenceAudit, verifyChangeSetReviews, sameReview } from "./change-set-review.js";
 import type { WorkItemStore } from "./store.js";
+import {
+  authoritativeOperationReceiptSchema,
+  authoritativeReceiptBundleHash,
+  buildAuthoritativeCompletionReceipts
+} from "./authoritative-completion-receipt.js";
 
 const id = z.string().min(1).max(256);
 const hash = z.string().regex(/^[a-f0-9]{64}$/u);
@@ -50,6 +55,8 @@ export const changeSetCompletionCoreSchema = z
     authorityId: id,
     policyHash: hash,
     operations: z.array(changeSetOperationProgressSchema).min(1).max(512),
+    /** Historical v1 completions lack receipts; all new completions include them. */
+    operationReceipts: z.array(authoritativeOperationReceiptSchema).min(1).max(512).optional(),
     completedAt: z.string().datetime({ offset: true })
   })
   .strict();
@@ -385,6 +392,22 @@ export function readChangeSetProgress(
       event.body.manifestHash !== record.manifestHash
     )
       fail();
+    if (core.operationReceipts) {
+      const source = changeSetProgressSchema.parse({
+        schemaVersion: "acs.change-set.progress.v1",
+        missionId: mission.id,
+        manifestHash: record.manifestHash,
+        revision: record.snapshot.revision,
+        operations
+      });
+      const rebuilt = buildAuthoritativeCompletionReceipts(db, store, record, source);
+      const expectedBundleHash = authoritativeReceiptBundleHash(rebuilt);
+      if (
+        strictCanonicalJsonV1(rebuilt) !== strictCanonicalJsonV1(core.operationReceipts) ||
+        event.body.receiptBundleHash !== expectedBundleHash
+      )
+        fail();
+    } else if (event.body.receiptBundleHash !== undefined) fail();
   } else if (mission.status === "succeeded") fail();
   return changeSetProgressSchema.parse({
     schemaVersion: "acs.change-set.progress.v1",

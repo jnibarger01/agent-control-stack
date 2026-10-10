@@ -188,6 +188,41 @@ describe("route enrichment (ADR 0025)", () => {
     });
   });
 
+  it("fails closed when the policy allow-list leaves no strategy, for routes and fallbacks", async () => {
+    for (const [ids, allowedStrategies] of [
+      [["alpha", "beta"], []],
+      [["alpha"], ["cua_recovery"]]
+    ] as const) {
+      const fx = open([...ids]);
+      let asked = 0;
+      const result = await route(fx, "alpha", {
+        workUnit: unit("none", "shell"),
+        routePolicy: { allowedStrategies },
+        strategyChooser: () => {
+          asked += 1;
+          return "single";
+        }
+      });
+      expect(result).toMatchObject({ decision: "reject", reasonCode: "route_strategy_rejected" });
+      expect(result.executorId).toBeUndefined();
+      expect(result.enrichment).toBeUndefined();
+      expect(asked).toBe(0);
+      const stored = fx.store.getLatestAuthoritativeRoutingEvidence(fx.workItemId);
+      expect(stored).toMatchObject({ decision: "reject", reasonCode: "route_strategy_rejected" });
+      expect(stored?.normalizedDecision).toMatchObject({
+        strategyRejection: {
+          reasons: [
+            {
+              code: "allowed_strategies_rejected",
+              detail: allowedStrategies.length === 0 ? "empty" : allowedStrategies.join(",")
+            }
+          ],
+          deterministicEvidence: expect.arrayContaining([{ kind: "candidate_strategies", value: [] }])
+        }
+      });
+    }
+  });
+
   it("enriches a deterministic fallback and a sole-candidate route too", async () => {
     const solo = open(["alpha"]);
     const sole = await route(solo, "alpha", { workUnit: unit() });

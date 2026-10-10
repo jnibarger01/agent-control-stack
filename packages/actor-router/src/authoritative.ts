@@ -12,6 +12,8 @@ import { NIMBLE_PROMPT_VERSION, NIMBLE_ROUTER_VERSION, type NimbleRoutingConfig 
 import { routeActor, type ActorRoutingInput } from "./index.js";
 import { startRouteShadow, type RouteShadowOptions } from "./route-shadow.js";
 import {
+  RouteStrategyRejectedError,
+  candidateStrategies,
   deriveRouteEnrichment,
   recommendStrategy,
   type RoutePolicy,
@@ -261,7 +263,18 @@ async function decideRoute(options: DecideAuthoritativeRouteOptions): Promise<Au
   const accepted = acceptNimbleChoice(nimble, eligibleAgents, options.config);
   if (accepted.kind === "route") {
     const agent = eligibleAgents.find((candidate) => candidate.id === accepted.executorId)!;
-    const enrichment = await enrich(options, eligibleAgents.length);
+    const enriched = await enrich(options, eligibleAgents.length);
+    if (enriched.kind === "rejected") {
+      return strategyRejected(
+        options,
+        enriched.rejection,
+        eligibleAgents,
+        excluded,
+        eligibility.scores,
+        publicNimble(nimble)
+      );
+    }
+    const enrichment = enriched.enrichment;
     return persist(options, {
       decision: "route",
       source: "nimble",
@@ -362,7 +375,11 @@ async function fallback(
     });
   }
   const agent = eligibleAgents.find((candidate) => candidate.id === selected);
-  const enrichment = await enrich(options, eligibleAgents.length);
+  const enriched = await enrich(options, eligibleAgents.length);
+  if (enriched.kind === "rejected") {
+    return strategyRejected(options, enriched.rejection, eligibleAgents, excluded, scores, normalized);
+  }
+  const enrichment = enriched.enrichment;
   return persist(options, {
     decision: "fallback",
     ...(enrichment ? { enrichment } : {}),
@@ -383,22 +400,57 @@ async function fallback(
  * Derive the structured strategy for a work-unit route. The candidate set comes from hard policy; a chooser's
  * recommendation is only ever one input to be validated against it. Routes without a work-unit context get none.
  */
-async function enrich(
-  options: DecideAuthoritativeRouteOptions,
-  eligibleCount: number
-): Promise<RouteEnrichment | undefined> {
+type EnrichOutcome =
+  | { kind: "enriched"; enrichment: RouteEnrichment | undefined }
+  | { kind: "rejected"; rejection: RouteStrategyRejectedError };
+
+async function enrich(options: DecideAuthoritativeRouteOptions, eligibleCount: number): Promise<EnrichOutcome> {
   const unit = options.context.workUnit;
-  if (!unit) return undefined;
+  if (!unit) return { kind: "enriched", enrichment: undefined };
   const policy = options.context.routePolicy ?? {};
-  const candidates = deriveRouteEnrichment({ unit, eligibleCount, policy }).deterministicEvidence.find(
-    (item) => item.kind === "candidate_strategies"
-  )?.value;
-  const recommended = await recommendStrategy(options.strategyChooser, {
-    candidates: Array.isArray(candidates) ? (candidates as never) : ["single"],
-    unit,
-    eligibleCount
+  const { candidates } = candidateStrategies(unit, eligibleCount, policy);
+  // Fail closed: with no permitted strategy the chooser is never asked and no default is substituted.
+  const recommended =
+    candidates.length === 0
+      ? undefined
+      : await recommendStrategy(options.strategyChooser, { candidates, unit, eligibleCount });
+  try {
+    return {
+      kind: "enriched",
+      enrichment: deriveRouteEnrichment({
+        unit,
+        eligibleCount,
+        policy,
+        ...(recommended === undefined ? {} : { recommended })
+      })
+    };
+  } catch (error) {
+    if (error instanceof RouteStrategyRejectedError) return { kind: "rejected", rejection: error };
+    throw error;
+  }
+}
+
+function strategyRejected(
+  options: DecideAuthoritativeRouteOptions,
+  rejection: RouteStrategyRejectedError,
+  eligibleAgents: RegistryAgentDetail[],
+  excluded: Record<string, string[]>,
+  scores: Record<string, number>,
+  normalized: Record<string, unknown>
+): AuthoritativeRouteResult {
+  return persist(options, {
+    decision: "reject",
+    source: "deterministic_fallback",
+    reasonCode: "route_strategy_rejected",
+    eligibleAgents,
+    excluded,
+    scores,
+    normalized: {
+      ...normalized,
+      strategyRejection: { reasons: rejection.reasons, deterministicEvidence: rejection.deterministicEvidence }
+    },
+    disposition: "fresh"
   });
-  return deriveRouteEnrichment({ unit, eligibleCount, policy, ...(recommended === undefined ? {} : { recommended }) });
 }
 
 function persist(
