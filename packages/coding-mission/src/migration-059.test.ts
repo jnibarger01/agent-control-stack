@@ -1,4 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { applyControlPlaneMigrations, controlPlaneMigrations } from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
 
@@ -7,8 +10,8 @@ import { describe, expect, it } from "vitest";
  * runner: schema through 056 plus canonical schema_migrations rows, so
  * applyControlPlaneMigrations upgrades it through 057+ the way a real deploy would.
  */
-function databaseAt056(): DatabaseSync {
-  const db = new DatabaseSync(":memory:");
+function databaseAt056(filename = ":memory:"): DatabaseSync {
+  const db = new DatabaseSync(filename);
   db.exec("PRAGMA foreign_keys = ON");
   db.exec(`CREATE TABLE schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -98,7 +101,54 @@ describe("migration 059: restore terminal units rewritten by migration 057", () 
     db.close();
   });
 
-  it("repairs a database that already ran 057 and does not touch units changed since", () => {
+  it("keeps an exclusive writer boundary from 057 quarantine through 059 restoration", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-057-059-lock-"));
+    const filename = join(dir, "upgrade.sqlite");
+    const db = databaseAt056(filename);
+    const competitor = new DatabaseSync(filename);
+    try {
+      seedMission(db, "m-done", "COMPLETED");
+      seedUnit(db, "m-done", "u-succeeded", "succeeded", null);
+      competitor.exec("PRAGMA busy_timeout = 0");
+      let quarantinedInThisRun = false;
+      let restorationReached = false;
+      let competingWriteRefused = false;
+      const monitored = {
+        prepare: (sql: string) => db.prepare(sql),
+        exec: (sql: string) => {
+          if (sql === "COMMIT" && quarantinedInThisRun && !restorationReached) {
+            throw new Error("writer lock released between migration 057 and 059");
+          }
+          db.exec(sql);
+          if (sql.includes("CREATE TABLE work_unit_verification_quarantine")) {
+            quarantinedInThisRun = true;
+          }
+          if (sql.includes("CREATE TABLE work_unit_verification_runs")) {
+            // Probe at 058, after the 057 update: a live retry from another
+            // SQLite connection must be refused by the still-held write lock.
+            expect(() => competitor.exec(
+              "UPDATE coding_operations SET title = 'concurrent retry' WHERE mission_id = 'm-done'"
+            )).toThrow();
+            competingWriteRefused = true;
+          }
+          if (sql.includes("verification.migration_057_terminal_restored")) {
+            restorationReached = true;
+          }
+        }
+      };
+      applyControlPlaneMigrations(monitored);
+      expect(quarantinedInThisRun).toBe(true);
+      expect(competingWriteRefused).toBe(true);
+      expect(restorationReached).toBe(true);
+      expect(unit(db, "m-done", "u-succeeded")).toEqual({ status: "succeeded", failure_category: null });
+    } finally {
+      competitor.close();
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses ambiguous restoration when 057 ran before this upgrade", () => {
     const db = databaseAt056();
     seedMission(db, "m-done", "COMPLETED");
     seedUnit(db, "m-done", "u-succeeded", "succeeded", null);
@@ -119,17 +169,53 @@ describe("migration 059: restore terminal units rewritten by migration 057", () 
       "UPDATE coding_operations SET failure_category = 'retry_budget_exhausted' WHERE mission_id = 'm-done' AND operation_id = 'u-reconciled'"
     ).run();
 
-    applyControlPlaneMigrations(db);
-
-    expect(unit(db, "m-done", "u-succeeded")).toEqual({ status: "succeeded", failure_category: null });
+    // A 057 installation made on a prior run is no longer safe to restore
+    // automatically: a later attempt can return to the same failure tuple.
+    expect(() => applyControlPlaneMigrations(db)).toThrow(/migration 059 refused ambiguous terminal restoration/);
+    expect(unit(db, "m-done", "u-succeeded")).toEqual({
+      status: "failed",
+      failure_category: "verification_failure"
+    });
     expect(unit(db, "m-done", "u-reconciled")).toEqual({
       status: "failed",
       failure_category: "retry_budget_exhausted"
     });
-    expect(quarantined(db)).toEqual([{ mission_id: "m-done", unit_id: "u-reconciled", previous_status: "succeeded" }]);
-    // Re-running the runner is a no-op.
-    applyControlPlaneMigrations(db);
-    expect(unit(db, "m-done", "u-succeeded")).toEqual({ status: "succeeded", failure_category: null });
+    expect(quarantined(db)).toEqual([
+      { mission_id: "m-done", unit_id: "u-reconciled", previous_status: "succeeded" },
+      { mission_id: "m-done", unit_id: "u-succeeded", previous_status: "succeeded" }
+    ]);
+    expect(db.prepare("SELECT version FROM schema_migrations WHERE version = 59").get()).toBeUndefined();
+    db.close();
+  });
+
+  it("does not turn a post-057 genuine retry failure back into success", () => {
+    const db = databaseAt056();
+    seedMission(db, "m-running", "RUNNING");
+    seedUnit(db, "m-running", "u-retried", "succeeded", null);
+    const insert = db.prepare(
+      "INSERT INTO schema_migrations (version, name, filename, checksum, applied_at) VALUES (?, ?, ?, ?, ?)"
+    );
+    for (const migration of controlPlaneMigrations().filter((entry) => entry.version === 57 || entry.version === 58)) {
+      db.exec(migration.sql);
+      insert.run(migration.version, migration.name, migration.filename, migration.checksum, "2026-10-08T00:00:00Z");
+    }
+    // The live mission retries after 057 and fails independent verification.
+    db.prepare(
+      "UPDATE coding_operations SET attempt = 2, status = 'failed', failure_category = 'verification_failure' WHERE mission_id = ? AND operation_id = ?"
+    ).run("m-running", "u-retried");
+    db.prepare(
+      "INSERT INTO coding_events (mission_id, name, body_json, created_at) VALUES (?, ?, ?, ?)"
+    ).run("m-running", "work_unit.retry_scheduled", '{"unitId":"u-retried","attempt":1}', "2026-10-08T00:01:00Z");
+
+    expect(() => applyControlPlaneMigrations(db)).toThrow(/migration 059 refused ambiguous terminal restoration/);
+    expect(unit(db, "m-running", "u-retried")).toEqual({
+      status: "failed",
+      failure_category: "verification_failure"
+    });
+    expect(quarantined(db)).toEqual([
+      { mission_id: "m-running", unit_id: "u-retried", previous_status: "succeeded" }
+    ]);
+    expect(db.prepare("SELECT version FROM schema_migrations WHERE version = 59").get()).toBeUndefined();
     db.close();
   });
 });
