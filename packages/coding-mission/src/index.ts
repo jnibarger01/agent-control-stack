@@ -24,6 +24,7 @@ export {
   type ValidationEvidence
 } from "./store.js";
 export * from "./mission-model.js";
+export * from "./mission-intelligence.js";
 export * from "./budget.js";
 export type {
   AddWorkUnitsResult,
@@ -36,3 +37,5 @@ export type {
 
 export * from "./worker-execution.js";
 export * from "./verification-gate.js";
+export * from "./authority.js";
+export * from "./child-work.js";
