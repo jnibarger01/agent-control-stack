@@ -93,7 +93,7 @@ Status key: NOT STARTED, IN PROGRESS, IMPLEMENTED, VERIFIED, INTEGRATED, BLOCKED
 
 | #   | Feature                           | Status      | Existing code on main                                                                                                                                                  | Gap (to be confirmed per slice)                                                                                  |
 | --- | --------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| 4   | Execution Flight Recorder         | NOT STARTED | hash-chained `audit_events`; `packages/evidence` (manifest, observation outbox, reader); `mission-trace.ts`                                                            | mission-level ordered replay API, retention policy, redaction audit, trust-assumption doc, UI                    |
+| 4   | Execution Flight Recorder         | IN PROGRESS | hash-chained `audit_events`; `packages/evidence` (manifest, observation outbox, reader); `mission-trace.ts`                                                            | mission-level ordered replay API, retention policy, redaction audit, trust-assumption doc, UI                    |
 | 9   | Delegated Authority Graph         | NOT STARTED | migration 060 `mission_authority`, `work_unit_authority` (intersection-only, write-once); `child-work.ts`; `authority-narrowing.ts`; autonomous authority grants (047) | graph query/history API, cascade revocation proof, cycle rejection test, restart/stale-claim negative tests, UI  |
 | 5   | Self-Healing Mission Runtime      | NOT STARTED | `packages/recovery` (bounded retry planner, startup reconciliation); lease/fencing (migration 058); `liveness.ts`                                                      | durable checkpoints, backoff scheduling, poison-work detection, operator escalation, duplicate-side-effect proof |
 | 2   | Dynamic Agent Swarm Builder       | NOT STARTED | `coding-mission` units/DAG/stages; `child-work.ts`; `actor-router`; `moa-orchestrator`; `adr/0017` Codex swarm                                                         | role-based composition, depth/child limits, resource-aware scheduling, teardown                                  |
@@ -108,19 +108,19 @@ Status key: NOT STARTED, IN PROGRESS, IMPLEMENTED, VERIFIED, INTEGRATED, BLOCKED
 
 Phase 1 first. Each slice is a vertical, separately reviewable PR off the then-current `origin/main`.
 
-| Slice | Scope                                                                                                                       | Depends on                   | Status      |
-| ----- | --------------------------------------------------------------------------------------------------------------------------- | ---------------------------- | ----------- |
-| 4.1   | Mission-scoped Flight Recorder read model over `audit_events` + evidence manifest, with integrity verdict and gap detection | none                         | NOT STARTED |
-| 4.2   | Retention policy + redaction verification + trust-assumptions doc (documents external anchor need)                          | 4.1                          | NOT STARTED |
-| 9.1   | Authority graph query API + history + cycle/escalation/revocation-propagation adversarial tests                             | merged #323                  | NOT STARTED |
-| 5.1   | Durable checkpoint + backoff + poison-work classification in recovery, with fenced-resume test                              | 9.1 (authority revalidation) | NOT STARTED |
-| 2.1   | Swarm composition planner with depth/child/resource limits                                                                  | 9.1, 5.1                     | NOT STARTED |
-| 3.1   | Integration manager read-only reconcile (PR discovery, merge simulation, gate evaluation, no merge)                         | none (parallel)              | NOT STARTED |
-| 7.1   | Evidence-driven provider selection with recorded rationale                                                                  | none (parallel)              | NOT STARTED |
-| 1.1   | Outcome-grounded recommendations (advisory only)                                                                            | 4.1                          | NOT STARTED |
-| 6.1   | Fault-injection simulation harness on an isolated in-memory store                                                           | 5.1                          | NOT STARTED |
-| 8.1   | Real health probes, dependency map, incident log                                                                            | none (parallel)              | NOT STARTED |
-| 10.x  | Mission Control views and controls, one panel per backend slice                                                             | each backend                 | NOT STARTED |
+| Slice | Scope                                                                                                                                                  | Depends on                   | Status      |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------- | ----------- |
+| 4.1   | Mission-scoped Flight Recorder read model (chain, verifier, replay API, `GET /coding-missions/:id/flight-record`; design in `docs/flight-recorder.md`) | none                         | IMPLEMENTED |
+| 4.2   | Retention policy + redaction verification + trust-assumptions doc (documents external anchor need)                                                     | 4.1                          | NOT STARTED |
+| 9.1   | Authority graph query API + history + cycle/escalation/revocation-propagation adversarial tests                                                        | merged #323                  | NOT STARTED |
+| 5.1   | Durable checkpoint + backoff + poison-work classification in recovery, with fenced-resume test                                                         | 9.1 (authority revalidation) | NOT STARTED |
+| 2.1   | Swarm composition planner with depth/child/resource limits                                                                                             | 9.1, 5.1                     | NOT STARTED |
+| 3.1   | Integration manager read-only reconcile (PR discovery, merge simulation, gate evaluation, no merge)                                                    | none (parallel)              | NOT STARTED |
+| 7.1   | Evidence-driven provider selection with recorded rationale                                                                                             | none (parallel)              | NOT STARTED |
+| 1.1   | Outcome-grounded recommendations (advisory only)                                                                                                       | 4.1                          | NOT STARTED |
+| 6.1   | Fault-injection simulation harness on an isolated in-memory store                                                                                      | 5.1                          | NOT STARTED |
+| 8.1   | Real health probes, dependency map, incident log                                                                                                       | none (parallel)              | NOT STARTED |
+| 10.x  | Mission Control views and controls, one panel per backend slice                                                                                        | each backend                 | NOT STARTED |
 
 ## Slice log
 
@@ -128,8 +128,31 @@ Phase 1 first. Each slice is a vertical, separately reviewable PR off the then-c
 | --------------------------- | ----------------------------------------- | ------------- | -------------- | ------- | ----------- | ---------------------------------------------------------------------- |
 | 0 (recon, baseline, ledger) | `claude/acs-autonomous-operations-146dab` | _this commit_ | baseline above | not run | not pushed  | Baseline vitest has 1 environment failure; `npm run check` not yet run |
 
+Slice 4.1 (branch above, draft PR): migration **062** (061 is reserved by open draft #333, per `pr:preflight`),
+`packages/coding-mission/src/flight-recorder.ts`, all coding-mission event and evidence writes routed through it.
+
+Evidence so far (local, not yet CI): `typecheck`, `lint`, `contracts:check` clean. Full vitest on the pre-rebase tree:
+2885 passed, 0 failed, 90 skipped. Targeted vitest after rebase and renumber: 442 passed in 26 files. 24 recorder
+tests cover edit, delete-middle, delete-newest, reorder, edited and deleted operational rows, event and evidence
+written around the recorder, redaction, rollback atomicity, legacy rows, paging. One gateway test completes a real
+mission, replays it (17 records, derived state `COMPLETED` equals live), edits the database underneath, and gets
+`tampered`.
+
+**What 4.1 does not do yet (remaining risks, do not claim as done):**
+
+- No external integrity anchor. A consistent full-chain rewrite is detectable only by comparing `headHash` to a value
+  held elsewhere; the test `documents the limit` proves the gap. Needed: publish head hash to an append-only sink.
+- Tool-call parameters, target, file and commit changes are recorded only to the extent the existing mission events
+  carry them. Per-tool-invocation capture with authorization reference and policy decision is slice 4.3.
+- Only coding missions are covered; change-set missions keep `mission-trace.ts`, and receipts stay with #306.
+- No retention job (policy is "keep everything", documented). No Mission Control evidence viewer (Feature 10).
+- `acs:read` guards the endpoint. A dedicated audit scope is a contract-baseline decision, not made here.
+- Migration 062 leaves a gap at 061 until #333 lands. #331, #332, #333 touch `index.ts`, `worker-execution.ts`,
+  `migration.ts`, `state-machine.test.ts`; expect trivial conflicts on whichever lands second.
+- `work_unit.completed` in `store.ts` stamps wall-clock time rather than the injected clock (pre-existing; seen in the
+  replay). Not changed here.
+
 ## Next action
 
-Slice 4.1: read `packages/work-items/src/mission-trace.ts`, `packages/evidence/src/reader.ts` and `read-surface.ts`, and
-PR #306/#305 diffs to decide whether the mission-scoped recorder read model belongs on top of those PRs or can land
-independently on `main`.
+Push the branch, open the draft PR (reserves 062), read CI. Then slice 9.1 (authority graph query, history, cycle and
+escalation negative tests) on a fresh slice off `origin/main`, or 4.3 if CI shows a recorder problem first.
