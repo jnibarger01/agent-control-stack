@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readMissionFlightRecord, type MissionFlightRecord } from "./flight-recorder.js";
 import { NIMBLE_ROUTING_ALGORITHM_VERSION } from "@agent-control-stack/actor-router";
 import { ControlStackError, stableHash } from "@agent-control-stack/shared";
 import {
@@ -274,6 +275,12 @@ export class CodingMissionController {
       results.push(await this.runUntilStable(mission.missionId));
     }
     return results;
+  }
+
+  /** Tamper-evident replay of one mission. Throws coding_mission_not_found for an unknown mission. */
+  flightRecord(missionId: string, window: { afterSeq?: number; limit?: number } = {}): MissionFlightRecord {
+    this.store.require(missionId);
+    return readMissionFlightRecord(this.store.db, missionId, window);
   }
 
   listRecent(limit = 50): ApprovalView[] {

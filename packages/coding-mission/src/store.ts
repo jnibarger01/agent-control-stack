@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { ControlStackError, applyControlPlaneMigrations, stableHash } from "@agent-control-stack/shared";
+import { appendFlightRecord, appendMissionEvent } from "./flight-recorder.js";
 import { verificationCriterionSchema, type VerificationCriterion } from "@agent-control-stack/verification";
 import {
   BudgetDecision,
@@ -861,12 +862,22 @@ export class CodingMissionStore {
     const payloadJson = JSON.stringify(payload);
     const evidenceId = `${kind}:${stableHash(payload).slice(0, 16)}`;
     this.transaction(() => {
-      this.db
+      const inserted = this.db
         .prepare(
           `INSERT OR IGNORE INTO coding_evidence (mission_id, evidence_id, kind, payload_hash, payload_json, created_at)
            VALUES (?, ?, ?, ?, ?, ?)`
         )
         .run(missionId, evidenceId, kind, stableHash(payload), payloadJson, now);
+      if (Number(inserted.changes) === 1) {
+        // Chain the payload hash so a later in-place edit of the evidence row is detectable.
+        appendFlightRecord(this.db, {
+          missionId,
+          eventId: null,
+          kind: "evidence.recorded",
+          bodyJson: JSON.stringify({ evidenceId, kind, payloadHash: stableHash(payload) }),
+          createdAt: now
+        });
+      }
     });
   }
 
@@ -1680,9 +1691,10 @@ export class CodingMissionStore {
   }
 
   private event(missionId: string, name: string, body: unknown, now: string): void {
-    this.db
-      .prepare(`INSERT INTO coding_events (mission_id, name, body_json, created_at) VALUES (?, ?, ?, ?)`)
-      .run(missionId, name, JSON.stringify(scrub(body)), now);
+    // One path for every mission event: the operational row and its chained flight record commit together.
+    this.transaction(() => {
+      appendMissionEvent(this.db, missionId, name, body, now);
+    });
   }
 
   private mapMission(row: MissionRow): CodingMissionRecord {
@@ -1717,17 +1729,4 @@ export class CodingMissionStore {
       updatedAt: row.updated_at
     };
   }
-}
-
-function scrub(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map((entry) => scrub(entry));
-  if (value && typeof value === "object") {
-    const clean: Record<string, unknown> = {};
-    for (const [key, child] of Object.entries(value)) {
-      if (/token|secret|authorization|password|cookie|credential/i.test(key)) continue;
-      clean[key] = scrub(child);
-    }
-    return clean;
-  }
-  return value;
 }

@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { NIMBLE_ROUTING_ALGORITHM_VERSION } from "@agent-control-stack/actor-router";
 import type { CodingMissionPorts, ExternalOutcome } from "@agent-control-stack/coding-mission";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
@@ -106,6 +107,81 @@ describe("coding mission HTTP", () => {
     const replay = await app.inject({ method: "GET", url: "/coding-missions/mission-http" });
     expect(replay.json()).toMatchObject({ state: "COMPLETED" });
     await app.close();
+  });
+
+  it("replays a completed mission from the flight recorder and exposes later tampering", async () => {
+    directory = mkdtempSync(join(tmpdir(), "acs-coding-http-flight-"));
+    const dbPath = join(directory, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    store.registerActor({ id: "user", actorType: "HUMAN", displayName: "user", externalRef: "local_bearer:local-dev" });
+    store.close();
+    const headers = { authorization: `Bearer ${auth.token}` };
+    const app = buildGateway({ dbPath, logger: false, auth, codingMissionPorts: ports() });
+    const created = await app.inject({
+      method: "POST",
+      url: "/coding-missions",
+      headers,
+      payload: {
+        missionId: "mission-flight",
+        repository: "example/repo",
+        baseRef: "main",
+        baseSha: BASE,
+        summary: "Ship"
+      }
+    });
+    const waiting = created.json() as { changeSet: string };
+    await app.inject({
+      method: "POST",
+      url: "/coding-missions/mission-flight/approve",
+      headers,
+      payload: { expectedChangeSetHash: waiting.changeSet }
+    });
+
+    const anonymous = await app.inject({ method: "GET", url: "/coding-missions/mission-flight/flight-record" });
+    expect(anonymous.statusCode).toBe(401);
+    const unknown = await app.inject({ method: "GET", url: "/coding-missions/nope/flight-record", headers });
+    expect(unknown.statusCode).toBe(404);
+    const badQuery = await app.inject({
+      method: "GET",
+      url: "/coding-missions/mission-flight/flight-record?limit=0",
+      headers
+    });
+    expect(badQuery.statusCode).toBe(400);
+
+    const replay = await app.inject({ method: "GET", url: "/coding-missions/mission-flight/flight-record", headers });
+    expect(replay.statusCode).toBe(200);
+    const body = replay.json() as {
+      trustworthy: boolean;
+      verification: { verdict: string; recordCount: number; headHash: string };
+      reconstruction: { derivedState: string; liveState: string; consistentWithLive: boolean };
+      records: Array<{ kind: string }>;
+    };
+    expect(body.verification.verdict).toBe("verified");
+    expect(body.trustworthy).toBe(true);
+    expect(body.reconstruction).toMatchObject({
+      derivedState: "COMPLETED",
+      liveState: "COMPLETED",
+      consistentWithLive: true
+    });
+    expect(body.records.length).toBeGreaterThan(3);
+    expect(JSON.stringify(body)).not.toMatch(/bearer|authorization/i);
+    await app.close();
+
+    // Change history in the database underneath the running system. Verification must notice.
+    const raw = new DatabaseSync(dbPath);
+    raw.exec(`UPDATE coding_events SET body_json = '{"forged":true}' WHERE mission_id = 'mission-flight' AND event_id = (
+      SELECT MIN(event_id) FROM coding_events WHERE mission_id = 'mission-flight' AND name LIKE 'work_unit.%')`);
+    raw.close();
+    const reopened = buildGateway({ dbPath, logger: false, auth, codingMissionPorts: ports() });
+    const after = await reopened.inject({
+      method: "GET",
+      url: "/coding-missions/mission-flight/flight-record",
+      headers
+    });
+    const tampered = after.json() as { trustworthy: boolean; verification: { verdict: string } };
+    expect(tampered.verification.verdict).toBe("tampered");
+    expect(tampered.trustworthy).toBe(false);
+    await reopened.close();
   });
 
   it("fails closed without ports, without read scope, and for a mismatched change-set hash", async () => {
