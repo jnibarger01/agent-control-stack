@@ -186,6 +186,8 @@ describe("governed execution composition root", () => {
   it("close() releases the control-plane connections", () => {
     const w = world();
     w.exec.close();
+    // Both stores must be released, not just the first one closed.
     expect(() => w.exec.missions.workUnits(w.item.id)).toThrow();
+    expect(() => w.exec.items.get(w.item.id)).toThrow();
   });
 });
