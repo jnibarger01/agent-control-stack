@@ -197,6 +197,15 @@ describe("governed execution composition root", () => {
       expect(() => boot(dbPath, { now: new Date().toISOString() }), dbPath).toThrow(/shared database file/u);
   });
 
+  it("fails closed when an untyped caller omits the identity callbacks", () => {
+    const base = { dbPath: join(mkdtempSync(join(tmpdir(), "acs-governed-")), "control.db") };
+    dirs.push(join(base.dbPath, ".."));
+    const missingActor = { ...base, verifyOperator: () => false } as never;
+    const missingOperator = { ...base, resolveActor: () => undefined } as never;
+    expect(() => createGovernedExecution(missingActor)).toThrow(/resolveActor/u);
+    expect(() => createGovernedExecution(missingOperator)).toThrow(/verifyOperator/u);
+  });
+
   it("close() releases the control-plane connections", () => {
     const w = world();
     w.exec.close();

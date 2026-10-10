@@ -61,6 +61,10 @@ function assertSharedDatabaseFile(dbPath: string): void {
  */
 export function createGovernedExecution(options: GovernedExecutionOptions): GovernedExecution {
   assertSharedDatabaseFile(options.dbPath);
+  // The types require these, but an untyped caller could omit them, and the ledger would then fall back to treating a
+  // worker id as the actor id. Omission must fail closed.
+  for (const callback of ["verifyOperator", "resolveActor"] as const)
+    if (typeof options[callback] !== "function") throw new Error(`governed execution requires ${callback}`);
   const items = new SqliteWorkItemStore(options.dbPath);
   let missions: CodingMissionStore | undefined;
   try {
