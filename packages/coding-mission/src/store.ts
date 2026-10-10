@@ -654,6 +654,7 @@ export class CodingMissionStore {
       if (result.changes !== 1) {
         throw new ControlStackError("coding_mission_claim_conflict", "operation claim could not be released");
       }
+      this.cancelStaleDescendants(missionId, operationId, "claim_released", new Date().toISOString());
     });
   }
 
@@ -1135,6 +1136,65 @@ export class CodingMissionStore {
   }
 
   /**
+   * When a parent's ownership advances (a retry, or a released claim), the work its previous claim admitted through
+   * request_child_work no longer has a valid owner. Those children (and their own authority-managed descendants) are
+   * marked superseded, and unfinished ones are cancelled (in-flight ones as uncertain), so stale-claim work can never feed
+   * the new claim's result. Units that were added directly, without an authority row, belong to nobody's claim and are
+   * left alone.
+   */
+  private cancelStaleDescendants(missionId: string, parentUnitId: string, reason: string, now: string): void {
+    const edges = this.db
+      .prepare("SELECT unit_id, parent_unit_id FROM work_unit_authority WHERE mission_id = ?")
+      .all(missionId) as Array<{ unit_id: string; parent_unit_id: string | null }>;
+    const stale = new Set<string>();
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const edge of edges) {
+        if (
+          edge.parent_unit_id &&
+          (edge.parent_unit_id === parentUnitId || stale.has(edge.parent_unit_id)) &&
+          !stale.has(edge.unit_id)
+        ) {
+          stale.add(edge.unit_id);
+          grew = true;
+        }
+      }
+    }
+    const rows = this.unitRows(missionId);
+    for (const row of rows) {
+      if (!stale.has(row.operation_id)) continue;
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO work_unit_child_supersessions (mission_id, child_unit_id, parent_unit_id, reason, created_at)
+           VALUES (?, ?, ?, ?, ?)`
+        )
+        .run(missionId, row.operation_id, row.parent_unit_id ?? parentUnitId, reason, now);
+      if (row.status === "succeeded" || row.status === "cancelled") continue;
+      if (row.status === "failed" && row.failure_category && NON_RETRYABLE_FAILURES.has(row.failure_category)) continue;
+      const inFlight = (IN_FLIGHT_WORK_UNIT_STATUSES as readonly string[]).includes(row.status);
+      this.db
+        .prepare(
+          `UPDATE coding_operations SET status = 'cancelled', cancel_external_state = ?, failure_category = 'cancelled'
+           WHERE mission_id = ? AND operation_id = ?`
+        )
+        .run(inFlight ? "uncertain" : "none", missionId, row.operation_id);
+      this.event(
+        missionId,
+        "work_unit.cancelled",
+        {
+          unitId: row.operation_id,
+          was: row.status,
+          externalState: inFlight ? "uncertain" : "none",
+          reason,
+          parentUnitId
+        },
+        now
+      );
+    }
+  }
+
+  /**
    * Schedule another attempt. The retry cap is checked from the durable attempt counter, so a restart or a racing
    * retry cannot exceed it. `unknown` and `conflict` units are never retried here: their external effect is unproven.
    */
@@ -1146,6 +1206,15 @@ export class CodingMissionStore {
       if (!unit) return { ok: false, outcome: "not_found" };
       if (unit.status === "unknown" || unit.status === "conflict") return { ok: false, outcome: "retry_unsafe" };
       if (unit.status !== "retryable" && unit.status !== "failed") return { ok: false, outcome: "not_retryable" };
+      // A recorded reduction is final, so a child it already accounted for can no longer be retried underneath it.
+      if (
+        unit.parent_unit_id &&
+        this.db
+          .prepare("SELECT 1 FROM work_unit_reductions WHERE mission_id = ? AND parent_unit_id = ?")
+          .get(missionId, unit.parent_unit_id)
+      ) {
+        return { ok: false, outcome: "not_retryable" };
+      }
       if (unit.failure_category && NON_RETRYABLE_FAILURES.has(unit.failure_category)) {
         return { ok: false, outcome: "not_retryable" };
       }
@@ -1178,6 +1247,7 @@ export class CodingMissionStore {
         )
         .run(missionId, unitId);
       if (result.changes !== 1) return { ok: false, outcome: "not_retryable" };
+      this.cancelStaleDescendants(missionId, unitId, "parent_retried", now);
       this.event(missionId, "work_unit.retry_scheduled", { unitId, attempt: unit.attempt }, now);
       return { ok: true, attempt: unit.attempt };
     });
@@ -1602,6 +1672,11 @@ export class CodingMissionStore {
       }
       return { used, decision };
     });
+  }
+
+  /** Append a structured mission event. Sensitive-looking keys are scrubbed. */
+  recordMissionEvent(missionId: string, name: string, body: unknown, now: string): void {
+    this.event(missionId, name, body, now);
   }
 
   private event(missionId: string, name: string, body: unknown, now: string): void {
