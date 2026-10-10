@@ -546,6 +546,20 @@ function gitReadOnly(args: readonly string[]): ReadOnlyArgvVerdict {
       return refuse(`git ${sub ?? ""} is not a read-only allowlisted subcommand`);
   }
   if (!parsed.ok) return refuse(parsed.reason);
+  // `diff`, `log` and `show` run configured textconv helpers unless `--no-textconv` is given before any
+  // `--`, so the flag must be present as a real option. Without it the command is not read-only.
+  if (sub !== "status") {
+    const separator = rest.indexOf("--");
+    const options = separator >= 0 ? rest.slice(0, separator) : rest;
+    if (!options.includes("--no-textconv")) {
+      return refuse(`git ${sub} needs --no-textconv: textconv filters execute configured helpers`);
+    }
+  }
+  // `rev:path` selects a blob (`HEAD~:.env`), and a blob pair can be diffed. Credential checks work on
+  // path names, not on blob selectors, so any `:` in a git operand is refused rather than parsed.
+  if (parsed.positionals.some((operand) => operand.includes(":"))) {
+    return refuse("git revision or blob selector (rev:path) is not allowed in a read-only argv");
+  }
   // Revisions and pathspecs are both plain tokens; both are reported for the containment checks.
   return pathOperands(parsed.positionals, 0);
 }

@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import {
   classifyReadOnlyArgv,
@@ -73,8 +73,10 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
   // where the rules below say so. `write` is never inferred, because inferring it would move an action the
   // old rules denied into an approval.
   const effects = inferCommandEffects(command);
-  // Paths the argv names count for the credential and project-root checks, not just declared `paths`.
-  const pathScope = withCommandPathOperands(context, command);
+  // Credential matching uses semantic operands where the classifier knows them, so an rg/grep search
+  // pattern (`rg credentials.json README.md`) is not mistaken for a file. Unclassified argv keeps the
+  // full token set, so an unknown command still cannot hide a credential path behind its flags.
+  const credentialScope = withCredentialOperands(context, command);
 
   if (isSudo(command)) {
     return risk("forbidden", "sudo is denied by default", ["deny:sudo"]);
@@ -88,7 +90,7 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
   if (hasShellMetacharacter(command)) {
     return risk("forbidden", "shell metacharacters are denied", ["deny:shell-metacharacter"]);
   }
-  if (touchesCredentialPath(pathScope)) {
+  if (touchesCredentialPath(credentialScope)) {
     return risk("forbidden", "credential path access is denied", ["deny:credential-path"]);
   }
   // Only declared paths. An argv operand outside the workspace is tagged on the approval below; denying
@@ -419,10 +421,15 @@ function isReadOnlyInsideCwd(context: PolicyContext): boolean {
   // Lexical resolve treats an in-cwd symlink to /etc as inside. Canonicalize,
   // and refuse operands whose target does not exist so an unverified link
   // cannot be auto-allowed.
+  const contentSearch = CONTENT_SEARCH_PROGRAMS.has(command[0] ?? "");
   return verdict.operands.every((operand) => {
     const lexical = resolve(root, operand);
     if (!existsSync(lexical)) return false;
-    return isInside(root, realpathForPolicy(lexical));
+    const canonical = realpathForPolicy(lexical);
+    if (!isInside(root, canonical)) return false;
+    // ripgrep recurses into a directory and reads hidden or ignored files beneath it, so a credential
+    // file the operand never names could leak. Only regular files are searched without approval.
+    return !contentSearch || statSync(canonical).isFile();
   });
 }
 
@@ -470,13 +477,17 @@ function reviewCommandBearingAction(
   return risk("requires_approval", `command requires approval (${summary})`, matchedRules);
 }
 
-function withCommandPathOperands(context: PolicyContext, command: string[]): PolicyContext {
-  const operands = commandPathOperands(command);
+function withCredentialOperands(context: PolicyContext, command: string[]): PolicyContext {
+  const verdict = classifyReadOnlyArgv(command);
+  const operands = verdict.ok ? verdict.operands : commandPathOperands(command);
   if (operands.length === 0) {
     return context;
   }
   return { ...context, paths: [...new Set([...(context.paths ?? []), ...operands])] };
 }
+
+/** Search programs read the contents of every file they are given, so a directory operand is refused. */
+const CONTENT_SEARCH_PROGRAMS: ReadonlySet<string> = new Set(["rg", "grep"]);
 
 function allowedPaths(context: PolicyContext): string[] | undefined {
   return context.cwd ? [resolve(context.cwd)] : undefined;

@@ -276,15 +276,29 @@ function gateWorkerClaimInTransaction(
   policy: PolicyEngine,
   parsed: z.infer<typeof claimInputSchema>
 ): ClaimedWorkItem | undefined {
-  const candidate = store
+  const candidates = store
     .list({ status: "approved" })
     .filter((workItem) => store.isWorkItemEligibleForWorker(workItem, parsed.workerId, ACS_ADMIN_APPROVER))
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
-    .find((workItem) => authoritativeRouteAllows(store, workItem.id, parsed.workerId));
-  if (!candidate) {
-    return undefined;
+    .filter((workItem) => authoritativeRouteAllows(store, workItem.id, parsed.workerId));
+  for (const candidate of candidates) {
+    const outcome = claimSelectedCandidate(store, policy, parsed, candidate);
+    // A stale candidate was returned to needs_approval. Later approved items may still be executable, so
+    // keep scanning instead of spending this one-shot claim on the stale item.
+    if (outcome !== REQUEUED) return outcome;
   }
+  return undefined;
+}
 
+/** Sentinel: the selected candidate was returned to approval, so the caller should try the next one. */
+const REQUEUED = Symbol("requeued");
+
+function claimSelectedCandidate(
+  store: WorkItemStore,
+  policy: PolicyEngine,
+  parsed: z.infer<typeof claimInputSchema>,
+  candidate: WorkItem
+): ClaimedWorkItem | undefined | typeof REQUEUED {
   const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, candidate, parsed.workerId, "claim");
   const plan = ensureExecutionPlan(store, candidate, parsed.workerId);
   const policyDecisionHash = stableHash({
@@ -316,7 +330,7 @@ function gateWorkerClaimInTransaction(
   );
   if (decision.decision === "require_approval" && (missing || planApprovals.some((approval) => !approval))) {
     returnApprovedItemToApproval(store, candidate.id);
-    return undefined;
+    return REQUEUED;
   }
   if (decision.decision === "deny" || !admission || missing || planApprovals.some((approval) => !approval)) {
     const blocked = store.blockWorkItem(candidate.id, policyTransition);
