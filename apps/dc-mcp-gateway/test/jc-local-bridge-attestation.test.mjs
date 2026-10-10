@@ -13,7 +13,8 @@ const PORT = 19411;
 const base = { PATH: process.env.PATH, HOME: process.env.HOME, BRIDGE_PROFILE: 'jace-commander', JC_PRESET: 'local', JC_RUNTIME_ID: 'jc-test', BRIDGE_PORT: String(PORT), DC_CMD: process.execPath, JC_ALLOW_SAME_UID_CHILD: '1' };
 
 test('local preset refuses a same-uid executor unless explicitly allowed', () => {
-  const { JC_ALLOW_SAME_UID_CHILD: _omit, ...env } = base;
+  const env = { ...base };
+  delete env.JC_ALLOW_SAME_UID_CHILD;
   const run = spawnSync(process.execPath, [bridge], { env: { ...env, DC_GATEWAY_EXECUTION_TOKEN: 'x'.repeat(40) }, encoding: 'utf8', timeout: 10_000 });
   assert.notEqual(run.status, 0);
   assert.match(run.stderr, /different uid/);
