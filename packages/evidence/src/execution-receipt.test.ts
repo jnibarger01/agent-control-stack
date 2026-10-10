@@ -68,11 +68,22 @@ const approvalCopy = (overrides: Partial<typeof approval> = {}) => ({
 });
 
 /** A sensitive attempt: approval required, and two independent reviewers (high-risk requirement). */
+const validation = () => ({ ...VALIDATION });
+const VALIDATION = {
+  runId: "test_1",
+  attemptId: "attempt_1",
+  workItemId: "work_1",
+  passed: true,
+  checksPassed: 10,
+  checksFailed: 0,
+  checksDigest: H("e")
+};
 const core = (): ExecutionReceiptCore => {
   const manifest = buildEvidenceManifest(manifestInput);
   return {
     schemaVersion: "acs.execution-receipt.v1",
     manifest,
+    validation: validation(),
     authorization: {
       actorId: "operator_1",
       workerId: "worker_1",
@@ -115,7 +126,7 @@ const expected = (): ReceiptBinding => ({
   actionHash: H("c"),
   admittedPlanHash: H("a"),
   manifestHash: buildEvidenceManifest(manifestInput).manifestHash,
-  validationRunId: "test_1",
+  validation: validation(),
   leaseId: "lease_1",
   claimTokenHash: H("4"),
   capabilityId: "cap_1",
@@ -157,7 +168,13 @@ describe("proof-of-execution receipt integrity", () => {
     ["inverted time", (c: ExecutionReceiptCore) => { c.manifest.startedAt = "2026-10-08T12:02:00Z"; }, "inverted_execution_time"],
     ["reviewer is implementer principal", (c: ExecutionReceiptCore) => { c.verification.reviewers[0]!.reviewerPrincipalId = "executor_1"; }, "verifier_not_independent"],
     ["duplicate reviewer principal", (c: ExecutionReceiptCore) => { c.verification.reviewers[1]!.reviewerPrincipalId = "reviewer_a"; }, "reviewer_not_distinct"],
-    ["validation run missing", (c: ExecutionReceiptCore) => { c.manifest.testEvidence!.validationRunId = undefined; }, "validation_run_missing"]
+    ["validation run missing", (c: ExecutionReceiptCore) => { c.manifest.testEvidence!.validationRunId = undefined; }, "validation_run_missing"],
+    ["manifest names another run", (c: ExecutionReceiptCore) => { c.manifest.testEvidence!.validationRunId = "other_run"; }, "validation_run_mismatch"],
+    ["run belongs to another attempt", (c: ExecutionReceiptCore) => { c.validation.attemptId = "attempt_2"; }, "validation_attempt_mismatch"],
+    ["run belongs to another work item", (c: ExecutionReceiptCore) => { c.validation.workItemId = "work_2"; }, "validation_work_item_mismatch"],
+    ["run failed", (c: ExecutionReceiptCore) => { c.validation.passed = false; }, "validation_not_passed"],
+    ["run has a failed check", (c: ExecutionReceiptCore) => { c.validation.checksFailed = 1; }, "validation_not_passed"],
+    ["manifest overstates check count", (c: ExecutionReceiptCore) => { c.manifest.testEvidence!.checksPassed = 99; }, "validation_counts_mismatch"]
   ] as const)("rejects an internally inconsistent receipt: %s", (_name, mutate, defect) => {
     const changed = core();
     mutate(changed);
@@ -179,7 +196,6 @@ describe("proof-of-execution receipt integrity", () => {
     ["attemptId", "different", "attempt_binding_mismatch"],
     ["workerId", "different", "worker_binding_mismatch"],
     ["manifestHash", H("8"), "manifest_binding_mismatch"],
-    ["validationRunId", "other_run", "validation_run_binding_mismatch"]
   ] as const)("rejects reuse against a different canonical %s", (field, value, defect) => {
     const result = verifyExecutionReceipt(buildExecutionReceipt(core()), { ...expected(), [field]: value });
     expect(result.ok).toBe(false);
@@ -388,7 +404,7 @@ describe("proof-of-execution receipt integrity", () => {
 
   describe("unverifiable evidence fails closed", () => {
     it("rejects a binding that omits a required canonical field", () => {
-      const { validationRunId: _omitted, ...partial } = expected();
+      const { validation: _omitted, ...partial } = expected();
       expect(verifyExecutionReceipt(buildExecutionReceipt(core()), partial).defects).toEqual(["invalid_binding_schema"]);
     });
 
@@ -464,6 +480,43 @@ describe("proof-of-execution receipt integrity", () => {
       expect(verifyExecutionReceipt(buildExecutionReceipt(core()), { bogus: true }).defects).toEqual([
         "invalid_binding_schema"
       ]);
+    });
+  });
+
+  describe("canonical validation run", () => {
+    it.each([
+      ["run id", (b: ReceiptBinding) => { b.validation.runId = "other_run"; }],
+      ["attempt", (b: ReceiptBinding) => { b.validation.attemptId = "attempt_2"; }],
+      ["work item", (b: ReceiptBinding) => { b.validation.workItemId = "work_2"; }],
+      ["check digest", (b: ReceiptBinding) => { b.validation.checksDigest = H("1"); }],
+      ["check count", (b: ReceiptBinding) => { b.validation.checksPassed = 9; }]
+    ] as const)("rejects a receipt whose canonical validation %s differs", (_name, mutate) => {
+      const bound = expected();
+      mutate(bound);
+      expect(verifyExecutionReceipt(buildExecutionReceipt(core()), bound).defects).toContain("validation_binding_mismatch");
+    });
+
+    it("rejects a receipt whose validation block was edited to match the manifest without the canonical run", () => {
+      const changed = core();
+      changed.validation.checksDigest = H("1");
+      expect(verifyExecutionReceipt(buildExecutionReceipt(changed), expected()).defects).toContain("validation_binding_mismatch");
+    });
+  });
+
+  describe("approval cap matches the canonical lease limit", () => {
+    it("accepts a plan with 17 approval-required actions, each with its own approval", () => {
+      const changed = core();
+      const many = Array.from({ length: 17 }, (_, index) =>
+        approvalCopy({
+          approvalId: `approval_${index + 1}`,
+          actionHash: H("c"),
+          audit: { eventId: `approval_event_${index + 1}`, eventHash: H("d") }
+        })
+      );
+      changed.authorization.approvals = many;
+      const bound = expected();
+      bound.approvals = many.map((approval) => ({ ...approval, audit: { ...approval.audit } }));
+      expect(verifyExecutionReceipt(buildExecutionReceipt(changed), bound)).toEqual({ ok: true, defects: [] });
     });
   });
 });

@@ -61,7 +61,23 @@ const policyDecisionSchema = z.enum(["allow", "require_approval"]);
 /** A canonical attempt can legitimately have zero reviewers when its requirement needs none. */
 const MAX_REVIEWERS = 8;
 /** Every approval the lease consumed: approvalId plus additionalApprovalIds in the canonical attempt lease. */
-const MAX_APPROVALS = 16;
+const MAX_APPROVALS = 64;
+/**
+ * The canonical validation run that proved the tests (work-items validationRunSchema), with its check
+ * counts and a digest of its individual checks. The manifest's testEvidence is a claim; this block is what
+ * the verifier compares that claim to.
+ */
+const validationRunRef = z
+  .object({
+    runId: id,
+    attemptId: id,
+    workItemId: id,
+    passed: z.boolean(),
+    checksPassed: z.number().int().nonnegative(),
+    checksFailed: z.number().int().nonnegative(),
+    checksDigest: hash
+  })
+  .strict();
 /** Terminal attempt outcomes the canonical store records (work-items attempt status). */
 const attemptOutcomeSchema = z.enum(["succeeded", "failed", "cancelled", "interrupted", "unknown", "quarantined"]);
 
@@ -89,6 +105,7 @@ export const executionReceiptCoreSchema = z
   .object({
     schemaVersion: z.literal(EXECUTION_RECEIPT_SCHEMA_VERSION),
     manifest: evidenceManifestSchema,
+    validation: validationRunRef,
     authorization: z
       .object({
         actorId,
@@ -151,6 +168,19 @@ export function receiptDefects(core: ExecutionReceiptCore): string[] {
     defects.push("tests_not_proven");
   // A test claim without a durable validation run cannot be retrieved or audited, so it proves nothing.
   if (m.testEvidence && !m.testEvidence.validationRunId) defects.push("validation_run_missing");
+  // The manifest's test claim must match the canonical run it names: same run, same attempt and work item,
+  // passed, and the same check counts. A failed or unrelated run cannot become test proof.
+  const val = core.validation;
+  if (m.testEvidence?.validationRunId !== undefined && m.testEvidence.validationRunId !== val.runId)
+    defects.push("validation_run_mismatch");
+  if (val.attemptId !== a.attemptId) defects.push("validation_attempt_mismatch");
+  if (val.workItemId !== m.workItemId) defects.push("validation_work_item_mismatch");
+  if (!val.passed || val.checksFailed !== 0 || val.checksPassed < 1) defects.push("validation_not_passed");
+  if (
+    m.testEvidence &&
+    (m.testEvidence.checksPassed !== val.checksPassed || m.testEvidence.checksFailed !== val.checksFailed)
+  )
+    defects.push("validation_counts_mismatch");
   if (m.commands.length === 0 || m.commands.some((c) => c.exitCode !== 0)) defects.push("command_execution_not_proven");
   if (r.resultWorkspaceRevision !== m.resultWorkspaceRevision || r.diffHash !== m.diffHash)
     defects.push("readback_mismatch");
@@ -201,7 +231,7 @@ export const receiptBindingSchema = z
     actionHash: hash,
     admittedPlanHash: hash,
     manifestHash: hash,
-    validationRunId: id,
+    validation: validationRunRef,
     leaseId: id,
     claimTokenHash: hash,
     capabilityId: id,
@@ -228,6 +258,19 @@ export type ReceiptBinding = z.infer<typeof receiptBindingSchema>;
 
 const sameRef = (x: { eventId: string; eventHash: string }, y: { eventId: string; eventHash: string }) =>
   x.eventId === y.eventId && x.eventHash === y.eventHash;
+
+type ValidationRun = z.infer<typeof validationRunRef>;
+function sameValidation(x: ValidationRun, y: ValidationRun): boolean {
+  return (
+    x.runId === y.runId &&
+    x.attemptId === y.attemptId &&
+    x.workItemId === y.workItemId &&
+    x.passed === y.passed &&
+    x.checksPassed === y.checksPassed &&
+    x.checksFailed === y.checksFailed &&
+    x.checksDigest === y.checksDigest
+  );
+}
 
 type Approval = z.infer<typeof approvalRef>;
 function sameApproval(x: Approval, y: Approval): boolean {
@@ -299,7 +342,7 @@ export function verifyExecutionReceipt(receipt: unknown, expected: unknown): { o
   check(m.actionHash === b.actionHash, "action_binding_mismatch");
   check(m.admittedPlanHash === b.admittedPlanHash, "plan_binding_mismatch");
   check(m.manifestHash === b.manifestHash, "manifest_binding_mismatch");
-  check(m.testEvidence?.validationRunId === b.validationRunId, "validation_run_binding_mismatch");
+  check(sameValidation(core.validation, b.validation), "validation_binding_mismatch");
 
   check(a.actorId === b.actorId, "actor_binding_mismatch");
   check(a.leaseId === b.leaseId, "lease_mismatch");
