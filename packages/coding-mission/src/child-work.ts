@@ -136,6 +136,9 @@ export interface LedgerOptions {
 
 export const DEFAULT_CLAIM_TTL_MS = 300_000;
 
+/** How far ahead of ACS's clock a claim timestamp may be and still count as live. */
+const MAX_CLAIM_CLOCK_SKEW_MS = 5_000;
+
 const MAX_CHILD_TTL_MS = 86_400_000;
 const KNOWN_PRIVILEGES = new Set<string>(changeSetPrivilegeSchema.options);
 
@@ -263,7 +266,12 @@ export class MissionAuthorityLedger {
         refusal = new ControlStackError(code, message);
         return undefined;
       };
-      const grant = this.options.grants.getAutonomousAuthority(input.grantId);
+      let grant: AutonomousAuthorityGrant | undefined;
+      try {
+        grant = this.readGrant(input.grantId);
+      } catch {
+        return refuse("mission_authority_unverified", "the grant failed verification", "grant_integrity_failure");
+      }
       if (!grant) return refuse("mission_authority_unverified", "no such authority grant", "grant_not_found");
       if (grant.missionId !== input.missionId) {
         return refuse("mission_authority_unverified", "the grant belongs to another mission", "grant_wrong_mission");
@@ -286,7 +294,7 @@ export class MissionAuthorityLedger {
       if (this.grantRevoked(grant.grantId)) {
         return refuse("mission_authority_unverified", "the grant has been revoked", "grant_revoked");
       }
-      if (this.options.grants.currentSubjectInputHash(input.missionId) !== grant.subjectInputHash) {
+      if (this.currentSubjectHash(input.missionId) !== grant.subjectInputHash) {
         return refuse(
           "mission_authority_unverified",
           "the grant no longer matches the mission's execution inputs",
@@ -388,7 +396,11 @@ export class MissionAuthorityLedger {
       return false;
     }
     const ttl = this.options.claimTtlMs ?? DEFAULT_CLAIM_TTL_MS;
-    return parent.claimedAt !== undefined && Date.parse(now) - Date.parse(parent.claimedAt) <= ttl;
+    if (parent.claimedAt === undefined) return false;
+    // A claim stamped in the future has a negative age and would pass `<= ttl` forever, so the owner could never be
+    // recovered. A small skew is tolerated; anything further ahead of ACS's clock is not a live claim.
+    const age = Date.parse(now) - Date.parse(parent.claimedAt);
+    return age >= -MAX_CLAIM_CLOCK_SKEW_MS && age <= ttl;
   }
 
   /** Uses the canonical revocation reader, which checks the projection against its audit event. A mismatch counts as revoked. */
@@ -397,6 +409,27 @@ export class MissionAuthorityLedger {
       return readAutonomousAuthorityRevocation(this.store.db, grantId);
     } catch {
       return true;
+    }
+  }
+
+  /**
+   * The grant store can throw when a grant fails its own integrity checks (hash, audit anchor). That is a verification
+   * failure, not a crash: map it to the integrity error the callers already turn into a durable denial.
+   */
+  private readGrant(grantId: string): AutonomousAuthorityGrant | undefined {
+    try {
+      return this.options.grants.getAutonomousAuthority(grantId);
+    } catch {
+      throw new ControlStackError("authority_integrity", "the authority grant failed verification");
+    }
+  }
+
+  /** Unavailable (or throwing) means undefined, which never equals a grant's hash, so the caller refuses. */
+  private currentSubjectHash(missionId: string): string | undefined {
+    try {
+      return this.options.grants.currentSubjectInputHash(missionId);
+    } catch {
+      return undefined;
     }
   }
 
@@ -424,7 +457,7 @@ export class MissionAuthorityLedger {
     if (!row) return undefined;
     const definition = this.parseDefinition(row.envelope_json, "mission authority");
     this.integrity("mission authority", definitionHash(definition) === row.envelope_hash);
-    const grant = this.options.grants.getAutonomousAuthority(String(row.grant_id));
+    const grant = this.readGrant(String(row.grant_id));
     this.integrity(
       "mission authority grant binding",
       grant !== undefined &&
@@ -597,10 +630,7 @@ export class MissionAuthorityLedger {
         parentHash = parentRecord?.definitionHash ?? missionAuthority.definitionHash;
         // The grant is re-checked on every request: revoking it stops new descendants immediately.
         if (this.grantRevoked(missionAuthority.grantId)) return deny(["grant_revoked"]);
-        if (
-          this.options.grants.currentSubjectInputHash(missionId) !==
-          this.options.grants.getAutonomousAuthority(missionAuthority.grantId)?.subjectInputHash
-        ) {
+        if (this.currentSubjectHash(missionId) !== this.readGrant(missionAuthority.grantId)?.subjectInputHash) {
           return deny(["grant_subject_changed"]);
         }
         // A valid claim is not enough: the claimant must be the actor this authority was issued to.
