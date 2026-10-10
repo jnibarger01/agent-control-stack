@@ -66,11 +66,91 @@ Mission work now has a transport-neutral execution boundary in `worker-execution
 
 The execution contract deliberately does **not** add swarm delegation or CUA. Those future executors must enter through the same dispatch/result/receipt boundary.
 
+## Mission authority and child work (migration 060)
+
+A mission's authority is the existing human-issued `AutonomousAuthorityDefinition` (migration 047). The subset test is
+`authorityNarrowingViolations` in `packages/work-items`; `authority.ts` adds only mission policy on top of it
+(`allowPrivilegedChildren`, `deniedPrivileges`, `maxChildTtlMs`):
+
+```text
+child = parent ∩ mission policy ∩ requested
+```
+
+**Binding a mission.** `MissionAuthorityLedger.grantMissionAuthority` takes a `grantId`, not an approver. It loads the
+grant from the control plane (`GrantReader`, satisfied by `SqliteWorkItemStore`) and refuses it unless it exists, names
+this mission, recomputes to its own `grantHash`, and is unexpired. The approver and reason recorded are the grant's
+(`issuedByActorId`, `reason`), never caller assertions. Allowing privileged children additionally needs an authenticated
+operator (`verifyOperator`). Refusals are committed as `authority.denied` evidence before the error is thrown. The
+binding is write-once. A mission without a binding cannot create child work.
+
+**Fail closed on read.** Every read re-verifies: the stored definition must parse and recompute to its hash, the mission
+policy (which is not part of the grant) must match its own fingerprint, the live grant must still match the stored grant
+hash and definition, and a derived unit's definition must be a subset of its parent's (checked at the instant it was
+created) and bound to the parent hash and grant it claims. A derived unit whose parent has no authority row is accepted
+only if that parent is a verified root; a missing intermediate record is corruption, not a root. Each `requestChildWork`
+also rechecks that the backing grant has not been revoked (through the canonical revocation reader, which checks the projection
+against its audit event; a mismatch counts as revoked) and that the mission's execution inputs still hash to the
+grant's `subjectInputHash` (`GrantReader.currentSubjectInputHash`; unavailable means refused), and that the claimant resolves (`resolveActor`) to the actor
+the grant was issued to, since a valid claim alone does not say the worker may exercise this authority. Any mismatch is
+`authority_integrity`, and the request is denied. The tables are append-only including against `INSERT OR REPLACE`
+(SQLite resolves that by deleting the old row without firing DELETE triggers, so each table also has a BEFORE INSERT guard).
+
+**`requestChildWork`** is the only way to create subordinate work. It needs the parent's live claim (token and worker id),
+takes time from the ledger's injected ACS clock (a request cannot supply one), and is all-or-nothing in one IMMEDIATE
+transaction together with the depth, total-children, unit and parallel caps, so racing agents yield one winner and a
+restart does not reset the caps.
+
+- A child that _asks_ for more than its parent holds is **denied with reasons** (`escalation:…`), never trimmed, and
+  recorded as `child.denied` / `authority.denied`. With no request, a child inherits the parent minus privileged privileges.
+- Privileged privileges (`process.privileged`, `service.control`, `deploy`, `remote`, `secret.read`) are never inherited
+  by default. A child gets one only if the parent holds it **and** mission policy allows privileged children.
+- The parent's `maxOperations` and `maxParallelOperations` are **shared** by its children, not copied into each: explicit
+  requests are charged first, children that inherit split what is left, and a request that would push the aggregate past
+  the parent is denied (`parent_limit_exhausted`). A cancelled child frees its share.
+- A parent's claim only counts as live for `claimTtlMs` (default 5 minutes) after it was taken, so an owner the controller
+  would already recover cannot keep creating, cancelling or reducing children. Mission policy is validated strictly
+  (known privileges, bounded integer TTL, no unknown fields) before it is persisted. `verificationPolicy` and titles are
+  validated before insertion so a bad value is a durable denial, not a database error.
+- Children are bound to the parent's claim by a non-reusable fence (a hash of the claim token), not by attempt number,
+  because attempt numbers repeat after a released claim. When the parent is retried or its claim released, the children its previous claim admitted through
+  `requestChildWork` are marked superseded (`work_unit_child_supersessions`) and their unfinished descendants are
+  cancelled (in-flight ones as uncertain). A superseded child that already succeeded stays as history but neither the
+  reducer nor the completion guard counts it, so the new claim is not stuck behind it. Units added directly, without an
+  authority row, belong to no claim and are left alone. Once a reduction is recorded no more children are admitted. A unit with authority-managed children
+  cannot move to `succeeded` or `verifying` until they are reduced; that guard is a trigger on the table, so it covers the
+  execution ledger and the verification gate as well as the legacy store. Plain parent/child units that were not admitted
+  through `requestChildWork` are not reducible and are not gated.
+- A child never outlives its parent and is further bounded by `maxChildTtlMs`. A grandchild derives from its parent's
+  definition, not the mission's.
+- Untyped input is shape-checked before anything is used: ids and enums must be strings, dependencies a string array,
+  and a malformed child is a durable denial. A request naming a mission that does not exist writes nothing. An explicitly
+  requested authority that is already expired is denied, and reductions are refused once the mission is terminal.
+- A derived unit with no authority row is **denied**, never treated as a root, so a unit created outside
+  `requestChildWork` cannot hand its descendants the whole mission authority.
+- A requested child budget is validated on every dimension with the canonical budget conversion and may only ask for
+  less than the mission budget. It is recorded; per-child enforcement beyond the mission-wide caps is not implemented.
+- Invalid payloads, missing dependencies and cycles become durable `child.denied` evidence. Denial reasons that echo
+  caller input are redacted and bounded first, and `child.requested` / `child.admitted` record the verified requester
+  (worker, parent attempt, a fence hash, never the claim token).
+
+**Cancellation and reduction.** `cancelChildren` cancels a unit's descendants, including failed ones a retry could still
+revive (only final failures such as `policy_denied` are left), and reports in-flight ones as uncertain. `reduceChildren`
+(`all_succeeded`, `select`, `majority_result`) is deterministic (ordered by child id, not finish time), treats a tie as
+`inconclusive`, and is recorded once with an integrity fingerprint that is verified before a stored reduction is returned.
+The request is validated before the write-once mutation: an unknown strategy, or `select` without the id of a
+succeeded child, is rejected and nothing is recorded. It waits for any child still parked as `retryable`, and once recorded `retryUnit` refuses further retries beneath that
+parent, so the append-only result cannot go stale. Both operations require the parent's live claim or an authenticated
+operator, so a stale worker cannot cancel or decide for work owned by a newer claimant; refusals are durable
+`authority.denied` evidence, and `child.reduced` records the selected child and result hash.
+
 ## Not yet in this runtime
 
-Mission authority envelopes and narrowed child authority, checkpoint/resume, `request_child_work`, CUA, and recovery
-policy are separate slices. Today the legacy coding path has no budget row (uncapped) and the `general` kind has no
-driver of its own.
+- Consulting `unitAuthority` when a worker is dispatched. Until then authority is a verified, tamper-evident ledger of
+  what each unit may do, not an enforcement point at dispatch. Production composition roots that construct the ledger
+  with the real grant store and operator verification are also not wired yet.
+- Checkpoint/resume as worker adapters on the execution ledger, the CUA worker, and recovery policy.
+- A driver for the `general` mission kind. The legacy coding path has no budget row (uncapped).
+- Delegating to a different executing actor (`authorityNarrowingViolations` refuses it deliberately and it needs its own decision).
 
 ## Verification gate
 
