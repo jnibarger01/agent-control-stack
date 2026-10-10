@@ -229,6 +229,27 @@ function parseDocument(raw: string, layer: 'system' | 'user'): ParsedDocument {
   return out;
 }
 
+/**
+ * Canonical path, failing closed. A root that does not exist yet is resolved through its deepest
+ * existing ancestor (so a symlink anywhere in the chain is followed); any other error rejects.
+ */
+function canonicalRoot(root: string): string {
+  const rest: string[] = [];
+  let current = path.resolve(root);
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(current), ...rest);
+    } catch (error) {
+      const parent = path.dirname(current);
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || parent === current) {
+        throw new PolicyError(`fs root ${root} cannot be resolved to a canonical path`);
+      }
+      rest.unshift(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
 function inside(root: string, candidate: string): boolean {
   return candidate === root || candidate.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
 }
@@ -242,6 +263,10 @@ export function assertPolicyImmutable(filePath: string): void {
   for (;;) {
     const stat = fs.lstatSync(current);
     if (stat.isSymbolicLink()) throw new PolicyError(`${current} is a symlink`);
+    // An owner can always chmod the path writable again, so a read-only mode on a path the
+    // JC account owns proves nothing. Every component must belong to someone else.
+    const me = process.geteuid?.();
+    if (me !== undefined && me !== 0 && stat.uid === me) throw new PolicyError(`${current} is owned by the JC account (uid ${me}); it could make it writable again`);
     if ((stat.mode & 0o022) !== 0) throw new PolicyError(`${current} is group/world-writable`);
     try {
       fs.accessSync(current, fs.constants.W_OK);
@@ -302,11 +327,13 @@ function applyUser(base: JcEffectivePolicy, doc: ParsedDocument, baseFsRoots: re
   }
   let fsRoots = base.fsRoots;
   if (doc.fsRoots) {
-    const limit = base.fsRoots ?? [...baseFsRoots];
-    for (const root of doc.fsRoots) {
-      if (!limit.some((allowed) => inside(allowed, root))) throw new PolicyError(`user policy fs root ${root} is outside the permitted roots`);
+    const limit = (base.fsRoots ?? [...baseFsRoots]).map(canonicalRoot);
+    // Compare (and keep) canonical paths: a symlink under an allowed root must not widen it.
+    const resolved = doc.fsRoots.map(canonicalRoot);
+    for (const [index, root] of resolved.entries()) {
+      if (!limit.some((allowed) => inside(allowed, root))) throw new PolicyError(`user policy fs root ${doc.fsRoots[index]} is outside the permitted roots`);
     }
-    fsRoots = doc.fsRoots;
+    fsRoots = resolved;
   }
   let allowCommands = base.allowCommands;
   if (doc.allowCommands) {

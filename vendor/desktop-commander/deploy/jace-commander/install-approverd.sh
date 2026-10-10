@@ -72,6 +72,11 @@ chown root:root /etc/jace-commander/approverd.json
 chmod 0644 /etc/jace-commander/approverd.json
 
 install -o root -g root -m 0644 "$REPO/deploy/jace-commander/jace-commander-approverd.service" /etc/systemd/system/jace-commander-approverd.service
+# The unit ships with a PATH lookup; pin it to the node binary validated above. (ProtectHome=true
+# means a node under /home cannot work, so refuse that up front.)
+case "$node_real" in /home/*|/root/*|/run/user/*) echo "$node_real is under a path hidden by ProtectHome=true; use a system node via JC_NODE_BIN" >&2; exit 1 ;; esac
+sed -i "s|^ExecStart=/usr/bin/env node |ExecStart=${node_real} |" /etc/systemd/system/jace-commander-approverd.service
+grep -q "^ExecStart=${node_real} " /etc/systemd/system/jace-commander-approverd.service || { echo "failed to pin node in the unit" >&2; exit 1; }
 
 # Create the key as the signer and print ONLY the public half.
 pub="$(runuser -u jc-approverd -- env -i PATH=/usr/bin:/bin "$node_real" /opt/jace-commander/dist/jace-commander/approverd-cli.js init --config /etc/jace-commander/approverd.json)"

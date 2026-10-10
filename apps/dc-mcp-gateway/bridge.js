@@ -136,9 +136,11 @@ const JC_CHILD_ENV_KEYS = [
   // NOT forwarded: a policy the child can edit is never accepted through the bridge.
   "JC_PRESET",
   "JC_POLICY_PATH",
-  // Local approval (ADR 0026 D4): the request socket and approverd's PUBLIC key only.
-  // The decide socket path is for the operator CLI and is deliberately not forwarded.
+  // Local approval (ADR 0026 D4): the request socket, approverd's PUBLIC key, and the decide
+  // socket PATH. A path is not authority; the child uses it only for jc_doctor's negative probe
+  // (it must NOT be able to open it), and an unprobed socket is reported as unverified.
   "JC_APPROVER_SOCKET",
+  "JC_APPROVER_DECIDE_SOCKET",
   "JC_APPROVER_PUBLIC_KEY",
   "JC_APPROVER_KEY_ID",
   // Best-effort trace mirror (ADR 0026 D5); off unless the URL is set.

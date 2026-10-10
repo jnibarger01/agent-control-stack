@@ -40,6 +40,9 @@ RestrictAddressFamilies=AF_UNIX
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
+# approverd chowns its socket directories and sockets to the configured groups; @privileged
+# contains @chown, so add exactly those syscalls back (later lines extend the allow-list).
+SystemCallFilter=@chown
 ReadWritePaths=/var/lib/jace-commander
 ReadOnlyPaths=/etc/jace-commander /opt/jace-commander
 

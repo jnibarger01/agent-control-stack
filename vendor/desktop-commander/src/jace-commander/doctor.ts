@@ -92,16 +92,20 @@ export async function jcDoctor(config: JcConfig, runtime: DoctorRuntime): Promis
       + (missing.length ? `; no handler: ${missing.join(',')}` : '')
       + (extra.length ? `; not in manifest: ${extra.join(',')}` : ''),
   });
+  const localUsesAcs = runtime.mode === 'local'
+    && createAuthorizerResolver('local', runtime.policy?.effective.authorizerTable).usesAcs();
   checks.push({
     name: 'capability verification',
-    ok: runtime.mode === 'managed' ? runtime.verifierReady : runtime.mode === 'local',
+    ok: runtime.mode === 'managed' ? runtime.verifierReady : runtime.mode === 'local' ? (!localUsesAcs || runtime.verifierReady) : false,
     required: true,
     detail: runtime.mode === 'managed'
       ? runtime.verifierReady
         ? `managed: every call needs an ACS-issued acs.jc.v1 capability (key ${config.acsKeyId ?? 'unset'})`
         : 'managed but no ACS verification key is configured; every call fails closed'
       : runtime.mode === 'local'
-        ? 'local: read class allowed; other classes follow the local class decisions (default: human approval)'
+        ? localUsesAcs && !runtime.verifierReady
+          ? 'local policy routes tools to ACS but no ACS verification key is configured (JC_ACS_PUBLIC_KEY / JC_ACS_KEY_ID); those calls fail closed'
+          : 'local: read class allowed; other classes follow the local class decisions (default: human approval)'
         : 'standalone: read-only tools only, NOT capability-checked; development only',
   });
   if (runtime.policy) {
@@ -125,7 +129,8 @@ export async function jcDoctor(config: JcConfig, runtime: DoctorRuntime): Promis
     const decisions = runtime.policy.effective.classDecisions as Record<string, string>;
     const needed = createAuthorizerResolver('local', runtime.policy.effective.authorizerTable)
       .routes().some((route) => route.authorizer === 'local' && decisions[route.riskClass] === 'approve');
-    const separated = health.serverCanDecide !== true;
+    // Separation is proven only by a NEGATIVE probe; an unprobed socket is not evidence.
+    const separated = health.serverCanDecide === false;
     checks.push({
       name: 'local approver',
       ok: health.configured === true && health.reachable === true && health.keyMatches === true && separated,
@@ -138,7 +143,9 @@ export async function jcDoctor(config: JcConfig, runtime: DoctorRuntime): Promis
           : !health.keyMatches
             ? 'approverd answered with a different key id or runtime id than configured'
             : !separated
-              ? 'THE SERVER IDENTITY CAN OPEN decide.sock: the model could approve its own requests; fix socket group/permissions'
+              ? health.serverCanDecide === true
+                ? 'THE SERVER IDENTITY CAN OPEN decide.sock: the model could approve its own requests; fix socket group/permissions'
+                : 'decide.sock separation is unverified: set JC_APPROVER_DECIDE_SOCKET for the server so it can run the negative probe'
               : 'approverd reachable, key matches, decide.sock is not reachable by the server identity',
     });
   }

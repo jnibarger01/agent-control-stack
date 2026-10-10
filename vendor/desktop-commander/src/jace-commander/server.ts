@@ -298,6 +298,15 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
         recordTrace(trace, name, args, { ok: false, code: 'JC_LOCAL_DENIED', ...routeTrace(route) });
         return fail('JC_LOCAL_DENIED', `${name} is denied by the local policy for class ${route.riskClass}`, { jaceCommanderMode: mode, ...jcAuthorizationMeta(mode, route, 'denied') });
       }
+      // Deterministic constraints run BEFORE any approval is requested or consumed: a call the
+      // policy forbids must never ask a human, nor burn an approval it cannot use.
+      if (policy) {
+        const violation = checkPolicyConstraints(policy.effective, name, args);
+        if (violation) {
+          recordTrace(trace, name, args, { ok: false, code: 'JC_POLICY_CONSTRAINT', ...routeTrace(route) });
+          return fail('JC_POLICY_CONSTRAINT', violation, { jaceCommanderMode: mode, ...jcAuthorizationMeta(mode, route, 'constraint-violation') });
+        }
+      }
       if (effective === 'approve') {
         const outcome = await localApproval(name, args, route);
         if (!outcome.granted) return outcome.result;
@@ -322,14 +331,6 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
           recordTrace(trace, name, args, { ok: false, code, ...routeTrace(route) });
           return fail(code, 'Jace Commander managed authorization rejected', { acsAuthorization: { version: 'acs.jc.v1', decision: 'denied', code }, ...routeMeta });
         }
-      }
-    }
-
-    if (policy && route.authorizer === 'local') {
-      const violation = checkPolicyConstraints(policy.effective, name, args);
-      if (violation) {
-        recordTrace(trace, name, args, { ok: false, code: 'JC_POLICY_CONSTRAINT', ...routeTrace(route) });
-        return fail('JC_POLICY_CONSTRAINT', violation, { jaceCommanderMode: mode, ...jcAuthorizationMeta(mode, route, 'constraint-violation') });
       }
     }
 
@@ -573,9 +574,11 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     const reachable = (result: { configured: boolean; reachable?: boolean }) => result.configured && result.reachable === true;
     const probes: Partial<Record<JcProviderId, JcProviderProbe>> = {
       'jc.fs': async () => {
-        const missing = config.fsRoots.filter((root) => !fs.existsSync(root));
-        if (config.fsRoots.length === 0) return { state: 'degraded', detail: 'JC_FS_ROOTS empty; filesystem, process and git tools fail closed' };
-        return missing.length ? { state: 'degraded', detail: `missing roots: ${missing.join(', ')}` } : { state: 'ok', detail: `${config.fsRoots.length} root(s)` };
+        // The same effective roots fsPolicy uses: the policy's, when it supplies them.
+        const roots = policy?.effective.fsRoots ?? config.fsRoots;
+        const missing = roots.filter((root) => !fs.existsSync(root));
+        if (roots.length === 0) return { state: 'degraded', detail: 'JC_FS_ROOTS empty and the policy sets no fsRoots; filesystem, process and git tools fail closed' };
+        return missing.length ? { state: 'degraded', detail: `missing roots: ${missing.join(', ')}` } : { state: 'ok', detail: `${roots.length} root(s)` };
       },
       'jc.privileged': async () => (helper
         ? { state: 'ok', detail: 'sudo -n helper available' }

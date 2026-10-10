@@ -118,6 +118,34 @@ await test('user layer may only tighten: loosening, authorizers, wider roots and
   assert.equal(load({ systemPathExplicit: false }).state, 'invalid');
 });
 
+await test('review hardening: constraints are checked before an approval is requested', async () => {
+  clean();
+  writePolicy(systemPath, { classes: { exec: 'approve' }, constraints: { fs: { roots: [work] }, exec: { allowCommands: ['/usr/bin/git'] } } });
+  const client = await connectLocal(configFor('.jc4'), load());
+  const result = await client.callTool({ name: 'start_process', arguments: { argv: [process.execPath, '-e', ''], cwd: work } });
+  // No approver exists here: reaching approval would have been JC_LOCAL_APPROVAL_UNAVAILABLE.
+  assert.equal(result.structuredContent.error.code, 'JC_POLICY_CONSTRAINT');
+  await client.close();
+});
+
+await test('review hardening: a symlinked user root cannot widen; JC-owned policy chains are not immutable', () => {
+  clean();
+  writePolicy(systemPath, { constraints: { fs: { roots: [work] } } });
+  const widen = path.join(work, 'widen');
+  fs.symlinkSync('/', widen);
+  writePolicy(userPath, { constraints: { fs: { roots: [widen] } } });
+  const widened = load();
+  assert.equal(widened.state, 'invalid');
+  assert.match(widened.errors.join(' '), /outside the permitted roots/);
+  fs.rmSync(widen);
+  if (process.geteuid?.() !== 0) {
+    // A read-only file the JC uid owns can be chmod-ed back, so it is rejected.
+    fs.chmodSync(systemPath, 0o444);
+    assert.throws(() => assertPolicyImmutable(systemPath), /owned by the JC account/);
+    fs.chmodSync(systemPath, 0o644);
+  }
+});
+
 await test('constraint checks: command allow/deny by name or absolute path, git remotes', () => {
   const effective = { ...load({ systemPathExplicit: false }).effective, denyCommands: ['curl', '/usr/bin/wget'], allowCommands: undefined, gitRemotes: ['origin'] };
   assert.match(checkPolicyConstraints(effective, 'start_process', { argv: ['/usr/bin/curl'] }), /denied/);
