@@ -402,7 +402,9 @@ export function commandPathOperands(command: readonly string[] | undefined): str
       operands.push(`/${value}`);
       continue;
     }
-    if (value.includes("/") || value.startsWith(".")) operands.push(value);
+    // Bare names (`credentials.json`, `id_rsa`) are path operands too. Dropping
+    // them hid credential files that have neither a slash nor a leading dot.
+    operands.push(value);
   }
   return operands;
 }
@@ -449,6 +451,12 @@ function parseFlags(
       index += 1;
       continue;
     }
+    // Exact allowlist entries include equals-forms (`--porcelain=v1`). Match the
+    // full token before splitting, or those flags can never hit `spec.exact`.
+    if (spec.exact?.includes(arg)) {
+      index += 1;
+      continue;
+    }
     const equals = arg.indexOf("=");
     const flag = equals >= 0 ? arg.slice(0, equals) : arg;
     const valuePredicate = spec.values?.[flag];
@@ -488,6 +496,8 @@ const isPattern = (value: string) => value.length > 0 && PATTERN_TOKEN.test(valu
 function pathOperands(positionals: string[], min: number): ReadOnlyArgvVerdict {
   if (positionals.length < min) return refuse(`at least ${min} path operand(s) required`);
   for (const operand of positionals) {
+    // `-` is stdin, not a validated file. Auto-approval must not treat it as a path.
+    if (operand === "-") return refuse("stdin marker is not a file operand");
     if (!PLAIN_TOKEN.test(operand)) return refuse(`operand ${JSON.stringify(operand)} is not a plain path`);
   }
   return ok(positionals);

@@ -75,7 +75,7 @@ When a worker claims the next approved item (`claim_next_approved_work_item` / `
 2. Re-run policy evaluation on the claimed item's current content (not the content at approval time).
 3. For each action still requiring approval, look up the approval by `(workItemId, actionHash)`.
 4. If found, consume it (`consumeApproval`): check request-hash match (if supplied), status is `granted`, not expired; atomically flip to `consumed`.
-5. If policy now denies, an approval is missing, or consumption fails for any reason, the work item is transitioned to `blocked` instead of `running` — the claim itself still succeeds (the lease is held), but execution does not proceed.
+5. If policy now requires approval and no unexpired grant covers the action, the claim returns no item and the work item is returned to `needs_approval` (approved items with no direct edge go approved → blocked → pending_policy → needs_approval). It is not left blocked and the lease is not held. A current policy deny still transitions the item to `blocked`.
 6. On success, the work item transitions to `running` and execution begins.
 7. Every step above is audited (`policy.decided`, `approval.consumed`, state-transition events).
 
@@ -83,7 +83,7 @@ When a worker claims the next approved item (`claim_next_approved_work_item` / `
 
 | Failure | Result |
 |---|---|
-| No approval found, **or an approval exists but has expired** | Work item transitions to `blocked` on claim. `hasApproval`'s own query excludes expired rows (`expires_at > now`), so an expired grant looks identical to a missing one to the claim flow — `consumeApproval` is never reached for it, and `approval_expired` is not observable through this documented path. |
+| No approval found, **or an approval exists but has expired** | Claim returns no item. Work item is returned to `needs_approval` (not left `blocked`). `hasApproval`'s own query excludes expired rows (`expires_at > now`), so an expired grant looks identical to a missing one — `consumeApproval` is never reached, and `approval_expired` is not observable through this path. |
 | Action hash on approve call doesn't match a required action | `approval_action_mismatch` |
 | Approval not required for the supplied action hash | `approval_not_required` |
 | Approval already consumed | `approval_already_consumed` (on re-approve attempt) / `approval_conflict` (on double-consume race) |

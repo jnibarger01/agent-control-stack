@@ -407,15 +407,23 @@ function isReadOnlyInsideCwd(context: PolicyContext): boolean {
   if (command.length === 0 && COMMAND_BEARING_KINDS.has(context.action.kind)) {
     return false;
   }
-  const root = resolve(context.cwd);
-  if (!context.paths.every((path) => isInside(root, resolve(root, path)))) {
+  const root = realpathForPolicy(resolve(context.cwd));
+  if (!context.paths.every((path) => isInside(root, realpathForPolicy(resolve(root, path))))) {
     return false;
   }
   if (command.length === 0) {
     return true;
   }
   const verdict = classifyReadOnlyArgv(command);
-  return verdict.ok && verdict.operands.every((operand) => isInside(root, resolve(root, operand)));
+  if (!verdict.ok) return false;
+  // Lexical resolve treats an in-cwd symlink to /etc as inside. Canonicalize,
+  // and refuse operands whose target does not exist so an unverified link
+  // cannot be auto-allowed.
+  return verdict.operands.every((operand) => {
+    const lexical = resolve(root, operand);
+    if (!existsSync(lexical)) return false;
+    return isInside(root, realpathForPolicy(lexical));
+  });
 }
 
 /**

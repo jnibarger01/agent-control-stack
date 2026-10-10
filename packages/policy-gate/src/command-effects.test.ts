@@ -115,11 +115,27 @@ describe("classifyReadOnlyArgv", () => {
   });
 });
 
+
+  it("allows exact equals-form flags on the read-only allowlist", () => {
+    expect(classifyReadOnlyArgv(["git", "status", "--porcelain=v1"]).ok).toBe(true);
+    expect(classifyReadOnlyArgv(["git", "status", "--porcelain=v2"]).ok).toBe(true);
+  });
+
+  it("rejects stdin markers as file operands", () => {
+    expect(classifyReadOnlyArgv(["cat", "-"]).ok).toBe(false);
+    expect(classifyReadOnlyArgv(["head", "-"]).ok).toBe(false);
+    expect(classifyReadOnlyArgv(["rg", "pattern", "-"]).ok).toBe(false);
+  });
 describe("commandPathOperands", () => {
   it("collects path-like operands and expands ~", () => {
-    expect(commandPathOperands(["cat", "README.md", "docs/a.md"])).toEqual(["docs/a.md"]);
+    expect(commandPathOperands(["cat", "README.md", "docs/a.md"])).toEqual(["README.md", "docs/a.md"]);
     expect(commandPathOperands(["cat", ".env"])).toEqual([".env"]);
-    expect(commandPathOperands(["dd", "if=/dev/zero", "of=disk.img"])).toEqual(["/dev/zero"]);
+    expect(commandPathOperands(["cat", "credentials.json", "token.json", "id_rsa"])).toEqual([
+      "credentials.json",
+      "token.json",
+      "id_rsa"
+    ]);
+    expect(commandPathOperands(["dd", "if=/dev/zero", "of=disk.img"])).toEqual(["/dev/zero", "disk.img"]);
     expect(commandPathOperands(["ls"])).toEqual([]);
     expect(commandPathOperands(["cat", "../outside.txt"])).toEqual(["../outside.txt"]);
     expect(commandPathOperands(["cat", "~/.ssh/id_rsa"])).toEqual(["/~/.ssh/id_rsa"]);
