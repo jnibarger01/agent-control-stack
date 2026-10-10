@@ -13,6 +13,7 @@ import { systemProbesClientSource } from "./system-probes.js";
 import { ADMIN_MODE_BANNER_TEXT } from "./types.js";
 import { auditRowsClientSource, metricsClientSource, themeClientSource } from "./visibility.js";
 import { workItemControlsClientSource } from "./work-item-controls.js";
+import { operatorThirtyClientSource } from "./operator-thirty-ui.js";
 
 export function clientScript(): string {
   return `
@@ -198,11 +199,13 @@ ${auditRowsClientSource()}
 ${metricsClientSource()}
 ${themeClientSource()}
 ${operationsClientSource()}
+${operatorThirtyClientSource()}
 function onDashboardFragmentsApplied() {
   applyOperationFilters();
   updateTitleBadge();
   refreshWaitBadges();
   if (document.body.dataset.activeView === 'connectors') refreshConnectorRoster();
+  if (typeof applyOperatorThirty === 'function') applyOperatorThirty();
 }
 function onWorkItemControlSucceeded(control, id, body) {
   const created = body && body.workItem && body.workItem.id;
