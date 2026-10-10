@@ -144,6 +144,20 @@ export function assertHandlerCoverage(handlerNames: readonly string[]): void {
 
 export { jcStandaloneToolAllowed };
 
+/**
+ * The authenticated caller, as set by the OAuth bridge (it force-overwrites client-written
+ * `_meta.gateway`). An approval is bound to this identity so it cannot be claimed by another
+ * principal. Absent (stdio) means "no principal".
+ */
+export function callerPrincipal(meta: Record<string, unknown> | undefined): string | undefined {
+  const gateway = meta?.gateway;
+  if (!gateway || typeof gateway !== 'object') return undefined;
+  const { sub, client_id: clientId } = gateway as Record<string, unknown>;
+  if (typeof sub !== 'string' || sub.length === 0 || sub.length > 200) return undefined;
+  const client = typeof clientId === 'string' ? clientId.slice(0, 100) : '';
+  return `${sub}|${client}`;
+}
+
 /** Tool names served in standalone mode, derived from the manifest. */
 export const JC_STANDALONE_TOOL_NAMES: readonly string[] = Object.freeze(
   JC_TOOLS.map((tool) => tool.name).filter((name) => jcStandaloneToolAllowed(name)),
@@ -264,6 +278,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     const name = request.params.name;
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
     const capability = (request.params._meta as Record<string, unknown> | undefined)?.acsCapability;
+    const principal = callerPrincipal(request.params._meta as Record<string, unknown> | undefined);
     const route = Object.prototype.hasOwnProperty.call(JC_TOOL_POLICIES, name) ? resolver.resolve(name) : undefined;
     if (!route) return fail('unknown_tool', `unknown tool: ${name}`);
     let routeMeta = jcAuthorizationMeta(mode, route);
@@ -308,7 +323,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
         }
       }
       if (effective === 'approve') {
-        const outcome = await localApproval(name, args, route);
+        const outcome = await localApproval(name, args, route, principal);
         if (!outcome.granted) return outcome.result;
         localAuthorization = outcome.authorization;
         helperCapability = outcome.token;
@@ -371,7 +386,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
    * For privileged_exec the same token is then handed to the root helper, which verifies it
    * again against its own root-owned local trust anchor; this process cannot grant sudo.
    */
-  async function localApproval(name: string, args: Record<string, unknown>, route: JcRoute):
+  async function localApproval(name: string, args: Record<string, unknown>, route: JcRoute, principal?: string):
     Promise<{ granted: true; authorization: JcLocalAuthorization; token: unknown } | { granted: false; result: ToolResult }> {
     const refuse = (code: string, message: string, decision: string, extraMeta: Record<string, unknown> = {}, extraTrace: Record<string, unknown> = {}) => {
       recordTrace(trace, name, args, { ok: false, code, ...routeTrace(route), ...extraTrace });
@@ -382,7 +397,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     }
     let reply: AuthorizeReply;
     try {
-      reply = await approver.authorize(name, args);
+      reply = await approver.authorize(name, args, principal);
     } catch (error) {
       const detail = error instanceof ApproverUnavailable ? error.message : 'approver error';
       return refuse('JC_LOCAL_APPROVAL_UNAVAILABLE', `${name} needs local human approval but approverd is unavailable (${detail}); nothing ran`, 'approval-unavailable');

@@ -520,5 +520,64 @@ await test('review hardening: overlapping request/decide groups refuse startup; 
   await info.daemon.stop();
 });
 
+await test('review hardening: approvals are bound to the caller; restart trusts only audit-backed, hash-consistent records', async () => {
+  const { callerPrincipal } = await import('../dist/jace-commander/server.js');
+  assert.equal(callerPrincipal(undefined), undefined);
+  assert.equal(callerPrincipal({ gateway: { sub: 'alice', client_id: 'c1' } }), 'alice|c1');
+  assert.equal(callerPrincipal({ gateway: { sub: '' } }), undefined);
+
+  const info = await makeApprover();
+  const client = new ApproverClient(info.config.requestSocket, RUNTIME, 2000);
+  const args = { path: path.join(root, 'bound.txt'), content: 'x' };
+  const alice = await client.authorize('write_file', args, 'alice|c1');
+  assert.equal(alice.state, 'pending');
+  const hash = computeLocalInvocationHash(RUNTIME, 'write_file', args);
+  const approve = (id) => runApproveCommand('approve', [id], {
+    decideSocket: info.config.decideSocket, approverId: 'tester',
+    io: { stdout() {}, stderr() {}, isTty: true, prompt: async () => hash.slice(0, 8) },
+  });
+  assert.equal(await approve(alice.approvalId), APPROVE_EXIT.ok);
+  // Another principal making the same call neither claims alice's approval nor shares her pending state.
+  const bob = await client.authorize('write_file', args, 'bob|c2');
+  assert.equal(bob.state, 'pending');
+  assert.notEqual(bob.approvalId, alice.approvalId);
+  const aliceRetry = await client.authorize('write_file', args, 'alice|c1');
+  assert.equal(aliceRetry.state, 'granted');
+  assert.equal(aliceRetry.approvalId, alice.approvalId);
+
+  // Restart: the legit pending record (bob) survives; a forged "approved" record and a hash-mismatched one do not.
+  await info.daemon.stop();
+  const dir = path.join(info.config.stateDir, 'approvals');
+  const bobFile = path.join(dir, `${bob.approvalId}.json`);
+  const forged = JSON.parse(fs.readFileSync(bobFile, 'utf8'));
+  forged.id = 'apr-forged';
+  forged.status = 'approved';
+  fs.writeFileSync(path.join(dir, 'apr-forged.json'), JSON.stringify(forged));
+  const mismatched = { ...JSON.parse(fs.readFileSync(bobFile, 'utf8')), id: 'apr-mismatch', arguments: { path: '/etc/passwd', content: 'x' } };
+  fs.writeFileSync(path.join(dir, 'apr-mismatch.json'), JSON.stringify(mismatched));
+  // A claimed approval whose file reverted to "approved" must not mint a second token.
+  const reverted = JSON.parse(fs.readFileSync(path.join(dir, `${alice.approvalId}.json`), 'utf8'));
+  assert.equal(reverted.status, 'claimed');
+  reverted.status = 'approved';
+  fs.writeFileSync(path.join(dir, `${alice.approvalId}.json`), JSON.stringify(reverted));
+  const again = new Approverd(info.config, { now });
+  await again.start();
+  const view = (id) => again.handleDecideOp({ op: 'show', id });
+  assert.equal(view('apr-forged').ok, false);
+  assert.equal(view('apr-mismatch').ok, false);
+  assert.equal(view(bob.approvalId).approval.status, 'pending');
+  assert.equal(view(alice.approvalId).approval.status, 'claimed');
+  assert.notEqual(again.handleRequestOp({ op: 'authorize', runtimeId: RUNTIME, tool: 'write_file', arguments: args, principal: 'alice|c1' }).state, 'granted');
+  await again.stop();
+
+  // A tampered audit chain restores nothing at all.
+  const auditFile = path.join(info.config.stateDir, 'audit.jsonl');
+  fs.appendFileSync(auditFile, '{"not":"a chain event"}\n');
+  const broken = new Approverd(info.config, { now });
+  await broken.start();
+  assert.equal(broken.handleDecideOp({ op: 'show', id: bob.approvalId }).ok, false);
+  await broken.stop();
+});
+
 fs.rmSync(root, { recursive: true, force: true });
 console.log(`\njace-commander approval: ${passed} passed`);

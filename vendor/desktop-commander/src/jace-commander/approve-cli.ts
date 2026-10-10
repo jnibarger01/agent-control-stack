@@ -83,6 +83,7 @@ export async function runApproveCommand(command: 'approve' | 'reject' | 'pending
       `  runtime:     ${String(approval.runtimeId)}`,
       `  requested:   ${String(approval.requestedAt)}   expires ${String(approval.expiresAt)}`,
       `  invocation:  ${hash}`,
+      `  caller:      ${approval.principal === undefined ? '(none: local stdio)' : String(approval.principal)}`,
       '  arguments:',
       ...displayArgs(approval.arguments).split('\n').map((line) => `    ${line}`),
       '',

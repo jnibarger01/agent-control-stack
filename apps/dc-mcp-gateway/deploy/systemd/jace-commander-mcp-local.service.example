@@ -26,7 +26,7 @@ Environment=BRIDGE_PORT=8003
 Environment=NODE_ENV=production
 Environment=JC_PRESET=local
 Environment=JC_POLICY_PATH=/etc/jace-commander/policy.json
-Environment=JC_STATE_DIR=/var/lib/jace-commander/state
+Environment=JC_STATE_DIR=/var/lib/jace-commander-mcp/state
 Environment=JC_RUNTIME_ID=jc-local
 EnvironmentFile=/etc/jace-commander/bridge.env
 ExecStart=/usr/bin/env node /opt/agent-control-stack/apps/dc-mcp-gateway/bridge.js
@@ -59,12 +59,14 @@ SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
 UMask=0077
 # Only these paths are writable. Add the workspace roots named in policy.json.
-ReadWritePaths=/var/lib/jace-commander /home/jc/work
+ReadWritePaths=/var/lib/jace-commander-mcp /home/jc/work
 ReadOnlyPaths=/etc/jace-commander
 # Outbound network is a policy decision (network class = approve). To forbid it
 # outright, add: IPAddressDeny=any  and  IPAddressAllow=localhost
-StateDirectory=jace-commander
-LogsDirectory=jace-commander
+# A DEDICATED directory: /var/lib/jace-commander (approverd key/state, helper nonces) stays root-owned
+# and is never handed to the jc account by systemd.
+StateDirectory=jace-commander-mcp
+LogsDirectory=jace-commander-mcp
 
 [Install]
 WantedBy=multi-user.target

@@ -36,7 +36,7 @@ import {
   computeLocalInvocationHash,
   localTokenSigningBytes,
 } from './local-token.js';
-import { JsonlTraceChain } from './looptrace.js';
+import { JsonlTraceChain, readTraceFile, verifyChain } from './looptrace.js';
 import { jcRiskClassOf } from './providers.js';
 
 export const DEFAULT_APPROVAL_TTL_MS = 15 * 60_000;
@@ -78,6 +78,8 @@ export interface ApprovalRecord {
   riskClass: string;
   arguments: Record<string, unknown>;
   invocationHash: string;
+  /** Authenticated caller that requested it (gateway sub|client); approval cannot move between callers. */
+  principal?: string;
   requestedAt: string;
   expiresAt: string;
   status: ApprovalStatus;
@@ -231,8 +233,10 @@ export class Approverd {
     } catch {
       return { ok: false, code: 'INVALID_REQUEST' };
     }
+    const principal = typeof message.principal === 'string' && message.principal.length > 0 && message.principal.length <= 320 ? message.principal : '';
+    if (message.principal !== undefined && principal === '') return { ok: false, code: 'INVALID_REQUEST' };
     this.expireStale();
-    const live = [...this.records.values()].filter((record) => record.invocationHash === invocationHash);
+    const live = [...this.records.values()].filter((record) => record.invocationHash === invocationHash && (record.principal ?? '') === principal);
     const approved = live.find((record) => record.status === 'approved');
     if (approved) return this.claim(approved);
     const pending = live.find((record) => record.status === 'pending');
@@ -254,11 +258,12 @@ export class Approverd {
       riskClass,
       arguments: args,
       invocationHash,
+      ...(principal ? { principal } : {}),
       requestedAt: new Date(now).toISOString(),
       expiresAt: new Date(now + (this.config.approvalTtlMs ?? DEFAULT_APPROVAL_TTL_MS)).toISOString(),
       status: 'pending',
     };
-    if (!this.auditAppend('approval_requested', { approvalId: record.id, tool, riskClass, invocationHash })) return { ok: false, code: 'AUDIT_UNAVAILABLE' };
+    if (!this.auditAppend('approval_requested', { approvalId: record.id, tool, riskClass, invocationHash, ...(principal ? { principal } : {}) })) return { ok: false, code: 'AUDIT_UNAVAILABLE' };
     this.records.set(record.id, record);
     this.persist(record);
     return { ok: true, state: 'pending', approvalId: record.id, expiresAt: record.expiresAt };
@@ -331,7 +336,9 @@ export class Approverd {
     // The human must have seen THIS invocation: the client echoes its hash.
     if (message.confirmHash !== record.invocationHash) return { ok: false, code: 'CONFIRMATION_MISMATCH' };
     const action = message.decision === 'approve' ? 'approved' : 'rejected';
-    if (!this.auditAppend('approval_decision', { approvalId: record.id, action, approverId: message.approverId, invocationHash: record.invocationHash })) {
+    if (!this.auditAppend('approval_decision', { approvalId: record.id, action, approverId: message.approverId,
+      // Node has no SO_PEERCRED: the socket group proves only that SOME decide-group member acted.
+      approverIdAssurance: 'self-asserted', invocationHash: record.invocationHash })) {
       return { ok: false, code: 'AUDIT_UNAVAILABLE' };
     }
     record.status = action;
@@ -381,16 +388,64 @@ export class Approverd {
     }
   }
 
+  /**
+   * Restores persisted approvals, trusting NOTHING on disk by itself: each record must be fully
+   * shaped, its invocation hash must recompute from its own runtime/tool/arguments/principal, and
+   * its state must be backed by the hash-chained audit log. A broken audit chain restores nothing.
+   */
   private loadRecords(): void {
+    const auditPath = path.join(this.config.stateDir, 'audit.jsonl');
+    const requested = new Map<string, string>();
+    const decided = new Map<string, Map<string, string>>();
+    if (fs.existsSync(auditPath)) {
+      const parsed = readTraceFile(auditPath);
+      if (parsed.parseError || !verifyChain(parsed.events).ok) return;
+      for (const event of parsed.events as Array<{ type: string; payload: Record<string, unknown> }>) {
+        const id = event.payload.approvalId;
+        const hash = event.payload.invocationHash;
+        if (typeof id !== 'string' || typeof hash !== 'string') continue;
+        if (event.type === 'approval_requested') requested.set(id, hash);
+        if (event.type === 'approval_decision' && typeof event.payload.action === 'string') {
+          const actions = decided.get(id) ?? new Map<string, string>();
+          actions.set(event.payload.action, hash);
+          decided.set(id, actions);
+        }
+      }
+    }
     for (const entry of fs.readdirSync(this.approvalsDir)) {
       if (!entry.endsWith('.json')) continue;
       try {
         const record = JSON.parse(fs.readFileSync(path.join(this.approvalsDir, entry), 'utf8')) as ApprovalRecord;
-        if (typeof record.id === 'string' && ID_PATTERN.test(record.id) && record.invocationHash) this.records.set(record.id, record);
+        if (!this.persistedRecordValid(record, requested, decided)) continue;
+        // The audit is the durable truth: a consumed approval must never be restored as usable.
+        if (decided.get(record.id)?.has('claimed') && record.status !== 'claimed') record.status = 'claimed';
+        this.records.set(record.id, record);
       } catch {
         // An unreadable record is dropped: it can only mean "no approval", never an approval.
       }
     }
+  }
+
+  private persistedRecordValid(record: ApprovalRecord, requested: Map<string, string>, decided: Map<string, Map<string, string>>): boolean {
+    if (!record || typeof record !== 'object') return false;
+    if (typeof record.id !== 'string' || !ID_PATTERN.test(record.id)) return false;
+    if (record.runtimeId !== this.config.runtimeId) return false;
+    if (typeof record.tool !== 'string' || jcRiskClassOf(record.tool) !== record.riskClass || record.riskClass === 'read') return false;
+    if (!['pending', 'approved', 'rejected', 'expired', 'claimed'].includes(record.status)) return false;
+    if (!Number.isFinite(Date.parse(record.requestedAt)) || !Number.isFinite(Date.parse(record.expiresAt))) return false;
+    if (record.principal !== undefined && typeof record.principal !== 'string') return false;
+    let expected: string;
+    try {
+      expected = computeLocalInvocationHash(record.runtimeId, record.tool, jcAuthorizationArguments(record.arguments));
+    } catch {
+      return false;
+    }
+    if (record.invocationHash !== expected) return false;
+    // Every record needs its request in the audit; approved/rejected/claimed need that decision too.
+    if (requested.get(record.id) !== record.invocationHash) return false;
+    const needed = record.status === 'approved' ? 'approved' : record.status === 'rejected' ? 'rejected' : record.status === 'claimed' ? 'claimed' : undefined;
+    if (needed && decided.get(record.id)?.get(needed) !== record.invocationHash) return false;
+    return true;
   }
 
   private listen(socketPath: string, group: string | number | undefined, handle: (message: unknown) => Json): Promise<net.Server> {

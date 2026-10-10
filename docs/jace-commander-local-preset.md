@@ -23,6 +23,14 @@ a second time by the root helper (see below).
 
 ## Human approval (`approverd`)
 
+Operational notes: an approval is bound to the authenticated caller (the gateway `sub|client_id` the OAuth
+bridge stamps; none over stdio), so another principal repeating the same call gets its own pending approval.
+On restart `approverd` restores only records whose hash recomputes and whose state is backed by its
+hash-chained audit log (a broken chain restores nothing). The approver name in the audit is
+**self-asserted**: the decide-socket group proves only that some member of that group decided. The MCP
+service uses its own `/var/lib/jace-commander-mcp` state directory; `/var/lib/jace-commander` (approver
+key/state, helper nonces) stays root-owned.
+
 Install with `sudo deploy/jace-commander/install-approverd.sh` (a root action; the
 repo never runs it for you). It creates three distinct identities: the `jc` server
 account, the `jc-approverd` signer that alone holds the signing key, and your login,

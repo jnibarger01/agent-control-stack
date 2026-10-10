@@ -55,8 +55,8 @@ export type AuthorizeReply =
 export class ApproverClient {
   constructor(private readonly requestSocket: string, private readonly runtimeId: string, private readonly timeoutMs = 3000) {}
 
-  async authorize(tool: string, args: Record<string, unknown>): Promise<AuthorizeReply> {
-    const reply = await approverCall(this.requestSocket, { op: 'authorize', runtimeId: this.runtimeId, tool, arguments: args }, this.timeoutMs);
+  async authorize(tool: string, args: Record<string, unknown>, principal?: string): Promise<AuthorizeReply> {
+    const reply = await approverCall(this.requestSocket, { op: 'authorize', runtimeId: this.runtimeId, tool, arguments: args, ...(principal ? { principal } : {}) }, this.timeoutMs);
     if (reply.ok !== true) throw new ApproverUnavailable(`approver refused (${String(reply.code ?? 'unknown')})`);
     if (reply.state === 'granted' && typeof reply.approvalId === 'string') return { state: 'granted', approvalId: reply.approvalId, token: reply.token };
     if (reply.state === 'pending' && typeof reply.approvalId === 'string' && typeof reply.expiresAt === 'string') {
