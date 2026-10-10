@@ -100,6 +100,11 @@ const WORK_ITEM_STATUSES = new Set([
   'succeeded', 'failed', 'blocked', 'cancelled', 'rejected', 'unknown', 'quarantined',
 ]);
 
+/** ACS readiness endpoint (cheap, about 60 ms). The deep /health is for the acs_read `health` view only. */
+export function acsReadyUrl(config: JcConfig): string {
+  return `${config.acsUrl.replace(/\/$/, '')}/readyz`;
+}
+
 export function acsReadUrl(config: JcConfig, view: AcsView, id?: string, status?: string): string {
   switch (view) {
     case 'health':
