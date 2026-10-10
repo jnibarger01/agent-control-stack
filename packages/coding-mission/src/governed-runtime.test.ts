@@ -183,6 +183,20 @@ describe("governed execution composition root", () => {
     expect(first.authority.grantId).toBe(w.grant.grantId);
   });
 
+  it("stops dispatching once the authoritative work item is terminal, while the mission row is still active", () => {
+    const w = world();
+    w.spawn("child-a", "tok-a");
+    w.exec.items.cancelWorkItem(w.item.id, { actor: "operator" }, { via: "policy_gate", actorId: HUMAN });
+    expect(w.exec.missions.require(w.item.id).state).not.toBe("cancelled");
+    expect(() => w.dispatch(w.exec, "child-a", "tok-a")).toThrow(/grant_subject_changed/u);
+    expect(w.exec.missions.events(w.item.id).map((e) => e.name)).toContain("authority.denied");
+  });
+
+  it("refuses a private database, where the two stores would not share revocations", () => {
+    for (const dbPath of [":memory:", "", "file::memory:", "file:private?mode=memory&cache=shared"])
+      expect(() => boot(dbPath, { now: new Date().toISOString() }), dbPath).toThrow(/shared database file/u);
+  });
+
   it("close() releases the control-plane connections", () => {
     const w = world();
     w.exec.close();

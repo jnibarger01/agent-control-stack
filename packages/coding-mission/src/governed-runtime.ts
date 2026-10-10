@@ -27,15 +27,31 @@ export interface GovernedExecution {
   close(): void;
 }
 
-/** The grant reader backed by the real control-plane store: canonical grant hash, audit-backed revocation. */
+/**
+ * Work item statuses after which a grant is no longer current. Mirrors SqliteWorkItemStore.requireActiveAutonomousAuthority,
+ * because the mission row is a separate record that can stay active after the work item is cancelled or finished.
+ */
+const TERMINAL_WORK_ITEM_STATUSES = new Set(["succeeded", "failed", "cancelled", "rejected", "quarantined"]);
+
+/**
+ * The grant reader backed by the real control-plane store: canonical grant hash, audit-backed revocation. A terminal
+ * work item reports no subject hash, which never equals a grant's, so every dependent check refuses.
+ */
 export function controlPlaneGrantReader(items: SqliteWorkItemStore): GrantReader {
   return {
     getAutonomousAuthority: (grantId) => items.getAutonomousAuthority(grantId),
     currentSubjectInputHash: (missionId) => {
       const item = items.get(missionId);
-      return item ? executionPlanSubjectInputHash(item) : undefined;
+      if (!item || TERMINAL_WORK_ITEM_STATUSES.has(item.status)) return undefined;
+      return executionPlanSubjectInputHash(item);
     }
   };
+}
+
+/** Revocations are read from the mission store's connection, so both stores must see one file. */
+function assertSharedDatabaseFile(dbPath: string): void {
+  if (dbPath === "" || dbPath === ":memory:" || dbPath.startsWith("file:"))
+    throw new Error("governed execution needs a shared database file; private in-memory databases are refused");
 }
 
 /**
@@ -44,6 +60,7 @@ export function controlPlaneGrantReader(items: SqliteWorkItemStore): GrantReader
  * here can mint or widen authority: it only wires readers.
  */
 export function createGovernedExecution(options: GovernedExecutionOptions): GovernedExecution {
+  assertSharedDatabaseFile(options.dbPath);
   const items = new SqliteWorkItemStore(options.dbPath);
   let missions: CodingMissionStore | undefined;
   try {
