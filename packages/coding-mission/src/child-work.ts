@@ -34,6 +34,7 @@ import {
   type WorkUnitStatus
 } from "./mission-model.js";
 import type { CodingMissionStore } from "./store.js";
+import type { DispatchAuthorityVerdict, ExecutorLane } from "./worker-execution.js";
 
 export const CHILD_WORK_TYPES = ["research", "coding", "review", "testing", "analysis", "verification"] as const;
 export type ChildWorkType = (typeof CHILD_WORK_TYPES)[number];
@@ -138,6 +139,12 @@ export const DEFAULT_CLAIM_TTL_MS = 300_000;
 
 /** How far ahead of ACS's clock a claim timestamp may be and still count as live. */
 const MAX_CLAIM_CLOCK_SKEW_MS = 5_000;
+
+/**
+ * The tool runtime an executor lane drives. The coder and mcp lanes have no single runtime, so their tool classes are
+ * enforced where each tool is invoked, not at dispatch.
+ */
+const LANE_RUNTIME: Partial<Record<ExecutorLane, string>> = { jc: "jace_commander", dc: "desktop_commander" };
 
 const MAX_CHILD_TTL_MS = 86_400_000;
 const KNOWN_PRIVILEGES = new Set<string>(changeSetPrivilegeSchema.options);
@@ -824,6 +831,63 @@ export class MissionAuthorityLedger {
       }
       return { ok: true, created: created.created, authorities };
     });
+  }
+
+  /**
+   * The dispatch gate: may this worker run this unit now, on this lane? Everything is read from durable state and ACS's
+   * own clock, and every doubt is a refusal. A unit runs under its own derived authority; only a root unit runs under
+   * the mission's. A unit that should have derived authority but has none is refused, never promoted to the mission's.
+   * Returns a reason instead of throwing so the dispatcher can record it as durable evidence.
+   */
+  verifyDispatch(input: {
+    missionId: string;
+    unitId: string;
+    workerId: string;
+    lane: ExecutorLane;
+    attempt: number;
+  }): DispatchAuthorityVerdict {
+    const refuse = (reason: string): DispatchAuthorityVerdict => ({ ok: false, reason });
+    try {
+      const now = Date.parse(this.clock());
+      const mission = this.store.get(input.missionId);
+      if (!mission || TERMINAL_MISSION_STATES.has(mission.state)) return refuse("mission_not_active");
+      const missionAuthority = this.missionAuthority(input.missionId);
+      if (!missionAuthority) return refuse("mission_has_no_authority");
+      const unit = this.store.workUnits(input.missionId).find((candidate) => candidate.unitId === input.unitId);
+      if (!unit) return refuse("unit_not_found");
+      const record = unit.parentUnitId ? this.unitAuthority(input.missionId, input.unitId) : undefined;
+      if (unit.parentUnitId && !record) return refuse("unit_authority_missing");
+      const superseded = this.store.db
+        .prepare("SELECT 1 FROM work_unit_child_supersessions WHERE mission_id = ? AND child_unit_id = ?")
+        .get(input.missionId, input.unitId);
+      if (superseded) return refuse("unit_superseded");
+      const definition = record?.definition ?? missionAuthority.definition;
+      const definitionHashValue = record?.definitionHash ?? missionAuthority.definitionHash;
+      const grantId = record?.grantId ?? missionAuthority.grantId;
+      if (this.grantRevoked(grantId)) return refuse("grant_revoked");
+      if (this.currentSubjectHash(input.missionId) !== this.readGrant(grantId)?.subjectInputHash) {
+        return refuse("grant_subject_changed");
+      }
+      if (!(Date.parse(definition.expiresAt) > now)) return refuse("authority_expired");
+      const actor = (this.options.resolveActor ?? ((workerId: string) => workerId))(input.workerId);
+      if (actor !== definition.executingActorId) return refuse("worker_not_authorized_for_authority");
+      if (!(input.attempt <= definition.limits.maxAttemptsPerOperation)) return refuse("attempt_limit_exceeded");
+      const runtime = LANE_RUNTIME[input.lane];
+      if (runtime && !definition.toolClasses.some((tool) => tool.runtime === runtime)) {
+        return refuse("lane_not_permitted");
+      }
+      return {
+        ok: true,
+        grantId,
+        unitAuthorityHash: definitionHashValue,
+        executingActorId: definition.executingActorId
+      };
+    } catch (error) {
+      if (error instanceof ControlStackError && error.code === "authority_integrity") {
+        return refuse("authority_integrity_failure");
+      }
+      throw error;
+    }
   }
 
   /**
