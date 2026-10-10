@@ -30,7 +30,7 @@ describe("inferCommandEffects", () => {
   it("never reports destructive or network for allowlisted read-only shapes", () => {
     for (const command of [
       ["git", "status"],
-      ["git", "diff", "--no-textconv", "--stat"],
+      ["git", "diff", "--no-textconv", "--no-ext-diff", "--stat"],
       ["cat", "README.md"],
       ["ls", "-la", "src"],
       ["rg", "-n", "TODO", "src"],
@@ -73,7 +73,7 @@ describe("classifyReadOnlyArgv", () => {
     expect(classifyReadOnlyArgv(["git", "status"]).ok).toBe(true);
     expect(classifyReadOnlyArgv(["git", "status", "--short"]).ok).toBe(true);
     expect(classifyReadOnlyArgv(["git", "diff"]).ok).toBe(false);
-    expect(classifyReadOnlyArgv(["git", "diff", "--no-textconv", "--stat"]).ok).toBe(true);
+    expect(classifyReadOnlyArgv(["git", "diff", "--no-textconv", "--no-ext-diff", "--stat"]).ok).toBe(true);
     expect(classifyReadOnlyArgv(["git", "diff", "--output=../x"]).ok).toBe(false);
     expect(classifyReadOnlyArgv(["git", "diff", "--ext-diff"]).ok).toBe(false);
     expect(classifyReadOnlyArgv(["git", "push", "origin", "main"]).ok).toBe(false);

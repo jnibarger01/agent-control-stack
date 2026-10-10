@@ -29,7 +29,7 @@ describe("policy gate", () => {
       }).decision
     ).toBe("allow");
     expect(evaluatePolicy({ ...base, command: ["git", "status"] }).decision).toBe("allow");
-    expect(evaluatePolicy({ ...base, command: ["git", "diff", "--no-textconv"] }).decision).toBe("allow");
+    expect(evaluatePolicy({ ...base, command: ["git", "diff", "--no-textconv", "--no-ext-diff", "--stat"] }).decision).toBe("allow");
     expect(evaluatePolicy({ ...base, command: ["git", "diff"] }).decision).toBe("require_approval");
     expect(evaluatePolicy({ ...base, command: ["npm", "test"] }).decision).toBe("require_approval");
     expect(evaluatePolicy({ ...base, command: ["npm", "test"] }).matchedRules).toContain("approval:package-script");

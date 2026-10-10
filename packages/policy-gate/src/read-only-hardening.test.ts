@@ -37,29 +37,63 @@ const policyFor = (command: string[], paths?: string[]) =>
   });
 
 describe("git read-only argv", () => {
-  it("requires --no-textconv for diff, log and show, but not for status", () => {
+  it("requires --no-textconv and --no-ext-diff for diff, log and show, but not for status", () => {
     expect(classifyReadOnlyArgv(["git", "status"]).ok).toBe(true);
-    expect(classifyReadOnlyArgv(["git", "diff"]).ok).toBe(false);
-    expect(classifyReadOnlyArgv(["git", "log", "-n", "3"]).ok).toBe(false);
-    expect(classifyReadOnlyArgv(["git", "diff", "--no-textconv"]).ok).toBe(true);
-    expect(classifyReadOnlyArgv(["git", "log", "--no-textconv", "-n", "3"]).ok).toBe(true);
-    expect(classifyReadOnlyArgv(["git", "show", "--no-textconv", "HEAD~1"]).ok).toBe(true);
+    expect(classifyReadOnlyArgv(["git", "diff", "--stat"]).ok).toBe(false);
+    expect(classifyReadOnlyArgv(["git", "log", "--oneline"]).ok).toBe(false);
+    expect(classifyReadOnlyArgv(["git", "diff", "--no-textconv", "--stat"]).ok).toBe(false);
+    expect(classifyReadOnlyArgv(["git", "diff", "--no-ext-diff", "--stat"]).ok).toBe(false);
+    expect(classifyReadOnlyArgv(["git", "diff", "--no-textconv", "--no-ext-diff", "--stat"]).ok).toBe(true);
+    expect(classifyReadOnlyArgv(["git", "log", "--no-textconv", "--no-ext-diff", "--oneline"]).ok).toBe(true);
+    expect(classifyReadOnlyArgv(["git", "show", "--no-textconv", "--no-ext-diff", "--name-only", "HEAD~1"]).ok).toBe(true);
   });
 
-  it("does not accept --no-textconv after the -- separator as a real option", () => {
-    expect(classifyReadOnlyArgv(["git", "diff", "--", "--no-textconv"]).ok).toBe(false);
+  it("refuses patch output, which prints file contents, even with the safety flags", () => {
+    const flags = ["--no-textconv", "--no-ext-diff"];
+    expect(classifyReadOnlyArgv(["git", "diff", ...flags]).ok).toBe(false);
+    expect(classifyReadOnlyArgv(["git", "show", ...flags, "HEAD"]).ok).toBe(false);
+    expect(classifyReadOnlyArgv(["git", "log", ...flags, "-p"]).ok).toBe(false);
+    expect(classifyReadOnlyArgv(["git", "diff", ...flags, "--stat", "--patch"]).ok).toBe(false);
+  });
+
+  it("refuses operands that escape the workspace, which git reads as filesystem files", () => {
+    const flags = ["--no-textconv", "--no-ext-diff", "--stat"];
+    expect(classifyReadOnlyArgv(["git", "diff", ...flags, "/tmp/secret", "README.md"]).ok).toBe(false);
+    expect(classifyReadOnlyArgv(["git", "diff", ...flags, "--no-index", "/etc/passwd", "README.md"]).ok).toBe(false);
+    expect(classifyReadOnlyArgv(["git", "diff", ...flags, "../outside.txt"]).ok).toBe(false);
+    expect(classifyReadOnlyArgv(["git", "status", "~/secret"]).ok).toBe(false);
+    expect(classifyReadOnlyArgv(["git", "diff", ...flags, "HEAD..HEAD~1"]).ok).toBe(true);
+  });
+
+  it("does not accept the safety flags after the -- separator as real options", () => {
+    expect(classifyReadOnlyArgv(["git", "diff", "--stat", "--", "--no-textconv", "--no-ext-diff"]).ok).toBe(false);
   });
 
   it("refuses rev:path blob selectors, which can diff two blobs of a credential file", () => {
-    expect(classifyReadOnlyArgv(["git", "diff", "HEAD~:.env", "HEAD:.env", "--no-textconv"]).ok).toBe(false);
-    expect(classifyReadOnlyArgv(["git", "show", "--no-textconv", "HEAD:README.md"]).ok).toBe(false);
-    expect(classifyReadOnlyArgv(["git", "diff", "--no-textconv", "HEAD~1..HEAD"]).ok).toBe(true);
+    const flags = ["--no-textconv", "--no-ext-diff", "--stat"];
+    expect(classifyReadOnlyArgv(["git", "diff", "HEAD~:.env", "HEAD:.env", ...flags]).ok).toBe(false);
+    expect(classifyReadOnlyArgv(["git", "diff", ...flags, "HEAD:README.md"]).ok).toBe(false);
   });
 });
 
 describe("policy decisions for hardened read-only argv", () => {
-  it("does not auto-allow bare git diff, which runs textconv helpers", () => {
+  it("does not auto-allow bare git diff, which runs textconv helpers and prints patch content", () => {
     expect(policyFor(["git", "diff"]).decision).toBe("require_approval");
+    expect(policyFor(["git", "diff", "--no-textconv", "--no-ext-diff"]).decision).toBe("require_approval");
+  });
+
+  it("does not auto-allow a diff that configured external drivers could run", () => {
+    expect(policyFor(["git", "diff", "--no-textconv", "--stat"]).decision).not.toBe("allow");
+  });
+
+  it("does not auto-allow an outside-workspace file compared by git, even with a declared path", () => {
+    const result = policyFor(["git", "diff", "--no-textconv", "--no-ext-diff", "--stat", "/tmp/secret", "README.md"], ["README.md"]);
+    expect(result.decision).not.toBe("allow");
+  });
+
+  it("still auto-allows metadata git reads inside the workspace", () => {
+    expect(policyFor(["git", "status"]).decision).toBe("allow");
+    expect(policyFor(["git", "diff", "--no-textconv", "--no-ext-diff", "--name-only"]).decision).toBe("allow");
   });
 
   it("does not auto-allow a rev:path blob diff of a credential file", () => {

@@ -503,6 +503,17 @@ function pathOperands(positionals: string[], min: number): ReadOnlyArgvVerdict {
   return ok(positionals);
 }
 
+/** Flags that make diff or show print metadata only. Without one of them, those commands print patch content. */
+const GIT_METADATA_ONLY_FLAGS: ReadonlySet<string> = new Set([
+  "--stat",
+  "--shortstat",
+  "--numstat",
+  "--name-only",
+  "--name-status",
+  "--no-patch",
+  "-s"
+]);
+
 function gitReadOnly(args: readonly string[]): ReadOnlyArgvVerdict {
   const sub = args[0];
   const rest = args.slice(1);
@@ -546,19 +557,33 @@ function gitReadOnly(args: readonly string[]): ReadOnlyArgvVerdict {
       return refuse(`git ${sub ?? ""} is not a read-only allowlisted subcommand`);
   }
   if (!parsed.ok) return refuse(parsed.reason);
-  // `diff`, `log` and `show` run configured textconv helpers unless `--no-textconv` is given before any
-  // `--`, so the flag must be present as a real option. Without it the command is not read-only.
   if (sub !== "status") {
     const separator = rest.indexOf("--");
     const options = separator >= 0 ? rest.slice(0, separator) : rest;
-    if (!options.includes("--no-textconv")) {
-      return refuse(`git ${sub} needs --no-textconv: textconv filters execute configured helpers`);
+    // Textconv filters and external diff drivers run configured helpers. `--no-textconv` does not disable
+    // `diff.external` / GIT_EXTERNAL_DIFF, so both flags are required as real options before any `--`.
+    if (!options.includes("--no-textconv") || !options.includes("--no-ext-diff")) {
+      return refuse(`git ${sub} needs --no-textconv and --no-ext-diff: configured diff helpers execute programs`);
+    }
+    // Patch output prints file contents, including secrets committed in history (`git show HEAD`). Only the
+    // metadata forms are read-only without review. `log` prints no patch unless asked; `diff` and `show` print
+    // one unless a metadata flag is given.
+    const patchRequested =
+      options.some((option) => option === "--patch" || (/^-[A-Za-z]+$/.test(option) && /[pu]/.test(option))) ||
+      (sub !== "log" && !options.some((option) => GIT_METADATA_ONLY_FLAGS.has(option)));
+    if (patchRequested) {
+      return refuse(`git ${sub} patch output prints file contents; only metadata forms are read-only`);
     }
   }
   // `rev:path` selects a blob (`HEAD~:.env`), and a blob pair can be diffed. Credential checks work on
   // path names, not on blob selectors, so any `:` in a git operand is refused rather than parsed.
   if (parsed.positionals.some((operand) => operand.includes(":"))) {
     return refuse("git revision or blob selector (rev:path) is not allowed in a read-only argv");
+  }
+  // git reads an absolute or parent-relative operand as a filesystem file outside the worktree (`git diff`
+  // with a path outside the repository compares that file). Such operands are not contained, so refuse them.
+  if (parsed.positionals.some((operand) => operand.startsWith("/") || operand.startsWith("~") || operand.split("/").includes(".."))) {
+    return refuse("git operand escapes the workspace");
   }
   // Revisions and pathspecs are both plain tokens; both are reported for the containment checks.
   return pathOperands(parsed.positionals, 0);
