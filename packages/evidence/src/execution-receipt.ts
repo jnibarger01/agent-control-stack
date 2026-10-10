@@ -60,8 +60,11 @@ const reviewerRef = z
 const policyDecisionSchema = z.enum(["allow", "require_approval"]);
 /** A canonical attempt can legitimately have zero reviewers when its requirement needs none. */
 const MAX_REVIEWERS = 8;
-/** Every approval the lease consumed: approvalId plus additionalApprovalIds in the canonical attempt lease. */
-const MAX_APPROVALS = 64;
+/**
+ * Every approval the lease consumed: one primary approvalId plus up to 64 additionalApprovalIds
+ * (work-items attempt.ts: additionalApprovals max 64). The total is therefore 1 + 64.
+ */
+const MAX_APPROVALS = 65;
 /**
  * The canonical validation run that proved the tests (work-items validationRunSchema), with its check
  * counts and a digest of its individual checks. The manifest's testEvidence is a claim; this block is what

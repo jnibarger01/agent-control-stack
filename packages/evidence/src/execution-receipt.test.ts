@@ -504,6 +504,32 @@ describe("proof-of-execution receipt integrity", () => {
   });
 
   describe("approval cap matches the canonical lease limit", () => {
+    it("accepts the full canonical lease: one primary approval plus 64 additional", () => {
+      const changed = core();
+      const many = Array.from({ length: 65 }, (_, index) =>
+        approvalCopy({
+          approvalId: `approval_${index + 1}`,
+          actionHash: H("c"),
+          audit: { eventId: `approval_event_${index + 1}`, eventHash: H("d") }
+        })
+      );
+      changed.authorization.approvals = many;
+      const bound = expected();
+      bound.approvals = many.map((approval) => ({ ...approval, audit: { ...approval.audit } }));
+      expect(verifyExecutionReceipt(buildExecutionReceipt(changed), bound)).toEqual({ ok: true, defects: [] });
+    });
+
+    it("rejects more approvals than the canonical lease can hold", () => {
+      const changed = core();
+      changed.authorization.approvals = Array.from({ length: 66 }, (_, index) =>
+        approvalCopy({
+          approvalId: `approval_${index + 1}`,
+          audit: { eventId: `approval_event_${index + 1}`, eventHash: H("d") }
+        })
+      );
+      expect(() => buildExecutionReceipt(changed)).toThrow();
+    });
+
     it("accepts a plan with 17 approval-required actions, each with its own approval", () => {
       const changed = core();
       const many = Array.from({ length: 17 }, (_, index) =>
