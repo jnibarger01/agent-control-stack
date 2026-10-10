@@ -43,6 +43,36 @@ Hermes CLI). Not run: `npm run check` aggregate (contracts, audit, release-integ
 6. Existing hash-chained `audit_events` (`packages/shared/src/audit-chain.ts`, CLI `audit export|verify`, `/readyz`
    check) is the tamper-evidence primitive. The Flight Recorder extends it; it does not create a parallel store.
 
+## External field report (pasted by operator, 2026-10-10; not independently reproduced here)
+
+Provenance: a separate session's readiness review of the live host. Treat figures as claims until re-measured.
+
+- **Verified in code on `f7e4f77`:** `apps/gateway/src/server.ts:1174` serves `GET /health` with `deepHealth`, while
+  `/livez` and `/readyz` are cheap. `docs/protocol/execution-mode.md` already states admin mode is sticky with no
+  default TTL (the live-row details below are the report's, not mine).
+- **Reported, not verified by me:** live `/health` takes about 7s (546 MB database, about 203k audit events, full
+  audit replay). Jace Commander aborts its status probe at 3s (`status()`) and 2s (`jc_doctor`), and
+  `requestJson` maps the abort to `upstream_unreachable`. Result: JC reports the control plane down while it is up.
+  The running gateway is release `3ccbf20-pr274-live`, JC is `3f274c0`.
+- **Fix already exists, uncommitted, in another session's dirty worktree** (`feat/antigravity-agent-card`): `/health`
+  to the cached readiness handler, audit replay moved to authenticated `POST /internal/health/deep`. Do not
+  duplicate or touch it. Owner needs to commit it; this mission picks it up only after it lands.
+- **Reported exposure to review under Feature 8:** Funnel serves `/health`, `/healthz`, `/ready` unauthenticated and
+  they include `pid` and `issuanceReady`; `/mobile` returns 502 with nothing listening; Hermes listens on
+  `0.0.0.0:8644`; the swarm view at `127.0.0.1:9711` is not listening. Gateway auth failures fail closed (401).
+- **Reported coverage:** sequential run, 2570 passed, authority coverage gate exit 0. My own baseline is 2859 passed
+  (parallel, different worktree), so the counts differ because of different trees; neither is a regression signal.
+- **Residual uncovered security branches reported:** `store.ts` ~7556/7589 (unparseable admin timestamp, unknown
+  stored mode), `server.ts` ~5521-5523 (TTL env parsing), ~1204 and ~2013 (unreadable mode row, missing credential),
+  and arms in `execute-approved.ts` and `apps/worker/src/index.ts`. Candidate negative-test slice under Feature 9.
+- **Not done by the reporter:** no immutable-tree smoke, no activation, no live rollback. Deploy/rollback is verified
+  only against stubs (`deploy-gateway-release.test.sh`) and a fixture SQLite drill.
+
+Consequences for the plan: Feature 8 slice 8.1 must make probe cost explicit (cheap liveness vs authenticated deep
+check) and report `STALE`/`UNAVAILABLE` rather than down when a probe times out. Add a JC-side regression check that
+a slow control plane is not reported as `upstream_unreachable` once the gateway fix lands. No live restart or deploy
+is authorized by this mission.
+
 ## Related work already in flight (do not duplicate)
 
 | Ref               | Branch                                             | State at recon                                            | Overlaps feature |
