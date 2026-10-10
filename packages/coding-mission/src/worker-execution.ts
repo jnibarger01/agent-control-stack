@@ -165,7 +165,10 @@ export function failureCategoryForCode(code?: string, message?: string): Failure
   return "tool_failure";
 }
 
-function resultBase(dispatch: DispatchEnvelope, now: string): Omit<ResultEnvelope, "outcome" | "receipts" | "externalStateUncertain"> {
+function resultBase(
+  dispatch: DispatchEnvelope,
+  now: string
+): Omit<ResultEnvelope, "outcome" | "receipts" | "externalStateUncertain"> {
   return {
     schemaVersion: "acs.work-unit-result.v1",
     attemptId: dispatch.attemptId,
@@ -281,10 +284,7 @@ export interface ToolLaneOutcome {
   externalStateUncertain?: boolean;
 }
 
-export type ToolLaneInvoker = (input: {
-  dispatch: DispatchEnvelope;
-  signal?: AbortSignal;
-}) => Promise<ToolLaneOutcome>;
+export type ToolLaneInvoker = (input: { dispatch: DispatchEnvelope; signal?: AbortSignal }) => Promise<ToolLaneOutcome>;
 
 /**
  * Thin facade for the existing JC, Desktop Commander, and generic MCP composition roots.
@@ -320,7 +320,8 @@ export class ToolLaneExecutionAdapter implements WorkUnitExecutorAdapter {
             ? [{ kind: `${this.lane}_result`, hash: outcome.resultHash }]
             : [];
       if (outcome.ok) {
-        const resultHash = outcome.resultHash ?? stableHash({ lane: this.lane, attemptId: dispatch.attemptId, receipts });
+        const resultHash =
+          outcome.resultHash ?? stableHash({ lane: this.lane, attemptId: dispatch.attemptId, receipts });
         return {
           ...resultBase(dispatch, this.now()),
           outcome: "succeeded",
@@ -383,7 +384,10 @@ export class WorkUnitExecutionLedger {
         unit.workerId !== input.workerId ||
         unit.attempt < 1
       ) {
-        throw new ControlStackError("coding_mission_claim_conflict", "execution dispatch does not match the live claim");
+        throw new ControlStackError(
+          "coding_mission_claim_conflict",
+          "execution dispatch does not match the live claim"
+        );
       }
       if (!EXECUTOR_LANES.includes(input.lane)) {
         throw new ControlStackError("execution_lane_invalid", "executor lane is invalid");
@@ -437,7 +441,10 @@ export class WorkUnitExecutionLedger {
             stored.routeHash !== routeHash ||
             stableHash(stored.authority) !== stableHash(authority)
           ) {
-            throw new ControlStackError("execution_attempt_conflict", "legacy execution attempt binding does not match");
+            throw new ControlStackError(
+              "execution_attempt_conflict",
+              "legacy execution attempt binding does not match"
+            );
           }
           return { ...stored, implementerEngineId };
         }
@@ -478,7 +485,10 @@ export class WorkUnitExecutionLedger {
           existing.implementer_engine_id !== implementerEngineId ||
           existing.executor_lane !== input.lane
         ) {
-          throw new ControlStackError("execution_attempt_conflict", "execution attempt identity already has another dispatch");
+          throw new ControlStackError(
+            "execution_attempt_conflict",
+            "execution attempt identity already has another dispatch"
+          );
         }
         return JSON.parse(existing.dispatch_json) as DispatchEnvelope;
       }
@@ -487,9 +497,7 @@ export class WorkUnitExecutionLedger {
           `SELECT attempt_id, dispatch_hash FROM work_unit_execution_attempts
            WHERE mission_id = ? AND unit_id = ? AND unit_attempt = ?`
         )
-        .get(input.missionId, input.unitId, unit.attempt) as
-        | { attempt_id: string; dispatch_hash: string }
-        | undefined;
+        .get(input.missionId, input.unitId, unit.attempt) as { attempt_id: string; dispatch_hash: string } | undefined;
       if (sameUnitAttempt) {
         throw new ControlStackError(
           "execution_attempt_conflict",
@@ -520,7 +528,14 @@ export class WorkUnitExecutionLedger {
       this.store.putEvidence(
         input.missionId,
         `execution_dispatch:${attemptId}`,
-        { attemptId, unitId: input.unitId, unitAttempt: unit.attempt, workerId: input.workerId, lane: input.lane, dispatchHash },
+        {
+          attemptId,
+          unitId: input.unitId,
+          unitAttempt: unit.attempt,
+          workerId: input.workerId,
+          lane: input.lane,
+          dispatchHash
+        },
         input.now
       );
       return dispatch;
@@ -642,16 +657,12 @@ export class WorkUnitExecutionLedger {
             if (changed.changes !== 1) {
               throw new ControlStackError("coding_mission_claim_conflict", "verification hand-off lost the claim");
             }
-            this.store.db
-              .prepare(
-                `INSERT INTO coding_events (mission_id, name, body_json, created_at)
-                 VALUES (?, 'verification.started', ?, ?)`
-              )
-              .run(
-                row.mission_id,
-                JSON.stringify({ unitId: row.unit_id, attemptId: row.attempt_id, resultHash: input.result.result.resultHash }),
-                input.result.finishedAt
-              );
+            this.store.recordMissionEvent(
+              row.mission_id,
+              "verification.started",
+              { unitId: row.unit_id, attemptId: row.attempt_id, resultHash: input.result.result.resultHash },
+              input.result.finishedAt
+            );
             applied = { applied: "awaiting_verification" };
           }
           break;
@@ -682,16 +693,12 @@ export class WorkUnitExecutionLedger {
           if (changed.changes !== 1) {
             throw new ControlStackError("coding_mission_claim_conflict", "cancelled outcome lost the claim");
           }
-          this.store.db
-            .prepare(
-              `INSERT INTO coding_events (mission_id, name, body_json, created_at)
-               VALUES (?, 'work_unit.cancelled', ?, ?)`
-            )
-            .run(
-              row.mission_id,
-              JSON.stringify({ unitId: row.unit_id, attemptId: row.attempt_id }),
-              input.result.finishedAt
-            );
+          this.store.recordMissionEvent(
+            row.mission_id,
+            "work_unit.cancelled",
+            { unitId: row.unit_id, attemptId: row.attempt_id },
+            input.result.finishedAt
+          );
           applied = { applied: "cancelled" };
           break;
         }
