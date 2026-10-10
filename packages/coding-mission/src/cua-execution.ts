@@ -3,11 +3,13 @@ import { ControlStackError, stableHash } from "@agent-control-stack/shared";
 import type { CuaAction, CuaActionType } from "./mission-model.js";
 import { parseWorkUnitPayload } from "./mission-model.js";
 import type { CodingMissionStore } from "./store.js";
-import type {
-  DispatchEnvelope,
-  ExecutionReceipt,
-  ResultEnvelope,
-  WorkUnitExecutorAdapter
+import {
+  boundedText,
+  resultBase,
+  type DispatchEnvelope,
+  type ExecutionReceipt,
+  type ResultEnvelope,
+  type WorkUnitExecutorAdapter
 } from "./worker-execution.js";
 
 /**
@@ -25,25 +27,21 @@ export interface CuaPage {
     wheel(dx: number, dy: number): Promise<void>;
   };
   goto(url: string): Promise<unknown>;
-}
-
-export interface CuaBrowserSession {
-  page: CuaPage;
   close(): Promise<void>;
 }
 
 export interface CuaBrowserProvider {
-  open(application: string): Promise<CuaBrowserSession>;
+  open(application: string): Promise<CuaPage>;
 }
 
 /** Opens a Playwright-shaped page and starts it at about:blank before any governed action. */
 export class PlaywrightCuaBrowser implements CuaBrowserProvider {
   constructor(private readonly connect: (application: string) => Promise<CuaPage>) {}
 
-  async open(application: string): Promise<CuaBrowserSession> {
+  async open(application: string): Promise<CuaPage> {
     const page = await this.connect(application);
     await page.goto("about:blank");
-    return { page, close: async () => {} };
+    return page;
   }
 }
 
@@ -53,7 +51,7 @@ interface CheckpointRow {
   sequence: number;
   action_type: CuaActionType;
   action_hash: string;
-  state: "planned" | "committed" | "uncertain" | "cancelled";
+  state: "planned" | "committed" | "uncertain";
   screenshot_hash: string | null;
   receipt_hash: string;
   origin: string | null;
@@ -63,18 +61,6 @@ interface ActionEffect {
   origin: string | null;
   screenshotHash?: string;
   uncertain: boolean;
-}
-
-function boundedText(value: string, max = 500): string {
-  const scrubbed = value
-    .replace(/authorization\s*[:=]\s*[^\s]+/giu, "authorization=[redacted]")
-    .replace(/(?:token|password|secret)\s*[:=]\s*[^\s]+/giu, "[redacted]")
-    .replace(/sk-[A-Za-z0-9_-]{12,}/gu, "[redacted]");
-  return scrubbed.slice(0, max);
-}
-
-function actionHash(action: CuaAction): string {
-  return stableHash(action);
 }
 
 function receiptKind(type: CuaActionType): string {
@@ -111,6 +97,17 @@ function approvedNavigation(url: string, origins: readonly string[]): { href: st
   return { href: parsed.href, origin: parsed.origin };
 }
 
+function landingUncertain(
+  type: CuaActionType,
+  url: string,
+  origins: readonly string[],
+  requireAllowlisted: boolean
+): boolean {
+  if (type === "observe" && !requireAllowlisted && url === "about:blank") return false;
+  const origin = pageOrigin(url);
+  return origin === null || origin === "about:blank" || !origins.includes(origin);
+}
+
 function isFenceError(error: unknown): boolean {
   return (
     error instanceof ControlStackError &&
@@ -138,12 +135,15 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
       throw new ControlStackError("execution_lane_mismatch", `cua adapter cannot execute ${dispatch.lane}`);
     }
     const prior = this.checkpoints(dispatch.attemptId);
-    if (prior.some((row) => row.state === "uncertain")) {
-      return this.unknownResult(dispatch, committedReceipts(prior));
-    }
-    if (prior.some((row) => row.state === "planned")) {
-      this.settlePlanned(dispatch);
+    if (prior.some((row) => row.state === "uncertain" || row.state === "planned")) {
+      if (prior.some((row) => row.state === "planned")) this.settlePlanned(dispatch);
       return this.unknownResult(dispatch, committedReceipts(this.checkpoints(dispatch.attemptId)));
+    }
+    if (prior.length > 0) {
+      const receipts = committedReceipts(prior);
+      const mutated = prior.some((row) => row.state === "committed" && MUTATING.has(row.action_type));
+      if (signal?.aborted) return this.cancelled(dispatch, mutated, receipts);
+      return this.unknownResult(dispatch, receipts);
     }
     if (signal?.aborted) return this.cancelled(dispatch, false, []);
 
@@ -152,102 +152,100 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
       payload = parseWorkUnitPayload("cua", dispatch.payload ?? {});
     } catch (error) {
       const message = error instanceof Error ? error.message : "cua payload is invalid";
-      return this.failed(dispatch, "invalid_output", "cua_payload_invalid", message, [], false);
+      return this.failed(dispatch, "invalid_output", "cua_payload_invalid", message, []);
     }
     if (payload.kind !== "cua") {
-      return this.failed(dispatch, "invalid_output", "cua_payload_invalid", "cua payload is required", [], false);
+      return this.failed(dispatch, "invalid_output", "cua_payload_invalid", "cua payload is required", []);
     }
     const applications = payload.allowedApplications ?? [];
     if (this.application.length === 0 || applications.length === 0 || !applications.includes(this.application)) {
-      return this.failed(
-        dispatch,
-        "policy_denied",
-        "cua_application_denied",
-        "application is not allowlisted",
-        [],
-        false
-      );
+      return this.failed(dispatch, "policy_denied", "cua_application_denied", "application is not allowlisted", []);
     }
     const origins = payload.allowedOrigins ?? [];
     const actions = payload.actions ?? [];
     if (actions.length === 0) return this.succeeded(dispatch, []);
 
     this.assertFence(dispatch);
-    let session: CuaBrowserSession | undefined;
+    let page: CuaPage | undefined;
     let committedMutation = false;
+    let requireAllowlisted = false;
     const receipts: ExecutionReceipt[] = [];
     try {
       for (const [sequence, action] of actions.entries()) {
         if (signal?.aborted) return this.cancelled(dispatch, committedMutation, receipts);
-        const hash = actionHash(action);
-        const existing = this.checkpoint(dispatch.attemptId, sequence);
-        if (existing?.state === "committed") {
-          if (existing.action_hash !== hash) {
-            throw new ControlStackError("execution_attempt_conflict", "CUA checkpoint does not match the action");
-          }
-          receipts.push({ kind: receiptKind(action.type), hash: existing.receipt_hash });
-          if (MUTATING.has(action.type)) committedMutation = true;
-          continue;
-        }
-        if (existing) return this.unknownResult(dispatch, receipts);
-
+        const hash = stableHash(action);
         const refusal = this.refusal(action, origins);
         if (refusal) {
-          return this.failed(dispatch, "policy_denied", refusal, "CUA action refused", receipts, false);
+          return this.failed(dispatch, "policy_denied", refusal, "CUA action refused", receipts);
         }
-        if (!session) session = await this.browser.open(this.application);
-        if (action.type !== "navigate") {
-          const current = session.page.url();
-          const origin = pageOrigin(current);
-          const allowed =
-            action.type === "observe"
-              ? current === "about:blank" || (origin !== null && origins.includes(origin))
-              : origin !== null && origins.includes(origin);
-          if (!allowed) {
-            return this.failed(
-              dispatch,
-              "policy_denied",
-              "cua_origin_denied",
-              "page origin is not allowlisted",
-              receipts,
-              false
-            );
-          }
+        // A fresh open is about:blank. Refuse click, type, and scroll before planning them.
+        const knownUrl = page ? page.url() : "about:blank";
+        if (action.type !== "navigate" && !this.pageAllows(action.type, knownUrl, origins, requireAllowlisted)) {
+          return this.failed(
+            dispatch,
+            "policy_denied",
+            "cua_origin_denied",
+            "page origin is not allowlisted",
+            receipts
+          );
         }
-
-        this.plan(dispatch, action, sequence, hash);
-        try {
-          const effect = await this.perform(session.page, action, origins);
-          if (effect.uncertain) {
-            this.finish(dispatch, sequence, hash, "uncertain", effect);
+        if (this.plan(dispatch, action, sequence, hash) === "blocked") {
+          this.settlePlanned(dispatch);
+          return this.unknownResult(dispatch, committedReceipts(this.checkpoints(dispatch.attemptId)));
+        }
+        if (!page) {
+          try {
+            page = await this.browser.open(this.application);
+          } catch (error) {
+            if (isFenceError(error)) throw error;
+            this.finish(dispatch, sequence, action.type, hash, "uncertain", { uncertain: true, origin: null });
             return this.unknownResult(dispatch, receipts);
           }
-          const receiptHash = this.finish(dispatch, sequence, hash, "committed", effect);
+        }
+        try {
+          const effect = await this.perform(page, action, origins, requireAllowlisted);
+          if (effect.uncertain) {
+            this.finish(dispatch, sequence, action.type, hash, "uncertain", effect);
+            return this.unknownResult(dispatch, receipts);
+          }
+          const receiptHash = this.finish(dispatch, sequence, action.type, hash, "committed", effect);
           receipts.push({ kind: receiptKind(action.type), hash: receiptHash });
-          if (MUTATING.has(action.type)) committedMutation = true;
+          if (MUTATING.has(action.type)) {
+            committedMutation = true;
+            requireAllowlisted = true;
+          }
         } catch (error) {
           if (isFenceError(error)) throw error;
           let origin: string | null = null;
           try {
-            origin = pageOrigin(session.page.url());
+            origin = pageOrigin(page.url());
           } catch {
             origin = null;
           }
-          this.finish(dispatch, sequence, hash, "uncertain", { uncertain: true, origin });
+          this.finish(dispatch, sequence, action.type, hash, "uncertain", { uncertain: true, origin });
           return this.unknownResult(dispatch, receipts);
         }
         if (signal?.aborted) return this.cancelled(dispatch, committedMutation, receipts);
       }
       return this.succeeded(dispatch, receipts);
     } finally {
-      if (session) {
+      if (page) {
         try {
-          await session.close();
+          await page.close();
         } catch {
           // A close failure must not replace a fenced result or invite a retry.
         }
       }
     }
+  }
+
+  private pageAllows(
+    type: CuaActionType,
+    url: string,
+    origins: readonly string[],
+    requireAllowlisted: boolean
+  ): boolean {
+    return !landingUncertain(type, url, origins, requireAllowlisted);
   }
 
   private refusal(action: CuaAction, origins: readonly string[]): string | undefined {
@@ -261,34 +259,36 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     return undefined;
   }
 
-  private async perform(page: CuaPage, action: CuaAction, origins: readonly string[]): Promise<ActionEffect> {
+  private async perform(
+    page: CuaPage,
+    action: CuaAction,
+    origins: readonly string[],
+    requireAllowlisted: boolean
+  ): Promise<ActionEffect> {
+    let screenshotHash: string | undefined;
     if (action.type === "observe") {
       const bytes = await page.screenshot();
       if (!(bytes instanceof Uint8Array)) {
         throw new ControlStackError("cua_observation_invalid", "screenshot was not bytes");
       }
-      return { uncertain: false, origin: pageOrigin(page.url()), screenshotHash: sha256Bytes(bytes) };
-    }
-    if (action.type === "click") {
+      screenshotHash = sha256Bytes(bytes);
+    } else if (action.type === "click") {
       await page.locator(action.selector).click();
-      return { uncertain: false, origin: pageOrigin(page.url()) };
-    }
-    if (action.type === "type") {
+    } else if (action.type === "type") {
       await page.locator(action.selector).fill(action.text);
-      return { uncertain: false, origin: pageOrigin(page.url()) };
-    }
-    if (action.type === "scroll") {
+    } else if (action.type === "scroll") {
       await page.mouse.wheel(action.dx, action.dy);
-      return { uncertain: false, origin: pageOrigin(page.url()) };
+    } else {
+      const approved = approvedNavigation(action.url, origins);
+      if (!approved) return { uncertain: true, origin: null };
+      await page.goto(approved.href);
     }
-    const approved = approvedNavigation(action.url, origins);
-    if (!approved) return { uncertain: true, origin: null };
-    await page.goto(approved.href);
-    const landed = pageOrigin(page.url());
-    if (!landed || landed === "about:blank" || !origins.includes(landed)) {
-      return { uncertain: true, origin: landed };
-    }
-    return { uncertain: false, origin: landed };
+    const url = page.url();
+    return {
+      uncertain: landingUncertain(action.type, url, origins, requireAllowlisted),
+      origin: pageOrigin(url),
+      ...(screenshotHash ? { screenshotHash } : {})
+    };
   }
 
   private assertFence(dispatch: DispatchEnvelope): void {
@@ -349,16 +349,11 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     }
   }
 
-  private plan(dispatch: DispatchEnvelope, action: CuaAction, sequence: number, hash: string): void {
-    this.store.transaction(() => {
+  private plan(dispatch: DispatchEnvelope, action: CuaAction, sequence: number, hash: string): "inserted" | "blocked" {
+    return this.store.transaction(() => {
       this.assertFenceInTransaction(dispatch);
       const existing = this.checkpoint(dispatch.attemptId, sequence);
-      if (existing) {
-        if (existing.action_hash !== hash || existing.state === "uncertain" || existing.state === "cancelled") {
-          throw new ControlStackError("coding_mission_claim_conflict", "CUA checkpoint is not runnable");
-        }
-        return;
-      }
+      if (existing) return "blocked";
       if (sequence > 0) {
         const previous = this.checkpoint(dispatch.attemptId, sequence - 1);
         if (!previous || previous.state !== "committed") {
@@ -386,18 +381,20 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
           stableHash({ actionHash: hash, state: "planned" }),
           this.now()
         );
+      return "inserted";
     });
   }
 
   private finish(
     dispatch: DispatchEnvelope,
     sequence: number,
+    actionType: CuaActionType,
     hash: string,
     state: "committed" | "uncertain",
     effect: ActionEffect
   ): string {
     const receiptHash = stableHash({
-      kind: receiptKind(this.checkpoint(dispatch.attemptId, sequence)?.action_type ?? "observe"),
+      kind: receiptKind(actionType),
       actionHash: hash,
       state,
       origin: effect.origin,
@@ -457,24 +454,9 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
       .get(attemptId, sequence) as CheckpointRow | undefined;
   }
 
-  private base(dispatch: DispatchEnvelope): Omit<ResultEnvelope, "outcome" | "receipts" | "externalStateUncertain"> {
-    return {
-      schemaVersion: "acs.work-unit-result.v1",
-      attemptId: dispatch.attemptId,
-      missionId: dispatch.missionId,
-      unitId: dispatch.unitId,
-      unitAttempt: dispatch.unitAttempt,
-      workerId: dispatch.workerId,
-      lane: dispatch.lane,
-      claimTokenHash: dispatch.claimTokenHash,
-      startedAt: dispatch.issuedAt,
-      finishedAt: this.now()
-    };
-  }
-
   private succeeded(dispatch: DispatchEnvelope, receipts: ExecutionReceipt[]): ResultEnvelope {
     return {
-      ...this.base(dispatch),
+      ...resultBase(dispatch, this.now()),
       outcome: "succeeded",
       receipts,
       result: { resultHash: stableHash({ receipts }), files: [] },
@@ -487,11 +469,10 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     category: "policy_denied" | "invalid_output",
     code: string,
     message: string,
-    receipts: ExecutionReceipt[],
-    externalStateUncertain: boolean
+    receipts: ExecutionReceipt[]
   ): ResultEnvelope {
     return {
-      ...this.base(dispatch),
+      ...resultBase(dispatch, this.now()),
       outcome: "failed",
       receipts,
       failure: {
@@ -500,7 +481,7 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
         nativeMessage: boundedText(message),
         retrySafe: false
       },
-      externalStateUncertain
+      externalStateUncertain: false
     };
   }
 
@@ -510,7 +491,7 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     receipts: ExecutionReceipt[]
   ): ResultEnvelope {
     return {
-      ...this.base(dispatch),
+      ...resultBase(dispatch, this.now()),
       outcome: "cancelled",
       receipts,
       failure: { category: "cancelled", retrySafe: false },
@@ -520,7 +501,7 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
 
   private unknownResult(dispatch: DispatchEnvelope, receipts: ExecutionReceipt[]): ResultEnvelope {
     return {
-      ...this.base(dispatch),
+      ...resultBase(dispatch, this.now()),
       outcome: "unknown",
       receipts,
       failure: {

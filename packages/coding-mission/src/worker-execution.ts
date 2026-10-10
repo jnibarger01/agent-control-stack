@@ -123,7 +123,7 @@ const TERMINAL_ATTEMPT_STATES = new Set<ExecutionAttemptRecord["state"]>([
   "rejected_stale"
 ]);
 
-function boundedText(value: string, max = 500): string {
+export function boundedText(value: string, max = 500): string {
   const scrubbed = value
     .replace(/authorization\s*[:=]\s*[^\s]+/giu, "authorization=[redacted]")
     .replace(/(?:token|password|secret)\s*[:=]\s*[^\s]+/giu, "[redacted]")
@@ -165,7 +165,7 @@ export function failureCategoryForCode(code?: string, message?: string): Failure
   return "tool_failure";
 }
 
-function resultBase(
+export function resultBase(
   dispatch: DispatchEnvelope,
   now: string
 ): Omit<ResultEnvelope, "outcome" | "receipts" | "externalStateUncertain"> {

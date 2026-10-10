@@ -191,7 +191,7 @@ CREATE TABLE cua_action_checkpoints (
   sequence INTEGER NOT NULL CHECK (sequence >= 0),
   action_type TEXT NOT NULL CHECK (action_type IN ('observe', 'click', 'type', 'scroll', 'navigate')),
   action_hash TEXT NOT NULL,
-  state TEXT NOT NULL CHECK (state IN ('planned', 'committed', 'uncertain', 'cancelled')),
+  state TEXT NOT NULL CHECK (state IN ('planned', 'committed', 'uncertain')),
   screenshot_hash TEXT,
   receipt_hash TEXT NOT NULL,
   origin TEXT,
@@ -199,6 +199,3 @@ CREATE TABLE cua_action_checkpoints (
   PRIMARY KEY (attempt_id, sequence),
   FOREIGN KEY (attempt_id) REFERENCES work_unit_execution_attempts (attempt_id) ON DELETE CASCADE
 );
-
-CREATE INDEX cua_action_checkpoints_mission_idx
-  ON cua_action_checkpoints (mission_id, unit_id, unit_attempt, sequence);

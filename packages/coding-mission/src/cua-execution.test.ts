@@ -13,14 +13,20 @@ const SECRET = "super-secret-phrase";
 const SHOT = Buffer.from("PNG-SECRET-BYTES");
 
 class FakePage implements CuaPage {
-  current = "about:blank";
+  current = "https://preset.example/";
   calls: string[] = [];
   failClick = false;
   redirectTo: string | undefined;
+  followTo: string | undefined;
+  closed = false;
   signal: AbortSignal | undefined;
 
   url(): string {
     return this.current;
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
   }
 
   async screenshot(): Promise<Uint8Array> {
@@ -33,9 +39,11 @@ class FakePage implements CuaPage {
       click: async () => {
         this.calls.push(`click:${selector}`);
         if (this.failClick) throw new Error(`click failed token=${SECRET}`);
+        if (this.followTo) this.current = this.followTo;
       },
       fill: async (text: string) => {
         this.calls.push(`fill:${selector}:${text}`);
+        if (this.followTo) this.current = this.followTo;
       }
     };
   }
@@ -43,6 +51,7 @@ class FakePage implements CuaPage {
   mouse = {
     wheel: async (dx: number, dy: number) => {
       this.calls.push(`wheel:${dx}:${dy}`);
+      if (this.followTo) this.current = this.followTo;
     }
   };
 
@@ -96,7 +105,8 @@ function harness(payload: ReturnType<typeof script> | { kind: "cua"; objective: 
     async open(opened) {
       opens += 1;
       page.calls.push(`open:${opened}`);
-      return { page, close: async () => {} };
+      page.current = "about:blank";
+      return page;
     }
   };
   const adapter = new CuaExecutionAdapter(ctx.store, browser, application, () => T2);
@@ -164,6 +174,9 @@ describe("governed CUA browser execution", () => {
     expect(stored).not.toContain(SECRET);
     expect(stored).not.toContain("PNG-SECRET-BYTES");
     expect(stored).not.toContain("claim-super-secret");
+    expect(page.closed).toBe(true);
+    expect(page.calls[0]).toBe("open:browser");
+    expect(page.calls[1]).toBe("screenshot");
   });
 
   it("refuses a disallowed origin without committing a checkpoint or calling the page", async () => {
@@ -244,7 +257,12 @@ describe("governed CUA browser execution", () => {
   });
 
   it.each(["claim", "fence"] as const)("rejects a stale %s and does not append a checkpoint", async (kind) => {
-    const { adapter, dispatch, store, checkpoints, opens } = harness(script([{ type: "click", selector: "#go" }]));
+    const { adapter, dispatch, store, checkpoints, opens, page } = harness(
+      script([
+        { type: "navigate", url: `${ORIGIN}/inbox` },
+        { type: "click", selector: "#go" }
+      ])
+    );
     if (kind === "claim") {
       store.db.prepare("UPDATE coding_operations SET claim_token = ? WHERE operation_id = 'u1'").run("replaced-token");
     } else {
@@ -255,10 +273,17 @@ describe("governed CUA browser execution", () => {
     await expect(adapter.execute(dispatch)).rejects.toThrow(/CUA (fence|fencing token)/);
     expect(checkpoints()).toEqual([]);
     expect(opens()).toBe(0);
+    expect(page.calls).toEqual([]);
+    expect(page.current).toBe("https://preset.example/");
   });
 
   it("cancels before an action without claiming an external effect", async () => {
-    const { adapter, dispatch, checkpoints, opens } = harness(script([{ type: "click", selector: "#go" }]));
+    const { adapter, dispatch, checkpoints, opens, page } = harness(
+      script([
+        { type: "navigate", url: `${ORIGIN}/inbox` },
+        { type: "click", selector: "#go" }
+      ])
+    );
     const signal = AbortSignal.abort();
     await expect(adapter.execute(dispatch, signal)).resolves.toMatchObject({
       outcome: "cancelled",
@@ -267,6 +292,8 @@ describe("governed CUA browser execution", () => {
     });
     expect(checkpoints()).toEqual([]);
     expect(opens()).toBe(0);
+    expect(page.calls).toEqual([]);
+    expect(page.current).toBe("https://preset.example/");
   });
 
   it("cancels as uncertain after a committed mutating action", async () => {
@@ -282,39 +309,145 @@ describe("governed CUA browser execution", () => {
     await expect(adapter.execute(dispatch, controller.signal)).resolves.toMatchObject({
       outcome: "cancelled",
       externalStateUncertain: true,
-      failure: { category: "cancelled" }
+      receipts: [expect.objectContaining({ kind: "cua_navigate" })],
+      failure: { category: "cancelled", retrySafe: false }
     });
     expect(checkpoints().map((row) => [row.action_type, row.state])).toEqual([["navigate", "committed"]]);
     expect(page.calls).not.toContain("screenshot");
+    expect(page.closed).toBe(true);
   });
 
-  it("leaves a browser throw after planned uncertain and does not call the browser again", async () => {
-    const { adapter, dispatch, page, checkpoints, opens } = harness(script([{ type: "click", selector: "#go" }]));
-    page.current = `${ORIGIN}/inbox`;
+  it("leaves a browser throw after an allowlisted navigate uncertain and does not call the browser again", async () => {
+    const { adapter, dispatch, page, checkpoints, opens } = harness(
+      script([
+        { type: "navigate", url: `${ORIGIN}/inbox` },
+        { type: "click", selector: "#go" }
+      ])
+    );
     page.failClick = true;
     await expect(adapter.execute(dispatch)).resolves.toMatchObject({
       outcome: "unknown",
       externalStateUncertain: true,
+      receipts: [expect.objectContaining({ kind: "cua_navigate" })],
       failure: { retrySafe: false }
     });
-    expect(checkpoints()).toEqual([expect.objectContaining({ state: "uncertain", action_type: "click" })]);
-    expect(page.calls.filter((call) => call.startsWith("click:"))).toHaveLength(1);
+    expect(checkpoints().map((row) => [row.action_type, row.state])).toEqual([
+      ["navigate", "committed"],
+      ["click", "uncertain"]
+    ]);
+    expect(page.calls).toEqual(["open:browser", `goto:${ORIGIN}/inbox`, "click:#go"]);
+    expect(page.current).toBe(`${ORIGIN}/inbox`);
     await expect(adapter.execute(dispatch)).resolves.toMatchObject({
       outcome: "unknown",
-      externalStateUncertain: true
+      externalStateUncertain: true,
+      receipts: [expect.objectContaining({ kind: "cua_navigate" })]
     });
     expect(page.calls.filter((call) => call.startsWith("click:"))).toHaveLength(1);
     expect(opens()).toBe(1);
     expect(JSON.stringify(checkpoints())).not.toContain(SECRET);
   });
 
-  it("starts a Playwright-shaped page at about:blank", async () => {
+  it("does not resume committed checkpoints on a fresh session", async () => {
+    const { adapter, dispatch, page, checkpoints, opens } = harness(
+      script([{ type: "navigate", url: `${ORIGIN}/inbox` }, { type: "observe" }])
+    );
+    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+      outcome: "succeeded",
+      externalStateUncertain: false,
+      receipts: [expect.objectContaining({ kind: "cua_navigate" }), expect.objectContaining({ kind: "cua_observe" })]
+    });
+    const calls = [...page.calls];
+    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+      outcome: "unknown",
+      externalStateUncertain: true,
+      receipts: [expect.objectContaining({ kind: "cua_navigate" }), expect.objectContaining({ kind: "cua_observe" })],
+      failure: { nativeCode: "cua_external_state_uncertain", retrySafe: false }
+    });
+    expect(page.calls).toEqual(calls);
+    expect(opens()).toBe(1);
+    expect(checkpoints().map((row) => row.state)).toEqual(["committed", "committed"]);
+  });
+
+  it("keeps a committed mutation uncertain when the signal is already aborted", async () => {
+    const { adapter, dispatch, page, opens } = harness(
+      script([
+        { type: "navigate", url: `${ORIGIN}/inbox` },
+        { type: "click", selector: "#go" }
+      ])
+    );
+    await expect(adapter.execute(dispatch)).resolves.toMatchObject({ outcome: "succeeded" });
+    const calls = page.calls.length;
+    await expect(adapter.execute(dispatch, AbortSignal.abort())).resolves.toMatchObject({
+      outcome: "cancelled",
+      externalStateUncertain: true,
+      receipts: [expect.objectContaining({ kind: "cua_navigate" }), expect.objectContaining({ kind: "cua_click" })],
+      failure: { category: "cancelled", retrySafe: false }
+    });
+    expect(opens()).toBe(1);
+    expect(page.calls).toHaveLength(calls);
+  });
+
+  it("cancels an observe-only checkpoint without claiming an external effect", async () => {
+    const { adapter, dispatch, opens } = harness(script([{ type: "observe" }]));
+    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+      outcome: "succeeded",
+      receipts: [expect.objectContaining({ kind: "cua_observe" })]
+    });
+    await expect(adapter.execute(dispatch, AbortSignal.abort())).resolves.toMatchObject({
+      outcome: "cancelled",
+      externalStateUncertain: false,
+      receipts: [expect.objectContaining({ kind: "cua_observe" })],
+      failure: { category: "cancelled", retrySafe: false }
+    });
+    expect(opens()).toBe(1);
+  });
+
+  it.each([
+    [{ type: "click" as const, selector: "#go" }, "click:#go"],
+    [{ type: "type" as const, selector: "#q", text: "visible" }, "fill:#q:visible"],
+    [{ type: "scroll" as const, dx: 3, dy: 4 }, "wheel:3:4"]
+  ])("stops when %j leaves an off-allowlist origin", async (action, call) => {
+    const { adapter, dispatch, page, checkpoints } = harness(
+      script([{ type: "navigate", url: `${ORIGIN}/inbox` }, action, { type: "observe" }])
+    );
+    page.followTo = "https://evil.example/after";
+    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+      outcome: "unknown",
+      externalStateUncertain: true,
+      receipts: [expect.objectContaining({ kind: "cua_navigate" })],
+      failure: { retrySafe: false }
+    });
+    expect(checkpoints().map((row) => [row.action_type, row.state, row.origin])).toEqual([
+      ["navigate", "committed", ORIGIN],
+      [action.type, "uncertain", "https://evil.example"]
+    ]);
+    expect(page.calls).toEqual(["open:browser", `goto:${ORIGIN}/inbox`, call]);
+    expect(page.closed).toBe(true);
+  });
+
+  it("refuses a click on the fresh about:blank page before opening", async () => {
+    const { adapter, dispatch, page, checkpoints, opens } = harness(script([{ type: "click", selector: "#go" }]));
+    page.current = `${ORIGIN}/inbox`;
+    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+      outcome: "failed",
+      externalStateUncertain: false,
+      failure: { category: "policy_denied", nativeCode: "cua_origin_denied", retrySafe: false }
+    });
+    expect(checkpoints()).toEqual([]);
+    expect(opens()).toBe(0);
+    expect(page.calls).toEqual([]);
+    expect(page.current).toBe(`${ORIGIN}/inbox`);
+  });
+
+  it("starts a Playwright-shaped page at about:blank and closes that page", async () => {
     const page = new FakePage();
     page.current = "https://evil.example/";
     const browser = new PlaywrightCuaBrowser(async () => page);
-    const session = await browser.open("browser");
+    const opened = await browser.open("browser");
     expect(page.calls).toEqual(["goto:about:blank"]);
     expect(page.url()).toBe("about:blank");
-    await session.close();
+    expect(opened).toBe(page);
+    await opened.close();
+    expect(page.closed).toBe(true);
   });
 });
