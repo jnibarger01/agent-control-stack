@@ -144,7 +144,7 @@ const migrationFiles = [
     filename: "059_work_unit_verification_terminal_restore.sql"
   },
   { version: 60, name: "mission_authority_and_child_work", filename: "060_mission_authority_and_child_work.sql" },
-  { version: 61, name: "mission_flight_recorder", filename: "061_mission_flight_recorder.sql" }
+  { version: 62, name: "mission_flight_recorder", filename: "062_mission_flight_recorder.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {

@@ -22,7 +22,7 @@ It is **tamper evidence**. It is not tamper prevention.
    modify (an append-only log, a signed note, another host) when a mission matters.
 2. A record shows what ACS recorded. It does not prove that a push, merge or deployment happened; those are
    separate effects with their own evidence.
-3. Events written before migration 061 are not chained. They are counted as `legacyEventCount` and make the verdict
+3. Events written before migration 062 are not chained. They are counted as `legacyEventCount` and make the verdict
    `partial_legacy`; they are never reported as tampering and never as verified.
 4. Evidence legacy detection uses the SQLite `rowid` cutoff taken at migration time. Deleting legacy evidence and
    reusing its rowids is not detectable.

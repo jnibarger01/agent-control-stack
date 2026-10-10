@@ -358,7 +358,7 @@ export const FLIGHT_TRUST_ASSUMPTIONS = [
   "A consistent full rewrite is detectable only by comparing headHash with a value recorded outside the database writer's reach.",
   "The append-only triggers stop application-level UPDATE and DELETE; they can be dropped by a database owner.",
   "Records show what ACS recorded. They do not prove an external side effect (a push, a merge, a deployment) happened.",
-  "Events written before migration 061 are not chained and are reported as legacy."
+  "Events written before migration 062 are not chained and are reported as legacy."
 ] as const;
 
 export interface FlightReplayRecord {
