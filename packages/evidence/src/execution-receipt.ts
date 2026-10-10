@@ -1,4 +1,4 @@
-import { domainHash } from "@agent-control-stack/shared";
+import { ControlStackError, domainHash } from "@agent-control-stack/shared";
 import { z } from "zod";
 import { evidenceManifestSchema, verifyEvidenceManifestHash } from "./evidence-manifest.js";
 
@@ -22,11 +22,15 @@ const id = z
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
 /** Engine and provider identifiers. The canonical verification contract accepts any non-empty id. */
 const engineId = z.string().min(1).max(256);
-/** Actor identities. The ACS registry accepts any non-empty id, including external ids with @ or /. */
+/** Principal and actor identities. The ACS registry accepts any non-empty id, including external ids with @ or /. */
 const actorId = z.string().trim().min(1).max(4096);
 const isoTimestamp = z.string().refine((value) => !Number.isNaN(Date.parse(value)), "invalid timestamp");
 const auditRef = z.object({ eventId: id, eventHash: hash }).strict();
-/** The canonical approval grant that authorized the attempt, with its own audit reference. */
+/**
+ * The canonical approval grant that authorized the attempt. `consumedAt` is the canonical time the
+ * grant was consumed by the attempt's lease. Expiry is enforced at consumption, not at execution start,
+ * because provisioning can run past the deadline after a grant has legitimately been consumed.
+ */
 const approvalRef = z
   .object({
     approvalId: id,
@@ -37,12 +41,14 @@ const approvalRef = z
     approverActorId: actorId,
     grantedAt: isoTimestamp,
     expiresAt: isoTimestamp,
+    consumedAt: isoTimestamp,
     audit: auditRef
   })
   .strict();
-/** One independent reviewer whose canonical verification passed. */
+/** One reviewer whose canonical verification passed. Independence is by principal, as canonical review does. */
 const reviewerRef = z
   .object({
+    reviewerPrincipalId: actorId,
     verifierEngineId: engineId,
     verifierProviderId: engineId,
     verdict: z.literal("pass"),
@@ -50,6 +56,16 @@ const reviewerRef = z
   })
   .strict();
 const policyDecisionSchema = z.enum(["allow", "require_approval"]);
+/** A canonical attempt can legitimately have zero reviewers when its requirement needs none. */
+const MAX_REVIEWERS = 8;
+
+/** Thrown when a receipt fails its internal completeness checks. The defect list is kept as data, not parsed from text. */
+export class ExecutionReceiptIncompleteError extends ControlStackError {
+  constructor(readonly defects: readonly string[]) {
+    super("execution_receipt_incomplete", `execution receipt is incomplete: ${defects.join(",")}`);
+    this.name = "ExecutionReceiptIncompleteError";
+  }
+}
 
 function requireApprovalMatchesDecision(
   value: { policyDecision: "allow" | "require_approval"; approval?: unknown },
@@ -85,9 +101,10 @@ export const executionReceiptCoreSchema = z
       .superRefine(requireApprovalMatchesDecision),
     verification: z
       .object({
+        implementerPrincipalId: actorId,
         implementerEngineId: engineId,
         implementerProviderId: engineId,
-        reviewers: z.array(reviewerRef).min(1).max(8),
+        reviewers: z.array(reviewerRef).max(MAX_REVIEWERS),
         verdict: z.literal("pass"),
         manifestHash: hash,
         criteriaPassed: z.number().int().positive().max(512),
@@ -131,14 +148,16 @@ export function receiptDefects(core: ExecutionReceiptCore): string[] {
     defects.push("readback_mismatch");
   if (Date.parse(m.startedAt) > Date.parse(m.finishedAt)) defects.push("inverted_execution_time");
   if (a.approval) {
-    // The grant must have existed when the attempt was claimed, and must not have expired by then.
-    if (Date.parse(a.approval.grantedAt) > Date.parse(m.startedAt)) defects.push("approval_granted_after_start");
-    if (Date.parse(m.startedAt) >= Date.parse(a.approval.expiresAt)) defects.push("approval_expired_at_start");
+    // The canonical grant must have been consumed while it was valid: after it was granted, before it expired.
+    if (Date.parse(a.approval.consumedAt) < Date.parse(a.approval.grantedAt))
+      defects.push("approval_consumed_before_grant");
+    if (Date.parse(a.approval.consumedAt) >= Date.parse(a.approval.expiresAt))
+      defects.push("approval_consumed_after_expiry");
   }
-  const reviewerIds = v.reviewers.map((reviewer) => reviewer.verifierEngineId);
-  if (new Set(reviewerIds).size !== reviewerIds.length) defects.push("reviewer_not_distinct");
-  if (v.reviewers.some((reviewer) => reviewer.verifierEngineId === v.implementerEngineId))
-    defects.push("verifier_not_independent");
+  // Canonical review counts a reviewer by principal, so distinctness and independence are by principal.
+  const principals = v.reviewers.map((reviewer) => reviewer.reviewerPrincipalId);
+  if (new Set(principals).size !== principals.length) defects.push("reviewer_not_distinct");
+  if (principals.includes(v.implementerPrincipalId)) defects.push("verifier_not_independent");
   const eventIds = [
     a.audit.eventId,
     ...(a.approval ? [a.approval.audit.eventId] : []),
@@ -154,15 +173,16 @@ export function receiptDefects(core: ExecutionReceiptCore): string[] {
 export function buildExecutionReceipt(input: unknown): ExecutionReceipt {
   const core = executionReceiptCoreSchema.parse(input);
   const defects = receiptDefects(core);
-  if (defects.length) throw new Error(`execution_receipt_incomplete: ${defects.join(",")}`);
+  if (defects.length) throw new ExecutionReceiptIncompleteError(defects);
   return executionReceiptSchema.parse({ ...core, receiptHash: executionReceiptHash(core) });
 }
 
 /**
  * Binding expectations must be obtained independently from a VERIFIED canonical audit chain and
  * current attempt, lease and verification-requirement state. Never use values copied from the
- * receipt as their own proof. `reviewersRequired` and `requireIndependentProvider` are the canonical
- * VerificationRequirement for this action (policy-gate evaluateVerificationRequirement).
+ * receipt as their own proof. `reviewersRequired`, `requireIndependentPrincipal` and
+ * `requireIndependentProvider` are the canonical VerificationRequirement for this action
+ * (policy-gate evaluateVerificationRequirement).
  */
 export const receiptBindingSchema = z
   .object({
@@ -180,10 +200,12 @@ export const receiptBindingSchema = z
     policyDecision: policyDecisionSchema,
     approval: approvalRef.optional(),
     policyAudit: auditRef,
+    implementerPrincipalId: actorId,
     implementerEngineId: engineId,
     implementerProviderId: engineId,
-    reviewers: z.array(reviewerRef).min(1).max(8),
-    reviewersRequired: z.number().int().min(0).max(8),
+    reviewers: z.array(reviewerRef).max(MAX_REVIEWERS),
+    reviewersRequired: z.number().int().min(0).max(MAX_REVIEWERS),
+    requireIndependentPrincipal: z.boolean(),
     requireIndependentProvider: z.boolean(),
     criteriaPassed: z.number().int().positive().max(512),
     verificationAudit: auditRef,
@@ -205,23 +227,28 @@ function sameApproval(x: ReceiptBinding["approval"], y: ReceiptBinding["approval
     x.approverActorId === y.approverActorId &&
     x.grantedAt === y.grantedAt &&
     x.expiresAt === y.expiresAt &&
+    x.consumedAt === y.consumedAt &&
     sameRef(x.audit, y.audit)
   );
 }
 
 type Reviewer = z.infer<typeof reviewerRef>;
-const reviewerKey = (reviewer: Reviewer) => `${reviewer.verifierEngineId}\u0000${reviewer.audit.eventId}`;
+const reviewerKey = (reviewer: Reviewer) => `${reviewer.reviewerPrincipalId}\u0000${reviewer.audit.eventId}`;
 function sameReviewers(x: readonly Reviewer[], y: readonly Reviewer[]): boolean {
   if (x.length !== y.length) return false;
   const left = [...x].sort((a, b) => reviewerKey(a).localeCompare(reviewerKey(b)));
   const right = [...y].sort((a, b) => reviewerKey(a).localeCompare(reviewerKey(b)));
-  return left.every(
-    (reviewer, index) =>
-      reviewer.verifierEngineId === right[index]?.verifierEngineId &&
-      reviewer.verifierProviderId === right[index]?.verifierProviderId &&
-      reviewer.verdict === right[index]?.verdict &&
-      sameRef(reviewer.audit, right[index]?.audit ?? { eventId: "", eventHash: "" })
-  );
+  return left.every((reviewer, index) => {
+    const other = right[index];
+    return (
+      other !== undefined &&
+      reviewer.reviewerPrincipalId === other.reviewerPrincipalId &&
+      reviewer.verifierEngineId === other.verifierEngineId &&
+      reviewer.verifierProviderId === other.verifierProviderId &&
+      reviewer.verdict === other.verdict &&
+      sameRef(reviewer.audit, other.audit)
+    );
+  });
 }
 
 export function verifyExecutionReceipt(receipt: unknown, expected: unknown): { ok: boolean; defects: string[] } {
@@ -253,17 +280,19 @@ export function verifyExecutionReceipt(receipt: unknown, expected: unknown): { o
   check(sameApproval(a.approval, b.approval), "approval_binding_mismatch");
   check(sameRef(a.audit, b.policyAudit), "policy_audit_mismatch");
 
+  check(v.implementerPrincipalId === b.implementerPrincipalId, "implementer_binding_mismatch");
   check(v.implementerEngineId === b.implementerEngineId, "implementer_binding_mismatch");
   check(v.implementerProviderId === b.implementerProviderId, "implementer_provider_binding_mismatch");
   check(sameReviewers(v.reviewers, b.reviewers), "reviewer_binding_mismatch");
+  // The canonical requirement is the bar: enough reviewers, from the canonical set, counted by principal.
   check(b.reviewers.length >= b.reviewersRequired, "canonical_reviewers_insufficient");
   check(v.reviewers.length >= b.reviewersRequired, "insufficient_reviewers");
+  if (b.requireIndependentPrincipal) {
+    check(!v.reviewers.some((reviewer) => reviewer.reviewerPrincipalId === v.implementerPrincipalId), "verifier_not_independent");
+  }
+  // Canonical provider independence excludes only the executor's provider. Reviewers may share a provider.
   if (b.requireIndependentProvider) {
-    const providers = v.reviewers.map((reviewer) => reviewer.verifierProviderId);
-    check(
-      new Set(providers).size === providers.length && !providers.includes(v.implementerProviderId),
-      "provider_not_independent"
-    );
+    check(!v.reviewers.some((reviewer) => reviewer.verifierProviderId === v.implementerProviderId), "provider_not_independent");
   }
   check(v.criteriaPassed === b.criteriaPassed, "criteria_binding_mismatch");
   check(sameRef(v.audit, b.verificationAudit), "verification_audit_mismatch");

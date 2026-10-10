@@ -1,9 +1,11 @@
+import { ControlStackError } from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
 import { buildEvidenceManifest, type BuildEvidenceManifestInput } from "./evidence-manifest.js";
 import {
   buildExecutionReceipt,
   verifyExecutionReceipt,
   receiptDefects,
+  ExecutionReceiptIncompleteError,
   type ExecutionReceiptCore,
   type ReceiptBinding
 } from "./execution-receipt.js";
@@ -38,8 +40,27 @@ const approval = {
   approverActorId: "approver_1",
   grantedAt: "2026-10-08T11:00:00Z",
   expiresAt: "2026-10-08T13:00:00Z",
+  consumedAt: "2026-10-08T11:30:00Z",
   audit: { eventId: "approval_event_1", eventHash: H("d") }
 };
+const reviewers = [
+  {
+    reviewerPrincipalId: "reviewer_a",
+    verifierEngineId: "claude",
+    verifierProviderId: "anthropic",
+    verdict: "pass" as const,
+    audit: { eventId: "review_1", eventHash: H("0") }
+  },
+  {
+    reviewerPrincipalId: "reviewer_b",
+    verifierEngineId: "gemini",
+    verifierProviderId: "google",
+    verdict: "pass" as const,
+    audit: { eventId: "review_2", eventHash: H("2") }
+  }
+];
+const copyReviewers = (list: typeof reviewers) => list.map((reviewer) => ({ ...reviewer, audit: { ...reviewer.audit } }));
+
 /** A sensitive attempt: approval required, and two independent reviewers (high-risk requirement). */
 const core = (): ExecutionReceiptCore => {
   const manifest = buildEvidenceManifest(manifestInput);
@@ -60,12 +81,10 @@ const core = (): ExecutionReceiptCore => {
       audit: { eventId: "auth_1", eventHash: H("5") }
     },
     verification: {
+      implementerPrincipalId: "executor_1",
       implementerEngineId: "codex",
       implementerProviderId: "openai",
-      reviewers: [
-        { verifierEngineId: "claude", verifierProviderId: "anthropic", verdict: "pass", audit: { eventId: "review_1", eventHash: H("0") } },
-        { verifierEngineId: "gemini", verifierProviderId: "google", verdict: "pass", audit: { eventId: "review_2", eventHash: H("2") } }
-      ],
+      reviewers: copyReviewers(reviewers),
       verdict: "pass",
       manifestHash: manifest.manifestHash,
       criteriaPassed: 3,
@@ -81,33 +100,32 @@ const core = (): ExecutionReceiptCore => {
   };
 };
 /** The canonical binding a verifier derives from the audit chain and the verification requirement. */
-const expected = (): ReceiptBinding => {
-  const built = core();
-  return {
-    workItemId: "work_1",
-    attemptId: "attempt_1",
-    workerId: "worker_1",
-    actorId: "operator_1",
-    actionHash: H("c"),
-    admittedPlanHash: H("a"),
-    manifestHash: buildEvidenceManifest(manifestInput).manifestHash,
-    validationRunId: "test_1",
-    leaseId: "lease_1",
-    claimTokenHash: H("4"),
-    capabilityId: "cap_1",
-    policyDecision: "require_approval",
-    approval: { ...approval, audit: { ...approval.audit } },
-    policyAudit: { eventId: "auth_1", eventHash: H("5") },
-    implementerEngineId: "codex",
-    implementerProviderId: "openai",
-    reviewers: built.verification.reviewers.map((reviewer) => ({ ...reviewer, audit: { ...reviewer.audit } })),
-    reviewersRequired: 2,
-    requireIndependentProvider: true,
-    criteriaPassed: 3,
-    verificationAudit: { eventId: "verify_1", eventHash: H("6") },
-    readbackAudit: { eventId: "readback_1", eventHash: H("7") }
-  };
-};
+const expected = (): ReceiptBinding => ({
+  workItemId: "work_1",
+  attemptId: "attempt_1",
+  workerId: "worker_1",
+  actorId: "operator_1",
+  actionHash: H("c"),
+  admittedPlanHash: H("a"),
+  manifestHash: buildEvidenceManifest(manifestInput).manifestHash,
+  validationRunId: "test_1",
+  leaseId: "lease_1",
+  claimTokenHash: H("4"),
+  capabilityId: "cap_1",
+  policyDecision: "require_approval",
+  approval: { ...approval, audit: { ...approval.audit } },
+  policyAudit: { eventId: "auth_1", eventHash: H("5") },
+  implementerPrincipalId: "executor_1",
+  implementerEngineId: "codex",
+  implementerProviderId: "openai",
+  reviewers: copyReviewers(reviewers),
+  reviewersRequired: 2,
+  requireIndependentPrincipal: true,
+  requireIndependentProvider: true,
+  criteriaPassed: 3,
+  verificationAudit: { eventId: "verify_1", eventHash: H("6") },
+  readbackAudit: { eventId: "readback_1", eventHash: H("7") }
+});
 
 describe("proof-of-execution receipt integrity", () => {
   it("builds content-addressed receipts and verifies expected bindings", () => {
@@ -128,8 +146,8 @@ describe("proof-of-execution receipt integrity", () => {
     ["wrong final readback", (c: ExecutionReceiptCore) => { c.readback.diffHash = H("9"); }, "readback_mismatch"],
     ["reused audit id", (c: ExecutionReceiptCore) => { c.readback.audit.eventId = c.authorization.audit.eventId; }, "audit_event_reused"],
     ["inverted time", (c: ExecutionReceiptCore) => { c.manifest.startedAt = "2026-10-08T12:02:00Z"; }, "inverted_execution_time"],
-    ["reviewer is implementer", (c: ExecutionReceiptCore) => { c.verification.reviewers[0]!.verifierEngineId = "codex"; }, "verifier_not_independent"],
-    ["duplicate reviewer", (c: ExecutionReceiptCore) => { c.verification.reviewers[1]!.verifierEngineId = "claude"; }, "reviewer_not_distinct"],
+    ["reviewer is implementer principal", (c: ExecutionReceiptCore) => { c.verification.reviewers[0]!.reviewerPrincipalId = "executor_1"; }, "verifier_not_independent"],
+    ["duplicate reviewer principal", (c: ExecutionReceiptCore) => { c.verification.reviewers[1]!.reviewerPrincipalId = "reviewer_a"; }, "reviewer_not_distinct"],
     ["validation run missing", (c: ExecutionReceiptCore) => { c.manifest.testEvidence!.validationRunId = undefined; }, "validation_run_missing"]
   ] as const)("rejects an internally inconsistent receipt: %s", (_name, mutate, defect) => {
     const changed = core();
@@ -177,7 +195,6 @@ describe("proof-of-execution receipt integrity", () => {
   it("accepts canonical engine identifiers containing a provider path", () => {
     const valid = core();
     valid.verification.reviewers[0]!.verifierEngineId = "anthropic/claude";
-    valid.verification.reviewers[0]!.verifierProviderId = "anthropic";
     const bound = expected();
     bound.reviewers[0]!.verifierEngineId = "anthropic/claude";
     expect(verifyExecutionReceipt(buildExecutionReceipt(valid), bound)).toEqual({ ok: true, defects: [] });
@@ -189,12 +206,29 @@ describe("proof-of-execution receipt integrity", () => {
     expect(verifyExecutionReceipt(receipt, { ...expected(), bypass: true }).ok).toBe(false);
   });
 
+  it("reports incomplete receipts as a typed ControlStackError with the defect list as data", () => {
+    const changed = core();
+    changed.authorization.approval!.consumedAt = "2026-10-08T14:00:00Z";
+    let thrown: unknown;
+    try {
+      buildExecutionReceipt(changed);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(ExecutionReceiptIncompleteError);
+    expect(thrown).toBeInstanceOf(ControlStackError);
+    expect((thrown as ControlStackError).code).toBe("execution_receipt_incomplete");
+    expect((thrown as ExecutionReceiptIncompleteError).defects).toEqual(["approval_consumed_after_expiry"]);
+  });
+
   describe("identity binding", () => {
     it.each([
       ["actor", (c: ExecutionReceiptCore) => { c.authorization.actorId = "someone_else"; }, "actor_binding_mismatch"],
+      ["implementer principal", (c: ExecutionReceiptCore) => { c.verification.implementerPrincipalId = "other"; }, "implementer_binding_mismatch"],
       ["implementer engine", (c: ExecutionReceiptCore) => { c.verification.implementerEngineId = "other"; }, "implementer_binding_mismatch"],
       ["implementer provider", (c: ExecutionReceiptCore) => { c.verification.implementerProviderId = "other"; }, "implementer_provider_binding_mismatch"],
-      ["reviewer engine", (c: ExecutionReceiptCore) => { c.verification.reviewers[0]!.verifierEngineId = "mistral"; }, "reviewer_binding_mismatch"]
+      ["reviewer engine", (c: ExecutionReceiptCore) => { c.verification.reviewers[0]!.verifierEngineId = "mistral"; }, "reviewer_binding_mismatch"],
+      ["reviewer principal", (c: ExecutionReceiptCore) => { c.verification.reviewers[0]!.reviewerPrincipalId = "reviewer_z"; }, "reviewer_binding_mismatch"]
     ] as const)("rejects a swapped %s claim even with a recomputed receipt hash", (_name, mutate, defect) => {
       const changed = core();
       mutate(changed);
@@ -220,6 +254,7 @@ describe("proof-of-execution receipt integrity", () => {
       ["request hash", (c: ExecutionReceiptCore) => { c.authorization.approval!.requestHash = H("7"); }],
       ["grant hash", (c: ExecutionReceiptCore) => { c.authorization.approval!.grantHash = H("7"); }],
       ["approver", (c: ExecutionReceiptCore) => { c.authorization.approval!.approverActorId = "approver_2"; }],
+      ["consumption time", (c: ExecutionReceiptCore) => { c.authorization.approval!.consumedAt = "2026-10-08T11:45:00Z"; }],
       ["approval audit", (c: ExecutionReceiptCore) => { c.authorization.approval!.audit.eventId = "approval_event_2"; }]
     ] as const)("rejects a mismatched canonical grant: %s", (_name, mutate) => {
       const changed = core();
@@ -227,16 +262,29 @@ describe("proof-of-execution receipt integrity", () => {
       expect(verifyExecutionReceipt(buildExecutionReceipt(changed), expected()).defects).toContain("approval_binding_mismatch");
     });
 
-    it("rejects a grant that did not exist when the attempt started", () => {
+    it("rejects a grant consumed before it was granted", () => {
       const changed = core();
-      changed.authorization.approval!.grantedAt = "2026-10-08T12:30:00Z";
-      expect(receiptDefects(changed)).toContain("approval_granted_after_start");
+      changed.authorization.approval!.consumedAt = "2026-10-08T10:00:00Z";
+      expect(receiptDefects(changed)).toContain("approval_consumed_before_grant");
     });
 
-    it("rejects a grant that had expired when the attempt started", () => {
+    it("rejects a grant consumed at or after its expiry", () => {
       const changed = core();
-      changed.authorization.approval!.expiresAt = "2026-10-08T11:59:00Z";
-      expect(receiptDefects(changed)).toContain("approval_expired_at_start");
+      changed.authorization.approval!.consumedAt = "2026-10-08T13:00:00Z";
+      expect(receiptDefects(changed)).toContain("approval_consumed_after_expiry");
+    });
+
+    it("accepts a grant consumed before expiry even when execution starts after the deadline", () => {
+      const changed = core();
+      changed.manifest = buildEvidenceManifest({
+        ...manifestInput,
+        startedAt: "2026-10-08T13:10:00Z",
+        finishedAt: "2026-10-08T13:11:00Z"
+      });
+      changed.verification.manifestHash = changed.manifest.manifestHash;
+      const bound = expected();
+      bound.manifestHash = changed.manifest.manifestHash;
+      expect(verifyExecutionReceipt(buildExecutionReceipt(changed), bound)).toEqual({ ok: true, defects: [] });
     });
 
     it("rejects a receipt whose policy decision differs from the canonical decision", () => {
@@ -262,12 +310,41 @@ describe("proof-of-execution receipt integrity", () => {
       expect(verifyExecutionReceipt(buildExecutionReceipt(core()), expected()).ok).toBe(true);
     });
 
-    it("rejects reviewers that share the implementer's provider when independence is required", () => {
+    it("accepts a low-risk read-only attempt that canonically requires zero reviewers", () => {
+      const changed = core();
+      changed.verification.reviewers = [];
+      const bound = expected();
+      bound.reviewers = [];
+      bound.reviewersRequired = 0;
+      bound.requireIndependentPrincipal = false;
+      bound.requireIndependentProvider = false;
+      expect(verifyExecutionReceipt(buildExecutionReceipt(changed), bound)).toEqual({ ok: true, defects: [] });
+    });
+
+    it("rejects an empty reviewer list when the canonical requirement needs reviewers", () => {
+      const changed = core();
+      changed.verification.reviewers = [];
+      const bound = expected();
+      bound.reviewers = [];
+      expect(verifyExecutionReceipt(buildExecutionReceipt(changed), bound).defects).toContain("insufficient_reviewers");
+    });
+
+    it("rejects reviewers that share the executor's provider when independence is required", () => {
       const changed = core();
       changed.verification.reviewers[0]!.verifierProviderId = "openai";
       const bound = expected();
       bound.reviewers[0]!.verifierProviderId = "openai";
       expect(verifyExecutionReceipt(buildExecutionReceipt(changed), bound).defects).toContain("provider_not_independent");
+    });
+
+    it("accepts two distinct principals from one provider that is not the executor's provider", () => {
+      const changed = core();
+      changed.verification.reviewers[0]!.verifierProviderId = "anthropic";
+      changed.verification.reviewers[1]!.verifierProviderId = "anthropic";
+      const bound = expected();
+      bound.reviewers[0]!.verifierProviderId = "anthropic";
+      bound.reviewers[1]!.verifierProviderId = "anthropic";
+      expect(verifyExecutionReceipt(buildExecutionReceipt(changed), bound)).toEqual({ ok: true, defects: [] });
     });
 
     it("does not require provider independence for a requirement that does not ask for it", () => {
