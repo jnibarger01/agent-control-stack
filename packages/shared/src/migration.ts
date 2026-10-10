@@ -237,17 +237,21 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
   repairExactPreLeaseRenewalTwentyToTwentyThreeLayout(db);
   repairExactRecoveryThirtySevenThirtyEightLayout(db);
   repairExactDeployedThirtyNineFortySevenLayout(db);
+  // Migration 057 quarantines terminal units and 059 restores them. Treat
+  // 057–059 as ONE write transaction: another connection must never be able
+  // to retry a quarantined unit after 057 but before 059 restores its state.
+  // Existing 057 installations remain ambiguous and require the guard below.
+  const appliedDuringThisUpgrade = new Set<number>();
+  let verificationUpgradeLockHeld = false;
   for (const migration of controlPlaneMigrations()) {
-    // The "already applied?" question is answered fresh inside this
-    // migration's own transaction, after BEGIN IMMEDIATE's write lock is
-    // actually held - not from a snapshot taken before the loop started.
-    // Two processes racing a fresh database both reach this point believing
-    // a migration is unapplied; only one gets the lock first, and the
-    // other must re-check rather than blindly re-INSERT once it wakes up,
-    // or it hits a UNIQUE violation on schema_migrations.version and the
-    // whole startup crashes instead of just no-op'ing past what its rival
-    // already committed.
-    db.exec("BEGIN IMMEDIATE");
+    // All existing-row checks happen while holding BEGIN IMMEDIATE. Other
+    // migration versions keep their usual per-migration transaction, but
+    // 057–059 share one lock through the final 059 restoration and commit.
+    const verificationWindow = migration.version >= 57 && migration.version <= 59;
+    if (!verificationUpgradeLockHeld) {
+      db.exec("BEGIN IMMEDIATE");
+      if (verificationWindow) verificationUpgradeLockHeld = true;
+    }
     try {
       const existing = queryMigrationRow(db, migration.version);
       if (existing) {
@@ -268,16 +272,42 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
             migration.version
           );
         }
-        db.exec("COMMIT");
+        if (!verificationWindow || migration.version === 59) {
+          db.exec("COMMIT");
+          verificationUpgradeLockHeld = false;
+        }
         continue;
       }
 
+      if (migration.version === 59 && !appliedDuringThisUpgrade.has(57)) {
+        const ambiguous = queryRows(
+          db,
+          `SELECT q.mission_id || ':' || q.unit_id AS id
+           FROM work_unit_verification_quarantine q
+           JOIN coding_operations o
+             ON o.mission_id = q.mission_id AND o.operation_id = q.unit_id
+           WHERE q.reason = 'migration_057_missing_verification_authority'
+             AND q.previous_status IN ('succeeded', 'cancelled')
+             AND o.status = 'failed' AND o.failure_category = 'verification_failure'
+           ORDER BY q.mission_id, q.unit_id LIMIT 50`
+        );
+        if (ambiguous.length > 0) {
+          throw new Error(
+            `migration 059 refused ambiguous terminal restoration after a prior 057 upgrade; ` +
+              `review work-unit attempts and events before manual reconciliation: ${ambiguous.join(", ")}`
+          );
+        }
+      }
       db.exec(migrationSqlForCurrentSchema(db, migration));
       db.prepare(
         `INSERT INTO schema_migrations (version, name, filename, checksum, applied_at)
            VALUES (?, ?, ?, ?, ?)`
       ).run(migration.version, migration.name, migration.filename, migration.checksum, new Date().toISOString());
-      db.exec("COMMIT");
+      if (!verificationWindow || migration.version === 59) {
+        db.exec("COMMIT");
+        verificationUpgradeLockHeld = false;
+      }
+      appliedDuringThisUpgrade.add(migration.version);
     } catch (error) {
       try {
         db.exec("ROLLBACK");
@@ -286,6 +316,10 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
       }
       throw error;
     }
+  }
+  if (verificationUpgradeLockHeld) {
+    db.exec("ROLLBACK");
+    throw new Error("migration 057–059 writer lock was not released after migration 059");
   }
 }
 

@@ -49,6 +49,9 @@ import { applyControlPlaneMigrations } from "@agent-control-stack/shared";
 import { JC_GENERATED_MANIFEST_PATH, renderJcGeneratedManifest } from "../../scripts/jc-tool-manifest.ts";
 import { JC_MANIFEST } from "../../vendor/desktop-commander/src/jace-commander/manifest.generated.ts";
 import { CLI_COMMANDS } from "../../vendor/desktop-commander/src/jace-commander/cli-commands.ts";
+import { JC_PROVIDERS, jcProviderOf } from "../../vendor/desktop-commander/src/jace-commander/providers.ts";
+// @ts-expect-error plain-JS edge module (no type declarations)
+import { JC_TOOL_PROVIDERS as EDGE_TOOL_PROVIDERS } from "../../apps/dc-mcp-gateway/jc-routing.js";
 import { isCredentialPath } from "../../vendor/desktop-commander/src/jace-commander/credential-paths.ts";
 import {
   JACE_COMMANDER_AUDIENCE,
@@ -128,6 +131,13 @@ describe("jc-tool-manifest drift gate", () => {
   it("matches the exact MCP descriptors Jace Commander advertises", () => {
     const byName = <T extends { name: string }>(left: T, right: T) => left.name.localeCompare(right.name);
     expect([...JC_TOOLS].sort(byName)).toEqual(jcMcpToolDescriptors().sort(byName));
+  });
+
+  it("the edge's tool->provider map is identical to Jace Commander's provider registry (ADR 0026)", () => {
+    const registry = Object.fromEntries(JC_PROVIDERS.flatMap((provider) => provider.tools.map((tool) => [tool, provider.id])));
+    expect(EDGE_TOOL_PROVIDERS).toEqual(registry);
+    expect(Object.keys(EDGE_TOOL_PROVIDERS).sort()).toEqual(jcToolContracts().map((tool: { name: string }) => tool.name).sort());
+    for (const name of Object.keys(EDGE_TOOL_PROVIDERS)) expect(jcProviderOf(name)).toBe(EDGE_TOOL_PROVIDERS[name]);
   });
 
   it("agrees on scopes and approval requirement for every tool, across the manifest, ACS and DC", () => {

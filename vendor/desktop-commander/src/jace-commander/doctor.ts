@@ -10,7 +10,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { JcConfig } from './config.js';
+import { createAuthorizerResolver } from './authorizers.js';
+import { acsReadyUrl } from './integrations.js';
 import { JC_MANIFEST } from './manifest.generated.js';
+import { DEFAULT_PRIVILEGED_CONFIG_PATH } from './privileged-core.js';
 import { VERSION } from '../version.js';
 
 const exec = promisify(execFile);
@@ -24,18 +27,26 @@ export interface DoctorCheck {
 }
 
 export interface DoctorRuntime {
-  mode: 'managed' | 'standalone';
+  mode: 'managed' | 'standalone' | 'local';
   handlerNames: readonly string[];
   verifierReady: boolean;
+  /** Present for the `local` preset. */
+  policy?: import('./local-policy.js').JcPolicyLoad;
+  /** Present for the `local` preset. */
+  approver?: () => Promise<Record<string, unknown>>;
+  /** Test seam: the fetch the ACS readiness probe uses. */
+  fetchImpl?: typeof fetch;
+  /** Some provider's ACS mode is `required` (local preset): an unreachable ACS then fails the report. */
+  acsRequired?: boolean;
   privilegedHelper: () => Promise<boolean>;
 }
 
 const CODE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
-async function probe(url: string | undefined): Promise<DoctorCheck> {
+async function probe(url: string | undefined, fetchImpl: typeof fetch = fetch): Promise<DoctorCheck> {
   if (!url) return { name: 'acs', ok: false, required: false, detail: 'JC_ACS_URL is not configured' };
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(2000) });
+    const response = await fetchImpl(url, { signal: AbortSignal.timeout(2000) });
     return { name: 'acs', ok: response.ok, required: false, detail: `${url} -> HTTP ${response.status}` };
   } catch (error) {
     return { name: 'acs', ok: false, required: false, detail: `${url} unreachable: ${error instanceof Error ? error.message : 'error'}` };
@@ -81,16 +92,82 @@ export async function jcDoctor(config: JcConfig, runtime: DoctorRuntime): Promis
       + (missing.length ? `; no handler: ${missing.join(',')}` : '')
       + (extra.length ? `; not in manifest: ${extra.join(',')}` : ''),
   });
+  const localUsesAcs = runtime.mode === 'local'
+    && createAuthorizerResolver('local', runtime.policy?.effective.authorizerTable).usesAcs();
   checks.push({
     name: 'capability verification',
-    ok: runtime.mode === 'managed' && runtime.verifierReady,
+    ok: runtime.mode === 'managed' ? runtime.verifierReady : runtime.mode === 'local' ? (!localUsesAcs || runtime.verifierReady) : false,
     required: true,
     detail: runtime.mode === 'managed'
       ? runtime.verifierReady
         ? `managed: every call needs an ACS-issued acs.jc.v1 capability (key ${config.acsKeyId ?? 'unset'})`
         : 'managed but no ACS verification key is configured; every call fails closed'
-      : 'standalone: read-only tools only, NOT capability-checked; development only',
+      : runtime.mode === 'local'
+        ? localUsesAcs && !runtime.verifierReady
+          ? 'local policy routes tools to ACS but no ACS verification key is configured (JC_ACS_PUBLIC_KEY / JC_ACS_KEY_ID); those calls fail closed'
+          : 'local: read class allowed; other classes follow the local class decisions (default: human approval)'
+        : 'standalone: read-only tools only, NOT capability-checked; development only',
   });
+  if (runtime.policy) {
+    const policy = runtime.policy;
+    const loosened = Object.entries(policy.effective.classDecisions).filter(([cls, decision]) => cls !== 'read' && decision === 'allow').map(([cls]) => cls);
+    checks.push({
+      name: 'local policy',
+      ok: policy.state !== 'invalid' && !policy.unsafeDev && policy.immutable,
+      required: true,
+      detail: policy.state === 'invalid'
+        ? `INVALID, everything except jc.meta is denied: ${policy.errors.join('; ')}`
+        : policy.unsafeDev
+          ? 'JC_POLICY_UNSAFE_DEV=1: a policy this process can edit is accepted; development only'
+          : `${policy.state} (hash ${policy.hash.slice(0, 12)}${policy.sources.length ? `, ${policy.sources.join(' + ')}` : ''})`
+            + (loosened.length ? `; classes allowed without approval: ${loosened.join(', ')} (guardrails, not a sandbox: rely on the OS account and unit hardening)` : ''),
+    });
+  }
+  if (runtime.approver && runtime.policy) {
+    const health = await runtime.approver();
+    // Only calls that are routed to the LOCAL authorizer AND decided `approve` ever reach a human.
+    const decisions = runtime.policy.effective.classDecisions as Record<string, string>;
+    const needed = createAuthorizerResolver('local', runtime.policy.effective.authorizerTable)
+      .routes().some((route) => route.authorizer === 'local' && decisions[route.riskClass] === 'approve');
+    // Separation is proven only by a NEGATIVE probe; an unprobed socket is not evidence.
+    const separated = health.serverCanDecide === false;
+    checks.push({
+      name: 'local approver',
+      ok: health.configured === true && health.reachable === true && health.keyMatches === true && separated,
+      // Only an error when the policy actually sends calls to a human.
+      required: needed,
+      detail: !health.configured
+        ? 'approverd is not configured (JC_APPROVER_SOCKET, JC_APPROVER_PUBLIC_KEY, JC_APPROVER_KEY_ID); approve-class calls fail closed'
+        : !health.reachable
+          ? 'approverd is configured but not reachable; approve-class calls fail closed'
+          : !health.keyMatches
+            ? 'approverd answered with a different key id or runtime id than configured'
+            : !separated
+              ? health.serverCanDecide === true
+                ? 'THE SERVER IDENTITY CAN OPEN decide.sock: the model could approve its own requests; fix socket group/permissions'
+                : 'decide.sock separation is unverified: set JC_APPROVER_DECIDE_SOCKET for the server so it can run the negative probe'
+              : 'approverd reachable, key matches, decide.sock is not reachable by the server identity',
+    });
+  }
+  if (runtime.mode === 'local' && runtime.policy?.effective.classDecisions.privileged === 'approve') {
+    // The helper reads its OWN root-owned config; a mismatch means it will reject approverd's tokens.
+    let detail: string;
+    let ok = false;
+    try {
+      const helperConfig = JSON.parse(fs.readFileSync(DEFAULT_PRIVILEGED_CONFIG_PATH, 'utf8')) as Record<string, unknown>;
+      if (typeof helperConfig.localKeyId !== 'string') {
+        detail = 'the root helper has no local trust anchor (config.localKeyId); privileged_exec under the local preset will be rejected by the helper';
+      } else if (helperConfig.localKeyId !== config.approverKeyId || helperConfig.localPublicKey !== config.approverPublicKey) {
+        detail = 'the root helper trusts a different approver key than JC_APPROVER_KEY_ID/JC_APPROVER_PUBLIC_KEY';
+      } else {
+        ok = true;
+        detail = `the root helper trusts approver key ${helperConfig.localKeyId}`;
+      }
+    } catch {
+      detail = `cannot read ${DEFAULT_PRIVILEGED_CONFIG_PATH}; the privileged helper is not installed for the local anchor`;
+    }
+    checks.push({ name: 'privileged local anchor', ok, required: false, detail });
+  }
   const roots = config.fsRoots.map((root) => ({ root, exists: fs.existsSync(root) }));
   checks.push({
     name: 'filesystem roots',
@@ -101,7 +178,7 @@ export async function jcDoctor(config: JcConfig, runtime: DoctorRuntime): Promis
       : 'JC_FS_ROOTS empty; filesystem, process and git tools fail closed',
   });
   checks.push(bridgePathCheck());
-  checks.push(await probe(config.acsUrl ? `${config.acsUrl.replace(/\/$/, '')}/health` : undefined));
+  checks.push({ ...(await probe(config.acsUrl ? acsReadyUrl(config) : undefined, runtime.fetchImpl)), required: runtime.acsRequired === true });
   try {
     const version = (await exec('git', ['--version'], { timeout: 2000 })).stdout.trim();
     checks.push({ name: 'git backend', ok: true, required: false, detail: version });
@@ -141,7 +218,7 @@ export async function jcDoctor(config: JcConfig, runtime: DoctorRuntime): Promis
 }
 
 export async function jcPing(config: JcConfig): Promise<Record<string, unknown>> {
-  const acs = await probe(config.acsUrl ? `${config.acsUrl.replace(/\/$/, '')}/health` : undefined);
+  const acs = await probe(config.acsUrl ? acsReadyUrl(config) : undefined);
   return { ok: true, version: VERSION, time: new Date().toISOString(), acs };
 }
 

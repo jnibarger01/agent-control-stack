@@ -1,0 +1,22 @@
+{
+  "version": "jc.policy.v1",
+  "authorizers": { "default": "local" },
+  "classes": {
+    "read": "allow",
+    "mutate": "allow",
+    "exec": "approve",
+    "network": "approve",
+    "privileged": "approve"
+  },
+  "constraints": {
+    "fs": {
+      "roots": ["/home/jc/work"],
+      "deniedRoots": ["/home/jc/work/.secrets"]
+    },
+    "exec": {
+      "allowCommands": ["/usr/bin/git", "/usr/bin/node", "/usr/bin/npm"],
+      "denyCommands": ["curl", "wget", "nc", "ncat"]
+    },
+    "git": { "remotes": ["origin"] }
+  }
+}
