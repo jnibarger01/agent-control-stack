@@ -38,11 +38,16 @@ Repair runs under `BEGIN IMMEDIATE`, rechecks after obtaining the write lock,
 shifts the existing records to versions 38 and 39, and applies the missing JC
 index at version 37 in the same transaction. It preserves admission rows and
 historical application timestamps. A failed insertion rolls back the metadata
-repair. Ordinary migrations then add versions 40–47. Each ordinary migration is
-its own transaction: a later failure can leave earlier migrations committed,
-and a subsequent startup checks checksums and resumes. Unknown, partial or
-modified recovery layouts are rejected; operators must investigate rather than
-edit checksums to force acceptance.
+repair. Ordinary migrations then add versions 40–47. Most subsequent migrations
+run in individual transactions: a later failure can leave earlier committed
+versions intact, and a subsequent startup checks checksums before resuming.
+**Exception:** versions 057, 058 and 059 share one `BEGIN IMMEDIATE` writer
+transaction. A failure anywhere in that group rolls back all three versions
+(including 057 quarantine and 059 restoration); no other SQLite writer can
+retry affected units in the gap. If 057 was committed during an earlier startup,
+059 deliberately refuses ambiguous terminal restoration and requires a
+backed-up, reviewed manual reconciliation. Unknown, partial or modified recovery
+layouts remain fail-closed; never edit checksums to force acceptance.
 
 A database already using the deployed JC-index version 37 follows the normal
 migration path without remapping. Duplicate non-null result idempotency keys

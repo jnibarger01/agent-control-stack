@@ -62,6 +62,24 @@ export function jcModeFromEnv(env = process.env) {
   if (env.JC_ENABLED !== '1') return { enabled: false };
   const acsGatewayUrl = (env.ACS_GATEWAY_URL || '').replace(/\/+$/, '');
   const acsGatewayToken = env.ACS_JC_GATEWAY_TOKEN || '';
+  // ADR 0026 D6: ACS is optional ONLY for the local preset. With no ACS configured every tool the
+  // policy routes to ACS is refused with ACS_UNAVAILABLE; local tools never need it.
+  if (env.JC_ACS_OPTIONAL === '1') {
+    if (env.JC_PRESET !== 'local') {
+      throw new Error('JC_ACS_OPTIONAL=1 requires JC_PRESET=local; refusing to start');
+    }
+    if (acsGatewayToken && acsGatewayToken === env.ACS_GATEWAY_TOKEN) {
+      throw new Error('ACS_JC_GATEWAY_TOKEN must differ from ACS_GATEWAY_TOKEN (separate ACS bridge identities); refusing to start');
+    }
+    return {
+      enabled: true,
+      acsOptional: true,
+      acsGatewayUrl,
+      acsGatewayToken,
+      issuePath: '/jc/capability/issue',
+      timeoutMs: parseInt(env.ACS_ISSUANCE_TIMEOUT_MS || '5000', 10),
+    };
+  }
   if (!acsGatewayUrl || !acsGatewayToken) {
     throw new Error('JC_ENABLED=1 requires ACS_GATEWAY_URL and ACS_JC_GATEWAY_TOKEN; refusing to start');
   }
@@ -284,6 +302,10 @@ export function capabilityTransport(managed, { identity, requestId }) {
     }
     const actor = subject.startsWith('chatgpt:') ? subject : `chatgpt:${subject}`;
     const issuePath = managed.issuePath || '/dc/capability/issue';
+    if (managed.acsOptional && (!managed.acsGatewayUrl || !managed.acsGatewayToken)) {
+      // No ACS configured: fail fast and distinctly instead of trying a request that cannot succeed.
+      throw Object.assign(new Error('ACS is not configured for this deployment'), { acsCode: 'ACS_UNAVAILABLE', acsDecision: null, acsDetails: {} });
+    }
     const actorHeader = issuePath === '/jc/capability/issue' ? 'x-jc-actor' : 'x-dc-actor';
     let issuance;
     try {

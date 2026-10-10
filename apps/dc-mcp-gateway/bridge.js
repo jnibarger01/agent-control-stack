@@ -49,11 +49,22 @@ if (PROFILE !== "desktop-commander" && PROFILE !== "jace-commander") {
   process.exit(1);
 }
 const JC = PROFILE === "jace-commander";
-if (JC && !MANAGED) {
-  console.error("bridge: BRIDGE_PROFILE=jace-commander requires ACS_MANAGED_MODE=1; refusing to start");
+// ADR 0026: the `local` preset authorizes locally and may run with no ACS at all.
+if (JC && !MANAGED && process.env.JC_PRESET !== "local") {
+  console.error("bridge: BRIDGE_PROFILE=jace-commander requires ACS_MANAGED_MODE=1 (or JC_PRESET=local); refusing to start");
   process.exit(1);
 }
 const DC_CMD = process.env.DC_CMD || "/home/linuxbrew/.linuxbrew/bin/node";
+// A command the model starts runs as the JC child's uid. If that is the bridge's uid, it can read
+// the bridge's secrets from /proc/<pid>/environ (gateway execution token, ACS tokens) and forge
+// attestations. The local preset therefore requires the child to drop to a DIFFERENT uid
+// (DC_CMD=setpriv/runuser with the bridge holding only CAP_SETUID/CAP_SETGID); same-uid is an
+// explicit, development-only opt-out.
+if (JC && process.env.JC_PRESET === "local" && process.env.JC_ALLOW_SAME_UID_CHILD !== "1"
+    && !["setpriv", "runuser"].includes(path.basename(DC_CMD))) {
+  console.error("bridge: JC_PRESET=local requires the executor to run as a different uid (DC_CMD=setpriv or runuser, see the local unit example); set JC_ALLOW_SAME_UID_CHILD=1 only for development; refusing to start");
+  process.exit(1);
+}
 // Resolved once so a relative JC_DC_DIR is not applied twice (as cwd and
 // again inside the script path).
 // Default: this monorepo's own Desktop Commander build (vendor/desktop-commander,
@@ -92,6 +103,13 @@ if (!JC && !process.env.DC_CWD) {
 }
 const DC_CWD = JC ? JC_DIR : process.env.DC_CWD || path.dirname(DC_ARGS[0]);
 const EXECUTION_TOKEN = process.env.DC_GATEWAY_EXECUTION_TOKEN || "";
+// ADR 0026: under the local preset nothing but the authenticated gateway may reach the
+// child (no ACS capability stands behind read:allow), so gateway attestation is mandatory.
+const JC_LOCAL = JC && process.env.JC_PRESET === "local";
+if (JC_LOCAL && !EXECUTION_TOKEN) {
+  console.error("bridge: JC_PRESET=local requires DC_GATEWAY_EXECUTION_TOKEN so gateway attestation can be enforced; refusing to start");
+  process.exit(1);
+}
 const GATEWAY_ATTESTATION_KEY = process.env.DC_GATEWAY_ATTESTATION_KEY || "";
 const PIPELINE_ACS_PUBLIC_KEY = process.env.DC_ACS_CAPABILITY_PUBLIC_KEY || "";
 const PIPELINE_ACS_KEY_ID = process.env.DC_ACS_CAPABILITY_KEY_ID || "";
@@ -123,9 +141,26 @@ const JC_CHILD_ENV_KEYS = [
   // Filesystem containment roots for the fs.read tools (defence in depth
   // behind ACS's own roots); without them every filesystem tool fails closed.
   "JC_FS_ROOTS",
-  "JC_FS_DENIED_ROOTS"
+  "JC_FS_DENIED_ROOTS",
+  // ADR 0026: local preset and its policy path. JC_POLICY_UNSAFE_DEV is deliberately
+  // NOT forwarded: a policy the child can edit is never accepted through the bridge.
+  "JC_PRESET",
+  "JC_POLICY_PATH",
+  // Local approval (ADR 0026 D4): the request socket, approverd's PUBLIC key, and the decide
+  // socket PATH. A path is not authority; the child uses it only for jc_doctor's negative probe
+  // (it must NOT be able to open it), and an unprobed socket is reported as unverified.
+  "JC_APPROVER_SOCKET",
+  "JC_APPROVER_DECIDE_SOCKET",
+  "JC_APPROVER_PUBLIC_KEY",
+  "JC_APPROVER_KEY_ID",
+  // Best-effort trace mirror (ADR 0026 D5); off unless the URL is set.
+  "JC_ACS_MIRROR_URL",
+  "JC_ACS_MIRROR_INTERVAL_MS",
+  "JC_ACS_MIRROR_MAX_PENDING"
 ];
-if (JC && (!process.env.JC_ACS_PUBLIC_KEY || !process.env.JC_ACS_KEY_ID || !process.env.JC_RUNTIME_ID)) {
+// ADR 0026: the `local` preset authorizes locally, so ACS verification material is
+// optional there (tools the policy routes to ACS then fail closed without it).
+if (JC && (process.env.JC_PRESET === "local" ? !process.env.JC_RUNTIME_ID : (!process.env.JC_ACS_PUBLIC_KEY || !process.env.JC_ACS_KEY_ID || !process.env.JC_RUNTIME_ID))) {
   console.error(
     "bridge: jace-commander profile requires JC_ACS_PUBLIC_KEY, JC_ACS_KEY_ID and JC_RUNTIME_ID; refusing to start"
   );
@@ -150,6 +185,8 @@ const CHILD_ENV = {
   ...(process.env.DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR
     ? { DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: process.env.DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR }
     : {}),
+  // Only the bridge, which force-overwrites _meta.gateway, may vouch for it (local preset requires attestation).
+  ...(JC && process.env.JC_PRESET === "local" ? { JC_GATEWAY_META_TRUSTED: "1" } : {}),
   ...(JC
     ? Object.fromEntries(JC_CHILD_ENV_KEYS.filter((key) => process.env[key]).map((key) => [key, process.env[key]]))
     : {}),
@@ -1166,6 +1203,11 @@ const httpServer = http.createServer(async (req, res) => {
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "not_found" }));
     return;
+  }
+
+  if (JC_LOCAL && !verifyAttestation(req.headers["x-dc-attestation"] || "", req.headers["x-dc-agent"])) {
+    console.error("bridge: local preset requires a valid gateway attestation; rejecting without forward");
+    return sendJsonRpcError(res, 401, -32001, "gateway attestation required");
   }
 
   if (EXECUTION_TOKEN && req.method === "POST") {

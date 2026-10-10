@@ -212,12 +212,22 @@ export class JsonlTraceChain {
       }
       const last = events[events.length - 1] as LoopTraceEvent | undefined;
       const event = buildEvent(this.runId, events.length, last?.hash ?? GENESIS_HASH, type, payload, ts);
+      const created = !fs.existsSync(this.filePath);
       const fd = fs.openSync(this.filePath, 'a', this.fileMode);
       try {
         fs.writeSync(fd, `${JSON.stringify(event)}\n`);
         fs.fsyncSync(fd);
       } finally {
         fs.closeSync(fd);
+      }
+      // A new file's directory entry is only durable once the directory is fsynced too.
+      if (created) {
+        const dirFd = fs.openSync(path.dirname(this.filePath), 'r');
+        try {
+          fs.fsyncSync(dirFd);
+        } finally {
+          fs.closeSync(dirFd);
+        }
       }
       return event;
     } finally {
