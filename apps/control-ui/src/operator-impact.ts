@@ -3,7 +3,7 @@
  */
 
 export const LAST_VIEW_STORAGE_KEY = "acs.mc.lastView";
-export const FOCUS_RING_TOKEN = "0 0 0 3px var(--brand), 0 0 0 6px var(--accent)";
+export const FOCUS_RING_TOKEN = "3px solid var(--accent)";
 export const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
 
 export const KNOWN_VIEWS = [

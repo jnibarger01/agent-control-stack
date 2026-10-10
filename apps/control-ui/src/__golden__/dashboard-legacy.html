@@ -666,7 +666,7 @@ pre.run-output { margin: 0; max-height: 420px; overflow: auto; white-space: pre-
 .relative-time { margin-left: 8px; color: var(--muted); font-size: 12px; }
 body[data-density="compact"] .queue-item { padding-top: 6px; padding-bottom: 6px; }
 body[data-density="compact"] .panel-head h2 { font-size: 15px; }
-body.acs-focus-plus :focus-visible { outline: 0 0 0 3px var(--brand), 0 0 0 6px var(--accent); outline-offset: 2px; }
+body.acs-focus-plus :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
 }
@@ -811,7 +811,7 @@ body.acs-focus-plus :focus-visible { outline: 0 0 0 3px var(--brand), 0 0 0 6px 
       <div class="detail-empty"><h3>No executor selected</h3><p>Select a row to inspect runtime state and tool capabilities.</p></div>
     </section>
   </div></article>
-        <article id="queue" class="panel queue-panel" data-view-panel="queue"><div class="panel-head"><h2>Work Queue</h2><span id="queue-filter-count">2 items</span></div><div class="queue-filter" id="queue-filter" role="search" aria-label="Filter work queue">
+        <article id="queue" class="panel queue-panel" tabindex="-1" data-view-panel="queue"><div class="panel-head"><h2>Work Queue</h2><span id="queue-filter-count">2 items</span></div><div class="queue-filter" id="queue-filter" role="search" aria-label="Filter work queue">
   <div class="queue-filter-row">
     <fieldset class="queue-filter-statuses">
       <legend>Status</legend>
@@ -836,7 +836,7 @@ body.acs-focus-plus :focus-visible { outline: 0 0 0 3px var(--brand), 0 0 0 6px 
 </div><div class="queue" id="queue-list"><button class="queue-item attention" data-work-item="wrk_approve" data-status="needs_approval" data-risk="high" data-title="Approve me" data-agent-id="/repo" data-created-at="2026-07-05T00:00:00.000Z" data-retry-sequence="0" data-lineage="" data-intent-norm="verify rendering"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span> <span class="attention-badge" title="Needs operator attention">&#9888; Needs attention</span></span><strong>Approve me</strong><small>verify rendering</small><span class="status-glyph" title="needs_approval">!</span><span class="relative-time" data-relative-time="2026-07-05T00:00:00.000Z"></span></button><button class="queue-item attention" data-work-item="wrk_blocked" data-status="blocked" data-risk="low" data-title="Blocked task" data-agent-id="/repo" data-created-at="2026-07-05T00:00:00.000Z" data-retry-sequence="0" data-lineage="" data-intent-norm="verify rendering"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span><span class="attention-badge" title="Needs operator attention">&#9888; Needs attention</span></span><strong>Blocked task</strong><small>verify rendering</small><small class="error-line">worker lease expired token=[redacted]</small><span class="status-glyph" title="blocked">×</span><span class="relative-time" data-relative-time="2026-07-05T00:00:00.000Z"></span></button></div><div id="queue-footer" class="queue-footer"></div></article>
       </section>
       <section class="grid approvals-grid">
-        <article id="approvals" class="panel wide" data-view-panel="approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">2 waiting</span></div><div id="approvals-list"><div class="approvals-list" role="list"><article class="approval-item overdue" role="listitem" data-risk="high" data-status="needs_approval" data-work-item-ref="wrk_approve"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span> <small class="wait-badge" data-waiting-since="2026-07-05T00:00:00.000Z" data-sla-ms="1800000">waiting 40m · over SLA</small></span><strong id="approval-title-wrk_approve">Approve me</strong><small>Requester: user · Actions: fs.read</small><button type="button" data-inspect-work="wrk_approve">Review details</button><label class="reason-field" for="reason-wrk_approve"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_approve" data-reason="wrk_approve" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Approve me"><button type="button" data-approve="wrk_approve" data-risk="high" disabled aria-describedby="reason-wrk_approve">Approval hash unavailable</button><button type="button" data-reject="wrk_approve" data-risk="high" aria-describedby="reason-wrk_approve">Reject</button></div><output id="approval-result-wrk_approve" class="approval-result" aria-live="polite"></output></article><article class="approval-item" role="listitem" data-risk="low" data-status="blocked" data-work-item-ref="wrk_blocked"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span><small class="wait-badge" data-waiting-since="2026-07-05T00:30:00.000Z" data-sla-ms="1800000">waiting 10m</small></span><strong id="approval-title-wrk_blocked">Blocked task</strong><small>Actions: fs.read</small><small class="error-line">worker lease expired token=[redacted]</small><button type="button" data-inspect-work="wrk_blocked">Review details</button><label class="reason-field" for="reason-wrk_blocked"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_blocked" data-reason="wrk_blocked" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Blocked task"><button type="button" data-unblock="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Unblock</button><button type="button" data-reject="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Reject</button></div><output id="approval-result-wrk_blocked" class="approval-result" aria-live="polite"></output></article></div></div></article>
+        <article id="approvals" class="panel wide" tabindex="-1" data-view-panel="approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">2 waiting</span></div><div id="approvals-list"><div class="approvals-list" role="list"><article class="approval-item overdue" role="listitem" data-risk="high" data-status="needs_approval" data-work-item-ref="wrk_approve"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span> <small class="wait-badge" data-waiting-since="2026-07-05T00:00:00.000Z" data-sla-ms="1800000">waiting 40m · over SLA</small></span><strong id="approval-title-wrk_approve">Approve me</strong><small>Requester: user · Actions: fs.read</small><button type="button" data-inspect-work="wrk_approve">Review details</button><label class="reason-field" for="reason-wrk_approve"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_approve" data-reason="wrk_approve" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Approve me"><button type="button" data-approve="wrk_approve" data-risk="high" disabled aria-describedby="reason-wrk_approve">Approval hash unavailable</button><button type="button" data-reject="wrk_approve" data-risk="high" aria-describedby="reason-wrk_approve">Reject</button></div><output id="approval-result-wrk_approve" class="approval-result" aria-live="polite"></output></article><article class="approval-item" role="listitem" data-risk="low" data-status="blocked" data-work-item-ref="wrk_blocked"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span><small class="wait-badge" data-waiting-since="2026-07-05T00:30:00.000Z" data-sla-ms="1800000">waiting 10m</small></span><strong id="approval-title-wrk_blocked">Blocked task</strong><small>Actions: fs.read</small><small class="error-line">worker lease expired token=[redacted]</small><button type="button" data-inspect-work="wrk_blocked">Review details</button><label class="reason-field" for="reason-wrk_blocked"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_blocked" data-reason="wrk_blocked" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Blocked task"><button type="button" data-unblock="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Unblock</button><button type="button" data-reject="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Reject</button></div><output id="approval-result-wrk_blocked" class="approval-result" aria-live="polite"></output></article></div></div></article>
         <article id="coding-missions" class="panel wide" data-view-panel="approvals"><div class="panel-head"><h2>Coding missions</h2><span>change-set approval</span></div><div id="coding-mission-list"><p class="empty">No coding missions are waiting for approval.</p></div></article>
       </section>
       <section class="grid lower">
@@ -1655,7 +1655,7 @@ document.addEventListener('visibilitychange', syncSystemProbes);
 
 
 const goToViews = {"o":"overview","q":"queue","a":"approvals","g":"agents","c":"connectors","x":"execution","m":"metrics","e":"audit","p":"policy","s":"system"};
-const keyboardShortcuts = [{"keys":"j / k","action":"Next / previous work item"},{"keys":"/","action":"Search the work queue"},{"keys":"a","action":"Go to the first waiting approval's reason"},{"keys":"g o","action":"Overview"},{"keys":"g q","action":"Work queue"},{"keys":"g a","action":"Approvals"},{"keys":"g g","action":"Agents"},{"keys":"g m","action":"Metrics"},{"keys":"g e","action":"Audit events"},{"keys":"g p","action":"Policy"},{"keys":"g s","action":"System"},{"keys":"?","action":"Show or hide this help"},{"keys":"Esc","action":"Close help"}];
+const keyboardShortcuts = [{"keys":"j / k","action":"Next / previous work item"},{"keys":"/","action":"Search the work queue"},{"keys":"a","action":"Go to the first waiting approval's reason"},{"keys":"g o","action":"Overview"},{"keys":"g q","action":"Work queue"},{"keys":"g a","action":"Approvals"},{"keys":"g g","action":"Agents"},{"keys":"g m","action":"Metrics"},{"keys":"g e","action":"Audit events"},{"keys":"g p","action":"Policy"},{"keys":"g s","action":"System"},{"keys":"r","action":"Refresh the dashboard"},{"keys":"?","action":"Show or hide this help"},{"keys":"Esc","action":"Close help"}];
 const baseDocumentTitle = document.title;
 let pendingGoKeyAt = 0;
 let notificationsWanted = false;
@@ -1909,6 +1909,11 @@ document.addEventListener('keydown', function (event) {
     event.preventDefault();
     showView('approvals');
     reason.focus();
+    return;
+  }
+  if (key === 'r' && typeof scheduleDashboardRefresh === 'function') {
+    event.preventDefault();
+    scheduleDashboardRefresh(0);
   }
 });
 
@@ -2320,7 +2325,9 @@ function applyOperatorNavBadges() {
     const view = badge.getAttribute('data-nav-count');
     const count = map[view] || 0;
     badge.hidden = count === 0;
-    badge.textContent = count ? String(count) : '';
+    badge.textContent = count ? ' ' + String(count) : '';
+    if (count) badge.setAttribute('aria-label', String(count) + ' items');
+    else badge.removeAttribute('aria-label');
   });
 }
 function applyOperatorPins() {
@@ -2569,25 +2576,33 @@ function bindOperatorThirty() {
   document.addEventListener('click', function (event) {
     const row = event.target && event.target.closest ? event.target.closest('[data-work-item]') : null;
     if (row) rememberOperatorWorkItem(row.getAttribute('data-work-item'));
-  });
-  document.addEventListener('keydown', function (event) {
-    if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
-    const target = event.target;
-    const tag = target && target.tagName ? String(target.tagName).toLowerCase() : '';
-    const typing = tag === 'input' || tag === 'textarea' || tag === 'select' || (target && target.isContentEditable === true);
-    if (typing || event.key !== 'r') return;
+    const skip = event.target && event.target.closest ? event.target.closest('a.skip-link') : null;
+    if (!skip) return;
+    const href = skip.getAttribute('href') || '';
+    if (href !== '#approvals' && href !== '#queue') return;
     event.preventDefault();
-    if (typeof refreshDashboard === 'function') {
-      Promise.resolve(refreshDashboard()).catch(function () {});
-    }
+    const id = href.slice(1);
+    try { if (typeof showView === 'function') showView(id); } catch (error) {}
+    const target = document.getElementById(id);
+    if (target && target.focus) target.focus();
+    try { history.replaceState(null, '', location.pathname + location.search + href); } catch (error) {}
   });
+  const queueFilter = document.getElementById('queue-filter');
+  if (queueFilter) {
+    queueFilter.addEventListener('input', renderOperatorFilterSummary);
+    queueFilter.addEventListener('change', renderOperatorFilterSummary);
+  }
   window.addEventListener('hashchange', function () {
     const view = (location.hash || '').slice(1);
     if (operatorThirty.knownViews.indexOf(view) !== -1) operatorStorageSet(operatorThirty.keys.lastView, view);
   });
   if (!location.hash) {
-    const stored = operatorStorageGet(operatorThirty.keys.lastView);
-    if (stored && operatorThirty.knownViews.indexOf(stored) !== -1 && typeof showView === 'function') showView(stored);
+    setTimeout(function () {
+      try {
+        const stored = operatorStorageGet(operatorThirty.keys.lastView);
+        if (stored && operatorThirty.knownViews.indexOf(stored) !== -1 && typeof showView === 'function') showView(stored);
+      } catch (error) {}
+    }, 0);
   }
   applyOperatorThirty();
   setInterval(applyOperatorRelativeTimes, 15000);

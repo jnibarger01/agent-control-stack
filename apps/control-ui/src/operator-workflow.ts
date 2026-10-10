@@ -59,6 +59,7 @@ export const KEYBOARD_SHORTCUTS: readonly ShortcutHelp[] = [
   { keys: "g e", action: "Audit events" },
   { keys: "g p", action: "Policy" },
   { keys: "g s", action: "System" },
+  { keys: "r", action: "Refresh the dashboard" },
   { keys: "?", action: "Show or hide this help" },
   { keys: "Esc", action: "Close help" }
 ];
@@ -341,6 +342,11 @@ document.addEventListener('keydown', function (event) {
     event.preventDefault();
     showView('approvals');
     reason.focus();
+    return;
+  }
+  if (key === 'r' && typeof scheduleDashboardRefresh === 'function') {
+    event.preventDefault();
+    scheduleDashboardRefresh(0);
   }
 });
 `;

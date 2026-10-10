@@ -233,7 +233,9 @@ function applyOperatorNavBadges() {
     const view = badge.getAttribute('data-nav-count');
     const count = map[view] || 0;
     badge.hidden = count === 0;
-    badge.textContent = count ? String(count) : '';
+    badge.textContent = count ? ' ' + String(count) : '';
+    if (count) badge.setAttribute('aria-label', String(count) + ' items');
+    else badge.removeAttribute('aria-label');
   });
 }
 function applyOperatorPins() {
@@ -482,25 +484,33 @@ function bindOperatorThirty() {
   document.addEventListener('click', function (event) {
     const row = event.target && event.target.closest ? event.target.closest('[data-work-item]') : null;
     if (row) rememberOperatorWorkItem(row.getAttribute('data-work-item'));
-  });
-  document.addEventListener('keydown', function (event) {
-    if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
-    const target = event.target;
-    const tag = target && target.tagName ? String(target.tagName).toLowerCase() : '';
-    const typing = tag === 'input' || tag === 'textarea' || tag === 'select' || (target && target.isContentEditable === true);
-    if (typing || event.key !== 'r') return;
+    const skip = event.target && event.target.closest ? event.target.closest('a.skip-link') : null;
+    if (!skip) return;
+    const href = skip.getAttribute('href') || '';
+    if (href !== '#approvals' && href !== '#queue') return;
     event.preventDefault();
-    if (typeof refreshDashboard === 'function') {
-      Promise.resolve(refreshDashboard()).catch(function () {});
-    }
+    const id = href.slice(1);
+    try { if (typeof showView === 'function') showView(id); } catch (error) {}
+    const target = document.getElementById(id);
+    if (target && target.focus) target.focus();
+    try { history.replaceState(null, '', location.pathname + location.search + href); } catch (error) {}
   });
+  const queueFilter = document.getElementById('queue-filter');
+  if (queueFilter) {
+    queueFilter.addEventListener('input', renderOperatorFilterSummary);
+    queueFilter.addEventListener('change', renderOperatorFilterSummary);
+  }
   window.addEventListener('hashchange', function () {
     const view = (location.hash || '').slice(1);
     if (operatorThirty.knownViews.indexOf(view) !== -1) operatorStorageSet(operatorThirty.keys.lastView, view);
   });
   if (!location.hash) {
-    const stored = operatorStorageGet(operatorThirty.keys.lastView);
-    if (stored && operatorThirty.knownViews.indexOf(stored) !== -1 && typeof showView === 'function') showView(stored);
+    setTimeout(function () {
+      try {
+        const stored = operatorStorageGet(operatorThirty.keys.lastView);
+        if (stored && operatorThirty.knownViews.indexOf(stored) !== -1 && typeof showView === 'function') showView(stored);
+      } catch (error) {}
+    }, 0);
   }
   applyOperatorThirty();
   setInterval(applyOperatorRelativeTimes, 15000);
