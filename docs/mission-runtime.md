@@ -63,8 +63,9 @@ Mission work now has a transport-neutral execution boundary in `worker-execution
 - A stale result is retained as `rejected_stale` evidence and cannot overwrite a cancelled or superseded work unit. An unknown external outcome stays `unknown` and cannot be blindly retried.
 - Successful execution does not bypass verification: any work unit whose verification policy is not `none` moves to `verifying`; the executor is not its own verifier.
 - `CoderExecutionAdapter` normalizes the existing coding port. `ToolLaneExecutionAdapter` is the thin result-normalization facade for already-authorized Jace Commander, Desktop Commander and MCP composition roots. It does not authorize calls, mint capabilities, widen scopes, or bypass their existing lease/fencing checks.
+- `CuaExecutionAdapter` runs the typed browser actions already stored on a `cua` payload (`observe`, `click`, `type`, `scroll`, `navigate`) on that same dispatch, claim fence, and result receipt boundary. It does not plan actions, mint capabilities, consult `unitAuthority`, or add an approval record. The browser application must be on `allowedApplications`, and navigation is limited to exact `http`/`https` origins on `allowedOrigins`. An empty allowlist refuses the action. Migration 061 admits executor lane `cua` and stores fenced action checkpoints (state, screenshot hash, receipt hash). Screenshot bytes, typed text, and tokens are not stored. A landed origin outside the allowlist, a browser throw after `planned`, or cancellation after a committed click, type, scroll, or navigate is external-state uncertain and is not retried.
 
-The execution contract deliberately does **not** add swarm delegation or CUA. Those future executors must enter through the same dispatch/result/receipt boundary.
+The execution contract does **not** add swarm delegation. Future executors must enter through the same dispatch/result/receipt boundary. CUA browser execution is already on that boundary, not a separate approval system.
 
 ## Mission authority and child work (migration 060)
 
@@ -148,7 +149,7 @@ operator, so a stale worker cannot cancel or decide for work owned by a newer cl
 - Consulting `unitAuthority` when a worker is dispatched. Until then authority is a verified, tamper-evident ledger of
   what each unit may do, not an enforcement point at dispatch. Production composition roots that construct the ledger
   with the real grant store and operator verification are also not wired yet.
-- Checkpoint/resume as worker adapters on the execution ledger, the CUA worker, and recovery policy.
+- Checkpoint/resume for workers other than the CUA browser adapter, and recovery policy. CUA action checkpoints are not a general resume mechanism.
 - A driver for the `general` mission kind. The legacy coding path has no budget row (uncapped).
 - Delegating to a different executing actor (`authorityNarrowingViolations` refuses it deliberately and it needs its own decision).
 
