@@ -35,6 +35,7 @@ const manifestInput: BuildEvidenceManifestInput = {
 };
 const approval = {
   approvalId: "approval_1",
+  actionHash: H("c"),
   requestHash: H("8"),
   grantHash: H("9"),
   approverActorId: "approver_1",
@@ -60,6 +61,11 @@ const reviewers = [
   }
 ];
 const copyReviewers = (list: typeof reviewers) => list.map((reviewer) => ({ ...reviewer, audit: { ...reviewer.audit } }));
+const approvalCopy = (overrides: Partial<typeof approval> = {}) => ({
+  ...approval,
+  ...overrides,
+  audit: { ...(overrides.audit ?? approval.audit) }
+});
 
 /** A sensitive attempt: approval required, and two independent reviewers (high-risk requirement). */
 const core = (): ExecutionReceiptCore => {
@@ -77,7 +83,7 @@ const core = (): ExecutionReceiptCore => {
       leaseId: "lease_1",
       claimTokenHash: H("4"),
       policyDecision: "require_approval",
-      approval: { ...approval, audit: { ...approval.audit } },
+      approvals: [approvalCopy()],
       audit: { eventId: "auth_1", eventHash: H("5") }
     },
     verification: {
@@ -95,6 +101,7 @@ const core = (): ExecutionReceiptCore => {
       resultWorkspaceRevision: H("e"),
       diffHash: H("f"),
       status: "succeeded",
+      resultId: "result_1",
       audit: { eventId: "readback_1", eventHash: H("7") }
     }
   };
@@ -113,8 +120,10 @@ const expected = (): ReceiptBinding => ({
   claimTokenHash: H("4"),
   capabilityId: "cap_1",
   policyDecision: "require_approval",
-  approval: { ...approval, audit: { ...approval.audit } },
+  approvals: [approvalCopy()],
   policyAudit: { eventId: "auth_1", eventHash: H("5") },
+  attemptOutcome: "succeeded",
+  resultId: "result_1",
   implementerPrincipalId: "executor_1",
   implementerEngineId: "codex",
   implementerProviderId: "openai",
@@ -208,7 +217,7 @@ describe("proof-of-execution receipt integrity", () => {
 
   it("reports incomplete receipts as a typed ControlStackError with the defect list as data", () => {
     const changed = core();
-    changed.authorization.approval!.consumedAt = "2026-10-08T14:00:00Z";
+    changed.authorization.approvals[0]!.consumedAt = "2026-10-08T14:00:00Z";
     let thrown: unknown;
     try {
       buildExecutionReceipt(changed);
@@ -239,7 +248,7 @@ describe("proof-of-execution receipt integrity", () => {
   describe("canonical approval binding", () => {
     it("cannot represent a require_approval decision without a canonical grant", () => {
       const changed = core();
-      changed.authorization.approval = undefined;
+      changed.authorization.approvals = [];
       expect(() => buildExecutionReceipt(changed)).toThrow();
     });
 
@@ -250,12 +259,12 @@ describe("proof-of-execution receipt integrity", () => {
     });
 
     it.each([
-      ["approval id", (c: ExecutionReceiptCore) => { c.authorization.approval!.approvalId = "approval_2"; }],
-      ["request hash", (c: ExecutionReceiptCore) => { c.authorization.approval!.requestHash = H("7"); }],
-      ["grant hash", (c: ExecutionReceiptCore) => { c.authorization.approval!.grantHash = H("7"); }],
-      ["approver", (c: ExecutionReceiptCore) => { c.authorization.approval!.approverActorId = "approver_2"; }],
-      ["consumption time", (c: ExecutionReceiptCore) => { c.authorization.approval!.consumedAt = "2026-10-08T11:45:00Z"; }],
-      ["approval audit", (c: ExecutionReceiptCore) => { c.authorization.approval!.audit.eventId = "approval_event_2"; }]
+      ["approval id", (c: ExecutionReceiptCore) => { c.authorization.approvals[0]!.approvalId = "approval_2"; }],
+      ["request hash", (c: ExecutionReceiptCore) => { c.authorization.approvals[0]!.requestHash = H("7"); }],
+      ["grant hash", (c: ExecutionReceiptCore) => { c.authorization.approvals[0]!.grantHash = H("7"); }],
+      ["approver", (c: ExecutionReceiptCore) => { c.authorization.approvals[0]!.approverActorId = "approver_2"; }],
+      ["consumption time", (c: ExecutionReceiptCore) => { c.authorization.approvals[0]!.consumedAt = "2026-10-08T11:45:00Z"; }],
+      ["approval audit", (c: ExecutionReceiptCore) => { c.authorization.approvals[0]!.audit.eventId = "approval_event_2"; }]
     ] as const)("rejects a mismatched canonical grant: %s", (_name, mutate) => {
       const changed = core();
       mutate(changed);
@@ -264,13 +273,13 @@ describe("proof-of-execution receipt integrity", () => {
 
     it("rejects a grant consumed before it was granted", () => {
       const changed = core();
-      changed.authorization.approval!.consumedAt = "2026-10-08T10:00:00Z";
+      changed.authorization.approvals[0]!.consumedAt = "2026-10-08T10:00:00Z";
       expect(receiptDefects(changed)).toContain("approval_consumed_before_grant");
     });
 
     it("rejects a grant consumed at or after its expiry", () => {
       const changed = core();
-      changed.authorization.approval!.consumedAt = "2026-10-08T13:00:00Z";
+      changed.authorization.approvals[0]!.consumedAt = "2026-10-08T13:00:00Z";
       expect(receiptDefects(changed)).toContain("approval_consumed_after_expiry");
     });
 
@@ -290,7 +299,7 @@ describe("proof-of-execution receipt integrity", () => {
     it("rejects a receipt whose policy decision differs from the canonical decision", () => {
       const changed = core();
       changed.authorization.policyDecision = "allow";
-      changed.authorization.approval = undefined;
+      changed.authorization.approvals = [];
       expect(verifyExecutionReceipt(buildExecutionReceipt(changed), expected()).defects).toContain("policy_decision_mismatch");
     });
   });
@@ -380,12 +389,81 @@ describe("proof-of-execution receipt integrity", () => {
   describe("unverifiable evidence fails closed", () => {
     it("rejects a binding that omits a required canonical field", () => {
       const { validationRunId: _omitted, ...partial } = expected();
-      expect(verifyExecutionReceipt(buildExecutionReceipt(core()), partial).defects).toEqual(["invalid_schema_or_binding"]);
+      expect(verifyExecutionReceipt(buildExecutionReceipt(core()), partial).defects).toEqual(["invalid_binding_schema"]);
     });
 
     it("rejects a binding that omits the canonical reviewer requirement", () => {
       const { reviewersRequired: _omitted, ...partial } = expected();
-      expect(verifyExecutionReceipt(buildExecutionReceipt(core()), partial).defects).toEqual(["invalid_schema_or_binding"]);
+      expect(verifyExecutionReceipt(buildExecutionReceipt(core()), partial).defects).toEqual(["invalid_binding_schema"]);
+    });
+  });
+
+  describe("complete canonical approval set", () => {
+    const second = () =>
+      approvalCopy({
+        approvalId: "approval_2",
+        actionHash: H("3"),
+        requestHash: H("4"),
+        grantHash: H("5"),
+        audit: { eventId: "approval_event_2", eventHash: H("1") }
+      });
+
+    it("accepts a multi-action attempt whose binding carries every consumed approval", () => {
+      const changed = core();
+      changed.authorization.approvals = [approvalCopy(), second()];
+      const bound = expected();
+      bound.approvals = [approvalCopy(), second()];
+      expect(verifyExecutionReceipt(buildExecutionReceipt(changed), bound)).toEqual({ ok: true, defects: [] });
+    });
+
+    it("rejects a receipt that omits an approval the lease consumed", () => {
+      const bound = expected();
+      bound.approvals = [approvalCopy(), second()];
+      expect(verifyExecutionReceipt(buildExecutionReceipt(core()), bound).defects).toContain("approval_binding_mismatch");
+    });
+
+    it("rejects an approval bound to a different action than the canonical record", () => {
+      const changed = core();
+      changed.authorization.approvals = [approvalCopy(), second()];
+      changed.authorization.approvals[1]!.actionHash = H("9");
+      const bound = expected();
+      bound.approvals = [approvalCopy(), second()];
+      expect(verifyExecutionReceipt(buildExecutionReceipt(changed), bound).defects).toContain("approval_binding_mismatch");
+    });
+
+    it("rejects two receipt approvals that name the same approval id", () => {
+      const changed = core();
+      changed.authorization.approvals = [approvalCopy(), approvalCopy({ actionHash: H("3") })];
+      expect(receiptDefects(changed)).toContain("approval_not_distinct");
+    });
+  });
+
+  describe("canonical attempt outcome and result identity", () => {
+    it.each(["failed", "cancelled", "quarantined", "unknown"] as const)(
+      "rejects a succeeded readback when the canonical attempt outcome is %s",
+      (outcome) => {
+        const bound = expected();
+        bound.attemptOutcome = outcome;
+        expect(verifyExecutionReceipt(buildExecutionReceipt(core()), bound).defects).toContain("attempt_outcome_mismatch");
+      }
+    );
+
+    it("rejects a receipt whose result identity differs from the canonical result", () => {
+      const bound = expected();
+      bound.resultId = "result_2";
+      expect(verifyExecutionReceipt(buildExecutionReceipt(core()), bound).defects).toContain("result_binding_mismatch");
+    });
+  });
+
+  describe("distinct defects for invalid receipts and invalid bindings", () => {
+    it("reports a malformed receipt as a receipt-schema defect", () => {
+      expect(verifyExecutionReceipt({ schemaVersion: "bogus" }, expected()).defects).toEqual(["invalid_receipt_schema"]);
+    });
+
+    it("reports a malformed binding as a binding-schema defect", () => {
+      expect(verifyExecutionReceipt(buildExecutionReceipt(core()), { bogus: true }).defects).toEqual([
+        "invalid_binding_schema"
+      ]);
     });
   });
 });

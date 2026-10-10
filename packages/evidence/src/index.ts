@@ -40,7 +40,8 @@ export {
   executionReceiptHash,
   receiptDefects,
   buildExecutionReceipt,
-  verifyExecutionReceipt
+  verifyExecutionReceipt,
+  ExecutionReceiptIncompleteError
 } from "./execution-receipt.js";
 export type { ExecutionReceipt, ExecutionReceiptCore, ReceiptBinding } from "./execution-receipt.js";
 
