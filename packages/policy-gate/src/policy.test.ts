@@ -29,7 +29,8 @@ describe("policy gate", () => {
       }).decision
     ).toBe("allow");
     expect(evaluatePolicy({ ...base, command: ["git", "status"] }).decision).toBe("allow");
-    expect(evaluatePolicy({ ...base, command: ["git", "diff"] }).decision).toBe("allow");
+    expect(evaluatePolicy({ ...base, command: ["git", "diff", "--no-textconv", "--no-ext-diff", "--stat"] }).decision).toBe("allow");
+    expect(evaluatePolicy({ ...base, command: ["git", "diff"] }).decision).toBe("require_approval");
     expect(evaluatePolicy({ ...base, command: ["npm", "test"] }).decision).toBe("require_approval");
     expect(evaluatePolicy({ ...base, command: ["npm", "test"] }).matchedRules).toContain("approval:package-script");
     expect(evaluatePolicy({ ...base, command: ["pnpm", "run", "test"] }).decision).toBe("require_approval");
@@ -105,6 +106,30 @@ describe("policy gate", () => {
           paths: ["src/index.ts"]
         }).decision
       ).toBe("allow");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not auto-allow an argv operand that is an in-cwd symlink to outside", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-policy-argv-symlink-"));
+    const root = join(dir, "root");
+    const outside = join(dir, "outside");
+    mkdirSync(root);
+    mkdirSync(outside);
+    writeFileSync(join(outside, "passwd"), "secret");
+    writeFileSync(join(root, "README.md"), "ok");
+    symlinkSync(outside, join(root, "link"), "dir");
+
+    try {
+      const result = evaluatePolicy({
+        ...base,
+        action: { kind: "shell", description: "cat through symlink", params: {} },
+        command: ["cat", "link/passwd"],
+        cwd: root,
+        paths: ["README.md"]
+      });
+      expect(result.decision).not.toBe("allow");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

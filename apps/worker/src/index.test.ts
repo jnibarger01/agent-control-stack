@@ -334,7 +334,7 @@ describe("worker policy gate", () => {
     }
   });
 
-  it("blocks approved write work without matching action approval", async () => {
+  it("returns approved write work without matching action approval to needs_approval", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-worker-"));
     const dbPath = join(dir, "control.db");
     const store = new SqliteWorkItemStore(dbPath);
@@ -355,7 +355,9 @@ describe("worker policy gate", () => {
       const check = new SqliteWorkItemStore(dbPath);
       try {
         expect(result.executed).toBe(false);
-        expect(check.get(workItem.id)?.status).toBe("blocked");
+        // Claim re-checks policy. The status was approved without an action approval, so the item
+        // goes back to awaiting approval instead of being blocked.
+        expect(check.get(workItem.id)?.status).toBe("needs_approval");
       } finally {
         check.close();
       }
