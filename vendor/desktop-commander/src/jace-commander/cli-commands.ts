@@ -638,7 +638,8 @@ export const LOCAL_COMMANDS: ReadonlyArray<{ usage: string; summary: string }> =
   { usage: 'tools [--remote]', summary: 'List tools (manifest; --remote asks the server via tools/list)' },
   { usage: 'status --local', summary: 'Local readiness: config, credentials, sudo helper (no network)' },
   { usage: 'login | whoami | logout', summary: 'ACS device login used by the server for acs_submit_mission' },
-  { usage: 'serve [--standalone]', summary: 'Run the stdio MCP server (spawned by the gateway bridge); --standalone serves read-only tools only' },
+  { usage: 'serve [--preset managed|standalone|local]', summary: 'Run the stdio MCP server (spawned by the gateway bridge); --standalone (= --preset standalone) serves read-only tools only' },
+  { usage: 'pending | approve <id> | reject <id>', summary: 'Local preset: list and decide human approvals (needs a TTY and JC_APPROVER_DECIDE_SOCKET)' },
   { usage: 'version', summary: 'Print version and manifest hash' },
   { usage: 'help', summary: 'This help' },
 ]);

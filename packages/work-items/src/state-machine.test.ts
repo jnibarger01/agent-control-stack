@@ -999,7 +999,8 @@ describe("work item state machine", () => {
           version: 59,
           name: "work_unit_verification_terminal_restore",
           filename: "059_work_unit_verification_terminal_restore.sql"
-        }
+        },
+        { version: 60, name: "mission_authority_and_child_work", filename: "060_mission_authority_and_child_work.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])

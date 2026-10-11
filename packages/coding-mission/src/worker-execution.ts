@@ -12,6 +12,27 @@ export interface ExecutionAuthorityRefs {
   leaseId?: string;
   fencingToken?: number;
   actionHash?: string;
+  /** Hash of the unit's derived authority definition, set by ACS (never the caller) for governed missions. */
+  unitAuthorityHash?: string;
+}
+
+/** The outcome of checking a dispatch against the authority the mission was granted. */
+export type DispatchAuthorityVerdict =
+  | { ok: true; grantId: string; unitAuthorityHash: string; executingActorId: string }
+  | { ok: false; reason: string };
+
+/**
+ * Decides whether a worker may run a unit on a lane right now. `MissionAuthorityLedger` implements it. It must read
+ * durable state and ACS's own clock, and return a refusal for anything it cannot prove.
+ */
+export interface DispatchAuthorityVerifier {
+  verifyDispatch(input: {
+    missionId: string;
+    unitId: string;
+    workerId: string;
+    lane: ExecutorLane;
+    attempt: number;
+  }): DispatchAuthorityVerdict;
 }
 
 export interface DispatchEnvelope {
@@ -148,7 +169,8 @@ function normalizedAuthority(authority: ExecutionAuthorityRefs | undefined): Exe
     ...(typeof authority.fencingToken === "number" && Number.isInteger(authority.fencingToken)
       ? { fencingToken: authority.fencingToken }
       : {}),
-    ...(typeof authority.actionHash === "string" ? { actionHash: authority.actionHash } : {})
+    ...(typeof authority.actionHash === "string" ? { actionHash: authority.actionHash } : {}),
+    ...(typeof authority.unitAuthorityHash === "string" ? { unitAuthorityHash: authority.unitAuthorityHash } : {})
   };
 }
 
@@ -363,7 +385,10 @@ export class ToolLaneExecutionAdapter implements WorkUnitExecutorAdapter {
 }
 
 export class WorkUnitExecutionLedger {
-  constructor(private readonly store: CodingMissionStore) {}
+  constructor(
+    private readonly store: CodingMissionStore,
+    private readonly options: { authority?: DispatchAuthorityVerifier } = {}
+  ) {}
 
   beginDispatch(input: {
     missionId: string;
@@ -374,7 +399,9 @@ export class WorkUnitExecutionLedger {
     authority?: ExecutionAuthorityRefs;
     now: string;
   }): DispatchEnvelope {
-    return this.store.transaction(() => {
+    // A refusal is evidence, so it is committed inside the transaction and thrown only after it.
+    let denial: ControlStackError | undefined;
+    const envelope = this.store.transaction((): DispatchEnvelope | undefined => {
       const unit = this.store.workUnits(input.missionId).find((candidate) => candidate.unitId === input.unitId);
       if (!unit) throw new ControlStackError("work_unit_not_found", "work unit does not exist");
       if (
@@ -387,6 +414,54 @@ export class WorkUnitExecutionLedger {
       }
       if (!EXECUTOR_LANES.includes(input.lane)) {
         throw new ControlStackError("execution_lane_invalid", "executor lane is invalid");
+      }
+      // A mission with a persisted authority binding is governed: nothing in it runs unless that authority is verified
+      // for this worker, unit, lane and attempt. A governed mission with no verifier configured is refused, not run
+      // unchecked. Missions with no binding dispatch exactly as before. The check precedes the replay path below, so
+      // a revoked or expired authority also stops a resumed dispatch.
+      let governedAuthority: ExecutionAuthorityRefs | undefined;
+      const governed = this.store.db
+        .prepare("SELECT 1 AS present FROM mission_authority WHERE mission_id = ?")
+        .get(input.missionId);
+      if (governed) {
+        let refusal: string | undefined;
+        if (!this.options.authority) {
+          refusal = "authority_verifier_unavailable";
+        } else {
+          let verdict: DispatchAuthorityVerdict;
+          try {
+            verdict = this.options.authority.verifyDispatch({
+              missionId: input.missionId,
+              unitId: input.unitId,
+              workerId: input.workerId,
+              lane: input.lane,
+              attempt: unit.attempt
+            });
+          } catch {
+            verdict = { ok: false, reason: "authority_verifier_failed" };
+          }
+          if (!verdict.ok) {
+            refusal = verdict.reason;
+          } else if (input.authority?.grantId !== undefined && input.authority.grantId !== verdict.grantId) {
+            refusal = "authority_ref_mismatch";
+          } else {
+            governedAuthority = {
+              ...normalizedAuthority(input.authority),
+              grantId: verdict.grantId,
+              unitAuthorityHash: verdict.unitAuthorityHash
+            };
+          }
+        }
+        if (refusal !== undefined) {
+          this.store.recordMissionEvent(
+            input.missionId,
+            "authority.denied",
+            { operation: "dispatch", unitId: input.unitId, lane: input.lane, reason: refusal },
+            input.now
+          );
+          denial = new ControlStackError("dispatch_authority_denied", `dispatch refused: ${refusal}`);
+          return undefined;
+        }
       }
       if (unit.verificationPolicy !== "none" && !this.store.verificationRequirement(input.missionId, input.unitId)) {
         throw new ControlStackError(
@@ -405,7 +480,7 @@ export class WorkUnitExecutionLedger {
         );
       }
       const claimTokenHash = stableHash(input.claimToken);
-      const authority = normalizedAuthority(input.authority);
+      const authority = governedAuthority ?? normalizedAuthority(input.authority);
       const payloadHash = stableHash(unit.payload ?? null);
       const routeHash = stableHash(unit.route ?? null);
       // Migration-056 attempts used an identity without implementerEngineId.
@@ -525,6 +600,8 @@ export class WorkUnitExecutionLedger {
       );
       return dispatch;
     });
+    if (denial) throw denial;
+    return envelope!;
   }
 
   attempt(attemptId: string): ExecutionAttemptRecord | undefined {
