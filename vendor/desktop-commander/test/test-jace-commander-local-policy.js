@@ -1,0 +1,30 @@
+#!/usr/bin/env node
+import assert from 'node:assert/strict';
+import { parseJcLocalPolicy, riskClassForJcTool, JC_DEFAULT_CLASS_POLICY } from '../dist/jace-commander/local-policy.js';
+import { JcApprovalCoordinator } from '../dist/jace-commander/approval-protocol.js';
+
+const input = () => ({ version: 'jc.policy.v1', classes: {}, roots: ['/tmp'], deniedRoots: [], authorizers: {} });
+const p = parseJcLocalPolicy(input());
+assert.equal(p.classes.privileged, 'approve');
+assert.deepEqual(p.classes, JC_DEFAULT_CLASS_POLICY);
+assert.equal(riskClassForJcTool('write_file'), 'mutate');
+assert.equal(riskClassForJcTool('privileged_exec'), 'privileged');
+assert.equal(riskClassForJcTool('git_push'), 'network');
+assert.throws(() => parseJcLocalPolicy({ ...input(), classes: { privileged: 'allow' } }));
+assert.throws(() => parseJcLocalPolicy({ ...input(), authorizers: { defaultAuthorizer: 'admin-delegated' } }));
+assert.throws(() => parseJcLocalPolicy({ ...input(), authorizers: { perTool: { made_up: 'local' } } }));
+assert.throws(() => parseJcLocalPolicy({ ...input(), unexpected: true }));
+let now = 1000, verifies = 0;
+const coordinator = new JcApprovalCoordinator({ verify: async () => { verifies++; return false; } }, () => now);
+const pending = coordinator.request('write_file', { path: '/tmp/test', content: 'x' }, 'runtime');
+const assertion = { approvalId: pending.id, challenge: pending.challenge, invocationHash: pending.invocationHash, operatorId: 'human', issuedAt: now, expiresAt: now + 1000 };
+await assert.rejects(coordinator.approve(assertion), /JC_APPROVAL_DENIED/);
+assert.equal(verifies, 1);
+await assert.rejects(coordinator.approve(assertion), /JC_APPROVAL_UNKNOWN/);
+const other = coordinator.request('write_file', {}, 'runtime');
+await assert.rejects(coordinator.approve({ ...assertion, approvalId: other.id }), /JC_APPROVAL_DENIED/);
+now += 31_000;
+const stale = coordinator.request('write_file', {}, 'runtime');
+now += 31_000;
+await assert.rejects(coordinator.approve({ ...assertion, approvalId: stale.id, challenge: stale.challenge, invocationHash: stale.invocationHash }), /JC_APPROVAL_DENIED/);
+console.log('JC local policy and human-assertion replay guards: passed');
