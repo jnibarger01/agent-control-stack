@@ -19,7 +19,8 @@ const ROOT: AutonomousAuthorityDefinition = {
   ],
   toolClasses: [
     { runtime: "desktop_commander", toolName: "read_file" },
-    { runtime: "desktop_commander", toolName: "write_file" }
+    { runtime: "desktop_commander", toolName: "write_file" },
+    { runtime: "sandbox", toolName: "code_edit" }
   ],
   maximumPrivileges: ["fs.read", "fs.write"],
   expiresAt: "2026-10-09T02:00:00.000Z",
@@ -236,7 +237,7 @@ describe("authority graph: read model", () => {
     expect(g2).toMatchObject({ authoritySource: "derived", parentUnitId: "c2", grantId: "grant-1" });
     expect(g2.narrowing!.notInherited).toEqual({
       scope: ["path:/repo/acme/docs:descendants"],
-      toolClasses: ["desktop_commander:write_file"],
+      toolClasses: ["desktop_commander:write_file", "sandbox:code_edit"],
       privileges: ["fs.write"]
     });
     expect(g2.narrowing!.executingActorChanged).toBe(false);
@@ -281,6 +282,19 @@ describe("authority graph: read model", () => {
       for (const node of graph.nodes) {
         const verdict = dispatch(t.ledger, node.unitId);
         expect(node.effective.state === "active", `${scenario.name}: ${node.unitId}`).toBe(verdict.ok);
+        // The lane view agrees with dispatch lane by lane: a unit never shows a lane that dispatch refuses.
+        if (node.effective.state === "active") {
+          for (const lane of ["coder", "jc", "dc", "mcp"] as const) {
+            const byLane = t.ledger.verifyDispatch({
+              missionId: "m1",
+              unitId: node.unitId,
+              workerId: "any-worker",
+              lane,
+              attempt: 1
+            });
+            expect(node.permittedLanes.includes(lane), `${scenario.name}: ${node.unitId} on ${lane}`).toBe(byLane.ok);
+          }
+        }
       }
     }
   });
