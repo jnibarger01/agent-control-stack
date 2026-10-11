@@ -94,7 +94,7 @@ Status key: NOT STARTED, IN PROGRESS, IMPLEMENTED, VERIFIED, INTEGRATED, BLOCKED
 | #   | Feature                           | Status      | Existing code on main                                                                                                                                                  | Gap (to be confirmed per slice)                                                                                  |
 | --- | --------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | 4   | Execution Flight Recorder         | IN PROGRESS | hash-chained `audit_events`; `packages/evidence` (manifest, observation outbox, reader); `mission-trace.ts`                                                            | mission-level ordered replay API, retention policy, redaction audit, trust-assumption doc, UI                    |
-| 9   | Delegated Authority Graph         | NOT STARTED | migration 060 `mission_authority`, `work_unit_authority` (intersection-only, write-once); `child-work.ts`; `authority-narrowing.ts`; autonomous authority grants (047) | graph query/history API, cascade revocation proof, cycle rejection test, restart/stale-claim negative tests, UI  |
+| 9   | Delegated Authority Graph         | IN PROGRESS | migration 060 `mission_authority`, `work_unit_authority` (intersection-only, write-once); `child-work.ts`; `authority-narrowing.ts`; autonomous authority grants (047) | graph query/history API, cascade revocation proof, cycle rejection test, restart/stale-claim negative tests, UI  |
 | 5   | Self-Healing Mission Runtime      | NOT STARTED | `packages/recovery` (bounded retry planner, startup reconciliation); lease/fencing (migration 058); `liveness.ts`                                                      | durable checkpoints, backoff scheduling, poison-work detection, operator escalation, duplicate-side-effect proof |
 | 2   | Dynamic Agent Swarm Builder       | NOT STARTED | `coding-mission` units/DAG/stages; `child-work.ts`; `actor-router`; `moa-orchestrator`; `adr/0017` Codex swarm                                                         | role-based composition, depth/child limits, resource-aware scheduling, teardown                                  |
 | 3   | Autonomous Integration Manager    | NOT STARTED | `packages/publication`, `scripts/pr-preflight.mjs`, `slice-workflow`                                                                                                   | PR discovery/reconcile engine, merge simulation, repo-level serialization, gate evaluator                        |
@@ -112,7 +112,7 @@ Phase 1 first. Each slice is a vertical, separately reviewable PR off the then-c
 | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------- | ----------- |
 | 4.1   | Mission-scoped Flight Recorder read model (chain, verifier, replay API, `GET /coding-missions/:id/flight-record`; design in `docs/flight-recorder.md`) | none                         | IMPLEMENTED |
 | 4.2   | Retention policy + redaction verification + trust-assumptions doc (documents external anchor need)                                                     | 4.1                          | NOT STARTED |
-| 9.1   | Authority graph query API + history + cycle/escalation/revocation-propagation adversarial tests                                                        | merged #323                  | NOT STARTED |
+| 9.1   | Authority graph query API + history + cycle/escalation/revocation-propagation adversarial tests                                                        | merged #323                  | IMPLEMENTED |
 | 5.1   | Durable checkpoint + backoff + poison-work classification in recovery, with fenced-resume test                                                         | 9.1 (authority revalidation) | NOT STARTED |
 | 2.1   | Swarm composition planner with depth/child/resource limits                                                                                             | 9.1, 5.1                     | NOT STARTED |
 | 3.1   | Integration manager read-only reconcile (PR discovery, merge simulation, gate evaluation, no merge)                                                    | none (parallel)              | NOT STARTED |
@@ -152,7 +152,26 @@ mission, replays it (17 records, derived state `COMPLETED` equals live), edits t
 - `work_unit.completed` in `store.ts` stamps wall-clock time rather than the injected clock (pre-existing; seen in the
   replay). Not changed here.
 
+Slice 4.1 CI (PR #334, draft): green at last read: `check` (aggregate incl. contracts and authority coverage) and `test`
+passed, `dc-execution-chain` passed, GitGuardian passed; dependabot and the merge gate skipped (draft). Not merged.
+
+Slice 9.1 (PR #336, draft, branch `feat/authority-graph-query-20261010`, worktree
+`/home/jacen/projects/acs-worktrees/authority-graph-9-1`, no migration): `MissionAuthorityLedger.authorityGraph`,
+design in `docs/authority-graph.md`. Local evidence: tsc, lint, contracts clean; full vitest 3537 passed, 0 failed;
+14 new tests. CI not yet read. Findings:
+
+- **Defect fixed:** a looped or self-referencing `work_unit_authority.parent_unit_id` made `unitAuthority` recurse until
+  `RangeError`, which escaped `verifyDispatch` as a crash. Now an `authority_integrity` refusal. Requires database
+  write access to trigger, so it is hardening, not a remote bug.
+- **Verified already correct (now regression-tested):** revocation of the mission grant reaches root, child and
+  grandchild at dispatch and blocks new delegation, survives a restart, and an unrelated revocation changes nothing.
+- **Not done:** HTTP route (ledger is not wired into the gateway on main; #332 wires it), per-delegation revocation
+  (only the mission grant is revocable; needs a new table and migration), Mission Control view, and the escalation
+  coverage was left to the existing 72 `child-work` and 11 `authority` tests rather than duplicated.
+- The ledger file itself lives only on the #334 branch; slice branches cut from main do not contain it.
+
 ## Next action
 
-Push the branch, open the draft PR (reserves 062), read CI. Then slice 9.1 (authority graph query, history, cycle and
-escalation negative tests) on a fresh slice off `origin/main`, or 4.3 if CI shows a recorder problem first.
+Read CI on #336 and #334. Then slice 5.1 (self-healing runtime): start with a read of `packages/recovery`,
+`liveness.ts` and the lease/fencing code from migration 058 to find which of checkpoints, backoff, poison-work
+detection and operator escalation already exist, before adding any. Migration numbers: next free is 063 (`pr:preflight`).
