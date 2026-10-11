@@ -286,14 +286,23 @@ function verifyUnderSnapshot(db: DatabaseSync, missionId: string): FlightVerific
     expectedSeq += 1;
   }
 
-  const epochRow = db
-    .prepare(`SELECT last_legacy_event_id, last_legacy_evidence_rowid FROM mission_flight_epoch WHERE singleton = 1`)
-    .get() as { last_legacy_event_id: number; last_legacy_evidence_rowid: number } | undefined;
-  if (!epochRow) {
-    findings.push({ kind: "unrecorded_event", detail: "recorder epoch row is missing" });
-  }
-  const legacyCutoff = epochRow?.last_legacy_event_id ?? 0;
-  const legacyEvidenceCutoff = epochRow?.last_legacy_evidence_rowid ?? 0;
+  const legacyEvents = new Set(
+    (
+      db
+        .prepare(
+          `SELECT e.event_id FROM coding_events AS e
+           JOIN mission_flight_legacy_events AS l ON l.event_id = e.event_id WHERE e.mission_id = ?`
+        )
+        .all(missionId) as Array<{ event_id: number }>
+    ).map((row) => row.event_id)
+  );
+  const legacyEvidence = new Set(
+    (
+      db
+        .prepare(`SELECT evidence_id FROM mission_flight_legacy_evidence WHERE mission_id = ?`)
+        .all(missionId) as Array<{ evidence_id: string }>
+    ).map((row) => row.evidence_id)
+  );
 
   const events = db
     .prepare(`SELECT event_id, name, body_json, created_at FROM coding_events WHERE mission_id = ? ORDER BY event_id`)
@@ -313,7 +322,7 @@ function verifyUnderSnapshot(db: DatabaseSync, missionId: string): FlightVerific
       }
       continue;
     }
-    if (row.event_id <= legacyCutoff) {
+    if (legacyEvents.has(row.event_id)) {
       // Records are only written after the epoch, so a record bound to an older event was inserted afterwards to make
       // unprovable history look recorded. The event stays counted as legacy.
       findings.push({
@@ -345,7 +354,7 @@ function verifyUnderSnapshot(db: DatabaseSync, missionId: string): FlightVerific
   let legacyEventCount = 0;
   for (const event of events) {
     if (chainedEventIds.has(event.event_id)) continue;
-    if (event.event_id <= legacyCutoff) legacyEventCount += 1;
+    if (legacyEvents.has(event.event_id)) legacyEventCount += 1;
     else {
       findings.push({
         kind: "unrecorded_event",
@@ -355,7 +364,7 @@ function verifyUnderSnapshot(db: DatabaseSync, missionId: string): FlightVerific
     }
   }
 
-  const legacyEvidenceCount = verifyEvidence(db, missionId, rows, legacyEvidenceCutoff, findings);
+  const legacyEvidenceCount = verifyEvidence(db, missionId, rows, legacyEvidence, findings);
 
   const verdict: FlightVerdict =
     findings.length > 0 ? "tampered" : legacyEventCount + legacyEvidenceCount > 0 ? "partial_legacy" : "verified";
@@ -373,7 +382,7 @@ function verifyEvidence(
   db: DatabaseSync,
   missionId: string,
   rows: RecordRow[],
-  legacyCutoff: number,
+  legacyEvidence: ReadonlySet<string>,
   findings: FlightFinding[]
 ): number {
   const recorded = new Map<
@@ -412,11 +421,10 @@ function verifyEvidence(
   }
   const evidence = db
     .prepare(
-      `SELECT rowid AS row_id, evidence_id, kind, created_at, payload_hash, payload_json
+      `SELECT evidence_id, kind, created_at, payload_hash, payload_json
        FROM coding_evidence WHERE mission_id = ?`
     )
     .all(missionId) as Array<{
-    row_id: number;
     evidence_id: string;
     kind: string;
     created_at: string;
@@ -430,7 +438,7 @@ function verifyEvidence(
     seen.add(ref);
     const label = safeLabel(row.evidence_id);
     const chained = recorded.get(ref);
-    if (row.row_id <= legacyCutoff) {
+    if (legacyEvidence.has(row.evidence_id)) {
       legacy += 1;
       if (chained) {
         findings.push({
@@ -563,6 +571,10 @@ function readUnderSnapshot(
   };
   forEachRecord(db, missionId, (record) => {
     const body = safeParse(record.bodyJson);
+    if (record.kind === "coding_mission.plan_replaced") {
+      // A replan deletes and re-creates the operations, so units recorded before it no longer exist.
+      for (const key of Object.keys(units)) delete units[key];
+    }
     if (record.kind === "mission.created" || record.kind === "coding_mission.created") {
       if (typeof body.state === "string") {
         stateHistory.push({ seq: record.seq, from: null, to: body.state, at: record.createdAt });
@@ -609,13 +621,23 @@ function readUnderSnapshot(
       createdAt: record.createdAt,
       recordHash: record.recordHash,
       previousHash: record.previousHash,
-      body: safeParse(record.bodyJson)
+      body: parseBody(record.bodyJson)
     })),
     ...(page.length > limit ? { nextAfterSeq: shown.at(-1)!.seq } : {}),
     trustAssumptions: FLIGHT_TRUST_ASSUMPTIONS
   };
 }
 
+/** The body exactly as persisted and verified (any JSON value), for display. */
+function parseBody(json: string): unknown {
+  try {
+    return JSON.parse(json) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/** Object bodies only, for deriving state and unit fields. Other JSON values carry no such fields. */
 function safeParse(json: string): Record<string, unknown> {
   try {
     const value = JSON.parse(json) as unknown;

@@ -5,6 +5,10 @@ mission from recorded evidence and find out whether that record was altered afte
 
 ## What it is, and what it is not
 
+This is a separate per-mission chain in `mission_flight_records`. It is **not** part of the global `audit_events` chain,
+and `audit verify` and the `/readyz` audit check do not cover it. Verify it with `verifyFlightRecord` or the
+flight-record endpoint. Anchoring each mission's head hash into `audit_events` is future work.
+
 It is **tamper evidence**. It is not tamper prevention.
 
 - Every record commits to the one before it (`previous_hash`) and to its own content (`record_hash`). Editing,
@@ -13,8 +17,8 @@ It is **tamper evidence**. It is not tamper prevention.
   chained when the evidence is first stored. Editing or deleting either operational row, or writing one around the
   recorder, is reported.
 - SQLite triggers make ordinary `UPDATE`, `DELETE` and `INSERT OR REPLACE` of `mission_flight_records` fail (the replace
-  guard is a `BEFORE INSERT` trigger because SQLite resolves a replace without firing delete triggers). The epoch row
-  is write-once. A database owner can drop the triggers.
+  guard is a `BEFORE INSERT` trigger because SQLite resolves a replace without firing delete triggers). The legacy key tables
+  are write-once. A database owner can drop the triggers.
 - Verification and replay read one database snapshot, so a writer committing mid-read cannot make a legitimate event
   look unrecorded or put unverified records in the response. Evidence is checked for payload, kind and timestamp.
 
@@ -28,14 +32,16 @@ It is **tamper evidence**. It is not tamper prevention.
    separate effects with their own evidence.
 3. Events written before migration 062 are not chained. They are counted as `legacyEventCount` (events) and `legacyEvidenceCount` (evidence rows) and make the verdict
    `partial_legacy`; they are never reported as tampering and never as verified.
-4. Evidence legacy detection uses the SQLite `rowid` cutoff taken at migration time. Deleting legacy evidence and
-   reusing its rowids is not detectable.
+4. Rows that existed before the migration are identified by an exact snapshot of their keys (event ids, and
+   mission and evidence ids), taken in the migration itself, not by a numeric cutoff. A later insert that reuses an
+   unused low id is therefore not mistaken for legacy. Deleting legacy rows is not detectable, because they were never
+   chained.
 5. A `tampered` verdict says the record cannot be trusted. It does not say who changed it or when.
 
 ## What is recorded
 
 A record bound to an event or evidence row that predates the recorder is `legacy_binding`: records are only written
-after the epoch, so such a record was inserted later to make unprovable history look recorded.
+after the migration, so such a record was inserted later to make unprovable history look recorded.
 
 Evidence identifiers and kinds can embed caller-supplied values, so the chain stores a hash of each (for integrity) and
 only a redacted label for display; findings use the same label. A malformed evidence binding is `unlinked_record`.

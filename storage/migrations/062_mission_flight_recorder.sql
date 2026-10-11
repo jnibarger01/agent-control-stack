@@ -1,15 +1,19 @@
 -- Execution Flight Recorder: a per-mission, append-only, hash-chained record of everything a coding mission did.
 --
 -- Each record commits to its predecessor, so an edited, removed, reordered or inserted record changes the chain and is
--- found by verification. The triggers below make accidental or application-level UPDATE/DELETE fail; they do NOT stop
--- a principal with write access to the database file, who can drop them or rewrite the whole chain. This is tamper
+-- found by verification. The triggers below make accidental or application-level UPDATE/DELETE/REPLACE fail; they do NOT
+-- stop a principal with write access to the database file, who can drop them or rewrite the whole chain. This is tamper
 -- EVIDENCE, not tamper prevention. Detecting a full rewrite needs the chain head recorded somewhere the database
 -- writer cannot reach (see docs/flight-recorder.md).
 --
+-- This chain is separate from the global audit_events chain. `audit verify` and the readiness check do not cover it.
+--
 -- coding_events remains the operational view. event_id links a chained record to its coding_events row so that an
--- edit to, or deletion of, the operational row is detected. epoch records the highest coding_events row that existed
--- before this migration, and likewise the highest coding_evidence rowid: those rows were never chained and are reported
--- as legacy, not as tampering.
+-- edit to, or deletion of, the operational row is detected.
+--
+-- Rows that existed before this migration were never chained. The exact set of their keys is recorded here (not a
+-- numeric cutoff, which a later insert reusing an unused low id could masquerade under). Those rows are reported as
+-- legacy, never as verified and never as tampering.
 
 CREATE TABLE mission_flight_records (
   mission_id TEXT NOT NULL,
@@ -23,16 +27,17 @@ CREATE TABLE mission_flight_records (
   PRIMARY KEY (mission_id, seq)
 );
 
-CREATE TABLE mission_flight_epoch (
-  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-  last_legacy_event_id INTEGER NOT NULL CHECK (last_legacy_event_id >= 0),
-  last_legacy_evidence_rowid INTEGER NOT NULL CHECK (last_legacy_evidence_rowid >= 0)
+CREATE TABLE mission_flight_legacy_events (
+  event_id INTEGER PRIMARY KEY
 );
+INSERT INTO mission_flight_legacy_events (event_id) SELECT event_id FROM coding_events;
 
-INSERT INTO mission_flight_epoch (singleton, last_legacy_event_id, last_legacy_evidence_rowid)
-SELECT 1,
-       (SELECT COALESCE(MAX(event_id), 0) FROM coding_events),
-       (SELECT COALESCE(MAX(rowid), 0) FROM coding_evidence);
+CREATE TABLE mission_flight_legacy_evidence (
+  mission_id TEXT NOT NULL,
+  evidence_id TEXT NOT NULL,
+  PRIMARY KEY (mission_id, evidence_id)
+);
+INSERT INTO mission_flight_legacy_evidence (mission_id, evidence_id) SELECT mission_id, evidence_id FROM coding_evidence;
 
 CREATE TRIGGER mission_flight_records_no_update BEFORE UPDATE ON mission_flight_records
 BEGIN
@@ -42,11 +47,6 @@ END;
 CREATE TRIGGER mission_flight_records_no_delete BEFORE DELETE ON mission_flight_records
 BEGIN
   SELECT RAISE(ABORT, 'mission_flight_records is append-only');
-END;
-
-CREATE TRIGGER mission_flight_epoch_no_change BEFORE UPDATE ON mission_flight_epoch
-BEGIN
-  SELECT RAISE(ABORT, 'mission_flight_epoch is write-once');
 END;
 
 -- INSERT OR REPLACE resolves a key conflict by deleting the old row without firing DELETE triggers (recursive_triggers
@@ -59,13 +59,29 @@ BEGIN
   SELECT RAISE(ABORT, 'mission_flight_records is append-only');
 END;
 
-CREATE TRIGGER mission_flight_epoch_no_replace BEFORE INSERT ON mission_flight_epoch
-WHEN EXISTS (SELECT 1 FROM mission_flight_epoch)
+-- The legacy key sets are fixed at migration time: nothing may be added, changed or removed afterwards.
+CREATE TRIGGER mission_flight_legacy_events_no_insert BEFORE INSERT ON mission_flight_legacy_events
 BEGIN
-  SELECT RAISE(ABORT, 'mission_flight_epoch is write-once');
+  SELECT RAISE(ABORT, 'mission_flight_legacy_events is write-once');
+END;
+CREATE TRIGGER mission_flight_legacy_events_no_update BEFORE UPDATE ON mission_flight_legacy_events
+BEGIN
+  SELECT RAISE(ABORT, 'mission_flight_legacy_events is write-once');
+END;
+CREATE TRIGGER mission_flight_legacy_events_no_delete BEFORE DELETE ON mission_flight_legacy_events
+BEGIN
+  SELECT RAISE(ABORT, 'mission_flight_legacy_events is write-once');
 END;
 
-CREATE TRIGGER mission_flight_epoch_no_delete BEFORE DELETE ON mission_flight_epoch
+CREATE TRIGGER mission_flight_legacy_evidence_no_insert BEFORE INSERT ON mission_flight_legacy_evidence
 BEGIN
-  SELECT RAISE(ABORT, 'mission_flight_epoch is write-once');
+  SELECT RAISE(ABORT, 'mission_flight_legacy_evidence is write-once');
+END;
+CREATE TRIGGER mission_flight_legacy_evidence_no_update BEFORE UPDATE ON mission_flight_legacy_evidence
+BEGIN
+  SELECT RAISE(ABORT, 'mission_flight_legacy_evidence is write-once');
+END;
+CREATE TRIGGER mission_flight_legacy_evidence_no_delete BEFORE DELETE ON mission_flight_legacy_evidence
+BEGIN
+  SELECT RAISE(ABORT, 'mission_flight_legacy_evidence is write-once');
 END;

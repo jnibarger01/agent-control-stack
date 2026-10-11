@@ -41,7 +41,11 @@ Hermes CLI). Not run: `npm run check` aggregate (contracts, audit, release-integ
 5. **JC independence** is being delivered by #324, #325, #326, #329. This mission must not touch the JC authority path
    other than adding regression checks once those land.
 6. Existing hash-chained `audit_events` (`packages/shared/src/audit-chain.ts`, CLI `audit export|verify`, `/readyz`
-   check) is the tamper-evidence primitive. The Flight Recorder extends it; it does not create a parallel store.
+   check) is the global tamper-evidence primitive. The Flight Recorder (slice 4.1) is a **separate per-mission chain**
+   in `mission_flight_records`; it reuses the same hashing idea but is not part of `audit_events`, and neither
+   `audit verify` nor the `/readyz` audit check covers it. It is verified by `verifyFlightRecord` and the
+   `/coding-missions/:id/flight-record` endpoint only. Anchoring each mission's head hash into `audit_events` (so the
+   existing verifier and readiness gate cover it, and a full rewrite becomes detectable) is future work.
 
 ## External field report (pasted by operator, 2026-10-10; not independently reproduced here)
 

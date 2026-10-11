@@ -74,7 +74,9 @@ describe("flight recorder: tamper evidence", () => {
     const store = mission();
     expect(() => store.db.exec("UPDATE mission_flight_records SET kind = 'x'")).toThrow(/append-only/);
     expect(() => store.db.exec("DELETE FROM mission_flight_records")).toThrow(/append-only/);
-    expect(() => store.db.exec("UPDATE mission_flight_epoch SET last_legacy_event_id = 999999")).toThrow(/write-once/);
+    expect(() => store.db.exec("INSERT INTO mission_flight_legacy_events (event_id) VALUES (999999)")).toThrow(
+      /write-once/
+    );
     expect(verifyFlightRecord(store.db, "m1").verdict).toBe("verified");
   });
 
@@ -235,8 +237,9 @@ describe("flight recorder: legacy rows", () => {
         `INSERT INTO coding_events (mission_id, name, body_json, created_at) VALUES ('old', 'legacy.event', '{}', ?)`
       )
       .run(T0);
-    store.db.exec("DROP TRIGGER mission_flight_epoch_no_change");
-    store.db.exec("UPDATE mission_flight_epoch SET last_legacy_event_id = (SELECT MAX(event_id) FROM coding_events)");
+    // Simulate a row that existed before the migration: its key is part of the fixed legacy set.
+    store.db.exec("DROP TRIGGER mission_flight_legacy_events_no_insert");
+    store.db.exec("INSERT INTO mission_flight_legacy_events (event_id) SELECT event_id FROM coding_events");
     expect(verifyFlightRecord(store.db, "old")).toMatchObject({ verdict: "partial_legacy", legacyEventCount: 1 });
   });
 });
@@ -361,7 +364,7 @@ describe("flight recorder: review hardening", () => {
     expect(middle.nextAfterSeq).toBe(4900);
   });
 
-  it("refuses INSERT OR REPLACE of a chained record and of the epoch, and deletion of the epoch", () => {
+  it("refuses INSERT OR REPLACE of a chained record and any change to the legacy key sets", () => {
     const store = mission();
     const row = store.db.prepare(`SELECT * FROM mission_flight_records WHERE seq = 2`).get() as Record<
       string,
@@ -377,6 +380,23 @@ describe("flight recorder: review hardening", () => {
         .run(row.mission_id, row.seq, row.event_id, row.created_at, row.previous_hash, "f".repeat(64))
     ).toThrow(/append-only/);
     // A different seq that reuses an already-chained event is refused too.
+    // Seed legacy rows the way a migration of an existing database would, then restore the write-once guard.
+    for (const [table, insertSql] of [
+      ["mission_flight_legacy_events", "INSERT INTO mission_flight_legacy_events (event_id) VALUES (424242)"],
+      [
+        "mission_flight_legacy_evidence",
+        "INSERT INTO mission_flight_legacy_evidence (mission_id, evidence_id) VALUES ('m1', 'seed')"
+      ]
+    ] as const) {
+      const guard = store.db.prepare(`SELECT sql FROM sqlite_master WHERE name = ?`).get(`${table}_no_insert`) as {
+        sql: string;
+      };
+      store.db.exec(`DROP TRIGGER ${table}_no_insert`);
+      store.db.exec(insertSql);
+      store.db.exec(guard.sql);
+    }
+    expect(() => store.db.exec(`UPDATE mission_flight_legacy_events SET event_id = 1`)).toThrow(/write-once/);
+    expect(() => store.db.exec(`UPDATE mission_flight_legacy_evidence SET evidence_id = 'x'`)).toThrow(/write-once/);
     expect(() =>
       store.db
         .prepare(
@@ -387,11 +407,15 @@ describe("flight recorder: review hardening", () => {
         .run(row.event_id, row.created_at, "f".repeat(64))
     ).toThrow(/append-only/);
     expect(() =>
+      store.db.exec(`INSERT OR REPLACE INTO mission_flight_legacy_events (event_id) VALUES (999999)`)
+    ).toThrow(/write-once/);
+    expect(() => store.db.exec(`DELETE FROM mission_flight_legacy_events`)).toThrow(/write-once/);
+    expect(() =>
       store.db.exec(
-        `INSERT OR REPLACE INTO mission_flight_epoch (singleton, last_legacy_event_id, last_legacy_evidence_rowid) VALUES (1, 999999, 999999)`
+        `INSERT OR REPLACE INTO mission_flight_legacy_evidence (mission_id, evidence_id) VALUES ('m1', 'x')`
       )
     ).toThrow(/write-once/);
-    expect(() => store.db.exec(`DELETE FROM mission_flight_epoch`)).toThrow(/write-once/);
+    expect(() => store.db.exec(`DELETE FROM mission_flight_legacy_evidence`)).toThrow(/write-once/);
     expect(verifyFlightRecord(store.db, "m1").verdict).toBe("verified");
   });
 
@@ -510,9 +534,9 @@ describe("flight recorder: second review hardening", () => {
          VALUES ('old', 'legacy:1', 'legacy', ?, '{}', ?)`
       )
       .run(stableHash({}), T0);
-    store.db.exec("DROP TRIGGER mission_flight_epoch_no_change");
+    store.db.exec("DROP TRIGGER mission_flight_legacy_evidence_no_insert");
     store.db.exec(
-      "UPDATE mission_flight_epoch SET last_legacy_evidence_rowid = (SELECT MAX(rowid) FROM coding_evidence)"
+      "INSERT INTO mission_flight_legacy_evidence (mission_id, evidence_id) SELECT mission_id, evidence_id FROM coding_evidence"
     );
     expect(verifyFlightRecord(store.db, "old")).toMatchObject({
       verdict: "partial_legacy",
@@ -533,8 +557,9 @@ describe("flight recorder: third review hardening", () => {
       )
       .run(T0);
     const legacyId = (store.db.prepare(`SELECT MAX(event_id) AS id FROM coding_events`).get() as { id: number }).id;
-    store.db.exec("DROP TRIGGER mission_flight_epoch_no_change");
-    store.db.exec("UPDATE mission_flight_epoch SET last_legacy_event_id = (SELECT MAX(event_id) FROM coding_events)");
+    // Simulate a row that existed before the migration: its key is part of the fixed legacy set.
+    store.db.exec("DROP TRIGGER mission_flight_legacy_events_no_insert");
+    store.db.exec("INSERT INTO mission_flight_legacy_events (event_id) SELECT event_id FROM coding_events");
     expect(verifyFlightRecord(store.db, "old").verdict).toBe("partial_legacy");
     // A writer chains a correctly hashed record that points at the old event so it looks contemporaneously recorded.
     store.transaction(() => {
@@ -561,9 +586,9 @@ describe("flight recorder: third review hardening", () => {
          VALUES ('old', 'legacy:1', 'legacy', ?, '{}', ?)`
       )
       .run(stableHash({}), T0);
-    store.db.exec("DROP TRIGGER mission_flight_epoch_no_change");
+    store.db.exec("DROP TRIGGER mission_flight_legacy_evidence_no_insert");
     store.db.exec(
-      "UPDATE mission_flight_epoch SET last_legacy_evidence_rowid = (SELECT MAX(rowid) FROM coding_evidence)"
+      "INSERT INTO mission_flight_legacy_evidence (mission_id, evidence_id) SELECT mission_id, evidence_id FROM coding_evidence"
     );
     store.transaction(() => {
       appendFlightRecord(store.db, {
@@ -615,5 +640,66 @@ describe("flight recorder: third review hardening", () => {
     const tampered = verifyFlightRecord(store.db, "m1");
     expect(tampered.findings.map((f) => f.kind)).toContain("evidence_modified");
     expect(JSON.stringify(tampered)).not.toContain("SUPERSECRETTOKEN");
+  });
+});
+
+describe("flight recorder: fourth review hardening", () => {
+  it("does not let a post-migration event reuse an unused low id to pass as legacy", () => {
+    const store = new CodingMissionStore(":memory:");
+    store.db.exec("PRAGMA foreign_keys = OFF");
+    const insert = store.db.prepare(
+      `INSERT INTO coding_events (event_id, mission_id, name, body_json, created_at) VALUES (?, 'm1', ?, '{}', ?)`
+    );
+    // An upgraded database: two pre-migration events with a gap between their ids.
+    insert.run(1, "legacy.one", T0);
+    insert.run(5, "legacy.two", T0);
+    store.db.exec("DROP TRIGGER mission_flight_legacy_events_no_insert");
+    store.db.exec("INSERT INTO mission_flight_legacy_events (event_id) SELECT event_id FROM coding_events");
+    expect(verifyFlightRecord(store.db, "m1")).toMatchObject({ verdict: "partial_legacy", legacyEventCount: 2 });
+    // After the migration a writer inserts an event under the unused id 3, below the highest legacy id. A numeric
+    // cutoff would call it legacy; the recorded key set does not.
+    insert.run(3, "forged", T0);
+    const result = verifyFlightRecord(store.db, "m1");
+    expect(result.verdict).toBe("tampered");
+    expect(result.findings).toEqual([expect.objectContaining({ kind: "unrecorded_event", eventId: 3 })]);
+    expect(result.legacyEventCount).toBe(2);
+  });
+
+  it("preserves non-object JSON bodies in the replay exactly as verified", () => {
+    const store = new CodingMissionStore(":memory:");
+    store.createGeneral({ missionId: "m1", summary: "s", initiatorId: "user-1", now: T0 });
+    for (const body of ["text", [1, 2], 7, null, true]) store.recordMissionEvent("m1", "note", body, T0);
+    const replay = readMissionFlightRecord(store.db, "m1");
+    expect(replay.verification.verdict).toBe("verified");
+    const bodies = replay.records.filter((r) => r.kind === "note").map((r) => r.body);
+    expect(bodies).toEqual(["text", [1, 2], 7, null, true]);
+  });
+
+  it("reconstructs the planned work-unit set, including blocked units, and a replan replaces it", () => {
+    const store = new CodingMissionStore(":memory:");
+    const created = store.create({
+      missionId: "m1",
+      repository: "example/repo",
+      baseRef: "main",
+      baseSha: "a".repeat(40),
+      summary: "plan",
+      branch: "acs/m1",
+      deploymentRequired: false,
+      deploymentAction: "none",
+      deploymentImpact: "none",
+      now: T0
+    });
+    const planned = store.replaceOperations(
+      created,
+      [
+        { operationId: "a", dependsOn: [], title: "a" },
+        { operationId: "b", dependsOn: ["a"], title: "b" }
+      ],
+      T0
+    );
+    expect(readMissionFlightRecord(store.db, "m1").reconstruction.units).toEqual({ a: "created", b: "created" });
+    store.replaceOperations(planned, [{ operationId: "c", dependsOn: [], title: "c" }], T0);
+    expect(readMissionFlightRecord(store.db, "m1").reconstruction.units).toEqual({ c: "created" });
+    expect(verifyFlightRecord(store.db, "m1").verdict).toBe("verified");
   });
 });

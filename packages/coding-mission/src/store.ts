@@ -570,8 +570,16 @@ export class CodingMissionStore {
         `INSERT INTO coding_operations (mission_id, operation_id, depends_on, title, status, files_json)
          VALUES (?, ?, ?, ?, 'pending', '[]')`
       );
+      this.event(mission.missionId, "coding_mission.plan_replaced", { unitCount: operations.length }, now);
       for (const operation of operations) {
         insert.run(mission.missionId, operation.operationId, JSON.stringify(operation.dependsOn), operation.title);
+        // Record each planned operation so a replay knows the whole work-unit set, including dependency-blocked units.
+        this.event(
+          mission.missionId,
+          "work_unit.created",
+          { unitId: operation.operationId, dependsOn: operation.dependsOn },
+          now
+        );
       }
       return this.transition(mission, "RUNNING", now, { event: "coding_mission.planned" });
     });
