@@ -99,7 +99,7 @@ Status key: NOT STARTED, IN PROGRESS, IMPLEMENTED, VERIFIED, INTEGRATED, BLOCKED
 | --- | --------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | 4   | Execution Flight Recorder         | IN PROGRESS | hash-chained `audit_events`; `packages/evidence` (manifest, observation outbox, reader); `mission-trace.ts`                                                            | mission-level ordered replay API, retention policy, redaction audit, trust-assumption doc, UI                    |
 | 9   | Delegated Authority Graph         | IN PROGRESS | migration 060 `mission_authority`, `work_unit_authority` (intersection-only, write-once); `child-work.ts`; `authority-narrowing.ts`; autonomous authority grants (047) | graph query/history API, cascade revocation proof, cycle rejection test, restart/stale-claim negative tests, UI  |
-| 5   | Self-Healing Mission Runtime      | NOT STARTED | `packages/recovery` (bounded retry planner, startup reconciliation); lease/fencing (migration 058); `liveness.ts`                                                      | durable checkpoints, backoff scheduling, poison-work detection, operator escalation, duplicate-side-effect proof |
+| 5   | Self-Healing Mission Runtime      | IN PROGRESS | `packages/recovery` (bounded retry planner, startup reconciliation); lease/fencing (migration 058); `liveness.ts`                                                      | durable checkpoints, backoff scheduling, poison-work detection, operator escalation, duplicate-side-effect proof |
 | 2   | Dynamic Agent Swarm Builder       | NOT STARTED | `coding-mission` units/DAG/stages; `child-work.ts`; `actor-router`; `moa-orchestrator`; `adr/0017` Codex swarm                                                         | role-based composition, depth/child limits, resource-aware scheduling, teardown                                  |
 | 3   | Autonomous Integration Manager    | IN PROGRESS | `packages/publication`, `scripts/pr-preflight.mjs`, `slice-workflow`                                                                                                   | PR discovery/reconcile engine, merge simulation, repo-level serialization, gate evaluator                        |
 | 7   | Model and Compute Broker          | NOT STARTED | `actor-router` (+ Nimble, `route-metrics`), `agent-cli`, `engine-adapter`, `secret-broker`                                                                             | capability/latency/cost evidence store, GPU/CPU probes, privacy classes, rationale record                        |
@@ -112,19 +112,19 @@ Status key: NOT STARTED, IN PROGRESS, IMPLEMENTED, VERIFIED, INTEGRATED, BLOCKED
 
 Phase 1 first. Each slice is a vertical, separately reviewable PR off the then-current `origin/main`.
 
-| Slice | Scope                                                                                                                                                  | Depends on                   | Status      |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------- | ----------- |
-| 4.1   | Mission-scoped Flight Recorder read model (chain, verifier, replay API, `GET /coding-missions/:id/flight-record`; design in `docs/flight-recorder.md`) | none                         | IMPLEMENTED |
-| 4.2   | Retention policy + redaction verification + trust-assumptions doc (documents external anchor need)                                                     | 4.1                          | NOT STARTED |
-| 9.1   | Authority graph query API + history + cycle/escalation/revocation-propagation adversarial tests                                                        | merged #323                  | IMPLEMENTED |
-| 5.1   | Durable checkpoint + backoff + poison-work classification in recovery, with fenced-resume test                                                         | 9.1 (authority revalidation) | NOT STARTED |
-| 2.1   | Swarm composition planner with depth/child/resource limits                                                                                             | 9.1, 5.1                     | NOT STARTED |
-| 3.1   | Integration manager read-only reconcile (PR discovery, merge simulation, gate evaluation, no merge)                                                    | none (parallel)              | IMPLEMENTED |
-| 7.1   | Evidence-driven provider selection with recorded rationale                                                                                             | none (parallel)              | NOT STARTED |
-| 1.1   | Outcome-grounded recommendations (advisory only)                                                                                                       | 4.1                          | NOT STARTED |
-| 6.1   | Fault-injection simulation harness on an isolated in-memory store                                                                                      | 5.1                          | NOT STARTED |
-| 8.1   | Real health probes, dependency map, incident log                                                                                                       | none (parallel)              | NOT STARTED |
-| 10.x  | Mission Control views and controls, one panel per backend slice                                                                                        | each backend                 | NOT STARTED |
+| Slice | Scope                                                                                                                                                                                     | Depends on                   | Status               |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- | -------------------- |
+| 4.1   | Mission-scoped Flight Recorder read model (chain, verifier, replay API, `GET /coding-missions/:id/flight-record`; design in `docs/flight-recorder.md`)                                    | none                         | MERGED, NOT DEPLOYED |
+| 4.2   | Retention policy + redaction verification + trust-assumptions doc (documents external anchor need)                                                                                        | 4.1                          | NOT STARTED          |
+| 9.1   | Authority graph query API + history + cycle/escalation/revocation-propagation adversarial tests                                                                                           | merged #323                  | IMPLEMENTED          |
+| 5.1   | Stale-claim recovery: fenced, idempotent, bounded, exponential backoff, poison-work stop, operator escalation record (PR pending). Checkpoints and provider/heartbeat inputs moved to 5.2 | 9.1 (authority revalidation) | IMPLEMENTED          |
+| 2.1   | Swarm composition planner with depth/child/resource limits                                                                                                                                | 9.1, 5.1                     | NOT STARTED          |
+| 3.1   | Integration manager read-only reconcile (PR discovery, merge simulation, gate evaluation, no merge)                                                                                       | none (parallel)              | IMPLEMENTED          |
+| 7.1   | Evidence-driven provider selection with recorded rationale                                                                                                                                | none (parallel)              | NOT STARTED          |
+| 1.1   | Outcome-grounded recommendations (advisory only)                                                                                                                                          | 4.1                          | NOT STARTED          |
+| 6.1   | Fault-injection simulation harness on an isolated in-memory store                                                                                                                         | 5.1                          | NOT STARTED          |
+| 8.1   | Real health probes, dependency map, incident log                                                                                                                                          | none (parallel)              | NOT STARTED          |
+| 10.x  | Mission Control views and controls, one panel per backend slice                                                                                                                           | each backend                 | NOT STARTED          |
 
 ## Slice log
 
@@ -174,8 +174,34 @@ design in `docs/authority-graph.md`. Local evidence: tsc, lint, contracts clean;
   coverage was left to the existing 72 `child-work` and 11 `authority` tests rather than duplicated.
 - The ledger file itself lives only on the #334 branch; slice branches cut from main do not contain it.
 
+Integration state (as of 2026-10-11, read from GitHub):
+
+- **#334 (slice 4.1) MERGED** to `main` as `e809a98` by the repository's own auto-merge workflow after its gates passed
+  (`check`, `test`, `dc-execution-chain`, the PR review gate). It is **not deployed** and migration 062 has not run
+  against any live database. No human or Codex review covered the final commit: Codex had hit its usage limit. Four
+  earlier review rounds found real defects (snapshot consistency, evidence metadata, legacy classification, replay
+  fidelity), so Feature 4 stays IN PROGRESS; do not read "merged" as "reviewed".
+- **#336 (slice 9.1) OPEN, DRAFT**, CI green (`check`, `test`, `dc-execution-chain`); the merge gate skips drafts. Not
+  marked ready by this mission.
+- Migration numbers on `main`: 062 (flight recorder). Next free: 063.
+
+Slice 5.1 (branch `feat/self-healing-runtime-20261011`, worktree `/home/jacen/projects/acs-worktrees/self-healing-5-1`,
+migration **063**): design and limits in `docs/self-healing-runtime.md`. Local evidence: tsc, lint, contracts clean; full
+vitest 3578 passed, 0 failed; 12 new tests plus a flight-recorder replay assertion. Mutation checks: removing the
+claim-time backoff check and the claim-token fence check each fail tests (the fence mutation initially did **not**, which
+exposed a missing test; fixed). Findings:
+
+- **Defect fixed:** `resetClaim` gave the attempt back, so a worker that kept vanishing was retried forever with no delay
+  and no record. Now a fenced, idempotent, bounded recovery with exponential backoff, a poison-work stop and a durable
+  escalation.
+- **Bug caught by its own test:** an append-only `BEFORE INSERT` guard also aborts `INSERT OR IGNORE`, which would have
+  broken escalation idempotency; replaced with an explicit existence check.
+- **Not done (5.2+):** durable checkpoints (nothing writes `checkpointed`), provider-disconnect / dependency-failure /
+  lost-heartbeat inputs, recovery for the generalized `worker-execution.ts` ledger, operator ack/resolve of escalations,
+  Mission Control view.
+
 ## Next action
 
-Read CI on #336 and #334. Then slice 5.1 (self-healing runtime): start with a read of `packages/recovery`,
-`liveness.ts` and the lease/fencing code from migration 058 to find which of checkpoints, backoff, poison-work
-detection and operator escalation already exist, before adding any. Migration numbers: next free is 063 (`pr:preflight`).
+Preflight, push and open the draft PR for 5.1 (reserves 063). Then read CI on #336 and 5.1. Next slices in order: 5.2
+(checkpoints + failure inputs), 2.1 swarm composition, 3.1 integration manager (read-only), 7.1 model broker, 8.1
+guardian probes. Features 6, 1 and 10 follow their backends.
