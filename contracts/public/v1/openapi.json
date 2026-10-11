@@ -2786,6 +2786,65 @@
         }
       }
     },
+    "/coding-missions/{id}/flight-record": {
+      "get": {
+        "operationId": "getCodingMissionFlightRecord",
+        "summary": "Replay a coding mission from its tamper-evident flight record, with a whole-chain integrity verdict. Tamper evidence, not prevention.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "afterSeq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "404": {
+            "description": "Coding mission does not exist."
+          },
+          "503": {
+            "description": "Coding mission ports are not configured."
+          }
+        }
+      }
+    },
     "/coding-missions/{id}/approve": {
       "post": {
         "operationId": "approveCodingChangeSet",

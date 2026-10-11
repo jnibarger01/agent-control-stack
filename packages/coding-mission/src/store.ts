@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { ControlStackError, applyControlPlaneMigrations, stableHash } from "@agent-control-stack/shared";
+import { appendFlightRecord, appendMissionEvent, evidenceBindingBody } from "./flight-recorder.js";
 import { verificationCriterionSchema, type VerificationCriterion } from "@agent-control-stack/verification";
 import {
   BudgetDecision,
@@ -491,6 +492,11 @@ export class CodingMissionStore {
     return { ok: false, outcome: "budget_exhausted", decision };
   }
 
+  /** Existence only. Does not deserialize the row, so a corrupted auxiliary column cannot hide a mission from audit. */
+  exists(missionId: string): boolean {
+    return this.db.prepare("SELECT 1 FROM coding_missions WHERE mission_id = ?").get(missionId) !== undefined;
+  }
+
   get(missionId: string): CodingMissionRecord | undefined {
     const row = this.db.prepare("SELECT * FROM coding_missions WHERE mission_id = ?").get(missionId) as
       MissionRow | undefined;
@@ -564,8 +570,16 @@ export class CodingMissionStore {
         `INSERT INTO coding_operations (mission_id, operation_id, depends_on, title, status, files_json)
          VALUES (?, ?, ?, ?, 'pending', '[]')`
       );
+      this.event(mission.missionId, "coding_mission.plan_replaced", { unitCount: operations.length }, now);
       for (const operation of operations) {
         insert.run(mission.missionId, operation.operationId, JSON.stringify(operation.dependsOn), operation.title);
+        // Record each planned operation so a replay knows the whole work-unit set, including dependency-blocked units.
+        this.event(
+          mission.missionId,
+          "work_unit.created",
+          { unitId: operation.operationId, dependsOn: operation.dependsOn },
+          now
+        );
       }
       return this.transition(mission, "RUNNING", now, { event: "coding_mission.planned" });
     });
@@ -654,7 +668,9 @@ export class CodingMissionStore {
       if (result.changes !== 1) {
         throw new ControlStackError("coding_mission_claim_conflict", "operation claim could not be released");
       }
-      this.cancelStaleDescendants(missionId, operationId, "claim_released", new Date().toISOString());
+      const releasedAt = new Date().toISOString();
+      this.event(missionId, "work_unit.claim_released", { unitId: operationId }, releasedAt);
+      this.cancelStaleDescendants(missionId, operationId, "claim_released", releasedAt);
     });
   }
 
@@ -682,11 +698,14 @@ export class CodingMissionStore {
 
   markOperation(missionId: string, operationId: string, status: "conflict" | "unknown" | "failed"): void {
     this.transaction(() => {
-      this.db
+      const changed = this.db
         .prepare(
           `UPDATE coding_operations SET status = ? WHERE mission_id = ? AND operation_id = ? AND status = 'running'`
         )
         .run(status, missionId, operationId);
+      if (Number(changed.changes) === 1) {
+        this.event(missionId, "work_unit.marked", { unitId: operationId, status }, new Date().toISOString());
+      }
     });
   }
 
@@ -859,14 +878,27 @@ export class CodingMissionStore {
 
   putEvidence(missionId: string, kind: string, payload: unknown, now: string): void {
     const payloadJson = JSON.stringify(payload);
+    // Hash what is stored, not the in-memory object: a Date or toJSON payload serializes differently, and the recorder
+    // verifies the stored JSON. For plain JSON payloads the two hashes are identical.
+    const payloadHash = stableHash(JSON.parse(payloadJson) as unknown);
     const evidenceId = `${kind}:${stableHash(payload).slice(0, 16)}`;
     this.transaction(() => {
-      this.db
+      const inserted = this.db
         .prepare(
           `INSERT OR IGNORE INTO coding_evidence (mission_id, evidence_id, kind, payload_hash, payload_json, created_at)
            VALUES (?, ?, ?, ?, ?, ?)`
         )
-        .run(missionId, evidenceId, kind, stableHash(payload), payloadJson, now);
+        .run(missionId, evidenceId, kind, payloadHash, payloadJson, now);
+      if (Number(inserted.changes) === 1) {
+        // Chain the payload hash so a later in-place edit of the evidence row is detectable.
+        appendFlightRecord(this.db, {
+          missionId,
+          eventId: null,
+          kind: "evidence.recorded",
+          bodyJson: evidenceBindingBody(evidenceId, kind, payloadHash),
+          createdAt: now
+        });
+      }
     });
   }
 
@@ -1236,6 +1268,12 @@ export class CodingMissionStore {
                WHERE mission_id = ? AND operation_id = ? AND status IN ('retryable', 'failed')`
             )
             .run(missionId, unitId);
+          this.event(
+            missionId,
+            "work_unit.failed",
+            { unitId, category: "retry_budget_exhausted", next: "failed" },
+            now
+          );
           return this.refuse(missionId, "retry", decision, now);
         }
       }
@@ -1680,9 +1718,10 @@ export class CodingMissionStore {
   }
 
   private event(missionId: string, name: string, body: unknown, now: string): void {
-    this.db
-      .prepare(`INSERT INTO coding_events (mission_id, name, body_json, created_at) VALUES (?, ?, ?, ?)`)
-      .run(missionId, name, JSON.stringify(scrub(body)), now);
+    // One path for every mission event: the operational row and its chained flight record commit together.
+    this.transaction(() => {
+      appendMissionEvent(this.db, missionId, name, body, now);
+    });
   }
 
   private mapMission(row: MissionRow): CodingMissionRecord {
@@ -1717,17 +1756,4 @@ export class CodingMissionStore {
       updatedAt: row.updated_at
     };
   }
-}
-
-function scrub(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map((entry) => scrub(entry));
-  if (value && typeof value === "object") {
-    const clean: Record<string, unknown> = {};
-    for (const [key, child] of Object.entries(value)) {
-      if (/token|secret|authorization|password|cookie|credential/i.test(key)) continue;
-      clean[key] = scrub(child);
-    }
-    return clean;
-  }
-  return value;
 }

@@ -69,6 +69,13 @@ export const codingMissionCreateBodySchema = z
     summary: z.string().min(1).max(4000)
   })
   .strict();
+export const flightRecordQuerySchema = z
+  .object({
+    afterSeq: z.coerce.number().int().min(0).default(0),
+    limit: z.coerce.number().int().min(1).max(1000).default(200)
+  })
+  .strict();
+
 export const codingMissionApprovalBodySchema = z
   .object({
     expectedChangeSetHash: z.string().regex(/^[a-f0-9]{64}$/u)
@@ -778,6 +785,18 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     additionalResponses: {
       "503": { description: "Coding mission ports are not configured." },
       "409": { description: "Mission is missing or its persisted state conflicts." }
+    }
+  },
+  {
+    method: "get",
+    path: "/coding-missions/{id}/flight-record",
+    operationId: "getCodingMissionFlightRecord",
+    querySchema: flightRecordQuerySchema,
+    summary:
+      "Replay a coding mission from its tamper-evident flight record, with a whole-chain integrity verdict. Tamper evidence, not prevention.",
+    additionalResponses: {
+      "404": { description: "Coding mission does not exist." },
+      "503": { description: "Coding mission ports are not configured." }
     }
   },
   {

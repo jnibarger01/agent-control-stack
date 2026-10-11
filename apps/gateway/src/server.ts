@@ -186,6 +186,7 @@ import {
   changeSetRevocationBodySchema,
   codingMissionCreateBodySchema,
   codingMissionApprovalBodySchema,
+  flightRecordQuerySchema,
   changeSetQuerySchema,
   cancelBodySchema,
   capabilitiesBodySchema,
@@ -2644,6 +2645,28 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       return sendError(reply, error);
     }
   });
+
+  app.get<{ Params: { id: string }; Querystring: Record<string, unknown> }>(
+    "/coding-missions/:id/flight-record",
+    async (request, reply) => {
+      try {
+        const credential = gatewayCredentialForRequest(request, auth);
+        if (!credential?.scopes.includes("acs:read")) return reply.code(401).send({ error: "unauthorized" });
+        if (!codingMissions) {
+          return reply
+            .code(503)
+            .send({ error: "coding mission ports are not configured", code: "coding_mission_unconfigured" });
+        }
+        const query = flightRecordQuerySchema.parse(request.query);
+        if (!codingMissions.store.exists(request.params.id)) {
+          return reply.code(404).send({ error: "coding mission does not exist", code: "coding_mission_not_found" });
+        }
+        return codingMissions.flightRecord(request.params.id, query);
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
 
   app.post<{ Params: { id: string } }>("/coding-missions/:id/approve", async (request, reply) => {
     try {
