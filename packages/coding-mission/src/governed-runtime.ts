@@ -39,6 +39,7 @@ const TERMINAL_WORK_ITEM_STATUSES = new Set(["succeeded", "failed", "cancelled",
  */
 export function controlPlaneGrantReader(items: SqliteWorkItemStore): GrantReader {
   return {
+    assertIntegrity: () => items.assertAuditChainIntegrity(),
     getAutonomousAuthority: (grantId) => items.getAutonomousAuthority(grantId),
     currentSubjectInputHash: (missionId) => {
       const item = items.get(missionId);

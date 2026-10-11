@@ -305,10 +305,15 @@ export class CodingMissionStore {
   constructor(dbOrPath: string | DatabaseSync) {
     this.ownsDb = typeof dbOrPath === "string";
     this.db = typeof dbOrPath === "string" ? new DatabaseSync(dbOrPath) : dbOrPath;
-    this.db.exec("PRAGMA foreign_keys = ON");
-    this.db.exec("PRAGMA busy_timeout = 5000");
-    this.db.exec("PRAGMA journal_mode = WAL");
-    applyControlPlaneMigrations(this.db);
+    try {
+      this.db.exec("PRAGMA foreign_keys = ON");
+      this.db.exec("PRAGMA busy_timeout = 5000");
+      this.db.exec("PRAGMA journal_mode = WAL");
+      applyControlPlaneMigrations(this.db);
+    } catch (error) {
+      if (this.ownsDb) this.db.close();
+      throw error;
+    }
   }
 
   close(): void {
