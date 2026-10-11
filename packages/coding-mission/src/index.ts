@@ -46,6 +46,14 @@ export {
   type RecoveryPolicy,
   type WorkUnitEscalation
 } from "./recovery-policy.js";
+export {
+  AUTHORITY_GRAPH_SCHEMA_VERSION,
+  type AuthorityGraph,
+  type AuthorityGraphEvent,
+  type AuthorityGraphNode,
+  type AuthorityNarrowing,
+  type AuthorityNodeState
+} from "./authority-graph.js";
 export type {
   AddWorkUnitsResult,
   BudgetRefusal,
