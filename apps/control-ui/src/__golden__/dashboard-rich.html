@@ -655,6 +655,8 @@ pre.run-output { margin: 0; max-height: 420px; overflow: auto; white-space: pre-
 .operator-timezone, .operator-filter-summary, .operator-empty-hint { margin: 0; color: var(--muted-strong); font-size: 12px; }
 .operator-recent { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .operator-recent a { color: var(--ink); }
+.queue-item.pinned { box-shadow: inset 3px 0 var(--accent); }
+.queue-item.pinned::before { content: "Pinned"; color: var(--accent); font-size: 11px; font-weight: 700; }
 .operator-jump-results { display: flex; flex-wrap: wrap; gap: 6px; }
 .operator-insights { margin-top: 12px; }
 .operator-insight-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin: 0; }
@@ -2373,10 +2375,19 @@ function applyOperatorSort() {
   const select = document.getElementById('operator-sort');
   const sort = operatorStorageGet(operatorThirty.keys.sort) || 'server';
   if (select) select.value = ['attention', 'newest', 'oldest', 'risk', 'id'].indexOf(sort) === -1 ? 'server' : sort;
-  if (!select || select.value === 'server') return;
+  if (!select) return;
   const list = document.getElementById('queue-list');
   if (!list) return;
   const rows = operatorQueueRows();
+  rows.forEach(function (row, index) {
+    if (!row.hasAttribute('data-operator-server-order')) row.setAttribute('data-operator-server-order', String(index));
+  });
+  if (select.value === 'server') {
+    rows.sort(function (left, right) {
+      return Number(left.getAttribute('data-operator-server-order')) - Number(right.getAttribute('data-operator-server-order'));
+    }).forEach(function (row) { list.appendChild(row); });
+    return;
+  }
   const riskRank = { critical: 0, high: 1, medium: 2, low: 3 };
   const attention = function (status) { return status === 'needs_approval' || status === 'blocked' || status === 'quarantined' ? 0 : 1; };
   rows.sort(function (left, right) {
@@ -2413,7 +2424,7 @@ function rememberOperatorWorkItem(id) {
 }
 function renderOperatorInsights() {
   const rows = operatorQueueRows();
-  const now = Date.now();
+  const now = typeof serverNowMs === 'function' ? serverNowMs() : Date.now();
   const scores = rows.map(function (row) {
     const risk = operatorThirty.riskWeight[row.getAttribute('data-risk')] || 0;
     const status = row.getAttribute('data-status') || '';
@@ -2439,6 +2450,9 @@ function renderOperatorInsights() {
     slaNode.textContent = breach || warning ? breach + ' breach, ' + warning + ' warning' : 'No SLA warning in view.';
   }
   const leases = Array.from(document.querySelectorAll('[data-lease-expires]')).filter(function (node) {
+    const owner = node.closest('[data-work-item]');
+    const status = owner && owner.getAttribute('data-status');
+    if (status === 'succeeded' || status === 'failed' || status === 'approved' || status === 'cancelled') return false;
     const expires = Date.parse(node.getAttribute('data-lease-expires') || '');
     return Number.isFinite(expires) && expires <= now;
   }).map(function (node) { return node.getAttribute('data-lease-id') || 'lease'; });
@@ -2446,13 +2460,18 @@ function renderOperatorInsights() {
   if (leaseNode) leaseNode.textContent = leases.length ? leases.join(', ') : 'No stale leases in view.';
   const sequences = Array.from(document.querySelectorAll('#events-timeline [data-sequence]')).map(function (node) {
     return Number(node.getAttribute('data-sequence'));
-  }).filter(function (sequence) { return Number.isInteger(sequence) && sequence > 0; }).sort(function (left, right) { return left - right; });
+  }).filter(function (sequence) { return Number.isSafeInteger(sequence) && sequence > 0; }).sort(function (left, right) { return left - right; });
   const gaps = [];
+  let moreGaps = false;
   for (let index = 1; index < sequences.length; index += 1) {
-    for (let missing = sequences[index - 1] + 1; missing < sequences[index]; missing += 1) gaps.push(missing);
+    for (let missing = sequences[index - 1] + 1; missing < sequences[index]; missing += 1) {
+      if (gaps.length === 8) { moreGaps = true; break; }
+      gaps.push(missing);
+    }
+    if (moreGaps) break;
   }
   const gapNode = document.getElementById('insight-gaps');
-  if (gapNode) gapNode.textContent = gaps.length ? 'Missing ' + gaps.slice(0, 8).join(', ') : 'No sequence gaps in view.';
+  if (gapNode) gapNode.textContent = gaps.length ? 'Missing ' + gaps.join(', ') + (moreGaps ? ' …' : '') : 'No sequence gaps in view.';
   const ages = { fresh: 0, aging: 0, stale: 0, ancient: 0, unknown: 0 };
   rows.forEach(function (row) {
     const created = Date.parse(row.getAttribute('data-created-at') || '');
@@ -2466,8 +2485,10 @@ function renderOperatorInsights() {
   const ageNode = document.getElementById('insight-ages');
   if (ageNode) ageNode.textContent = 'fresh ' + ages.fresh + ', aging ' + ages.aging + ', stale ' + ages.stale + ', ancient ' + ages.ancient;
   const activity = { active: 0, idle: 0, stale: 0, unknown: 0 };
-  document.querySelectorAll('[data-last-seen]').forEach(function (node) {
-    const seen = Date.parse(node.getAttribute('data-last-seen') || '');
+  document.querySelectorAll('#agent-roster-body [data-agent]').forEach(function (node) {
+    const seenValue = node.getAttribute('data-last-seen');
+    if (!seenValue) { activity.unknown += 1; return; }
+    const seen = Date.parse(seenValue);
     if (!Number.isFinite(seen) || now - seen < 0) { activity.unknown += 1; return; }
     const age = now - seen;
     if (age < 300000) activity.active += 1;
@@ -2475,7 +2496,7 @@ function renderOperatorInsights() {
     else activity.stale += 1;
   });
   const agentNode = document.getElementById('insight-agents');
-  if (agentNode) agentNode.textContent = 'active ' + activity.active + ', idle ' + activity.idle + ', stale ' + activity.stale;
+  if (agentNode) agentNode.textContent = 'active ' + activity.active + ', idle ' + activity.idle + ', stale ' + activity.stale + ', unknown ' + activity.unknown;
   const groups = {};
   rows.forEach(function (row) {
     const key = row.getAttribute('data-intent-norm') || '';
@@ -2501,7 +2522,7 @@ function renderOperatorInsights() {
   if (executionNode) {
     const admin = document.querySelector('[data-execution-mode="admin"]');
     const adminOn = !!(admin && admin.checked);
-    const dryRun = rows.some(function (row) { return /dry_run/i.test(row.textContent || ''); });
+    const dryRun = rows.some(function (row) { return !!row.querySelector('[data-execution-mode="dry_run"]'); });
     if (adminOn && dryRun) executionNode.textContent = 'Admin mode is on, but a visible result is still dry-run. Admin mode does not prove live execution.';
     else if (adminOn) executionNode.textContent = operatorThirty.adminWarning + ' This display does not grant execution authority.';
     else executionNode.textContent = 'Strict mode. Display does not grant execution authority.';
@@ -2517,6 +2538,27 @@ function renderOperatorFilterSummary() {
   const filterActive = visible !== rows.length;
   hint.hidden = !(filterActive && visible === 0 && rows.length > 0);
   hint.textContent = hint.hidden ? '' : 'No work items match this filter. Clear filters to see the full queue.';
+}
+function copySelectedOperatorId() {
+  const id = typeof selectedWorkItemId === 'string' ? selectedWorkItemId.trim() : '';
+  let rejected = !id || id.length > 128;
+  if (!rejected) {
+    for (let operatorIdIndex = 0; operatorIdIndex < id.length; operatorIdIndex += 1) {
+      const code = id.charCodeAt(operatorIdIndex);
+      if (code <= 32 || code === 34 || code === 39 || code === 60 || code === 62 || code === 96) rejected = true;
+    }
+  }
+  if (!rejected && /secret|token|password|api[_-]?key|bearer /i.test(id)) rejected = true;
+  if (rejected) {
+    if (typeof announce === 'function') announce('No safe work-item id to copy');
+    return;
+  }
+  const write = navigator.clipboard && navigator.clipboard.writeText ? navigator.clipboard.writeText(id) : Promise.reject();
+  Promise.resolve(write).then(function () {
+    if (typeof announce === 'function') announce('Copied work item id');
+  }).catch(function () {
+    if (typeof announce === 'function') announce('Could not copy work item id');
+  });
 }
 function applyOperatorThirty() {
   applyOperatorDensity();
@@ -2548,27 +2590,17 @@ function bindOperatorThirty() {
     operatorStorageSet(operatorThirty.keys.focus, on ? 'on' : 'off');
     applyOperatorFocus();
   });
-  document.getElementById('operator-copy-id')?.addEventListener('click', function () {
-    const id = typeof selectedWorkItemId === 'string' ? selectedWorkItemId.trim() : '';
-    let rejected = !id || id.length > 128;
-    if (!rejected) {
-      for (let operatorIdIndex = 0; operatorIdIndex < id.length; operatorIdIndex += 1) {
-        const code = id.charCodeAt(operatorIdIndex);
-        if (code <= 32 || code === 34 || code === 39 || code === 60 || code === 62 || code === 96) rejected = true;
-      }
-    }
-    if (!rejected && /secret|token|password|api[_-]?key|bearer /i.test(id)) rejected = true;
-    if (rejected) {
-      if (typeof announce === 'function') announce('No safe work-item id to copy');
-      return;
-    }
-    const write = navigator.clipboard && navigator.clipboard.writeText ? navigator.clipboard.writeText(id) : Promise.reject();
-    Promise.resolve(write).then(function () {
-      if (typeof announce === 'function') announce('Copied work item id');
-    }).catch(function () {
-      if (typeof announce === 'function') announce('Could not copy work item id');
-    });
-  });
+  document.getElementById('operator-copy-id')?.addEventListener('click', copySelectedOperatorId);
+  const workDrawer = document.getElementById('work-drawer');
+  if (workDrawer && !document.getElementById('operator-copy-id-drawer')) {
+    const copyButton = document.createElement('button');
+    copyButton.type = 'button';
+    copyButton.id = 'operator-copy-id-drawer';
+    copyButton.className = 'tool-button';
+    copyButton.textContent = 'Copy work item id';
+    copyButton.addEventListener('click', copySelectedOperatorId);
+    workDrawer.querySelector('.drawer-head')?.appendChild(copyButton);
+  }
   document.getElementById('operator-pin')?.addEventListener('click', function () {
     const id = typeof selectedWorkItemId === 'string' ? selectedWorkItemId.trim() : '';
     if (!id) {
@@ -2637,7 +2669,7 @@ function bindOperatorThirty() {
     }, 0);
   }
   applyOperatorThirty();
-  setInterval(applyOperatorRelativeTimes, 15000);
+  setInterval(function () { applyOperatorRelativeTimes(); renderOperatorInsights(); }, 15000);
 }
 bindOperatorThirty();
 
@@ -3524,6 +3556,7 @@ function applyQueueFilterClient(filter) {
       ? ('Showing all ' + buttons.length + ' work items')
       : ('Showing ' + visible + ' of ' + buttons.length + ' work items');
   }
+  if (typeof renderOperatorFilterSummary === 'function') renderOperatorFilterSummary();
   return visible;
 }
 
@@ -3637,6 +3670,7 @@ function applyConfirmedExecutionMode(mode, problem) {
   const issue = document.querySelector('#execution-mode-problem');
   if (admin) { admin.hidden = mode !== 'admin'; admin.textContent = mode === 'admin' ? "ACS ADMIN MODE -- human approval disabled" : ''; }
   if (issue) { issue.hidden = !problem; issue.textContent = problem ? 'ACS execution mode ' + problem + ' -- fail closed' : ''; }
+  if (typeof renderOperatorInsights === 'function') renderOperatorInsights();
 }
 function requestAdminModeConfirm() {
   return new Promise(function (resolve) {
@@ -4483,6 +4517,7 @@ function showView(name) {
   const view = viewAliases[name] || 'overview';
   syncPageHeading(view);
   document.body.dataset.activeView = view;
+  try { localStorage.setItem("acs.mc.lastView", view); } catch {}
   document.querySelectorAll('nav a[data-nav]').forEach((link) => {
     link.classList.toggle('active', link.dataset.nav === view);
   });

@@ -49,6 +49,35 @@ describe("dashboard fragments", () => {
 });
 
 describe("live dashboard client (#6, #7, #8, #9)", () => {
+  it("restores the server queue order and keeps copy available in the work drawer", async () => {
+    const app = bootLive({
+      workItems: [item("wrk_server_first", { status: "running" }), item("wrk_server_second")],
+      events: [],
+      now: NOW
+    });
+    await app.flush();
+    const queueIds = () =>
+      [...app.document.querySelectorAll<HTMLButtonElement>("#queue-list [data-work-item]")].map((row) =>
+        row.getAttribute("data-work-item")
+      );
+    expect(queueIds()).toEqual(["wrk_server_first", "wrk_server_second"]);
+
+    const sort = app.document.querySelector<HTMLSelectElement>("#operator-sort")!;
+    sort.value = "attention";
+    sort.dispatchEvent(new app.window.Event("change", { bubbles: true }));
+    expect(queueIds()).toEqual(["wrk_server_second", "wrk_server_first"]);
+    sort.value = "server";
+    sort.dispatchEvent(new app.window.Event("change", { bubbles: true }));
+    expect(queueIds()).toEqual(["wrk_server_first", "wrk_server_second"]);
+
+    app.document.querySelector<HTMLElement>('[data-work-item="wrk_server_first"]')!.click();
+    const drawer = app.document.querySelector<HTMLElement>("#work-drawer")!;
+    const copyButton = drawer.querySelector<HTMLButtonElement>("#operator-copy-id-drawer");
+    expect(drawer.hidden).toBe(false);
+    expect(copyButton).not.toBeNull();
+    expect(copyButton?.disabled).toBe(false);
+  });
+
   it("does not pull server-only renderer code into the client graph (#21)", () => {
     const html = renderDashboard({ workItems: [item("wrk_a")], events: [], now: NOW });
     const match = /const pageMeta = (\{.*?\});/u.exec(html);
@@ -140,6 +169,8 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     expect(app.window.location.search).toBe("?status=running");
     expect(app.window.location.hash).toBe("#execution");
     expect(app.text("#queue-filter-count")).toBe("1 of 4 items");
+    expect(app.text("#operator-filter-summary")).toBe("Showing 1 of 4 work items");
+    expect(app.window.localStorage.getItem("acs.mc.lastView")).toBe("execution");
 
     (
       app.document.querySelector(
@@ -150,6 +181,7 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     expect(app.window.location.search).toBe("?status=failed&status=blocked");
     expect(app.window.location.hash).toBe("#queue");
     expect(app.text("#queue-filter-count")).toBe("2 of 4 items");
+    expect(app.text("#operator-filter-summary")).toBe("Showing 2 of 4 work items");
 
     (app.document.querySelector('#overview [data-dashboard-view="agents"]') as HTMLElement).click();
     expect(app.document.body.dataset.activeView).toBe("agents");

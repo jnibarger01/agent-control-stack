@@ -14,6 +14,7 @@ import { ADMIN_MODE_BANNER_TEXT } from "./types.js";
 import { auditRowsClientSource, metricsClientSource, themeClientSource } from "./visibility.js";
 import { workItemControlsClientSource } from "./work-item-controls.js";
 import { operatorThirtyClientSource } from "./operator-thirty-ui.js";
+import { LAST_VIEW_STORAGE_KEY } from "./operator-impact.js";
 
 export function clientScript(): string {
   return `
@@ -1083,6 +1084,7 @@ function applyQueueFilterClient(filter) {
       ? ('Showing all ' + buttons.length + ' work items')
       : ('Showing ' + visible + ' of ' + buttons.length + ' work items');
   }
+  if (typeof renderOperatorFilterSummary === 'function') renderOperatorFilterSummary();
   return visible;
 }
 
@@ -1196,6 +1198,7 @@ function applyConfirmedExecutionMode(mode, problem) {
   const issue = document.querySelector('#execution-mode-problem');
   if (admin) { admin.hidden = mode !== 'admin'; admin.textContent = mode === 'admin' ? ${JSON.stringify(ADMIN_MODE_BANNER_TEXT)} : ''; }
   if (issue) { issue.hidden = !problem; issue.textContent = problem ? 'ACS execution mode ' + problem + ' -- fail closed' : ''; }
+  if (typeof renderOperatorInsights === 'function') renderOperatorInsights();
 }
 function requestAdminModeConfirm() {
   return new Promise(function (resolve) {
@@ -1343,6 +1346,7 @@ function showView(name) {
   const view = viewAliases[name] || 'overview';
   syncPageHeading(view);
   document.body.dataset.activeView = view;
+  try { localStorage.setItem(${JSON.stringify(LAST_VIEW_STORAGE_KEY)}, view); } catch {}
   document.querySelectorAll('nav a[data-nav]').forEach((link) => {
     link.classList.toggle('active', link.dataset.nav === view);
   });
