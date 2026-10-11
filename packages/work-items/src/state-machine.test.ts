@@ -1001,7 +1001,8 @@ describe("work item state machine", () => {
           filename: "059_work_unit_verification_terminal_restore.sql"
         },
         { version: 60, name: "mission_authority_and_child_work", filename: "060_mission_authority_and_child_work.sql" },
-        { version: 61, name: "cua_browser_execution", filename: "061_cua_browser_execution.sql" }
+        { version: 61, name: "cua_browser_execution", filename: "061_cua_browser_execution.sql" },
+        { version: 62, name: "mission_flight_recorder", filename: "062_mission_flight_recorder.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])

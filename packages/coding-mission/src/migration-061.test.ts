@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { controlPlaneMigrations } from "@agent-control-stack/shared";
+import { applyControlPlaneMigrations, controlPlaneMigrations } from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
 import { CodingMissionStore } from "./store.js";
 import { WorkUnitExecutionLedger } from "./worker-execution.js";
@@ -16,6 +16,50 @@ function applyThrough(last: number): DatabaseSync {
 }
 
 describe("migration 061: cua executor lane", () => {
+  it("applies after migration 062 when an existing database receives the late 061 slice", () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec("PRAGMA foreign_keys = ON");
+    const migrations = controlPlaneMigrations();
+    const insert = () =>
+      db.prepare(
+        "INSERT INTO schema_migrations (version, name, filename, checksum, applied_at) VALUES (?, ?, ?, ?, ?)"
+      );
+    db.exec(`CREATE TABLE schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      filename TEXT NOT NULL,
+      checksum TEXT NOT NULL DEFAULT '',
+      applied_at TEXT NOT NULL
+    )`);
+    for (const migration of migrations.filter((entry) => entry.version <= 60)) {
+      db.exec(migration.sql);
+      insert().run(migration.version, migration.name, migration.filename, migration.checksum, "2026-10-11T00:00:00Z");
+    }
+    const flightRecorder = migrations.find((entry) => entry.version === 62)!;
+    db.exec(flightRecorder.sql);
+    insert().run(
+      flightRecorder.version,
+      flightRecorder.name,
+      flightRecorder.filename,
+      flightRecorder.checksum,
+      "2026-10-11T00:00:00Z"
+    );
+
+    applyControlPlaneMigrations(db);
+
+    expect(db.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 2").all()).toEqual([
+      { version: 62 },
+      { version: 61 }
+    ]);
+    expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(
+      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mission_flight_records'").get()
+    ).toEqual({
+      name: "mission_flight_records"
+    });
+    db.close();
+  });
+
   it("accepts executor_lane cua on a fresh database", () => {
     const db = applyThrough(61);
     expect(db.prepare("PRAGMA foreign_keys").get()).toEqual({ foreign_keys: 1 });

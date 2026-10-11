@@ -18,8 +18,7 @@ export interface ExecutionAuthorityRefs {
 
 /** The outcome of checking a dispatch against the authority the mission was granted. */
 export type DispatchAuthorityVerdict =
-  | { ok: true; grantId: string; unitAuthorityHash: string; executingActorId: string }
-  | { ok: false; reason: string };
+  { ok: true; grantId: string; unitAuthorityHash: string; executingActorId: string } | { ok: false; reason: string };
 
 /**
  * Decides whether a worker may run a unit on a lane right now. `MissionAuthorityLedger` implements it. It must read
@@ -734,20 +733,12 @@ export class WorkUnitExecutionLedger {
             if (changed.changes !== 1) {
               throw new ControlStackError("coding_mission_claim_conflict", "verification hand-off lost the claim");
             }
-            this.store.db
-              .prepare(
-                `INSERT INTO coding_events (mission_id, name, body_json, created_at)
-                 VALUES (?, 'verification.started', ?, ?)`
-              )
-              .run(
-                row.mission_id,
-                JSON.stringify({
-                  unitId: row.unit_id,
-                  attemptId: row.attempt_id,
-                  resultHash: input.result.result.resultHash
-                }),
-                input.result.finishedAt
-              );
+            this.store.recordMissionEvent(
+              row.mission_id,
+              "verification.started",
+              { unitId: row.unit_id, attemptId: row.attempt_id, resultHash: input.result.result.resultHash },
+              input.result.finishedAt
+            );
             applied = { applied: "awaiting_verification" };
           }
           break;
@@ -778,16 +769,12 @@ export class WorkUnitExecutionLedger {
           if (changed.changes !== 1) {
             throw new ControlStackError("coding_mission_claim_conflict", "cancelled outcome lost the claim");
           }
-          this.store.db
-            .prepare(
-              `INSERT INTO coding_events (mission_id, name, body_json, created_at)
-               VALUES (?, 'work_unit.cancelled', ?, ?)`
-            )
-            .run(
-              row.mission_id,
-              JSON.stringify({ unitId: row.unit_id, attemptId: row.attempt_id }),
-              input.result.finishedAt
-            );
+          this.store.recordMissionEvent(
+            row.mission_id,
+            "work_unit.cancelled",
+            { unitId: row.unit_id, attemptId: row.attempt_id },
+            input.result.finishedAt
+          );
           applied = { applied: "cancelled" };
           break;
         }
@@ -801,6 +788,12 @@ export class WorkUnitExecutionLedger {
           if (changed.changes !== 1) {
             throw new ControlStackError("coding_mission_claim_conflict", "unknown outcome lost the claim");
           }
+          this.store.recordMissionEvent(
+            row.mission_id,
+            "work_unit.unknown",
+            { unitId: row.unit_id, attemptId: row.attempt_id },
+            input.result.finishedAt
+          );
           applied = { applied: "unknown" };
           break;
         }
