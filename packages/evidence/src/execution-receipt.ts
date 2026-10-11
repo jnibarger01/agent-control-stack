@@ -81,6 +81,27 @@ const validationRunRef = z
     checksDigest: hash
   })
   .strict();
+const validationCheckRef = z
+  .object({
+    checkId: id,
+    runId: id,
+    name: z.string().min(1).max(256),
+    passed: z.boolean(),
+    detail: z.string().max(64_000),
+    stdout: z.string().max(1_000_000).optional(),
+    stderr: z.string().max(1_000_000).optional()
+  })
+  .strict();
+const canonicalValidationRunRef = validationRunRef.extend({ checks: z.array(validationCheckRef) }).strict();
+export type ValidationCheckBinding = z.infer<typeof validationCheckRef>;
+export const EXECUTION_VALIDATION_CHECKS_HASH_DOMAIN = "acs:execution-validation-checks:v1" as const;
+/** Hash the canonical check rows in stable check-id order before binding them to a receipt. */
+export function executionValidationChecksHash(checks: readonly ValidationCheckBinding[]): string {
+  return domainHash(
+    EXECUTION_VALIDATION_CHECKS_HASH_DOMAIN,
+    [...checks].sort((left, right) => left.checkId.localeCompare(right.checkId))
+  );
+}
 /** Terminal attempt outcomes the canonical store records (work-items attempt status). */
 const attemptOutcomeSchema = z.enum(["succeeded", "failed", "cancelled", "interrupted", "unknown", "quarantined"]);
 
@@ -234,7 +255,7 @@ export const receiptBindingSchema = z
     actionHash: hash,
     admittedPlanHash: hash,
     manifestHash: hash,
-    validation: validationRunRef,
+    validation: canonicalValidationRunRef,
     leaseId: id,
     claimTokenHash: hash,
     capabilityId: id,
@@ -263,7 +284,8 @@ const sameRef = (x: { eventId: string; eventHash: string }, y: { eventId: string
   x.eventId === y.eventId && x.eventHash === y.eventHash;
 
 type ValidationRun = z.infer<typeof validationRunRef>;
-function sameValidation(x: ValidationRun, y: ValidationRun): boolean {
+type CanonicalValidationRun = z.infer<typeof canonicalValidationRunRef>;
+function sameValidation(x: ValidationRun, y: CanonicalValidationRun): boolean {
   return (
     x.runId === y.runId &&
     x.attemptId === y.attemptId &&
@@ -346,6 +368,16 @@ export function verifyExecutionReceipt(receipt: unknown, expected: unknown): { o
   check(m.admittedPlanHash === b.admittedPlanHash, "plan_binding_mismatch");
   check(m.manifestHash === b.manifestHash, "manifest_binding_mismatch");
   check(sameValidation(core.validation, b.validation), "validation_binding_mismatch");
+  const validationChecksPassed = b.validation.checks.filter((entry) => entry.passed).length;
+  const validationChecksFailed = b.validation.checks.length - validationChecksPassed;
+  check(
+    b.validation.checks.every((entry) => entry.runId === b.validation.runId) &&
+      validationChecksPassed === b.validation.checksPassed &&
+      validationChecksFailed === b.validation.checksFailed &&
+      b.validation.passed === (validationChecksPassed > 0 && validationChecksFailed === 0) &&
+      executionValidationChecksHash(b.validation.checks) === b.validation.checksDigest,
+    "canonical_validation_checks_mismatch"
+  );
 
   check(a.actorId === b.actorId, "actor_binding_mismatch");
   check(a.leaseId === b.leaseId, "lease_mismatch");
@@ -363,11 +395,17 @@ export function verifyExecutionReceipt(receipt: unknown, expected: unknown): { o
   check(b.reviewers.length >= b.reviewersRequired, "canonical_reviewers_insufficient");
   check(v.reviewers.length >= b.reviewersRequired, "insufficient_reviewers");
   if (b.requireIndependentPrincipal) {
-    check(!v.reviewers.some((reviewer) => reviewer.reviewerPrincipalId === v.implementerPrincipalId), "verifier_not_independent");
+    check(
+      !v.reviewers.some((reviewer) => reviewer.reviewerPrincipalId === v.implementerPrincipalId),
+      "verifier_not_independent"
+    );
   }
   // Canonical provider independence excludes only the executor's provider. Reviewers may share a provider.
   if (b.requireIndependentProvider) {
-    check(!v.reviewers.some((reviewer) => reviewer.verifierProviderId === v.implementerProviderId), "provider_not_independent");
+    check(
+      !v.reviewers.some((reviewer) => reviewer.verifierProviderId === v.implementerProviderId),
+      "provider_not_independent"
+    );
   }
   check(r.status === b.attemptOutcome, "attempt_outcome_mismatch");
   check(r.resultId === b.resultId, "result_binding_mismatch");

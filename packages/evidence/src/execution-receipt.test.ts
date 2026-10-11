@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { buildEvidenceManifest, type BuildEvidenceManifestInput } from "./evidence-manifest.js";
 import {
   buildExecutionReceipt,
+  executionValidationChecksHash,
   verifyExecutionReceipt,
   receiptDefects,
   ExecutionReceiptIncompleteError,
@@ -68,7 +69,16 @@ const approvalCopy = (overrides: Partial<typeof approval> = {}) => ({
 });
 
 /** A sensitive attempt: approval required, and two independent reviewers (high-risk requirement). */
-const validation = () => ({ ...VALIDATION });
+const validationChecks = () =>
+  Array.from({ length: 10 }, (_, index) => ({
+    checkId: `check_${index + 1}`,
+    runId: VALIDATION.runId,
+    name: `check ${index + 1}`,
+    passed: true,
+    detail: "passed"
+  }));
+const validation = () => ({ ...VALIDATION, checksDigest: executionValidationChecksHash(validationChecks()) });
+const canonicalValidation = () => ({ ...validation(), checks: validationChecks() });
 const VALIDATION = {
   runId: "test_1",
   attemptId: "attempt_1",
@@ -126,7 +136,7 @@ const expected = (): ReceiptBinding => ({
   actionHash: H("c"),
   admittedPlanHash: H("a"),
   manifestHash: buildEvidenceManifest(manifestInput).manifestHash,
-  validation: validation(),
+  validation: canonicalValidation(),
   leaseId: "lease_1",
   claimTokenHash: H("4"),
   capabilityId: "cap_1",
@@ -500,6 +510,21 @@ describe("proof-of-execution receipt integrity", () => {
       const changed = core();
       changed.validation.checksDigest = H("1");
       expect(verifyExecutionReceipt(buildExecutionReceipt(changed), expected()).defects).toContain("validation_binding_mismatch");
+    });
+
+    it("recomputes the canonical digest and outcome from the trusted check rows", () => {
+      const receipt = buildExecutionReceipt(core());
+      const bound = expected();
+      bound.validation.checks[0]!.detail = "changed without updating the digest";
+      expect(verifyExecutionReceipt(receipt, bound).defects).toContain("canonical_validation_checks_mismatch");
+
+      const failedRun = expected();
+      failedRun.validation.checks[0]!.passed = false;
+      failedRun.validation.checksPassed = 9;
+      failedRun.validation.checksFailed = 1;
+      failedRun.validation.passed = false;
+      failedRun.validation.checksDigest = executionValidationChecksHash(failedRun.validation.checks);
+      expect(verifyExecutionReceipt(receipt, failedRun).defects).toContain("validation_binding_mismatch");
     });
   });
 

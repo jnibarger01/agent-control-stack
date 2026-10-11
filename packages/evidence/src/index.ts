@@ -37,13 +37,19 @@ export {
   executionReceiptCoreSchema,
   executionReceiptSchema,
   receiptBindingSchema,
+  executionValidationChecksHash,
   executionReceiptHash,
   receiptDefects,
   buildExecutionReceipt,
   verifyExecutionReceipt,
   ExecutionReceiptIncompleteError
 } from "./execution-receipt.js";
-export type { ExecutionReceipt, ExecutionReceiptCore, ReceiptBinding } from "./execution-receipt.js";
+export type {
+  ExecutionReceipt,
+  ExecutionReceiptCore,
+  ReceiptBinding,
+  ValidationCheckBinding
+} from "./execution-receipt.js";
 
 export { computeWorkspaceRevision, detectWorkspaceDrift } from "./workspace-revision.js";
 export type { WorkspaceRevisionResult, WorkspaceDriftResult } from "./workspace-revision.js";
