@@ -170,7 +170,7 @@ async function startGateway(env) {
 async function lane(acsHandler) {
   const acs = recorder(acsHandler);
   const dcUp = recorder(() => ({ status: 200, body: { jsonrpc: '2.0', id: 1, result: { lane: 'dc' } } }));
-  const jcUp = recorder((req) => (req.path === '/authority' ? { status: 200, body: { variant: 'jc' } } : { status: 200, body: { jsonrpc: '2.0', id: 1, result: { lane: 'jc' } } }));
+  const jcUp = recorder((req) => (req.path === '/authority' ? { status: 200, body: { variant: 'jc', childMode: 'managed' } } : { status: 200, body: { jsonrpc: '2.0', id: 1, result: { lane: 'jc' } } }));
   const [acsPort, dcPort, jcPort] = [await acs.listen(), await dcUp.listen(), await jcUp.listen()];
   const gw = await startGateway({
     UPSTREAM: `http://127.0.0.1:${dcPort}`, JC_ENABLED: '1', JC_UPSTREAM: `http://127.0.0.1:${jcPort}`,

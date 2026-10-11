@@ -8,7 +8,7 @@ import { providerForTool, type JcProviderId } from './providers.js';
 
 export type JcAuthorizer = 'local' | 'acs-capability' | 'admin-delegated';
 export type JcAuthorizerDecision = JcAuthorizer | 'refused';
-export type JcAuthorizerPreset = 'managed' | 'standalone';
+export type JcAuthorizerPreset = 'managed' | 'standalone' | 'local';
 
 export interface JcAuthorizerOverrides {
   perTool?: Readonly<Record<string, JcAuthorizer>>;
@@ -20,6 +20,7 @@ export function resolveJcAuthorizer(
   name: string,
   preset: JcAuthorizerPreset,
   overrides: JcAuthorizerOverrides = {},
+  allowLocalNonRead = false,
 ): JcAuthorizerDecision {
   const policy = Object.prototype.hasOwnProperty.call(JC_TOOL_POLICIES, name) ? JC_TOOL_POLICIES[name] : undefined;
   const provider = providerForTool(name);
@@ -34,7 +35,7 @@ export function resolveJcAuthorizer(
   // Until the policy gate, approval signer and root-helper trust anchors exist,
   // a local authorizer may ONLY authorize non-approval read-scope tools.
   if (selected === 'local') {
-    if (policy.requiresApproval || policy.scopes.length === 0 || !policy.scopes.every((scope) => scope.endsWith('.read'))) {
+    if (!allowLocalNonRead && (policy.requiresApproval || policy.scopes.length === 0 || !policy.scopes.every((scope) => scope.endsWith('.read')))) {
       return 'refused';
     }
   }

@@ -24,7 +24,7 @@ export interface DoctorCheck {
 }
 
 export interface DoctorRuntime {
-  mode: 'managed' | 'standalone';
+  mode: 'managed' | 'standalone' | 'local';
   handlerNames: readonly string[];
   verifierReady: boolean;
   privilegedHelper: () => Promise<boolean>;
@@ -83,13 +83,13 @@ export async function jcDoctor(config: JcConfig, runtime: DoctorRuntime): Promis
   });
   checks.push({
     name: 'capability verification',
-    ok: runtime.mode === 'managed' && runtime.verifierReady,
+    ok: runtime.mode !== 'managed' || runtime.verifierReady,
     required: true,
     detail: runtime.mode === 'managed'
       ? runtime.verifierReady
         ? `managed: every call needs an ACS-issued acs.jc.v1 capability (key ${config.acsKeyId ?? 'unset'})`
         : 'managed but no ACS verification key is configured; every call fails closed'
-      : 'standalone: read-only tools only, NOT capability-checked; development only',
+      : runtime.mode === 'local' ? 'local: root-controlled policy and jc.local.v1 capabilities' : 'standalone: read-only tools only, NOT capability-checked; development only',
   });
   const roots = config.fsRoots.map((root) => ({ root, exists: fs.existsSync(root) }));
   checks.push({

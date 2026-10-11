@@ -52,16 +52,22 @@ import { invokePrivilegedHelper, privilegedHelperAvailable } from './privileged-
 import { JC_TOOLS } from './tool-descriptors.js';
 import { JC_PROVIDER_REGISTRY, assertJcProviderCoverage } from './providers.js';
 import { resolveJcAuthorizer } from './authorizers.js';
+import { loadRootControlledJcPolicy, readRootControlledJcFile, riskClassForJcTool } from './local-policy.js';
+import { verifyJcLocalCapability, FileNonceStore as LocalFileNonceStore } from './local-capability.js';
 export { JC_TOOLS };
 import { VERSION } from '../version.js';
 
-export type JcMode = 'managed' | 'standalone';
+export type JcMode = 'managed' | 'standalone' | 'local';
 
 export interface JcServerDeps {
   fetchImpl?: typeof fetch;
   invokeHelper?: typeof invokePrivilegedHelper;
   helperAvailable?: typeof privilegedHelperAvailable;
   now?: () => number;
+  /** Test-only trust injection; production loads fixed root-owned paths. */
+  localPolicy?: ReturnType<typeof loadRootControlledJcPolicy>;
+  localSigner?: crypto.KeyObject;
+  localNonces?: LocalFileNonceStore;
 }
 
 
@@ -132,6 +138,15 @@ export const JC_STANDALONE_TOOL_NAMES: readonly string[] = Object.freeze(
 export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDeps = {}): Server {
   assertToolPolicyCoverage();
   assertJcProviderCoverage(JC_TOOLS.map((tool) => tool.name));
+  // Startup is fail-closed: no user-controlled policy or signing key can
+  // authorize local writes, and no permissive fallback is applied.
+  const local = mode === 'local' ? (deps.localPolicy ?? loadRootControlledJcPolicy()) : undefined;
+  const localSigner = mode === 'local'
+    ? (deps.localSigner ?? crypto.createPublicKey(readRootControlledJcFile('/etc/jace-commander/approverd-public.pem', 8192)))
+    : undefined;
+  if (localSigner && (localSigner.type !== 'public' || localSigner.asymmetricKeyType !== 'ed25519'))
+    throw new Error('JC_LOCAL_SIGNER_INVALID');
+  const localNonces = mode === 'local' ? (deps.localNonces ?? new LocalFileNonceStore(path.join(config.stateDir, 'local-nonces'))) : undefined;
   const fetchImpl = deps.fetchImpl ?? fetch;
   const invokeHelper = deps.invokeHelper ?? invokePrivilegedHelper;
   const helperAvailable = deps.helperAvailable ?? privilegedHelperAvailable;
@@ -166,7 +181,30 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
     const capability = (request.params._meta as Record<string, unknown> | undefined)?.acsCapability;
     if (!Object.prototype.hasOwnProperty.call(JC_TOOL_POLICIES, name)) return fail('unknown_tool', `unknown tool: ${name}`);
-    const effectiveAuthorizer = resolveJcAuthorizer(name, mode);
+    const effectiveAuthorizer = resolveJcAuthorizer(
+      name, mode, local?.policy.authorizers, mode === 'local',
+    );
+    if (mode === 'local') {
+      if (name === 'privileged_exec' || effectiveAuthorizer === 'acs-capability' ||
+          effectiveAuthorizer === 'admin-delegated') {
+        return fail('JC_LOCAL_TOOL_UNAVAILABLE', 'tool requires another explicit, unavailable authorizer');
+      }
+      if (effectiveAuthorizer === 'local') {
+        const risk = riskClassForJcTool(name);
+        const decision = local!.policy.classes[risk];
+        if (decision === 'approve') {
+          try {
+            verifyJcLocalCapability(
+              (request.params._meta as Record<string, unknown> | undefined)?.jcLocalCapability,
+              localSigner!, { runtimeId: config.runtimeId, tool: name, arguments: args },
+              localNonces!,
+            );
+          } catch {
+            return fail('JC_LOCAL_APPROVAL_REQUIRED', 'a valid independently issued jc.local.v1 token is required');
+          }
+        }
+      }
+    }
     // Selection is not authorization. Until an independently verified,
     // operator-enabled ACS admin delegation protocol ships, reject this path.
     if (effectiveAuthorizer === 'admin-delegated') {
@@ -195,6 +233,16 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       }
     }
 
+    // The local audit is authoritative. Fail closed BEFORE execution on any
+    // inability to durably record an authorized invocation.
+    if (mode === 'local') {
+      try {
+        trace.append('tool_call_started', {
+          tool: name, argumentsSha256: argsHash(args),
+          effectiveAuthorizer, policyHash: local!.hash,
+        });
+      } catch { return fail('JC_LOCAL_AUDIT_UNAVAILABLE', 'local audit unavailable: nothing executed'); }
+    }
     let result: ToolResult;
     try {
       result = await dispatch(name, args, capability);
@@ -210,14 +258,25 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
         ? { ...authorization, decision: 'granted' }
         : { decision: name === 'privileged_exec' ? 'delegated-to-privileged-helper' : 'not-required' },
     };
-    recordTrace(trace, name, args, { ok: !result.isError, workItemId: authorization?.workItemId });
+    if (mode === 'local') {
+      try {
+        trace.append('tool_call_finished', {
+          tool: name, argumentsSha256: argsHash(args), ok: !result.isError,
+          policyHash: local!.hash,
+        });
+      } catch {
+        return fail('JC_LOCAL_AUDIT_UNAVAILABLE', 'the local audit completion record could not be persisted');
+      }
+    } else {
+      recordTrace(trace, name, args, { ok: !result.isError, workItemId: authorization?.workItemId });
+    }
     return { ...result, _meta: { ...(result._meta ?? {}), ...meta } };
   });
 
   type Handler = (args: Record<string, unknown>, capability: unknown) => Promise<ToolResult>;
   const fsPolicy: JcFsPolicy = {
-    roots: config.fsRoots,
-    deniedRoots: [...defaultDeniedRoots(config.stateDir, config.homeDir), ...config.fsDeniedRoots],
+    roots: local ? local.policy.roots : config.fsRoots,
+    deniedRoots: [...defaultDeniedRoots(config.stateDir, config.homeDir), ...config.fsDeniedRoots, ...(local?.policy.deniedRoots ?? [])],
   };
 
   // One handler per manifest tool. The same handlers serve every caller:
@@ -323,6 +382,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       mode,
       runtimeId: config.runtimeId,
       publicMcpUrl: config.publicMcpUrl,
+      localPolicyHash: local?.hash ?? null,
       managedAuthorization: mode === 'managed'
         ? { contract: 'acs.jc.v1', keyConfigured: Boolean(config.acsPublicKey && config.acsKeyId) }
         : { contract: 'none (standalone)', tools: 'read-only only', served: JC_STANDALONE_TOOL_NAMES.length },

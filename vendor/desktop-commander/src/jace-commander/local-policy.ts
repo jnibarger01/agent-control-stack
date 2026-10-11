@@ -47,7 +47,11 @@ export function parseJcLocalPolicy(input: unknown): JcLocalPolicy {
     if (v !== undefined && v !== 'allow' && v !== 'approve') throw new Error('JC_POLICY_INVALID');
     if (v) classes[risk] = v;
   }
-  if (classes.privileged !== 'approve') throw new Error('JC_POLICY_PRIVILEGED_REQUIRES_APPROVAL');
+  // A root-owned policy can narrow tool access but cannot switch off human
+  // authorization for actions that mutate state or execute commands.
+  for (const risk of ['mutate', 'exec', 'network', 'privileged'] as const) {
+    if (classes[risk] !== 'approve') throw new Error('JC_POLICY_APPROVAL_REQUIRED');
+  }
   const roots = paths(input.roots);
   const deniedRoots = paths(input.deniedRoots);
   const raw = input.authorizers;
@@ -82,7 +86,7 @@ export function parseJcLocalPolicy(input: unknown): JcLocalPolicy {
 }
 /** Checks every component including file, forbidding symlinks and non-root ownership.
  * Fail-closed on platforms unable to expose POSIX uid/mode. */
-export function loadRootControlledJcPolicy(filename = JC_POLICY_FILE_DEFAULT): { policy: JcLocalPolicy; hash: string } {
+export function readRootControlledJcFile(filename: string, maxBytes = 65536): string {
   if (!path.isAbsolute(filename)) throw new Error('JC_POLICY_INVALID');
   let part = path.parse(filename).root;
   for (const segment of filename.slice(part.length).split(path.sep).filter(Boolean)) {
@@ -93,12 +97,15 @@ export function loadRootControlledJcPolicy(filename = JC_POLICY_FILE_DEFAULT): {
   const fd = fs.openSync(filename, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
   try {
     const stat = fs.fstatSync(fd);
-    if (!stat.isFile() || stat.uid !== 0 || (stat.mode & 0o022) !== 0 || stat.size > 65536)
+    if (!stat.isFile() || stat.uid !== 0 || (stat.mode & 0o022) !== 0 || stat.size > maxBytes)
       throw new Error('JC_POLICY_UNTRUSTED_FILE');
-    const contents = fs.readFileSync(fd, 'utf8');
-    const policy = parseJcLocalPolicy(JSON.parse(contents));
-    return { policy, hash: crypto.createHash('sha256').update(contents).digest('hex') };
+    return fs.readFileSync(fd, 'utf8');
   } finally { fs.closeSync(fd); }
+}
+export function loadRootControlledJcPolicy(filename = JC_POLICY_FILE_DEFAULT): { policy: JcLocalPolicy; hash: string } {
+  const contents = readRootControlledJcFile(filename);
+  const policy = parseJcLocalPolicy(JSON.parse(contents));
+  return { policy, hash: crypto.createHash('sha256').update(contents).digest('hex') };
 }
 export function riskClassForJcTool(toolName: string): JcRiskClass {
   const tool = JC_MANIFEST.tools.find(x => x.name === toolName);

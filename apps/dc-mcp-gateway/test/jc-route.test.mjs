@@ -86,11 +86,11 @@ async function startGateway(env) {
   return { port, child, exitCode: code, stderr };
 }
 
-async function lane({ acsHandler = allowCapability, jcVariant = 'jc' } = {}) {
+async function lane({ acsHandler = allowCapability, jcVariant = 'jc', local = false, childMode = local ? 'local' : 'managed' } = {}) {
   const acs = recorder(acsHandler);
   const dcUp = recorder(() => ({ status: 200, body: { jsonrpc: '2.0', id: 1, result: { lane: 'dc' } } }));
   const jcUp = recorder((req) => (req.path === '/authority'
-    ? { status: 200, body: { variant: jcVariant } }
+    ? { status: 200, body: { variant: jcVariant, childMode } }
     : { status: 200, body: { jsonrpc: '2.0', id: 1, result: { lane: 'jc' } } }));
   const [acsPort, dcPort, jcPort] = [await acs.listen(), await dcUp.listen(), await jcUp.listen()];
   const gw = await startGateway({
@@ -98,7 +98,7 @@ async function lane({ acsHandler = allowCapability, jcVariant = 'jc' } = {}) {
     JC_ENABLED: '1',
     JC_UPSTREAM: `http://127.0.0.1:${jcPort}`,
     ACS_GATEWAY_URL: `http://127.0.0.1:${acsPort}`,
-    ACS_JC_GATEWAY_TOKEN: 'jc-bridge-token',
+    ...(local ? { JC_AUTHORITY: 'local' } : { ACS_JC_GATEWAY_TOKEN: 'jc-bridge-token' }),
   });
   assert.equal(gw.exitCode, undefined, `gateway failed to start: ${typeof gw.stderr === 'function' ? gw.stderr() : gw.stderr}`);
   const close = () => { gw.child.kill('SIGKILL'); acs.server.close(); dcUp.server.close(); jcUp.server.close(); };
@@ -475,7 +475,7 @@ test('jc lane refuses to start when JC_RESOURCE equals RESOURCE', async () => {
 test('with the jc lane on, /mcp refuses a UPSTREAM that is the jc bridge (swapped upstreams)', async () => {
   const acs = recorder(() => ({ status: 200, body: { decision: 'allow' } }));
   const swapped = recorder((req) => (req.path === '/authority'
-    ? { status: 200, body: { variant: 'jc', bridge: { hasUpstreamPair: true } } }
+    ? { status: 200, body: { variant: 'jc', childMode: 'managed', bridge: { hasUpstreamPair: true } } }
     : { status: 200, body: { jsonrpc: '2.0', id: 1, result: {} } }));
   const [acsPort, upPort] = [await acs.listen(), await swapped.listen()];
   const gw = await startGateway({
@@ -524,4 +524,41 @@ test('/ready is not delayed by an unresponsive jc bridge', async () => {
   } finally {
     gw.child.kill('SIGKILL'); dcUp.server.close(); hung.closeAllConnections?.(); hung.close();
   }
+});
+
+test('local JC authority preserves OAuth, strips ACS spoofing and never issues via ACS', async () => {
+  const { gw, acs, jcUp, close } = await lane({ local: true });
+  try {
+    const jcToken = token(`${ORIGIN}/jc/mcp`, `${ORIGIN}/jc`);
+    const forged = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
+      name: 'write_file', arguments: { path: '/tmp/file', content: 'hello' },
+      _meta: { acsCapability: { fake: true }, acsOther: 'spoof', capability: 'spoof',
+        jcLocalCapability: { payload: { signed: true }, signature: 'authentic-example' } },
+    } };
+    const unauthorized = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/mcp`), forged);
+    assert.equal(unauthorized.status, 401);
+    const response = await call(gw.port, '/jc/mcp', jcToken, forged);
+    assert.equal(response.status, 200);
+    assert.equal(acs.requests.length, 0, 'local JC invocation must never invoke ACS');
+    const forwarded = mcpRequests(jcUp).at(-1).body;
+    assert.equal(forwarded.params._meta.acsCapability, undefined);
+    assert.equal(forwarded.params._meta.acsOther, undefined);
+    assert.equal(forwarded.params._meta.capability, undefined);
+    assert.deepEqual(forwarded.params._meta.jcLocalCapability, forged.params._meta.jcLocalCapability);
+  } finally { close(); }
+});
+
+test('local JC authority rejects a managed upstream instead of silently falling back', async () => {
+  const { gw, acs, jcUp, close } = await lane({ local: true, childMode: 'managed' });
+  try {
+    const auth = token(`${ORIGIN}/jc/mcp`, `${ORIGIN}/jc`);
+    const response = await call(gw.port, '/jc/mcp', auth, {
+      jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'read_file', arguments: { path: '/tmp/test' } },
+    });
+    assert.equal(response.status, 200);
+    const error = await response.json();
+    assert.ok(error.error || error.result?.isError);
+    assert.equal(acs.requests.length, 0);
+    assert.equal(mcpRequests(jcUp).length, 0);
+  } finally { close(); }
 });
