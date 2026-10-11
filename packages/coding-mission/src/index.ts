@@ -25,7 +25,25 @@ export {
 } from "./store.js";
 export * from "./mission-model.js";
 export * from "./mission-intelligence.js";
+export {
+  FLIGHT_RECORD_SCHEMA_VERSION,
+  FLIGHT_TRUST_ASSUMPTIONS,
+  readMissionFlightRecord,
+  verifyFlightRecord,
+  type FlightFinding,
+  type FlightVerdict,
+  type FlightVerification,
+  type MissionFlightRecord
+} from "./flight-recorder.js";
 export * from "./budget.js";
+export {
+  AUTHORITY_GRAPH_SCHEMA_VERSION,
+  type AuthorityGraph,
+  type AuthorityGraphEvent,
+  type AuthorityGraphNode,
+  type AuthorityNarrowing,
+  type AuthorityNodeState
+} from "./authority-graph.js";
 export type {
   AddWorkUnitsResult,
   BudgetRefusal,

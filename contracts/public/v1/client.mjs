@@ -164,6 +164,10 @@ const operations = {
     "method": "GET",
     "path": "/coding-missions/{id}"
   },
+  "getCodingMissionFlightRecord": {
+    "method": "GET",
+    "path": "/coding-missions/{id}/flight-record"
+  },
   "approveCodingChangeSet": {
     "method": "POST",
     "path": "/coding-missions/{id}/approve"
