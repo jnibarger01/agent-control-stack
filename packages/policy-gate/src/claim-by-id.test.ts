@@ -124,7 +124,7 @@ describe("gateWorkerClaimById (claim_approved_work_item_by_id)", () => {
     }
   });
 
-  it("re-evaluates policy at claim time and blocks instead of claiming when approval is missing", () => {
+  it("re-evaluates policy at claim time and returns the item to needs_approval when approval is missing", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-claim-by-id-tools-blocked-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));
     const tools = createWorkItemTools(store, createPolicyEngine());
@@ -142,8 +142,10 @@ describe("gateWorkerClaimById (claim_approved_work_item_by_id)", () => {
 
       const claimed = tools.claim_approved_work_item_by_id({ id: workItem.id, workerId: "worker-a" });
 
-      expect(claimed?.status).toBe("blocked");
-      expect(store.get(workItem.id)?.status).toBe("blocked");
+      // The approval the item was claimed with is no longer required by policy, so the item goes
+      // back to awaiting approval rather than being blocked or claimed.
+      expect(claimed).toBeUndefined();
+      expect(store.get(workItem.id)?.status).toBe("needs_approval");
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });
@@ -233,9 +235,9 @@ describe("gateWorkerClaimById (claim_approved_work_item_by_id)", () => {
       expect(codex.status).toBe("approved");
       expect(claude.status).toBe("approved");
 
-      expect(() =>
-        tools.claim_approved_work_item_by_id({ id: codex.id, workerId: "claude-code" })
-      ).toThrowError(expect.objectContaining({ code: "worker_target_mismatch" }));
+      expect(() => tools.claim_approved_work_item_by_id({ id: codex.id, workerId: "claude-code" })).toThrowError(
+        expect.objectContaining({ code: "worker_target_mismatch" })
+      );
       expect(store.get(codex.id)?.status).toBe("approved");
 
       const claimed = tools.claim_next_approved_work_item({ workerId: "claude-code" });
@@ -412,12 +414,9 @@ describe("durable work item assignment is authoritative for both claim paths", (
       expect(store.findNextApprovedWorkItemForWorker("worker-b")?.id).toBe(item.id);
 
       // The assigned worker may still claim it.
-      const claimed = store.claimApprovedWorkItemById(
-        item.id,
-        executionActionHash(store.get(item.id)!),
-        "worker-b",
-        { allowLegacyClaimForTests: true }
-      );
+      const claimed = store.claimApprovedWorkItemById(item.id, executionActionHash(store.get(item.id)!), "worker-b", {
+        allowLegacyClaimForTests: true
+      });
       expect(claimed?.workerId).toBe("worker-b");
     } finally {
       store.close();

@@ -143,11 +143,36 @@ parent, so the append-only result cannot go stale. Both operations require the p
 operator, so a stale worker cannot cancel or decide for work owned by a newer claimant; refusals are durable
 `authority.denied` evidence, and `child.reduced` records the selected child and result hash.
 
+## Dispatch authority gate
+
+`WorkUnitExecutionLedger.beginDispatch` is the one place every executor lane passes before a worker runs a unit, and it
+is where authority is enforced. A mission with a persisted `mission_authority` binding is **governed**:
+
+- The ledger needs a `DispatchAuthorityVerifier` (`MissionAuthorityLedger.verifyDispatch` implements it). A governed
+  mission dispatched with no verifier is refused (`authority_verifier_unavailable`), never run unchecked.
+- The verifier reads durable state and ACS's clock and refuses anything it cannot prove: mission not active, no unit
+  authority for a derived unit (a unit created outside `request_child_work` is never promoted to the mission's
+  authority), a unit superseded by a newer parent claim, a revoked grant, execution inputs that no longer match what the
+  grant approved, an expired authority, a worker that does not resolve to the actor the authority was issued to, an
+  attempt beyond the authority's `maxAttemptsPerOperation`, and a `jc`/`dc` lane whose tool runtime the authority does
+  not grant.
+- A caller-supplied `authority.grantId` that is not the verified one is refused (`authority_ref_mismatch`). On success
+  the envelope's `authority` carries the verified `grantId` and the hash of the unit's derived authority
+  (`unitAuthorityHash`), so what a worker ran under is bound into the dispatch hash.
+- The check runs before the replay path, so a resumed dispatch after revocation or expiry is refused too.
+- A refusal throws `dispatch_authority_denied` after the transaction commits an `authority.denied` event
+  (`operation: "dispatch"`) and writes no execution attempt.
+- A mission with no authority binding dispatches exactly as before.
+
+Limits: the `coder` and `mcp` lanes have no single tool runtime, so their tool classes are checked where each tool is
+invoked, not at dispatch. `maxRuntimeMs` is not yet turned into a deadline on the envelope. `claimUnit` itself does not
+consult authority; the gate is at dispatch. No production composition root constructs the dispatch ledger with a
+verifier yet, and the real grant reader is only wired in tests.
+
 ## Not yet in this runtime
 
-- Consulting `unitAuthority` when a worker is dispatched. Until then authority is a verified, tamper-evident ledger of
-  what each unit may do, not an enforcement point at dispatch. Production composition roots that construct the ledger
-  with the real grant store and operator verification are also not wired yet.
+- Production composition roots that construct the authority ledger with the real grant store and operator
+  verification, and the dispatch ledger with that verifier.
 - Checkpoint/resume as worker adapters on the execution ledger, the CUA worker, and recovery policy.
 - A driver for the `general` mission kind. The legacy coding path has no budget row (uncapped).
 - Delegating to a different executing actor (`authorityNarrowingViolations` refuses it deliberately and it needs its own decision).
