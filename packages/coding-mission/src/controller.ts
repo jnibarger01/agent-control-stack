@@ -4,6 +4,7 @@ import { readMissionFlightRecord, type MissionFlightRecord } from "./flight-reco
 import { NIMBLE_ROUTING_ALGORITHM_VERSION } from "@agent-control-stack/actor-router";
 import { ControlStackError, stableHash } from "@agent-control-stack/shared";
 import type { MissionAuthorityPolicy } from "./authority.js";
+import type { AuthorityGraph } from "./authority-graph.js";
 import type { MissionAuthorityRecord } from "./child-work.js";
 import { createGovernedExecution, type GovernedExecution } from "./governed-runtime.js";
 import {
@@ -524,6 +525,17 @@ export class CodingMissionController {
     if (!MISSION_ID.test(missionId))
       throw new ControlStackError("coding_mission_id_invalid", "mission identifier is invalid");
     return this.governed.authority.grantMissionAuthority({ missionId, grantId, ...options });
+  }
+
+  /** The mission's delegated authority as a read-only projection (see authority-graph.ts). Governed controllers only. */
+  authorityGraph(missionId: string): AuthorityGraph {
+    if (!this.governed) {
+      throw new ControlStackError(
+        "governed_execution_disabled",
+        "governed execution is not enabled on this controller"
+      );
+    }
+    return this.governed.authority.authorityGraph(missionId);
   }
 
   /** Governed dispatch: audit integrity, then the authority gate, then execution within the deadline, then the result. */

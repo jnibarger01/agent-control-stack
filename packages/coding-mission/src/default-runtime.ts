@@ -85,6 +85,8 @@ export function codingMissionPortsFromEnv(
   const now = dependencies.now ?? (() => new Date().toISOString());
   return {
     now,
+    // Governed execution is an explicit opt-in (exactly "1"). Off, the controller behaves as it always has.
+    ...(env.ACS_CODING_MISSION_GOVERNED === "1" ? { governance: { mode: "enforce" as const } } : {}),
     deploymentPolicy: {
       requirement(repository: string) {
         const entry = config.deployPolicy[repository];
