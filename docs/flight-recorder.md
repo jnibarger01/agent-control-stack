@@ -26,13 +26,17 @@ It is **tamper evidence**. It is not tamper prevention.
    modify (an append-only log, a signed note, another host) when a mission matters.
 2. A record shows what ACS recorded. It does not prove that a push, merge or deployment happened; those are
    separate effects with their own evidence.
-3. Events written before migration 062 are not chained. They are counted as `legacyEventCount` and make the verdict
+3. Events written before migration 062 are not chained. They are counted as `legacyEventCount` (events) and `legacyEvidenceCount` (evidence rows) and make the verdict
    `partial_legacy`; they are never reported as tampering and never as verified.
 4. Evidence legacy detection uses the SQLite `rowid` cutoff taken at migration time. Deleting legacy evidence and
    reusing its rowids is not detectable.
 5. A `tampered` verdict says the record cannot be trusted. It does not say who changed it or when.
 
 ## What is recorded
+
+A record with no operational event row is only valid as an evidence binding (`evidence.recorded`, once per evidence
+row); any other unlinked record is `unlinked_record`, however well it hashes. An attacker who writes both a forged
+operational row and a matching record is the full-rewrite case below.
 
 Every mission event goes through `CodingMissionStore.recordMissionEvent`, which writes the operational row and the
 chained record in one transaction. If either write fails, both roll back. This includes state transitions (with
@@ -53,8 +57,8 @@ are masked.
   only `records` is paged (`nextAfterSeq` continues).
 - `verification.verdict`: `verified`, `partial_legacy`, or `tampered`, with `findings[]` (`record_hash_mismatch`,
   `previous_hash_mismatch`, `sequence_gap`, `event_missing`, `event_modified`, `unrecorded_event`,
-  `evidence_missing`, `evidence_modified`, `unrecorded_evidence`).
-- `reconstruction` is derived from the chain alone (state history, last state, per-unit lifecycle: created, ready, claimed, verifying, completed, failed, retryable, retry_scheduled, cancelled) and compared with the
+  `evidence_missing`, `evidence_modified`, `unrecorded_evidence`, `unlinked_record`).
+- `reconstruction` is derived from the chain alone (state history, last state, per-unit lifecycle: created, ready, claimed, verifying, completed, failed, retryable, retry_scheduled, cancelled, pending, conflict, unknown) and compared with the
   live mission row (`consistentWithLive`). A mismatch means the live row changed without a recorded transition.
 - `trustworthy` is `false` for any `tampered` verdict. The records are still returned for investigation.
 

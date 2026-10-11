@@ -774,6 +774,12 @@ export class WorkUnitExecutionLedger {
           if (changed.changes !== 1) {
             throw new ControlStackError("coding_mission_claim_conflict", "unknown outcome lost the claim");
           }
+          this.store.recordMissionEvent(
+            row.mission_id,
+            "work_unit.unknown",
+            { unitId: row.unit_id, attemptId: row.attempt_id },
+            input.result.finishedAt
+          );
           applied = { applied: "unknown" };
           break;
         }

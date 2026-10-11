@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stableHash } from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
 import {
   appendFlightRecord,
@@ -413,6 +414,110 @@ describe("flight recorder: review hardening", () => {
       cancelled: "cancelled",
       retryable: "retryable",
       failed: "failed"
+    });
+  });
+});
+
+describe("flight recorder: second review hardening", () => {
+  it("rejects a correctly hashed record that has no source row and is not an evidence binding", () => {
+    const store = mission();
+    store.transaction(() => {
+      appendFlightRecord(store.db, {
+        missionId: "m1",
+        eventId: null,
+        kind: "mission.state_changed",
+        bodyJson: JSON.stringify({ from: "RUNNING", to: "COMPLETED" }),
+        createdAt: T0
+      });
+    });
+    const result = verifyFlightRecord(store.db, "m1");
+    expect(result.verdict).toBe("tampered");
+    expect(result.findings.map((f) => f.kind)).toContain("unlinked_record");
+    expect(readMissionFlightRecord(store.db, "m1").trustworthy).toBe(false);
+  });
+
+  it("rejects a second record binding the same evidence", () => {
+    const store = mission();
+    const existing = readFlightRecords(store.db, "m1").find((r) => r.kind === "evidence.recorded")!;
+    store.transaction(() => {
+      appendFlightRecord(store.db, {
+        missionId: "m1",
+        eventId: null,
+        kind: "evidence.recorded",
+        bodyJson: existing.bodyJson,
+        createdAt: T0
+      });
+    });
+    expect(verifyFlightRecord(store.db, "m1").findings.map((f) => f.kind)).toContain("unlinked_record");
+  });
+
+  it("records every durable status transition: released claims, marked units", () => {
+    const store = new CodingMissionStore(":memory:");
+    store.createGeneral({ missionId: "m1", summary: "life", initiatorId: "user-1", now: T0 });
+    store.addWorkUnits(
+      "m1",
+      [
+        { unitId: "a", kind: "coding", title: "a" },
+        { unitId: "b", kind: "coding", title: "b" },
+        { unitId: "c", kind: "coding", title: "c" }
+      ],
+      T0
+    );
+    const claim = (n: number) => ({ token: `tok-${n}`, workerId: "w", route: {}, claimedAt: T0 });
+    store.claimUnit("m1", "a", claim(1));
+    store.claimUnit("m1", "b", claim(2));
+    store.claimUnit("m1", "c", claim(3));
+    store.markOperation("m1", "a", "unknown");
+    store.markOperation("m1", "b", "conflict");
+    store.markOperation("m1", "c", "failed");
+    // Marking a unit that is no longer running changes nothing and records nothing.
+    store.markOperation("m1", "a", "failed");
+    expect(readMissionFlightRecord(store.db, "m1").reconstruction.units).toMatchObject({
+      a: "unknown",
+      b: "conflict",
+      c: "failed"
+    });
+    expect(store.events("m1").filter((e) => e.name === "work_unit.marked")).toHaveLength(3);
+
+    store.addWorkUnits("m1", [{ unitId: "d", kind: "coding", title: "d" }], T0);
+    store.claimUnit("m1", "d", claim(4));
+    store.resetClaim("m1", "d");
+    const replay = readMissionFlightRecord(store.db, "m1");
+    expect(replay.reconstruction.units.d).toBe("pending");
+    expect(replay.verification.verdict).toBe("verified");
+  });
+
+  it("verifies evidence whose payload has non-plain JSON behavior", () => {
+    const store = mission();
+    store.putEvidence(
+      "m1",
+      "observed",
+      { at: new Date(T0), skipped: undefined, n: 1, nested: { toJSON: () => "x" } },
+      T0
+    );
+    const result = verifyFlightRecord(store.db, "m1");
+    expect(result.findings).toEqual([]);
+    expect(result.verdict).toBe("verified");
+  });
+
+  it("reports legacy evidence separately from legacy events", () => {
+    const store = new CodingMissionStore(":memory:");
+    store.createGeneral({ missionId: "old", summary: "s", initiatorId: "user-1", now: T0 });
+    store.db
+      .prepare(
+        `INSERT INTO coding_evidence (mission_id, evidence_id, kind, payload_hash, payload_json, created_at)
+         VALUES ('old', 'legacy:1', 'legacy', ?, '{}', ?)`
+      )
+      .run(stableHash({}), T0);
+    store.db.exec("DROP TRIGGER mission_flight_epoch_no_change");
+    store.db.exec(
+      "UPDATE mission_flight_epoch SET last_legacy_evidence_rowid = (SELECT MAX(rowid) FROM coding_evidence)"
+    );
+    expect(verifyFlightRecord(store.db, "old")).toMatchObject({
+      verdict: "partial_legacy",
+      legacyEventCount: 0,
+      legacyEvidenceCount: 1,
+      findings: []
     });
   });
 });

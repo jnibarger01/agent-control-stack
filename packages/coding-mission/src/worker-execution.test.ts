@@ -235,6 +235,8 @@ describe("work-unit execution ledger", () => {
     };
     expect(ledger.applyResult({ claimToken: claim.token, result })).toEqual({ applied: "unknown" });
     expect(store.workUnits("m1")[0]).toMatchObject({ status: "unknown", failureCategory: "unknown" });
+    // The status change is recorded, so a replay does not leave the unit in its previous state.
+    expect(store.events("m1").map((event) => event.name)).toContain("work_unit.unknown");
     expect(store.retryUnit("m1", "u1", T2)).toEqual({ ok: false, outcome: "retry_unsafe" });
   });
 

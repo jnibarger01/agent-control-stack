@@ -655,7 +655,9 @@ export class CodingMissionStore {
       if (result.changes !== 1) {
         throw new ControlStackError("coding_mission_claim_conflict", "operation claim could not be released");
       }
-      this.cancelStaleDescendants(missionId, operationId, "claim_released", new Date().toISOString());
+      const releasedAt = new Date().toISOString();
+      this.event(missionId, "work_unit.claim_released", { unitId: operationId }, releasedAt);
+      this.cancelStaleDescendants(missionId, operationId, "claim_released", releasedAt);
     });
   }
 
@@ -683,11 +685,14 @@ export class CodingMissionStore {
 
   markOperation(missionId: string, operationId: string, status: "conflict" | "unknown" | "failed"): void {
     this.transaction(() => {
-      this.db
+      const changed = this.db
         .prepare(
           `UPDATE coding_operations SET status = ? WHERE mission_id = ? AND operation_id = ? AND status = 'running'`
         )
         .run(status, missionId, operationId);
+      if (Number(changed.changes) === 1) {
+        this.event(missionId, "work_unit.marked", { unitId: operationId, status }, new Date().toISOString());
+      }
     });
   }
 
@@ -860,6 +865,9 @@ export class CodingMissionStore {
 
   putEvidence(missionId: string, kind: string, payload: unknown, now: string): void {
     const payloadJson = JSON.stringify(payload);
+    // Hash what is stored, not the in-memory object: a Date or toJSON payload serializes differently, and the recorder
+    // verifies the stored JSON. For plain JSON payloads the two hashes are identical.
+    const payloadHash = stableHash(JSON.parse(payloadJson) as unknown);
     const evidenceId = `${kind}:${stableHash(payload).slice(0, 16)}`;
     this.transaction(() => {
       const inserted = this.db
@@ -867,14 +875,14 @@ export class CodingMissionStore {
           `INSERT OR IGNORE INTO coding_evidence (mission_id, evidence_id, kind, payload_hash, payload_json, created_at)
            VALUES (?, ?, ?, ?, ?, ?)`
         )
-        .run(missionId, evidenceId, kind, stableHash(payload), payloadJson, now);
+        .run(missionId, evidenceId, kind, payloadHash, payloadJson, now);
       if (Number(inserted.changes) === 1) {
         // Chain the payload hash so a later in-place edit of the evidence row is detectable.
         appendFlightRecord(this.db, {
           missionId,
           eventId: null,
           kind: "evidence.recorded",
-          bodyJson: JSON.stringify({ evidenceId, kind, payloadHash: stableHash(payload) }),
+          bodyJson: JSON.stringify({ evidenceId, kind, payloadHash }),
           createdAt: now
         });
       }
@@ -1247,6 +1255,12 @@ export class CodingMissionStore {
                WHERE mission_id = ? AND operation_id = ? AND status IN ('retryable', 'failed')`
             )
             .run(missionId, unitId);
+          this.event(
+            missionId,
+            "work_unit.failed",
+            { unitId, category: "retry_budget_exhausted", next: "failed" },
+            now
+          );
           return this.refuse(missionId, "retry", decision, now);
         }
       }

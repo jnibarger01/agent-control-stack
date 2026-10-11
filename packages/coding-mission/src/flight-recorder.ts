@@ -32,7 +32,8 @@ export type FlightFindingKind =
   | "unrecorded_event"
   | "evidence_missing"
   | "evidence_modified"
-  | "unrecorded_evidence";
+  | "unrecorded_evidence"
+  | "unlinked_record";
 
 export interface FlightFinding {
   kind: FlightFindingKind;
@@ -53,7 +54,10 @@ export interface FlightVerification {
   verdict: FlightVerdict;
   recordCount: number;
   headHash: string;
+  /** Operational events that predate the recorder and so were never chained. */
   legacyEventCount: number;
+  /** Evidence rows that predate the recorder and so were never chained. */
+  legacyEvidenceCount: number;
   findings: FlightFinding[];
 }
 
@@ -277,7 +281,18 @@ function verifyUnderSnapshot(db: DatabaseSync, missionId: string): FlightVerific
   const eventsById = new Map(events.map((event) => [event.event_id, event]));
   const chainedEventIds = new Set<number>();
   for (const row of rows) {
-    if (row.event_id === null) continue;
+    if (row.event_id === null) {
+      // Only evidence bindings are written without an operational event row. Anything else unlinked is an insert that
+      // bypassed the recorder, however well it hashes.
+      if (row.kind !== "evidence.recorded") {
+        findings.push({
+          kind: "unlinked_record",
+          seq: row.seq,
+          detail: "record has no operational event row and is not an evidence binding"
+        });
+      }
+      continue;
+    }
     chainedEventIds.add(row.event_id);
     const event = eventsById.get(row.event_id);
     if (!event) {
@@ -309,11 +324,18 @@ function verifyUnderSnapshot(db: DatabaseSync, missionId: string): FlightVerific
     }
   }
 
-  legacyEventCount += verifyEvidence(db, missionId, rows, legacyEvidenceCutoff, findings);
+  const legacyEvidenceCount = verifyEvidence(db, missionId, rows, legacyEvidenceCutoff, findings);
 
   const verdict: FlightVerdict =
-    findings.length > 0 ? "tampered" : legacyEventCount > 0 ? "partial_legacy" : "verified";
-  return { verdict, recordCount: rows.length, headHash: previousHash, legacyEventCount, findings };
+    findings.length > 0 ? "tampered" : legacyEventCount + legacyEvidenceCount > 0 ? "partial_legacy" : "verified";
+  return {
+    verdict,
+    recordCount: rows.length,
+    headHash: previousHash,
+    legacyEventCount,
+    legacyEvidenceCount,
+    findings
+  };
 }
 
 function verifyEvidence(
@@ -329,6 +351,15 @@ function verifyEvidence(
     try {
       const body = JSON.parse(row.body_json) as { evidenceId?: unknown; payloadHash?: unknown; kind?: unknown };
       if (typeof body.evidenceId === "string" && typeof body.payloadHash === "string") {
+        if (recorded.has(body.evidenceId)) {
+          findings.push({
+            kind: "unlinked_record",
+            seq: row.seq,
+            evidenceId: body.evidenceId,
+            detail: "evidence is bound by more than one chained record"
+          });
+          continue;
+        }
         recorded.set(body.evidenceId, {
           payloadHash: body.payloadHash,
           kind: body.kind,
@@ -443,6 +474,9 @@ export interface MissionFlightRecord {
       | "retryable"
       | "retry_scheduled"
       | "cancelled"
+      | "pending"
+      | "conflict"
+      | "unknown"
     >;
   };
   records: FlightReplayRecord[];
@@ -477,7 +511,9 @@ function readUnderSnapshot(
     "verification.started": "verifying",
     "work_unit.completed": "completed",
     "work_unit.cancelled": "cancelled",
-    "work_unit.retry_scheduled": "retry_scheduled"
+    "work_unit.retry_scheduled": "retry_scheduled",
+    "work_unit.claim_released": "pending",
+    "work_unit.unknown": "unknown"
   };
   forEachRecord(db, missionId, (record) => {
     const body = safeParse(record.bodyJson);
@@ -490,7 +526,11 @@ function readUnderSnapshot(
     }
     if (typeof body.unitId !== "string") return;
     if (record.kind === "work_unit.failed") units[body.unitId] = body.next === "retryable" ? "retryable" : "failed";
-    else {
+    else if (record.kind === "work_unit.marked") {
+      if (body.status === "conflict" || body.status === "unknown" || body.status === "failed") {
+        units[body.unitId] = body.status;
+      }
+    } else {
       const unitStatus = unitEvents[record.kind];
       if (unitStatus) units[body.unitId] = unitStatus;
     }
