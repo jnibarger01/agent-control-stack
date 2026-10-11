@@ -30,7 +30,12 @@ describe("MergeSimulator", () => {
     const head = s.branch("feature", base, { "b.txt": "from feature\n", "a.txt": "feature a\n" });
     const main = s.advanceMain({ "b.txt": "from main\n", "a.txt": "main a\n" });
     const sim = new MergeSimulator(createGitRunner(s.dir));
-    expect(await sim.simulate(main, head)).toMatchObject({ evaluated: true, clean: false, conflicts: ["a.txt", "b.txt"], behindBy: 1 });
+    expect(await sim.simulate(main, head)).toMatchObject({
+      evaluated: true,
+      clean: false,
+      conflicts: ["a.txt", "b.txt"],
+      behindBy: 1
+    });
   });
 
   it("counts how far the base has moved since the head diverged", async () => {
@@ -49,7 +54,11 @@ describe("MergeSimulator", () => {
     const base = s.commit("base", { "a.txt": "a\n" });
     const sim = new MergeSimulator(createGitRunner(s.dir));
     expect(await sim.simulate(base, "f".repeat(40))).toMatchObject({ evaluated: false, clean: false });
-    expect(await sim.simulate(base, "main")).toMatchObject({ evaluated: false, clean: false, detail: "not a full commit id" });
+    expect(await sim.simulate(base, "main")).toMatchObject({
+      evaluated: false,
+      clean: false,
+      detail: "not a full commit id"
+    });
     expect(await sim.simulate(base, "--output=/tmp/x")).toMatchObject({ evaluated: false });
   });
 
@@ -66,6 +75,39 @@ describe("MergeSimulator", () => {
     expect(s.refs()).toBe(refsBefore);
     expect(s.status()).toBe("");
     expect(git(s.dir, "rev-parse", "HEAD")).toBe(main);
+  });
+
+  it("builds simulated merge commits without any host git identity or global config", async () => {
+    const s = scratch();
+    const base = s.commit("base", { "a.txt": "a\n" });
+    const one = s.branch("one", base, { "a.txt": "one\n" });
+    const empty = mkdtempSync(join(tmpdir(), "acs-nohome-"));
+    cleanups.push(() => rmSync(empty, { recursive: true, force: true }));
+    const saved = {
+      HOME: process.env.HOME,
+      GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
+      XDG: process.env.XDG_CONFIG_HOME
+    };
+    process.env.HOME = empty;
+    process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+    process.env.XDG_CONFIG_HOME = empty;
+    try {
+      const sim = new MergeSimulator(createGitRunner(s.dir));
+      const merged = await sim.simulate(base, one);
+      const commit = await sim.syntheticMerge(merged.tree!, [base, one]);
+      expect(commit).toMatch(/^[0-9a-f]{40}$/u);
+      // Deterministic: the same inputs give the same synthetic commit.
+      expect(await sim.syntheticMerge(merged.tree!, [base, one])).toBe(commit);
+    } finally {
+      for (const [key, value] of [
+        ["HOME", saved.HOME],
+        ["GIT_CONFIG_GLOBAL", saved.GIT_CONFIG_GLOBAL],
+        ["XDG_CONFIG_HOME", saved.XDG]
+      ] as const) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   it("chains a simulated merge so the next pull request sees the first", async () => {
@@ -99,6 +141,8 @@ describe("createIsolatedClone", () => {
   });
 
   it("refuses when the source cannot be cloned", async () => {
-    await expect(createIsolatedClone("/nonexistent/source/repo", join(tmpdir(), "acs-never"))).rejects.toThrow(/isolated clone failed/);
+    await expect(createIsolatedClone("/nonexistent/source/repo", join(tmpdir(), "acs-never"))).rejects.toThrow(
+      /isolated clone failed/
+    );
   });
 });

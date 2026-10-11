@@ -4,6 +4,22 @@ import type { MergeSimulation } from "./types.js";
 const GIT_TIMEOUT_MS = 60_000;
 const SHA = /^[0-9a-f]{40}$/u;
 
+/**
+ * Simulated merge commits need an identity and must not depend on the host's git configuration: a machine or CI runner
+ * with no global identity would otherwise fail `commit-tree` and the engine would report nothing mergeable. The identity
+ * and dates are fixed, which also makes the synthetic commit ids deterministic.
+ */
+const SIMULATION_GIT_ENV = {
+  GIT_TERMINAL_PROMPT: "0",
+  GIT_CONFIG_NOSYSTEM: "1",
+  GIT_AUTHOR_NAME: "ACS Integration Simulation",
+  GIT_AUTHOR_EMAIL: "acs-integration-simulation@users.noreply.github.com",
+  GIT_COMMITTER_NAME: "ACS Integration Simulation",
+  GIT_COMMITTER_EMAIL: "acs-integration-simulation@users.noreply.github.com",
+  GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z",
+  GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z"
+} as const;
+
 export type GitRunner = (args: string[]) => Promise<{ exitCode: number | null; stdout: string; stderr: string }>;
 
 /** Runs git without a shell, with the repo's bounded-subprocess limits, in `cwd`. */
@@ -13,7 +29,7 @@ export function createGitRunner(cwd: string): GitRunner {
       cwd,
       command: "git",
       args,
-      env: { ...subprocessEnv(), GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1" },
+      env: { ...subprocessEnv(), ...SIMULATION_GIT_ENV },
       timeoutMs: GIT_TIMEOUT_MS,
       terminationGraceMs: 5_000,
       maxOutputBytes: 4 * 1024 * 1024
@@ -57,7 +73,13 @@ export class MergeSimulator {
       return { evaluated: false, clean: false, conflicts: [], behindBy: 0, detail: "not a full commit id" };
     }
     if (!(await this.hasCommit(baseSha)) || !(await this.hasCommit(headSha))) {
-      return { evaluated: false, clean: false, conflicts: [], behindBy: 0, detail: "commit is not present in the isolated clone" };
+      return {
+        evaluated: false,
+        clean: false,
+        conflicts: [],
+        behindBy: 0,
+        detail: "commit is not present in the isolated clone"
+      };
     }
     const behind = (await this.behindBy(baseSha, headSha)) ?? 0;
     const merged = await this.git(["merge-tree", "--write-tree", "--name-only", "--no-messages", baseSha, headSha]);
@@ -84,7 +106,13 @@ export class MergeSimulator {
 
   /** A synthetic merge commit for chaining simulations. Unreferenced: it exists only in the object database. */
   async syntheticMerge(tree: string, parents: string[]): Promise<string | undefined> {
-    const args = ["commit-tree", tree, ...parents.flatMap((parent) => ["-p", parent]), "-m", "acs integration simulation"];
+    const args = [
+      "commit-tree",
+      tree,
+      ...parents.flatMap((parent) => ["-p", parent]),
+      "-m",
+      "acs integration simulation"
+    ];
     const result = await this.git(args);
     const sha = result.stdout.trim();
     return result.exitCode === 0 && SHA.test(sha) ? sha : undefined;
