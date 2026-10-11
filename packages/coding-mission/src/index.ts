@@ -36,6 +36,16 @@ export {
   type MissionFlightRecord
 } from "./flight-recorder.js";
 export * from "./budget.js";
+export {
+  DEFAULT_RECOVERY_POLICY,
+  RECOVERY_POLICY_LIMITS,
+  recoveryBackoffMs,
+  resolveRecoveryPolicy,
+  type RecoveryDecision,
+  type RecoveryOutcome,
+  type RecoveryPolicy,
+  type WorkUnitEscalation
+} from "./recovery-policy.js";
 export type {
   AddWorkUnitsResult,
   BudgetRefusal,

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { RecoveryPolicy } from "./recovery-policy.js";
 import { readMissionFlightRecord, type MissionFlightRecord } from "./flight-recorder.js";
 import { NIMBLE_ROUTING_ALGORITHM_VERSION } from "@agent-control-stack/actor-router";
 import { ControlStackError, stableHash } from "@agent-control-stack/shared";
@@ -94,6 +95,8 @@ export interface CodingMissionPorts {
   };
   /** Running claims younger than this are left to the worker that holds them. */
   claimTtlMs?: number;
+  /** Bounds and backoff for recovering stale claims. Defaults are conservative; see recovery-policy.ts. */
+  recoveryPolicy?: Partial<RecoveryPolicy>;
   onTransition?: (from: CodingMissionState, to: CodingMissionState, missionId: string) => void;
 }
 
@@ -387,17 +390,23 @@ export class CodingMissionController {
         true
       );
     }
-    const ready = operations
-      .filter(
-        (operation) =>
-          operation.status === "pending" &&
-          operation.dependsOn.every(
-            (dependency) => operations.find((candidate) => candidate.operationId === dependency)?.status === "succeeded"
-          )
-      )
+    const eligible = operations.filter(
+      (operation) =>
+        operation.status === "pending" &&
+        operation.dependsOn.every(
+          (dependency) => operations.find((candidate) => candidate.operationId === dependency)?.status === "succeeded"
+        )
+    );
+    const nowMs = Date.parse(this.ports.now());
+    const ready = eligible
+      .filter((operation) => !operation.retryNotBefore || nowMs >= Date.parse(operation.retryNotBefore))
       .sort((left, right) => left.operationId.localeCompare(right.operationId));
     const nextOperation = ready[0];
-    if (!nextOperation) return this.degrade(mission, "dependency_blocked");
+    if (!nextOperation) {
+      // Units waiting out a recovery backoff are not blocked; the mission simply has nothing to run yet.
+      if (eligible.length > 0) return this.result(mission, false, "recovery_backoff");
+      return this.degrade(mission, "dependency_blocked");
+    }
     const route = await this.ports.router.route({
       mission,
       operation: { operationId: nextOperation.operationId, title: nextOperation.title }
@@ -429,9 +438,37 @@ export class CodingMissionController {
 
   private async recoverOperation(mission: CodingMissionRecord, operation: CodingOperation): Promise<AdvanceResult> {
     const observed = await this.ports.coder.observe({ mission, operationId: operation.operationId });
-    if (observed.status === "unknown") return this.result(mission, false, "unknown_operation");
+    if (observed.status === "unknown") {
+      // The executor cannot say whether the operation ran. Retrying could repeat a side effect, so an operator is told.
+      this.store.escalateRecovery(
+        mission.missionId,
+        operation.operationId,
+        "recovery_unsafe",
+        { observed: "unknown" },
+        this.ports.now()
+      );
+      return this.result(mission, false, "unknown_operation");
+    }
     if (observed.status === "absent") {
-      this.store.resetClaim(mission.missionId, operation.operationId);
+      if (!operation.claimToken) {
+        // Without the claim token there is no fence to release, so a stale worker could not be shut out.
+        this.store.escalateRecovery(
+          mission.missionId,
+          operation.operationId,
+          "recovery_unsafe",
+          { reason: "claim_has_no_fence" },
+          this.ports.now()
+        );
+        return this.degrade(mission, "recovery_unsafe");
+      }
+      const decision = this.store.releaseStaleClaim(
+        mission.missionId,
+        operation.operationId,
+        operation.claimToken,
+        this.ports.now(),
+        this.ports.recoveryPolicy
+      );
+      if (decision.outcome === "poisoned") return this.degrade(this.store.require(mission.missionId), "poison_work");
       return this.result(this.store.require(mission.missionId), true, "operation_absent");
     }
     if (observed.status === "succeeded" && observed.value) {
