@@ -10,7 +10,32 @@
 -- Recovery only ever follows confirmed non-execution (the executor reported the operation absent). Anything the system
 -- cannot prove safe is escalated, never retried.
 
-ALTER TABLE coding_operations ADD COLUMN retry_not_before TEXT;
+-- Every timestamp ACS writes is an ISO-8601 UTC string from toISOString() (24 characters). A value that does not parse
+-- would make a unit permanently unclaimable, so the database refuses it rather than leaving it to be misread later.
+ALTER TABLE coding_operations ADD COLUMN retry_not_before TEXT
+  CHECK (retry_not_before IS NULL OR (length(retry_not_before) = 24 AND julianday(retry_not_before) IS NOT NULL));
+
+-- Claim tokens are the fence. A token must never be reused for the same unit, or the holder of an earlier claim could
+-- present it against a later one (an ABA fence), and a recovery recorded for the old claim would be mistaken for the new
+-- one. Only a hash of each token is kept.
+CREATE TABLE work_unit_claim_tokens (
+  mission_id TEXT NOT NULL,
+  unit_id TEXT NOT NULL,
+  token_hash TEXT NOT NULL CHECK (length(token_hash) = 64),
+  first_claimed_at TEXT NOT NULL,
+  PRIMARY KEY (mission_id, unit_id, token_hash),
+  FOREIGN KEY (mission_id, unit_id) REFERENCES coding_operations (mission_id, operation_id)
+);
+CREATE TRIGGER work_unit_claim_tokens_no_update BEFORE UPDATE ON work_unit_claim_tokens
+BEGIN SELECT RAISE(ABORT, 'work_unit_claim_tokens: append-only'); END;
+CREATE TRIGGER work_unit_claim_tokens_no_delete BEFORE DELETE ON work_unit_claim_tokens
+BEGIN SELECT RAISE(ABORT, 'work_unit_claim_tokens: append-only'); END;
+CREATE TRIGGER work_unit_claim_tokens_no_replace BEFORE INSERT ON work_unit_claim_tokens
+WHEN EXISTS (
+  SELECT 1 FROM work_unit_claim_tokens
+  WHERE mission_id = NEW.mission_id AND unit_id = NEW.unit_id AND token_hash = NEW.token_hash
+)
+BEGIN SELECT RAISE(ABORT, 'work_unit_claim_tokens: append-only'); END;
 
 CREATE TABLE work_unit_recoveries (
   mission_id TEXT NOT NULL,

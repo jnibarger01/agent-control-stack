@@ -27,14 +27,20 @@ interface World {
   clock: { ms: number };
   observe: { value: ExternalOutcome<{ resultHash: string; files: string[] }> };
   executed: string[];
+  /** Ordered log of executor-boundary calls, for asserting the fence protocol. */
+  calls: string[];
   ports: CodingMissionPorts;
 }
 
-function world(extra: Partial<CodingMissionPorts> = {}): World {
+function world(
+  extra: Partial<CodingMissionPorts> = {},
+  coderExtras: Partial<CodingMissionPorts["coder"]> = { idempotent: true }
+): World {
   const w: World = {
     clock: { ms: 0 },
     observe: { value: { status: "absent" } },
     executed: [],
+    calls: [],
     ports: undefined as unknown as CodingMissionPorts
   };
   w.ports = {
@@ -49,11 +55,16 @@ function world(extra: Partial<CodingMissionPorts> = {}): World {
       })
     },
     coder: {
-      execute: async ({ operationId }) => {
+      execute: async ({ operationId, claimToken }) => {
+        w.calls.push(`execute:${claimToken ?? "-"}`);
         w.executed.push(operationId);
         return ok({ resultHash: "result-1", files: ["api.ts"] });
       },
-      observe: async () => w.observe.value
+      observe: async ({ claimToken }) => {
+        w.calls.push(`observe:${claimToken ?? "-"}`);
+        return w.observe.value;
+      },
+      ...coderExtras
     },
     reconciler: { reconcile: async () => ok({ headSha: HEAD, conflicts: [] }) },
     validator: {
@@ -314,7 +325,10 @@ describe("self-healing: backoff is enforced at the claim boundary", () => {
         route: {},
         claimedAt: new Date(at).toISOString()
       });
+    // The control plane's clock decides, so the claim is admitted only once that clock reaches the backoff.
+    w.clock.ms = notBefore - T0 - 1;
     expect(claim("early", notBefore - 1)).toEqual({ ok: false, outcome: "recovery_backoff" });
+    w.clock.ms = notBefore - T0;
     expect(claim("on-time", notBefore)).toMatchObject({ ok: true });
   });
 
@@ -373,5 +387,195 @@ describe("self-healing: recovery records are append-only", () => {
          VALUES ('m1', 'edit-api', 'poison_work', '{}', '2026-10-11T00:00:00.000Z')`
       )
     ).toThrow(/append-only/);
+  });
+});
+
+describe("self-healing: the executor boundary", () => {
+  it("fences the stale holder at the executor before it looks, then releases", async () => {
+    const w = world(
+      {},
+      {
+        fence: async ({ claimToken }) => {
+          w.calls.push(`fence:${claimToken}`);
+          return { status: "succeeded", value: undefined };
+        }
+      }
+    );
+    const controller = await planned(w);
+    vanishedWorker(controller, w, "tok-stale");
+    expect(await controller.advance("m1")).toMatchObject({ progressed: true, code: "operation_absent" });
+    expect(w.calls).toEqual(["fence:tok-stale", "observe:tok-stale"]);
+    expect(controller.store.operations("m1")[0]).toMatchObject({ status: "pending" });
+  });
+
+  it("does not release when the fence fails, and never observes past a failed fence", async () => {
+    for (const status of ["unknown", "rejected"] as const) {
+      const w = world(
+        {},
+        {
+          fence: async () => {
+            w.calls.push("fence");
+            return { status };
+          }
+        }
+      );
+      const controller = await planned(w);
+      vanishedWorker(controller, w, "tok-stale");
+      expect(await controller.advance("m1")).toMatchObject({ progressed: false, code: "fence_failed" });
+      expect(w.calls).toEqual(["fence"]);
+      expect(controller.store.operations("m1")[0]).toMatchObject({ status: "running", claimToken: "tok-stale" });
+      expect(controller.store.escalations("m1")).toEqual([
+        expect.objectContaining({ kind: "recovery_unsafe", detail: { reason: "fence_failed", status } })
+      ]);
+      expect(controller.store.db.prepare("SELECT COUNT(*) AS n FROM work_unit_recoveries").get()).toEqual({ n: 0 });
+    }
+  });
+
+  it("refuses to retry when the executor neither fences nor declares the operation idempotent", async () => {
+    const w = world({}, {});
+    const controller = await planned(w);
+    vanishedWorker(controller, w, "tok-stale");
+    expect(await controller.advance("m1")).toMatchObject({ progressed: false, code: "recovery_unsafe" });
+    expect(controller.store.operations("m1")[0]).toMatchObject({ status: "running", claimToken: "tok-stale" });
+    expect(controller.store.escalations("m1")).toEqual([
+      expect.objectContaining({ kind: "recovery_unsafe", detail: { reason: "executor_cannot_fence" } })
+    ]);
+    expect(w.executed).toEqual([]);
+  });
+
+  it("passes the claim token to the executor so a fencing executor can validate it", async () => {
+    const w = world();
+    const controller = await planned(w);
+    await controller.advance("m1");
+    expect(w.calls).toHaveLength(1);
+    expect(w.calls[0]).toMatch(/^execute:[0-9a-f-]{36}$/u);
+  });
+});
+
+describe("self-healing: claim tokens are single-use per unit", () => {
+  it("refuses to reuse the token of a recovered claim, so a recovery is never mistaken for the new claim", async () => {
+    const w = world();
+    const controller = await planned(w);
+    vanishedWorker(controller, w, "tok-1");
+    const decision = controller.store.releaseStaleClaim("m1", "edit-api", "tok-1", iso(w.clock.ms));
+    w.clock.ms = Date.parse(decision.retryNotBefore!) - T0 + 1;
+    expect(
+      controller.store.claimUnit("m1", "edit-api", {
+        token: "tok-1",
+        workerId: "w",
+        route: {},
+        claimedAt: iso(w.clock.ms)
+      })
+    ).toEqual({ ok: false, outcome: "claim_token_reused" });
+    expect(
+      controller.store.claimUnit("m1", "edit-api", {
+        token: "tok-2",
+        workerId: "w",
+        route: {},
+        claimedAt: iso(w.clock.ms)
+      })
+    ).toMatchObject({ ok: true });
+    // The earlier holder cannot complete the newer claim with its old token.
+    expect(() =>
+      controller.store.completeOperation("m1", "edit-api", "tok-1", { resultHash: "x", files: [] })
+    ).toThrowError(expect.objectContaining({ code: "coding_mission_claim_conflict" }));
+  });
+
+  it("scopes uniqueness to the unit", async () => {
+    const w = world({
+      planner: {
+        decompose: () => [
+          { operationId: "a", dependsOn: [], title: "a" },
+          { operationId: "b", dependsOn: [], title: "b" }
+        ]
+      }
+    });
+    const controller = await planned(w).catch(() => undefined);
+    expect(controller).toBeUndefined(); // planned() asserts a single edit-api unit; build the two-unit mission directly
+    const c = new CodingMissionController(":memory:", w.ports);
+    c.create({ missionId: "m1", repository: "example/repo", baseRef: "main", baseSha: BASE, summary: "two" });
+    await c.advance("m1");
+    const claim = (unit: string) =>
+      c.store.claimUnit("m1", unit, { token: "shared", workerId: "w", route: {}, claimedAt: iso(0) });
+    expect(claim("a")).toMatchObject({ ok: true });
+    expect(claim("b")).toMatchObject({ ok: true });
+  });
+});
+
+describe("self-healing: atomic poison and degradation", () => {
+  it("rolls the whole decision back if the mission cannot be degraded", async () => {
+    const w = world({ recoveryPolicy: { maxRecoveries: 0 } });
+    const controller = await planned(w);
+    vanishedWorker(controller, w, "tok-1");
+    const real = controller.store.transition.bind(controller.store);
+    controller.store.transition = () => {
+      throw new Error("process died before the degradation committed");
+    };
+    await expect(controller.advance("m1")).rejects.toThrow(/process died/);
+    controller.store.transition = real;
+    // Nothing from the poison decision survived: the unit is still the stale claim and no escalation exists.
+    expect(controller.store.operations("m1")[0]).toMatchObject({ status: "running", claimToken: "tok-1" });
+    expect(controller.store.db.prepare("SELECT COUNT(*) AS n FROM work_unit_recoveries").get()).toEqual({ n: 0 });
+    expect(controller.store.escalations("m1")).toEqual([]);
+    // The retry reaches the same, now complete, decision.
+    expect(await controller.advance("m1")).toMatchObject({ state: "DEGRADED", code: "poison_work" });
+  });
+});
+
+describe("self-healing: the clock that admits a claim", () => {
+  it("judges the backoff on the control plane's clock, not on a time the caller names", async () => {
+    const w = world();
+    const controller = await planned(w);
+    vanishedWorker(controller, w, "tok-1");
+    const decision = controller.store.releaseStaleClaim("m1", "edit-api", "tok-1", iso(w.clock.ms));
+    const future = new Date(Date.parse(decision.retryNotBefore!) + 3_600_000).toISOString();
+    expect(
+      controller.store.claimUnit("m1", "edit-api", { token: "early", workerId: "w", route: {}, claimedAt: future })
+    ).toEqual({ ok: false, outcome: "recovery_backoff" });
+  });
+
+  it("refuses an unparsable claim time instead of treating NaN as elapsed", async () => {
+    const store = new CodingMissionStore(":memory:");
+    store.createGeneral({ missionId: "m1", summary: "s", now: iso(0) });
+    store.addWorkUnits("m1", [{ unitId: "u", kind: "coding", title: "u" }], iso(0));
+    store.claimUnit("m1", "u", { token: "t1", workerId: "w", route: {}, claimedAt: iso(0) });
+    store.releaseStaleClaim("m1", "u", "t1", iso(0));
+    for (const claimedAt of ["not a date", "", "9999-99-99"]) {
+      expect(store.claimUnit("m1", "u", { token: `t-${claimedAt}`, workerId: "w", route: {}, claimedAt })).toEqual({
+        ok: false,
+        outcome: "recovery_backoff"
+      });
+    }
+  });
+});
+
+describe("self-healing: a malformed persisted backoff", () => {
+  it("is refused by the database", async () => {
+    const w = world();
+    const controller = await planned(w);
+    for (const bad of ["soon", "2026-10-11", "2026-13-45T00:00:00.000Z"]) {
+      expect(() =>
+        controller.store.db
+          .prepare("UPDATE coding_operations SET retry_not_before = ? WHERE operation_id = 'edit-api'")
+          .run(bad)
+      ).toThrow(/CHECK|constraint/iu);
+    }
+  });
+
+  it("is reported as an integrity failure when it is read, not as an endless backoff", async () => {
+    const w = world();
+    const controller = await planned(w);
+    controller.store.db.exec("PRAGMA ignore_check_constraints = ON");
+    controller.store.db.exec(
+      "UPDATE coding_operations SET retry_not_before = 'garbage-garbage-garbage!' WHERE operation_id = 'edit-api'"
+    );
+    controller.store.db.exec("PRAGMA ignore_check_constraints = OFF");
+    expect(() => controller.store.operations("m1")).toThrowError(
+      expect.objectContaining({ code: "coding_mission_integrity" })
+    );
+    await expect(controller.advance("m1")).rejects.toMatchObject({ code: "coding_mission_integrity" });
+    expect(
+      controller.store.claimUnit("m1", "edit-api", { token: "t", workerId: "w", route: {}, claimedAt: iso(0) })
+    ).toEqual({ ok: false, outcome: "recovery_backoff" });
   });
 });

@@ -12,19 +12,46 @@ and was retried forever, immediately, with nothing recorded.
 
 On a stale claim (older than `claimTtlMs`) the controller asks the executor whether the operation ran:
 
-| Executor says                     | Result                                                                                         |
-| --------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `absent` (confirmed it never ran) | `releaseStaleClaim`: recorded recovery, exponential backoff, unit back to `pending`.           |
-| `succeeded`                       | Existing reconciliation; the result is adopted. Unchanged.                                     |
+| Executor says                     | Result                                                                                        |
+| --------------------------------- | --------------------------------------------------------------------------------------------- |
+| `absent` (confirmed it never ran) | `releaseStaleClaim`: recorded recovery, exponential backoff, unit back to `pending`.          |
+| `succeeded`                       | Existing reconciliation; the result is adopted. Unchanged.                                    |
 | `unknown`                         | **Not retried.** A `recovery_unsafe` escalation is recorded (once); the claim stays as it is. |
-| anything else                     | Existing behavior: the mission is degraded. Unchanged.                                         |
+| anything else                     | Existing behavior: the mission is degraded. Unchanged.                                        |
 
 A stale claim with no claim token has no fence to release, so it is escalated as `recovery_unsafe` and the mission is
 degraded. Recovery follows confirmed non-execution only; an effect the system cannot rule out is never repeated.
 
+### Fencing at the executor
+
+Releasing a claim in the database only stops the old holder from _completing_ the unit. A worker that was slow, not dead,
+could still resume after the executor reported the operation `absent` and perform it. So "absent" is trusted only if the
+old holder cannot run now:
+
+1. If the executor port provides `fence`, recovery calls it first with the stale claim token and looks at the operation only
+   after it succeeds. A fence that fails or is unknown escalates `recovery_unsafe` (`fence_failed`) and releases nothing.
+2. Otherwise the executor must declare `idempotent: true` (running the operation again converges with no repeated side
+   effect). The default runtime's marker executor does.
+3. Otherwise nothing is retried: `recovery_unsafe` with `executor_cannot_fence`, for an operator.
+
+The claim token is also passed to `execute` and `observe`, so a fencing executor can validate it.
+
+### Claim tokens
+
+A token may be used for one claim of a unit, ever (`work_unit_claim_tokens`, hash only, append-only). Reusing one is refused
+(`claim_token_reused`), so the holder of an earlier claim cannot present its token against a later one, and a recovery
+recorded for an old claim cannot be mistaken for the new one.
+
+### The clock that admits a claim
+
+The controller sets the store's `admissionClock` to the control plane's clock. The backoff is judged against it, not against
+the `claimedAt` a caller supplies, so naming a later time does not skip the wait. An unparsable time is a refusal. The
+backoff column is checked by the database (a 24-character ISO UTC timestamp), and reading a value that does not parse is a
+`coding_mission_integrity` error: a corrupt value stops the mission loudly instead of stalling it as "waiting" forever.
+
 ### Fencing
 
-The claim token is the fence. `releaseStaleClaim` only accepts the current claimant's token. After release the unit's
+The claim token is the database fence. `releaseStaleClaim` only accepts the current claimant's token. After release the unit's
 token is cleared, so the old holder cannot complete the unit (`completeOperation` requires the matching token) and
 cannot release or complete a newer claim. Tests cover a late completion, a never-seen token, and a stale holder against
 a newer claim.
@@ -45,7 +72,7 @@ one hour) so a misconfiguration cannot restore an unbounded loop.
 
 ### Poison work and escalation
 
-The recovery after the limit stops the unit instead: status `failed`, category `retry_budget_exhausted` (already
+The recovery after the limit stops the unit instead, in the same transaction that degrades the mission (so a crash cannot leave a running mission with a failed unit and lose the diagnosis): status `failed`, category `retry_budget_exhausted` (already
 non-retryable), claim cleared, a `poison_work` escalation recorded, and the mission degraded with code `poison_work`.
 `work_unit_escalations` is append-only evidence for an operator, one row per unit and kind. It is not a control;
 acknowledging or resolving an escalation is a later slice, with the Mission Control surface.

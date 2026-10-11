@@ -41,11 +41,29 @@ export interface CodingMissionPorts {
       mission: CodingMissionRecord;
       operationId: string;
       workerId: string;
+      /** The claim's fence. A fencing executor refuses to start or commit work under a token it has revoked. */
+      claimToken?: string;
     }): Promise<ExternalOutcome<{ resultHash: string; files: string[] }>>;
     observe(input: {
       mission: CodingMissionRecord;
       operationId: string;
+      claimToken?: string;
     }): Promise<ExternalOutcome<{ resultHash: string; files: string[] }>>;
+    /**
+     * Revoke the stale claim at the executor: after this resolves as `succeeded`, a worker holding `claimToken` can no
+     * longer start the operation or commit its effects. Recovery calls it before it looks at the operation, so "absent"
+     * cannot be invalidated by the old holder resuming.
+     */
+    fence?(input: {
+      mission: CodingMissionRecord;
+      operationId: string;
+      claimToken: string;
+    }): Promise<ExternalOutcome<unknown>>;
+    /**
+     * Declares that running the operation again converges on the same result with no repeated side effect, so a stale
+     * holder resuming is harmless. Without `fence` or this declaration, recovery cannot be proven safe and is escalated.
+     */
+    idempotent?: boolean;
   };
   reconciler: {
     reconcile(input: {
@@ -140,6 +158,8 @@ export class CodingMissionController {
     private readonly ports: CodingMissionPorts
   ) {
     this.store = dbOrPath instanceof CodingMissionStore ? dbOrPath : new CodingMissionStore(dbOrPath);
+    // Claim admission (recovery backoff) is judged on the control plane's clock, not on a time a caller names.
+    this.store.admissionClock = () => Date.parse(this.ports.now());
   }
 
   close(): void {
@@ -431,45 +451,67 @@ export class CodingMissionController {
     const executed = await this.ports.coder.execute({
       mission,
       operationId: nextOperation.operationId,
-      workerId: route.workerId
+      workerId: route.workerId,
+      claimToken: token
     });
     return this.acceptCoderResult(mission, nextOperation.operationId, token, executed);
   }
 
   private async recoverOperation(mission: CodingMissionRecord, operation: CodingOperation): Promise<AdvanceResult> {
-    const observed = await this.ports.coder.observe({ mission, operationId: operation.operationId });
-    if (observed.status === "unknown") {
-      // The executor cannot say whether the operation ran. Retrying could repeat a side effect, so an operator is told.
+    const unsafe = (detail: Record<string, unknown>, code: string, degrade = false): AdvanceResult => {
       this.store.escalateRecovery(
         mission.missionId,
         operation.operationId,
         "recovery_unsafe",
-        { observed: "unknown" },
+        detail,
         this.ports.now()
       );
-      return this.result(mission, false, "unknown_operation");
+      return degrade ? this.degrade(mission, code) : this.result(mission, false, code);
+    };
+
+    // Fence the stale holder at the executor before looking: if it were still able to start, "absent" would prove nothing.
+    let fenced = false;
+    if (this.ports.coder.fence && operation.claimToken) {
+      const fence = await this.ports.coder.fence({
+        mission,
+        operationId: operation.operationId,
+        claimToken: operation.claimToken
+      });
+      if (fence.status !== "succeeded") return unsafe({ reason: "fence_failed", status: fence.status }, "fence_failed");
+      fenced = true;
+    }
+
+    const observed = await this.ports.coder.observe({
+      mission,
+      operationId: operation.operationId,
+      ...(operation.claimToken ? { claimToken: operation.claimToken } : {})
+    });
+    if (observed.status === "unknown") {
+      // The executor cannot say whether the operation ran. Retrying could repeat a side effect, so an operator is told.
+      return unsafe({ observed: "unknown" }, "unknown_operation");
     }
     if (observed.status === "absent") {
-      if (!operation.claimToken) {
-        // Without the claim token there is no fence to release, so a stale worker could not be shut out.
-        this.store.escalateRecovery(
+      // Without the claim token there is no fence to release, so a stale worker could not be shut out.
+      if (!operation.claimToken) return unsafe({ reason: "claim_has_no_fence" }, "recovery_unsafe", true);
+      // Absence only proves the operation did not run if the old holder cannot run it now: either the executor fenced it,
+      // or the operation is declared idempotent. Otherwise this is not proven safe, and nothing is retried.
+      if (!fenced && this.ports.coder.idempotent !== true) {
+        return unsafe({ reason: "executor_cannot_fence" }, "recovery_unsafe");
+      }
+      const claimToken = operation.claimToken;
+      // One commit: the unit's failure and the mission's degradation. A crash between them would leave a RUNNING mission
+      // with a failed unit that later resumes as "dependency_blocked", losing the poison_work diagnosis.
+      return this.store.transaction(() => {
+        const decision = this.store.releaseStaleClaim(
           mission.missionId,
           operation.operationId,
-          "recovery_unsafe",
-          { reason: "claim_has_no_fence" },
-          this.ports.now()
+          claimToken,
+          this.ports.now(),
+          this.ports.recoveryPolicy
         );
-        return this.degrade(mission, "recovery_unsafe");
-      }
-      const decision = this.store.releaseStaleClaim(
-        mission.missionId,
-        operation.operationId,
-        operation.claimToken,
-        this.ports.now(),
-        this.ports.recoveryPolicy
-      );
-      if (decision.outcome === "poisoned") return this.degrade(this.store.require(mission.missionId), "poison_work");
-      return this.result(this.store.require(mission.missionId), true, "operation_absent");
+        if (decision.outcome === "poisoned") return this.degrade(this.store.require(mission.missionId), "poison_work");
+        return this.result(this.store.require(mission.missionId), true, "operation_absent");
+      });
     }
     if (observed.status === "succeeded" && observed.value) {
       const token = operation.claimToken ?? "reconciled";

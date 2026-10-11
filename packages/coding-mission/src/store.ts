@@ -242,7 +242,8 @@ export type ClaimUnitResult =
         | "dependencies_unmet"
         | "claim_conflict"
         | "verification_requirement_missing"
-        | "recovery_backoff";
+        | "recovery_backoff"
+        | "claim_token_reused";
     };
 export type RetryUnitResult =
   | { ok: true; attempt: number }
@@ -331,6 +332,12 @@ export class CodingMissionStore {
   }
 
   private transactionDepth = 0;
+
+  /**
+   * The control plane's clock, in epoch milliseconds. When set, claim admission (the recovery backoff) is judged against
+   * it instead of the `claimedAt` a caller supplies, so a caller cannot reclaim early by naming a later time.
+   */
+  admissionClock?: () => number;
 
   transaction<T>(work: () => T): T {
     if (this.transactionDepth > 0) return work();
@@ -571,7 +578,7 @@ export class CodingMissionStore {
       ...(row.worker_id ? { workerId: row.worker_id } : {}),
       ...(row.route_json ? { route: JSON.parse(row.route_json) as unknown } : {}),
       ...(row.result_hash ? { resultHash: row.result_hash } : {}),
-      ...(row.retry_not_before ? { retryNotBefore: row.retry_not_before } : {}),
+      ...(row.retry_not_before ? { retryNotBefore: validRetryNotBefore(row.retry_not_before, row.operation_id) } : {}),
       files: row.files_json ? parseStringArray(row.files_json) : []
     }));
   }
@@ -643,9 +650,20 @@ export class CodingMissionStore {
       const waiting = this.db
         .prepare("SELECT retry_not_before FROM coding_operations WHERE mission_id = ? AND operation_id = ?")
         .get(missionId, operationId) as { retry_not_before: string | null } | undefined;
-      if (waiting?.retry_not_before && Date.parse(claim.claimedAt) < Date.parse(waiting.retry_not_before)) {
-        return { ok: false, outcome: "recovery_backoff" };
+      if (waiting?.retry_not_before) {
+        const admittedAt = this.admissionClock ? this.admissionClock() : Date.parse(claim.claimedAt);
+        const notBefore = Date.parse(waiting.retry_not_before);
+        // An unparsable time on either side is a refusal, never an admission: NaN compares false against everything.
+        if (!Number.isFinite(admittedAt) || !Number.isFinite(notBefore) || admittedAt < notBefore) {
+          return { ok: false, outcome: "recovery_backoff" };
+        }
       }
+      // A claim token is the fence and may be used for one claim of a unit, ever.
+      const tokenHash = stableHash({ domain: "acs.claim-token.v1", missionId, operationId, token: claim.token });
+      const reused = this.db
+        .prepare("SELECT 1 FROM work_unit_claim_tokens WHERE mission_id = ? AND unit_id = ? AND token_hash = ?")
+        .get(missionId, operationId, tokenHash);
+      if (reused) return { ok: false, outcome: "claim_token_reused" };
       const budget = this.budget(missionId);
       let decision: BudgetDecision = { allowed: true, exhausted: [], unaccounted: [] };
       if (budget) {
@@ -670,6 +688,11 @@ export class CodingMissionStore {
         )
         .run(claim.token, claim.claimedAt, claim.workerId, JSON.stringify(claim.route), missionId, operationId);
       if (result.changes !== 1) return { ok: false, outcome: "claim_conflict" };
+      this.db
+        .prepare(
+          "INSERT INTO work_unit_claim_tokens (mission_id, unit_id, token_hash, first_claimed_at) VALUES (?, ?, ?, ?)"
+        )
+        .run(missionId, operationId, tokenHash, claim.claimedAt);
       this.event(
         missionId,
         "work_unit.claimed",
@@ -1966,4 +1989,18 @@ export class CodingMissionStore {
       updatedAt: row.updated_at
     };
   }
+}
+
+/**
+ * A persisted backoff that does not parse would silently make a unit unclaimable forever (NaN compares false). Reading it is
+ * an integrity failure, reported loudly instead of stalling the mission.
+ */
+function validRetryNotBefore(value: string, unitId: string): string {
+  if (!Number.isFinite(Date.parse(value))) {
+    throw new ControlStackError(
+      "coding_mission_integrity",
+      `work unit ${unitId} has an unreadable recovery backoff timestamp`
+    );
+  }
+  return value;
 }
