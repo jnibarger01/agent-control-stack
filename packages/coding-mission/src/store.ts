@@ -1,7 +1,14 @@
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
-import { ControlStackError, applyControlPlaneMigrations, stableHash } from "@agent-control-stack/shared";
+import { ControlStackError, applyControlPlaneMigrations, redactValue, stableHash } from "@agent-control-stack/shared";
 import { appendFlightRecord, appendMissionEvent, evidenceBindingBody } from "./flight-recorder.js";
+import {
+  recoveryBackoffMs,
+  resolveRecoveryPolicy,
+  type RecoveryDecision,
+  type RecoveryPolicy,
+  type WorkUnitEscalation
+} from "./recovery-policy.js";
 import { verificationCriterionSchema, type VerificationCriterion } from "@agent-control-stack/verification";
 import {
   BudgetDecision,
@@ -117,6 +124,8 @@ export interface CodingOperation {
   workerId?: string;
   route?: unknown;
   resultHash?: string;
+  /** Set after a recovery: the unit will not be claimed before this instant. */
+  retryNotBefore?: string;
   files: string[];
 }
 
@@ -228,7 +237,13 @@ export type ClaimUnitResult =
   | BudgetRefusal
   | {
       ok: false;
-      outcome: "mission_not_active" | "dependencies_unmet" | "claim_conflict" | "verification_requirement_missing";
+      outcome:
+        | "mission_not_active"
+        | "dependencies_unmet"
+        | "claim_conflict"
+        | "verification_requirement_missing"
+        | "recovery_backoff"
+        | "claim_token_reused";
     };
 export type RetryUnitResult =
   | { ok: true; attempt: number }
@@ -322,6 +337,12 @@ export class CodingMissionStore {
   }
 
   private transactionDepth = 0;
+
+  /**
+   * The control plane's clock, in epoch milliseconds. When set, claim admission (the recovery backoff) is judged against
+   * it instead of the `claimedAt` a caller supplies, so a caller cannot reclaim early by naming a later time.
+   */
+  admissionClock?: () => number;
 
   transaction<T>(work: () => T): T {
     if (this.transactionDepth > 0) return work();
@@ -535,7 +556,8 @@ export class CodingMissionStore {
   operations(missionId: string): CodingOperation[] {
     const rows = this.db
       .prepare(
-        `SELECT operation_id, depends_on, title, status, claim_token, claimed_at, worker_id, route_json, result_hash, files_json
+        `SELECT operation_id, depends_on, title, status, claim_token, claimed_at, worker_id, route_json, result_hash,
+                files_json, retry_not_before
          FROM coding_operations WHERE mission_id = ? ORDER BY operation_id`
       )
       .all(missionId) as Array<{
@@ -549,6 +571,7 @@ export class CodingMissionStore {
       route_json: string | null;
       result_hash: string | null;
       files_json: string | null;
+      retry_not_before: string | null;
     }>;
     return rows.map((row) => ({
       operationId: row.operation_id,
@@ -560,6 +583,7 @@ export class CodingMissionStore {
       ...(row.worker_id ? { workerId: row.worker_id } : {}),
       ...(row.route_json ? { route: JSON.parse(row.route_json) as unknown } : {}),
       ...(row.result_hash ? { resultHash: row.result_hash } : {}),
+      ...(row.retry_not_before ? { retryNotBefore: validRetryNotBefore(row.retry_not_before, row.operation_id) } : {}),
       files: row.files_json ? parseStringArray(row.files_json) : []
     }));
   }
@@ -627,6 +651,24 @@ export class CodingMissionStore {
       if (!parseStringArray(unit.depends_on).every((dependency) => succeeded.has(dependency))) {
         return { ok: false, outcome: "dependencies_unmet" };
       }
+      // A recovered unit waits out its backoff. ACS's own clock decides, via the caller-supplied claim time.
+      const waiting = this.db
+        .prepare("SELECT retry_not_before FROM coding_operations WHERE mission_id = ? AND operation_id = ?")
+        .get(missionId, operationId) as { retry_not_before: string | null } | undefined;
+      if (waiting?.retry_not_before) {
+        const admittedAt = this.admissionClock ? this.admissionClock() : Date.parse(claim.claimedAt);
+        const notBefore = Date.parse(waiting.retry_not_before);
+        // An unparsable time on either side is a refusal, never an admission: NaN compares false against everything.
+        if (!Number.isFinite(admittedAt) || !Number.isFinite(notBefore) || admittedAt < notBefore) {
+          return { ok: false, outcome: "recovery_backoff" };
+        }
+      }
+      // A claim token is the fence and may be used for one claim of a unit, ever.
+      const tokenHash = stableHash({ domain: "acs.claim-token.v1", missionId, operationId, token: claim.token });
+      const reused = this.db
+        .prepare("SELECT 1 FROM work_unit_claim_tokens WHERE mission_id = ? AND unit_id = ? AND token_hash = ?")
+        .get(missionId, operationId, tokenHash);
+      if (reused) return { ok: false, outcome: "claim_token_reused" };
       const budget = this.budget(missionId);
       let decision: BudgetDecision = { allowed: true, exhausted: [], unaccounted: [] };
       if (budget) {
@@ -651,6 +693,11 @@ export class CodingMissionStore {
         )
         .run(claim.token, claim.claimedAt, claim.workerId, JSON.stringify(claim.route), missionId, operationId);
       if (result.changes !== 1) return { ok: false, outcome: "claim_conflict" };
+      this.db
+        .prepare(
+          "INSERT INTO work_unit_claim_tokens (mission_id, unit_id, token_hash, first_claimed_at) VALUES (?, ?, ?, ?)"
+        )
+        .run(missionId, operationId, tokenHash, claim.claimedAt);
       this.event(
         missionId,
         "work_unit.claimed",
@@ -659,6 +706,192 @@ export class CodingMissionStore {
       );
       return { ok: true, attempt: unit.attempt + 1, decision };
     });
+  }
+
+  /**
+   * Recover a unit whose claim went stale and whose executor confirmed the operation never ran. Idempotent on the
+   * released claim: the same claim token always yields the first decision. The claim token is the fence, so only the
+   * current claimant's token can be released, and a stale worker holding an older token can neither release nor
+   * complete anything afterwards. Each recovery is a durable record; once the policy limit is reached the unit is
+   * stopped as poison work (failed, non-retryable) and an escalation is recorded for an operator.
+   */
+  releaseStaleClaim(
+    missionId: string,
+    operationId: string,
+    claimToken: string,
+    now: string,
+    policy?: Partial<RecoveryPolicy>
+  ): RecoveryDecision {
+    const limits = resolveRecoveryPolicy(policy);
+    const fenceHash = stableHash({ domain: "acs.claim-fence.v1", missionId, operationId, claimToken });
+    return this.transaction(() => {
+      const prior = this.db
+        .prepare(
+          `SELECT seq, outcome, retry_not_before FROM work_unit_recoveries
+           WHERE mission_id = ? AND unit_id = ? AND claim_fence_hash = ?`
+        )
+        .get(missionId, operationId, fenceHash) as
+        { seq: number; outcome: "rescheduled" | "poisoned"; retry_not_before: string | null } | undefined;
+      if (prior) {
+        return {
+          outcome: prior.outcome,
+          sequence: prior.seq,
+          ...(prior.retry_not_before ? { retryNotBefore: prior.retry_not_before } : {}),
+          replayed: true
+        };
+      }
+      const unit = this.db
+        .prepare(
+          `SELECT status, claim_token, worker_id, attempt FROM coding_operations
+           WHERE mission_id = ? AND operation_id = ?`
+        )
+        .get(missionId, operationId) as
+        { status: string; claim_token: string | null; worker_id: string | null; attempt: number } | undefined;
+      if (!unit || unit.claim_token !== claimToken || !["running", "unknown", "checkpointed"].includes(unit.status)) {
+        throw new ControlStackError("coding_mission_claim_conflict", "the claim to recover is not the current claim");
+      }
+      const sequence =
+        (
+          this.db
+            .prepare("SELECT COUNT(*) AS n FROM work_unit_recoveries WHERE mission_id = ? AND unit_id = ?")
+            .get(missionId, operationId) as { n: number }
+        ).n + 1;
+      const poisoned = sequence > limits.maxRecoveries;
+      const retryNotBefore = poisoned
+        ? undefined
+        : new Date(Date.parse(now) + recoveryBackoffMs(sequence, limits)).toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO work_unit_recoveries
+             (mission_id, unit_id, seq, claim_fence_hash, claim_attempt, worker_id, reason, outcome, retry_not_before, decided_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'stale_claim_confirmed_absent', ?, ?, ?)`
+        )
+        .run(
+          missionId,
+          operationId,
+          sequence,
+          fenceHash,
+          unit.attempt,
+          unit.worker_id,
+          poisoned ? "poisoned" : "rescheduled",
+          retryNotBefore ?? null,
+          now
+        );
+      if (poisoned) {
+        this.db
+          .prepare(
+            `UPDATE coding_operations
+             SET status = 'failed', failure_category = 'retry_budget_exhausted', claim_token = NULL, worker_id = NULL,
+                 retry_not_before = NULL
+             WHERE mission_id = ? AND operation_id = ?`
+          )
+          .run(missionId, operationId);
+        this.insertEscalation(
+          missionId,
+          operationId,
+          "poison_work",
+          { recoveries: sequence - 1, maxRecoveries: limits.maxRecoveries, lastAttempt: unit.attempt },
+          now
+        );
+        this.event(
+          missionId,
+          "work_unit.poisoned",
+          { unitId: operationId, recoveries: sequence - 1, maxRecoveries: limits.maxRecoveries },
+          now
+        );
+        this.event(missionId, "recovery.escalated", { unitId: operationId, kind: "poison_work" }, now);
+      } else {
+        this.db
+          .prepare(
+            `UPDATE coding_operations
+             SET status = 'pending', claim_token = NULL, worker_id = NULL, attempt = MAX(attempt - 1, 0),
+                 retry_not_before = ?
+             WHERE mission_id = ? AND operation_id = ?`
+          )
+          .run(retryNotBefore!, missionId, operationId);
+        this.event(
+          missionId,
+          "work_unit.recovered",
+          { unitId: operationId, sequence, retryNotBefore, reason: "stale_claim_confirmed_absent" },
+          now
+        );
+      }
+      this.cancelStaleDescendants(missionId, operationId, "claim_released", now);
+      return {
+        outcome: poisoned ? "poisoned" : "rescheduled",
+        sequence,
+        ...(retryNotBefore ? { retryNotBefore } : {}),
+        replayed: false
+      } as RecoveryDecision;
+    });
+  }
+
+  /**
+   * Record that recovery cannot be proven safe (for example the claim has no fence, or the executor could not say whether
+   * the operation ran). Nothing is retried; an operator must look. Idempotent per unit and kind.
+   */
+  escalateRecovery(
+    missionId: string,
+    operationId: string,
+    kind: "recovery_unsafe",
+    detail: unknown,
+    now: string
+  ): void {
+    this.transaction(() => {
+      if (this.insertEscalation(missionId, operationId, kind, redactValue(detail) ?? null, now)) {
+        this.event(missionId, "recovery.escalated", { unitId: operationId, kind }, now);
+      }
+    });
+  }
+
+  /**
+   * Insert an escalation unless one already exists for the unit and kind. The table's BEFORE INSERT guard aborts on a
+   * duplicate key (so INSERT OR REPLACE cannot rewrite history), which means INSERT OR IGNORE would abort too; the
+   * existence check is explicit instead. Returns whether a row was written.
+   */
+  private insertEscalation(
+    missionId: string,
+    operationId: string,
+    kind: string,
+    detail: unknown,
+    now: string
+  ): boolean {
+    const exists = this.db
+      .prepare("SELECT 1 FROM work_unit_escalations WHERE mission_id = ? AND unit_id = ? AND kind = ?")
+      .get(missionId, operationId, kind);
+    if (exists) return false;
+    this.db
+      .prepare(
+        `INSERT INTO work_unit_escalations (mission_id, unit_id, kind, detail_json, created_at)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(missionId, operationId, kind, JSON.stringify(detail), now);
+    return true;
+  }
+
+  escalations(missionId: string): WorkUnitEscalation[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT escalation_id, mission_id, unit_id, kind, detail_json, created_at FROM work_unit_escalations
+           WHERE mission_id = ? ORDER BY escalation_id`
+        )
+        .all(missionId) as Array<{
+        escalation_id: number;
+        mission_id: string;
+        unit_id: string;
+        kind: "poison_work" | "recovery_unsafe";
+        detail_json: string;
+        created_at: string;
+      }>
+    ).map((row) => ({
+      escalationId: row.escalation_id,
+      missionId: row.mission_id,
+      unitId: row.unit_id,
+      kind: row.kind,
+      detail: JSON.parse(row.detail_json) as unknown,
+      createdAt: row.created_at
+    }));
   }
 
   resetClaim(missionId: string, operationId: string): void {
@@ -1761,4 +1994,18 @@ export class CodingMissionStore {
       updatedAt: row.updated_at
     };
   }
+}
+
+/**
+ * A persisted backoff that does not parse would silently make a unit unclaimable forever (NaN compares false). Reading it is
+ * an integrity failure, reported loudly instead of stalling the mission.
+ */
+function validRetryNotBefore(value: string, unitId: string): string {
+  if (!Number.isFinite(Date.parse(value))) {
+    throw new ControlStackError(
+      "coding_mission_integrity",
+      `work unit ${unitId} has an unreadable recovery backoff timestamp`
+    );
+  }
+  return value;
 }
