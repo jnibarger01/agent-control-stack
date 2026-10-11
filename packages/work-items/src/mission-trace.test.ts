@@ -148,6 +148,39 @@ describe("mission audit projection", () => {
     }
   });
 
+  it("does not apply the current observation bound to as-of reads", () => {
+    const ctx = fixture();
+    try {
+      const cutoff = ctx.store.getMissionTrace(ctx.mission.id).events.at(-1)!.event.sequence;
+      const db = new DatabaseSync(ctx.path);
+      try {
+        const now = new Date().toISOString();
+        const insert = db.prepare(
+          "INSERT INTO jev_observation_outbox " +
+            "(observation_id, work_item_id, trace_id, question_set_version, classifier_version, status, attempts, max_attempts, created_at, available_at) " +
+            "VALUES (?, ?, ?, ?, ?, 'pending', 0, 3, ?, ?)"
+        );
+        for (let index = 0; index < 2049; index++) {
+          insert.run(
+            `obs_${index.toString(16).padStart(24, "0")}`,
+            ctx.mission.id,
+            "trace_historical_observation",
+            `questions@${index}`,
+            `classifier@${index}`,
+            now,
+            now
+          );
+        }
+      } finally {
+        db.close();
+      }
+      expect(() => ctx.store.getMissionTrace(ctx.mission.id, { asOfSequence: cutoff })).not.toThrow();
+      expect(() => ctx.store.getMissionTrace(ctx.mission.id)).toThrow("too many historical observations");
+    } finally {
+      ctx.close();
+    }
+  });
+
   it("bounds input and rejects unknown missions", () => {
     const ctx = fixture();
     try {

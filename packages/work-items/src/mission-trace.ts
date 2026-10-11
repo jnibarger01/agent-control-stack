@@ -53,10 +53,12 @@ export function readMissionTrace(
   const { afterSequence, limit, asOfSequence } = missionTraceQuerySchema.parse(query);
   if (!store.get(missionId)) throw new ControlStackError("work_item_not_found", "mission not found");
   const rows = db
-    .prepare(`SELECT p.permit_id FROM change_set_operation_permits p
+    .prepare(
+      `SELECT p.permit_id FROM change_set_operation_permits p
       JOIN audit_events permit_event ON permit_event.id = p.audit_event_id
       WHERE p.mission_id = ? AND (? IS NULL OR permit_event.sequence <= ?)
-      ORDER BY permit_event.sequence LIMIT 2049`)
+      ORDER BY permit_event.sequence LIMIT 2049`
+    )
     .all(missionId, asOfSequence ?? null, asOfSequence ?? null) as Array<{ permit_id: string }>;
   if (rows.length > 2048)
     throw new ControlStackError("mission_trace_resource_limit", "too many historical operation links");
@@ -94,21 +96,24 @@ export function readMissionTrace(
       )
       .all(workIds) as Array<{ work_item_id: string; trace_id: string }>
   ).map((row) => ({ workItemId: row.work_item_id, traceId: row.trace_id }));
-  const observationRows = db
-    .prepare(
-      `SELECT observation_id, work_item_id, trace_id, status,
+  const observationRows =
+    asOfSequence === undefined
+      ? (db
+          .prepare(
+            `SELECT observation_id, work_item_id, trace_id, status,
     classifier_version, question_set_version, telemetry_correlation_id FROM jev_observation_outbox
     WHERE work_item_id IN (SELECT value FROM json_each(?)) LIMIT 2049`
-    )
-    .all(workIds) as Array<{
-    observation_id: string;
-    work_item_id: string;
-    trace_id: string;
-    status: string;
-    classifier_version: string;
-    question_set_version: string;
-    telemetry_correlation_id: string | null;
-  }>;
+          )
+          .all(workIds) as Array<{
+          observation_id: string;
+          work_item_id: string;
+          trace_id: string;
+          status: string;
+          classifier_version: string;
+          question_set_version: string;
+          telemetry_correlation_id: string | null;
+        }>)
+      : [];
   if (observationRows.length > 2048)
     throw new ControlStackError("mission_trace_resource_limit", "too many historical observations");
   const observations = observationRows.map((row) => ({
@@ -135,7 +140,18 @@ export function readMissionTrace(
         WHERE work_item_id IN (SELECT value FROM json_each(?)))
     ) ORDER BY sequence ASC LIMIT ?`
     )
-    .all(afterSequence, asOfSequence ?? null, asOfSequence ?? null, workIds, workIds, workIds, missionId, workIds, workIds, limit + 1) as Array<{
+    .all(
+      afterSequence,
+      asOfSequence ?? null,
+      asOfSequence ?? null,
+      workIds,
+      workIds,
+      workIds,
+      missionId,
+      workIds,
+      workIds,
+      limit + 1
+    ) as Array<{
     id: string;
     sequence: number;
     previous_hash: string;
