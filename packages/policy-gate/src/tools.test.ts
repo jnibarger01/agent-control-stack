@@ -62,7 +62,7 @@ describe("policy-gated work item tools", () => {
     }
   });
 
-  it("blocks claimed work when required approval is missing", () => {
+  it("returns claimed work to needs_approval when required approval is missing", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-tools-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));
     const tools = createWorkItemTools(store, fakePolicy("require_approval"));
@@ -79,7 +79,10 @@ describe("policy-gated work item tools", () => {
 
       const claimed = tools.claim_next_approved_work_item({ workerId: "worker-a" });
 
-      expect(claimed?.status).toBe("blocked");
+      // Claim-time re-evaluation found an approval the item no longer has, so it goes back to
+      // awaiting approval instead of being blocked. The policy decision is on the audit chain.
+      expect(claimed).toBeUndefined();
+      expect(store.get(workItem.id)?.status).toBe("needs_approval");
       expect(store.readEvents().map((event) => event.name)).toContain("policy.decided");
     } finally {
       store.close();

@@ -1,0 +1,13 @@
+{
+  "runtimeId": "<must equal JC_RUNTIME_ID of the jace-commander server, e.g. jc-local>",
+  "keyId": "jc-approver-1",
+  "stateDir": "/var/lib/jace-commander/approverd",
+  "keyPath": "/var/lib/jace-commander/approverd-key/approver.key",
+  "requestSocket": "/run/jace-commander/request/request.sock",
+  "decideSocket": "/run/jace-commander/decide/decide.sock",
+  "requestGroup": "jc",
+  "decideGroup": "jc-approvers",
+  "approvalTtlMs": 900000,
+  "tokenTtlMs": 25000,
+  "maxPending": 64
+}

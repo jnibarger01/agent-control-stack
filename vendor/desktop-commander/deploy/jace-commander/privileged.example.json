@@ -4,5 +4,7 @@
   "runtimeId": "<must equal JC_RUNTIME_ID of the jace-commander server, e.g. jc-jacen-ubuntu>",
   "nonceDir": "/var/lib/jace-commander/nonces",
   "auditPath": "/var/log/jace-commander/privileged-audit.jsonl",
-  "maxTimeoutMs": 600000
+  "maxTimeoutMs": 600000,
+  "localPublicKey": "<OPTIONAL, set with localKeyId: base64url SPKI DER Ed25519 public key of approverd (jc.local.v1)>",
+  "localKeyId": "<OPTIONAL: approverd key id, must differ from acsKeyId, e.g. jc-approver-1>"
 }

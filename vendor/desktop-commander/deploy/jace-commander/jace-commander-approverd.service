@@ -1,0 +1,50 @@
+# approverd: the local human-approval authority (ADR 0026 D4). SYSTEM unit.
+# Installed by install-approverd.sh. It owns the jc.local.v1 signing key and must
+# be a DIFFERENT account from the `jc` server and from the human operator.
+[Unit]
+Description=Jace Commander approverd (local approval authority)
+After=local-fs.target
+
+[Service]
+User=jc-approverd
+Group=jc-approverd
+# Needed to chgrp its sockets to the server's group and the approvers' group.
+SupplementaryGroups=jc jc-approvers
+# /run/jace-commander is created owned by jc-approverd; the daemon makes request/ and decide/ inside it.
+RuntimeDirectory=jace-commander
+RuntimeDirectoryMode=0755
+ExecStart=/usr/bin/env node /opt/jace-commander/dist/jace-commander/approverd-cli.js run --config /etc/jace-commander/approverd.json
+Restart=on-failure
+RestartSec=2
+UMask=0077
+
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# approverd chowns its socket directories and sockets to the configured groups; @privileged
+# contains @chown, so add exactly those syscalls back (later lines extend the allow-list).
+SystemCallFilter=@chown
+ReadWritePaths=/var/lib/jace-commander
+ReadOnlyPaths=/etc/jace-commander /opt/jace-commander
+
+[Install]
+WantedBy=multi-user.target
