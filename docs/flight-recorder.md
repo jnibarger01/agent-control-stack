@@ -34,6 +34,12 @@ It is **tamper evidence**. It is not tamper prevention.
 
 ## What is recorded
 
+A record bound to an event or evidence row that predates the recorder is `legacy_binding`: records are only written
+after the epoch, so such a record was inserted later to make unprovable history look recorded.
+
+Evidence identifiers and kinds can embed caller-supplied values, so the chain stores a hash of each (for integrity) and
+only a redacted label for display; findings use the same label. A malformed evidence binding is `unlinked_record`.
+
 A record with no operational event row is only valid as an evidence binding (`evidence.recorded`, once per evidence
 row); any other unlinked record is `unlinked_record`, however well it hashes. An attacker who writes both a forged
 operational row and a matching record is the full-rewrite case below.
@@ -49,7 +55,9 @@ are masked.
 
 ## API
 
-`GET /coding-missions/:id/flight-record?afterSeq=0&limit=200` — scope `acs:read`.
+`GET /coding-missions/:id/flight-record?afterSeq=0&limit=200` — scope `acs:read`; in the public contract
+(`getCodingMissionFlightRecord`). It checks that the mission exists without deserializing the mission row, so a
+corrupted auxiliary column cannot disable forensic replay.
 
 - `401` without a valid credential, `404` for an unknown mission, `400` for a bad query, `503` when coding missions
   are not configured.
@@ -57,7 +65,7 @@ are masked.
   only `records` is paged (`nextAfterSeq` continues).
 - `verification.verdict`: `verified`, `partial_legacy`, or `tampered`, with `findings[]` (`record_hash_mismatch`,
   `previous_hash_mismatch`, `sequence_gap`, `event_missing`, `event_modified`, `unrecorded_event`,
-  `evidence_missing`, `evidence_modified`, `unrecorded_evidence`, `unlinked_record`).
+  `evidence_missing`, `evidence_modified`, `unrecorded_evidence`, `unlinked_record`, `legacy_binding`).
 - `reconstruction` is derived from the chain alone (state history, last state, per-unit lifecycle: created, ready, claimed, verifying, completed, failed, retryable, retry_scheduled, cancelled, pending, conflict, unknown) and compared with the
   live mission row (`consistentWithLive`). A mismatch means the live row changed without a recorded transition.
 - `trustworthy` is `false` for any `tampered` verdict. The records are still returned for investigation.

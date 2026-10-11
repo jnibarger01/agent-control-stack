@@ -186,6 +186,7 @@ import {
   changeSetRevocationBodySchema,
   codingMissionCreateBodySchema,
   codingMissionApprovalBodySchema,
+  flightRecordQuerySchema,
   changeSetQuerySchema,
   cancelBodySchema,
   capabilitiesBodySchema,
@@ -2657,7 +2658,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             .send({ error: "coding mission ports are not configured", code: "coding_mission_unconfigured" });
         }
         const query = flightRecordQuerySchema.parse(request.query);
-        if (!codingMissions.store.get(request.params.id)) {
+        if (!codingMissions.store.exists(request.params.id)) {
           return reply.code(404).send({ error: "coding mission does not exist", code: "coding_mission_not_found" });
         }
         return codingMissions.flightRecord(request.params.id, query);
@@ -5084,12 +5085,6 @@ function reportedExecutionBackend(): "dry_run" | "desktop_commander" | undefined
 const DASHBOARD_EVENT_PAGE = 50;
 /** Most recent policy decisions summarized on the Policy panel. */
 const POLICY_SUMMARY_WINDOW = 500;
-const flightRecordQuerySchema = z
-  .object({
-    afterSeq: z.coerce.number().int().min(0).default(0),
-    limit: z.coerce.number().int().min(1).max(1000).default(200)
-  })
-  .strict();
 const dashboardQuerySchema = z
   .object({ finished: z.coerce.number().int().min(0).max(MAX_DASHBOARD_FINISHED_LIMIT).optional() })
   .passthrough();

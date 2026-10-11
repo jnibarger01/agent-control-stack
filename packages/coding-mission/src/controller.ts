@@ -279,7 +279,9 @@ export class CodingMissionController {
 
   /** Tamper-evident replay of one mission. Throws coding_mission_not_found for an unknown mission. */
   flightRecord(missionId: string, window: { afterSeq?: number; limit?: number } = {}): MissionFlightRecord {
-    this.store.require(missionId);
+    if (!this.store.exists(missionId)) {
+      throw new ControlStackError("coding_mission_not_found", "coding mission does not exist");
+    }
     return readMissionFlightRecord(this.store.db, missionId, window);
   }
 

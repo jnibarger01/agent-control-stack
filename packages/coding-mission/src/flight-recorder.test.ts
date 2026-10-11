@@ -5,6 +5,7 @@ import { stableHash } from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
 import {
   appendFlightRecord,
+  evidenceBindingBody,
   flightRecordHash,
   readFlightRecords,
   readMissionFlightRecord,
@@ -519,5 +520,100 @@ describe("flight recorder: second review hardening", () => {
       legacyEvidenceCount: 1,
       findings: []
     });
+  });
+});
+
+describe("flight recorder: third review hardening", () => {
+  it("rejects a record bound to an event that predates the recorder, and keeps that event legacy", () => {
+    const store = new CodingMissionStore(":memory:");
+    store.db.exec("PRAGMA foreign_keys = OFF");
+    store.db
+      .prepare(
+        `INSERT INTO coding_events (mission_id, name, body_json, created_at) VALUES ('old', 'legacy.event', '{}', ?)`
+      )
+      .run(T0);
+    const legacyId = (store.db.prepare(`SELECT MAX(event_id) AS id FROM coding_events`).get() as { id: number }).id;
+    store.db.exec("DROP TRIGGER mission_flight_epoch_no_change");
+    store.db.exec("UPDATE mission_flight_epoch SET last_legacy_event_id = (SELECT MAX(event_id) FROM coding_events)");
+    expect(verifyFlightRecord(store.db, "old").verdict).toBe("partial_legacy");
+    // A writer chains a correctly hashed record that points at the old event so it looks contemporaneously recorded.
+    store.transaction(() => {
+      appendFlightRecord(store.db, {
+        missionId: "old",
+        eventId: legacyId,
+        kind: "legacy.event",
+        bodyJson: "{}",
+        createdAt: T0
+      });
+    });
+    const result = verifyFlightRecord(store.db, "old");
+    expect(result.verdict).toBe("tampered");
+    expect(result.findings.map((f) => f.kind)).toContain("legacy_binding");
+    expect(result.legacyEventCount).toBe(1);
+  });
+
+  it("rejects a record bound to evidence that predates the recorder", () => {
+    const store = new CodingMissionStore(":memory:");
+    store.createGeneral({ missionId: "old", summary: "s", initiatorId: "user-1", now: T0 });
+    store.db
+      .prepare(
+        `INSERT INTO coding_evidence (mission_id, evidence_id, kind, payload_hash, payload_json, created_at)
+         VALUES ('old', 'legacy:1', 'legacy', ?, '{}', ?)`
+      )
+      .run(stableHash({}), T0);
+    store.db.exec("DROP TRIGGER mission_flight_epoch_no_change");
+    store.db.exec(
+      "UPDATE mission_flight_epoch SET last_legacy_evidence_rowid = (SELECT MAX(rowid) FROM coding_evidence)"
+    );
+    store.transaction(() => {
+      appendFlightRecord(store.db, {
+        missionId: "old",
+        eventId: null,
+        kind: "evidence.recorded",
+        bodyJson: evidenceBindingBody("legacy:1", "legacy", stableHash({})),
+        createdAt: T0
+      });
+    });
+    const result = verifyFlightRecord(store.db, "old");
+    expect(result.verdict).toBe("tampered");
+    expect(result.findings.map((f) => f.kind)).toContain("legacy_binding");
+    expect(result.legacyEvidenceCount).toBe(1);
+  });
+
+  it("rejects malformed evidence bindings", () => {
+    for (const bodyJson of ["{}", JSON.stringify({ evidenceRef: 1, metaHash: "x", payloadHash: "y" })]) {
+      const store = mission();
+      store.transaction(() => {
+        appendFlightRecord(store.db, {
+          missionId: "m1",
+          eventId: null,
+          kind: "evidence.recorded",
+          bodyJson,
+          createdAt: T0
+        });
+      });
+      const result = verifyFlightRecord(store.db, "m1");
+      expect(result.verdict).toBe("tampered");
+      expect(result.findings.map((f) => f.kind)).toContain("unlinked_record");
+    }
+  });
+
+  it("keeps credential-shaped evidence identifiers out of the chain and the replay, and still verifies", () => {
+    const store = mission();
+    const secretKind = "route:ghp_SUPERSECRETTOKEN0123456789";
+    store.putEvidence("m1", secretKind, { ok: true }, T0);
+    const replay = readMissionFlightRecord(store.db, "m1");
+    expect(replay.verification).toMatchObject({ verdict: "verified", findings: [] });
+    expect(JSON.stringify(replay)).not.toContain("SUPERSECRETTOKEN");
+    expect(JSON.stringify(store.db.prepare(`SELECT body_json FROM mission_flight_records`).all())).not.toContain(
+      "SUPERSECRETTOKEN"
+    );
+    // The raw value is still the operational key, so evidence lookup is unchanged.
+    expect(store.evidence("m1", secretKind)).toEqual({ ok: true });
+    // Tampering is still detected, and findings never echo the raw identifier either.
+    store.db.exec(`UPDATE coding_evidence SET payload_json = '{"ok":false}' WHERE kind LIKE 'route:%'`);
+    const tampered = verifyFlightRecord(store.db, "m1");
+    expect(tampered.findings.map((f) => f.kind)).toContain("evidence_modified");
+    expect(JSON.stringify(tampered)).not.toContain("SUPERSECRETTOKEN");
   });
 });

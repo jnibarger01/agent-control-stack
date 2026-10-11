@@ -184,6 +184,38 @@ describe("coding mission HTTP", () => {
     await reopened.close();
   });
 
+  it("still replays the flight chain when an unrelated mission column is corrupted", async () => {
+    directory = mkdtempSync(join(tmpdir(), "acs-coding-http-corrupt-"));
+    const dbPath = join(directory, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    store.registerActor({ id: "user", actorType: "HUMAN", displayName: "user", externalRef: "local_bearer:local-dev" });
+    store.close();
+    const headers = { authorization: `Bearer ${auth.token}` };
+    const app = buildGateway({ dbPath, logger: false, auth, codingMissionPorts: ports() });
+    await app.inject({
+      method: "POST",
+      url: "/coding-missions",
+      headers,
+      payload: {
+        missionId: "mission-corrupt",
+        repository: "example/repo",
+        baseRef: "main",
+        baseSha: BASE,
+        summary: "Ship"
+      }
+    });
+    const raw = new DatabaseSync(dbPath);
+    raw.exec(`UPDATE coding_missions SET validation_json = '{not json' WHERE mission_id = 'mission-corrupt'`);
+    raw.close();
+    // The mission view cannot be deserialized, but forensic replay must not depend on it.
+    const view = await app.inject({ method: "GET", url: "/coding-missions/mission-corrupt", headers });
+    expect(view.statusCode).toBeGreaterThanOrEqual(400);
+    const replay = await app.inject({ method: "GET", url: "/coding-missions/mission-corrupt/flight-record", headers });
+    expect(replay.statusCode).toBe(200);
+    expect(replay.json()).toMatchObject({ verification: { verdict: "verified" } });
+    await app.close();
+  });
+
   it("fails closed without ports, without read scope, and for a mismatched change-set hash", async () => {
     directory = mkdtempSync(join(tmpdir(), "acs-coding-http-denied-"));
     const dbPath = join(directory, "control.db");

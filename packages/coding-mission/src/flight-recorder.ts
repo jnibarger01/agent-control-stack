@@ -33,7 +33,8 @@ export type FlightFindingKind =
   | "evidence_missing"
   | "evidence_modified"
   | "unrecorded_evidence"
-  | "unlinked_record";
+  | "unlinked_record"
+  | "legacy_binding";
 
 export interface FlightFinding {
   kind: FlightFindingKind;
@@ -81,6 +82,25 @@ export function flightRecordHash(input: Omit<FlightRecord, "recordHash">): strin
     bodyJson: input.bodyJson,
     createdAt: input.createdAt,
     previousHash: input.previousHash
+  });
+}
+
+/** A label safe to show: secret-shaped values in an identifier are masked. Never used as a lookup key. */
+function safeLabel(value: string): string {
+  return String(redactValue(value));
+}
+
+/**
+ * The chained body for one evidence row. Evidence ids and kinds can embed caller-supplied identifiers, so the chain
+ * stores a hash of each for integrity (`evidenceRef`, `metaHash`) and only a redacted label for display.
+ */
+export function evidenceBindingBody(evidenceId: string, kind: string, payloadHash: string): string {
+  return JSON.stringify({
+    evidenceRef: stableHash(evidenceId),
+    metaHash: stableHash({ evidenceId, kind }),
+    payloadHash,
+    evidenceId: safeLabel(evidenceId),
+    kind: safeLabel(kind)
   });
 }
 
@@ -293,6 +313,17 @@ function verifyUnderSnapshot(db: DatabaseSync, missionId: string): FlightVerific
       }
       continue;
     }
+    if (row.event_id <= legacyCutoff) {
+      // Records are only written after the epoch, so a record bound to an older event was inserted afterwards to make
+      // unprovable history look recorded. The event stays counted as legacy.
+      findings.push({
+        kind: "legacy_binding",
+        seq: row.seq,
+        eventId: row.event_id,
+        detail: "record is bound to an event that predates the recorder"
+      });
+      continue;
+    }
     chainedEventIds.add(row.event_id);
     const event = eventsById.get(row.event_id);
     if (!event) {
@@ -345,31 +376,39 @@ function verifyEvidence(
   legacyCutoff: number,
   findings: FlightFinding[]
 ): number {
-  const recorded = new Map<string, { payloadHash: string; kind: unknown; createdAt: string; seq: number }>();
+  const recorded = new Map<
+    string,
+    { payloadHash: string; metaHash: string; createdAt: string; label: string; seq: number }
+  >();
   for (const row of rows) {
     if (row.kind !== "evidence.recorded") continue;
-    try {
-      const body = JSON.parse(row.body_json) as { evidenceId?: unknown; payloadHash?: unknown; kind?: unknown };
-      if (typeof body.evidenceId === "string" && typeof body.payloadHash === "string") {
-        if (recorded.has(body.evidenceId)) {
-          findings.push({
-            kind: "unlinked_record",
-            seq: row.seq,
-            evidenceId: body.evidenceId,
-            detail: "evidence is bound by more than one chained record"
-          });
-          continue;
-        }
-        recorded.set(body.evidenceId, {
-          payloadHash: body.payloadHash,
-          kind: body.kind,
-          createdAt: row.created_at,
-          seq: row.seq
-        });
-      }
-    } catch {
-      // A body that is not valid JSON already fails the record hash or the SQL json_valid check.
+    const body = safeParse(row.body_json);
+    const valid =
+      typeof body.evidenceRef === "string" &&
+      typeof body.metaHash === "string" &&
+      typeof body.payloadHash === "string" &&
+      typeof body.evidenceId === "string";
+    if (!valid) {
+      findings.push({ kind: "unlinked_record", seq: row.seq, detail: "malformed evidence binding" });
+      continue;
     }
+    const ref = body.evidenceRef as string;
+    if (recorded.has(ref)) {
+      findings.push({
+        kind: "unlinked_record",
+        seq: row.seq,
+        evidenceId: body.evidenceId as string,
+        detail: "evidence is bound by more than one chained record"
+      });
+      continue;
+    }
+    recorded.set(ref, {
+      payloadHash: body.payloadHash as string,
+      metaHash: body.metaHash as string,
+      createdAt: row.created_at,
+      label: body.evidenceId as string,
+      seq: row.seq
+    });
   }
   const evidence = db
     .prepare(
@@ -387,17 +426,24 @@ function verifyEvidence(
   const seen = new Set<string>();
   let legacy = 0;
   for (const row of evidence) {
-    seen.add(row.evidence_id);
-    const chained = recorded.get(row.evidence_id);
-    if (!chained) {
-      if (row.row_id <= legacyCutoff) legacy += 1;
-      else {
+    const ref = stableHash(row.evidence_id);
+    seen.add(ref);
+    const label = safeLabel(row.evidence_id);
+    const chained = recorded.get(ref);
+    if (row.row_id <= legacyCutoff) {
+      legacy += 1;
+      if (chained) {
         findings.push({
-          kind: "unrecorded_evidence",
-          evidenceId: row.evidence_id,
-          detail: "evidence row has no chained record"
+          kind: "legacy_binding",
+          seq: chained.seq,
+          evidenceId: label,
+          detail: "record is bound to evidence that predates the recorder"
         });
       }
+      continue;
+    }
+    if (!chained) {
+      findings.push({ kind: "unrecorded_evidence", evidenceId: label, detail: "evidence row has no chained record" });
       continue;
     }
     let recomputed: string | undefined;
@@ -409,23 +455,23 @@ function verifyEvidence(
     if (
       row.payload_hash !== chained.payloadHash ||
       recomputed !== chained.payloadHash ||
-      row.kind !== chained.kind ||
+      stableHash({ evidenceId: row.evidence_id, kind: row.kind }) !== chained.metaHash ||
       row.created_at !== chained.createdAt
     ) {
       findings.push({
         kind: "evidence_modified",
         seq: chained.seq,
-        evidenceId: row.evidence_id,
+        evidenceId: label,
         detail: "evidence payload, kind or timestamp no longer matches what was chained when it was stored"
       });
     }
   }
-  for (const [evidenceId, chained] of recorded) {
-    if (!seen.has(evidenceId)) {
+  for (const [ref, chained] of recorded) {
+    if (!seen.has(ref)) {
       findings.push({
         kind: "evidence_missing",
         seq: chained.seq,
-        evidenceId,
+        evidenceId: chained.label,
         detail: "chained evidence record has no evidence row"
       });
     }

@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { ControlStackError, applyControlPlaneMigrations, stableHash } from "@agent-control-stack/shared";
-import { appendFlightRecord, appendMissionEvent } from "./flight-recorder.js";
+import { appendFlightRecord, appendMissionEvent, evidenceBindingBody } from "./flight-recorder.js";
 import { verificationCriterionSchema, type VerificationCriterion } from "@agent-control-stack/verification";
 import {
   BudgetDecision,
@@ -492,6 +492,11 @@ export class CodingMissionStore {
     return { ok: false, outcome: "budget_exhausted", decision };
   }
 
+  /** Existence only. Does not deserialize the row, so a corrupted auxiliary column cannot hide a mission from audit. */
+  exists(missionId: string): boolean {
+    return this.db.prepare("SELECT 1 FROM coding_missions WHERE mission_id = ?").get(missionId) !== undefined;
+  }
+
   get(missionId: string): CodingMissionRecord | undefined {
     const row = this.db.prepare("SELECT * FROM coding_missions WHERE mission_id = ?").get(missionId) as
       MissionRow | undefined;
@@ -882,7 +887,7 @@ export class CodingMissionStore {
           missionId,
           eventId: null,
           kind: "evidence.recorded",
-          bodyJson: JSON.stringify({ evidenceId, kind, payloadHash }),
+          bodyJson: evidenceBindingBody(evidenceId, kind, payloadHash),
           createdAt: now
         });
       }
