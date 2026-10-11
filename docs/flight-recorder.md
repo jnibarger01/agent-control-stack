@@ -12,7 +12,11 @@ It is **tamper evidence**. It is not tamper prevention.
 - Each chained record is tied to its operational `coding_events` row (`event_id`), and each evidence payload hash is
   chained when the evidence is first stored. Editing or deleting either operational row, or writing one around the
   recorder, is reported.
-- SQLite triggers make ordinary `UPDATE` and `DELETE` of `mission_flight_records` fail. A database owner can drop them.
+- SQLite triggers make ordinary `UPDATE`, `DELETE` and `INSERT OR REPLACE` of `mission_flight_records` fail (the replace
+  guard is a `BEFORE INSERT` trigger because SQLite resolves a replace without firing delete triggers). The epoch row
+  is write-once. A database owner can drop the triggers.
+- Verification and replay read one database snapshot, so a writer committing mid-read cannot make a legitimate event
+  look unrecorded or put unverified records in the response. Evidence is checked for payload, kind and timestamp.
 
 ## Trust assumptions
 
@@ -45,11 +49,12 @@ are masked.
 
 - `401` without a valid credential, `404` for an unknown mission, `400` for a bad query, `503` when coding missions
   are not configured.
-- `verification` always covers the whole chain; only `records` is paged (`nextAfterSeq` continues).
+- `verification` always covers the whole chain and reconstruction scans all of it in batches, at any mission size;
+  only `records` is paged (`nextAfterSeq` continues).
 - `verification.verdict`: `verified`, `partial_legacy`, or `tampered`, with `findings[]` (`record_hash_mismatch`,
   `previous_hash_mismatch`, `sequence_gap`, `event_missing`, `event_modified`, `unrecorded_event`,
   `evidence_missing`, `evidence_modified`, `unrecorded_evidence`).
-- `reconstruction` is derived from the chain alone (state history, last state, per-unit outcome) and compared with the
+- `reconstruction` is derived from the chain alone (state history, last state, per-unit lifecycle: created, ready, claimed, verifying, completed, failed, retryable, retry_scheduled, cancelled) and compared with the
   live mission row (`consistentWithLive`). A mismatch means the live row changed without a recorded transition.
 - `trustworthy` is `false` for any `tampered` verdict. The records are still returned for investigation.
 

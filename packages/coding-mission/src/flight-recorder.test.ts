@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   appendFlightRecord,
@@ -282,5 +285,134 @@ describe("flight recorder: mission replay", () => {
     const rest = readMissionFlightRecord(store.db, "m1", { afterSeq: 2, limit: 10 });
     expect(rest.records.map((r) => r.seq)).toEqual([3, 4]);
     expect(rest.nextAfterSeq).toBeUndefined();
+  });
+});
+
+describe("flight recorder: review hardening", () => {
+  it("verifies and replays one consistent snapshot while another connection commits", () => {
+    const directory = mkdtempSync(join(tmpdir(), "acs-flight-snapshot-"));
+    try {
+      const dbPath = join(directory, "control.db");
+      const reader = new CodingMissionStore(dbPath);
+      reader.createGeneral({ missionId: "m1", summary: "snapshot", initiatorId: "user-1", now: T0 });
+      reader.recordMissionEvent("m1", "work_unit.created", { unitId: "u1" }, T0);
+      const writer = new CodingMissionStore(dbPath);
+      // Commit a legitimate event (operational row and chained record together) in the middle of the reader's queries.
+      const realPrepare = reader.db.prepare.bind(reader.db);
+      let calls = 0;
+      let injected = false;
+      (reader.db as { prepare: unknown }).prepare = (sql: string) => {
+        calls += 1;
+        if (calls === 3 && !injected) {
+          injected = true;
+          writer.recordMissionEvent("m1", "work_unit.ready", { unitId: "u1" }, T0);
+        }
+        return realPrepare(sql);
+      };
+      const replay = readMissionFlightRecord(reader.db, "m1");
+      expect(injected).toBe(true);
+      expect(replay.verification.verdict).toBe("verified");
+      expect(replay.records.length).toBe(replay.verification.recordCount);
+      (reader.db as { prepare: unknown }).prepare = realPrepare;
+      // The event committed during the read is visible to the next read.
+      expect(readMissionFlightRecord(reader.db, "m1").verification.recordCount).toBe(
+        replay.verification.recordCount + 1
+      );
+      writer.close();
+      reader.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("detects a changed evidence kind or timestamp, not only a changed payload", () => {
+    const store = mission();
+    store.db.exec(`UPDATE coding_evidence SET kind = 'other' WHERE kind = 'validation'`);
+    expect(verifyFlightRecord(store.db, "m1").findings.map((f) => f.kind)).toContain("evidence_modified");
+    store.db.exec(`UPDATE coding_evidence SET kind = 'validation', created_at = '2030-01-01T00:00:00.000Z'`);
+    expect(verifyFlightRecord(store.db, "m1").findings.map((f) => f.kind)).toContain("evidence_modified");
+    store.db.exec(`UPDATE coding_evidence SET created_at = '${T0}'`);
+    expect(verifyFlightRecord(store.db, "m1").verdict).toBe("verified");
+  });
+
+  it("pages and reconstructs past 5,000 records", () => {
+    const store = new CodingMissionStore(":memory:");
+    store.createGeneral({ missionId: "m1", summary: "big", initiatorId: "user-1", now: T0 });
+    store.transaction(() => {
+      for (let i = 0; i < 5100; i += 1) store.recordMissionEvent("m1", "work_unit.created", { unitId: `u${i}` }, T0);
+    });
+    store.transition(store.require("m1"), "PLANNING", T0, { event: "mission.state_changed" });
+    const total = 5100 + 1 + 1;
+    const late = readMissionFlightRecord(store.db, "m1", { afterSeq: 5000, limit: 1000 });
+    expect(late.verification).toMatchObject({ verdict: "verified", recordCount: total });
+    expect(late.records[0]!.seq).toBe(5001);
+    expect(late.records.length).toBe(Math.min(1000, total - 5000));
+    expect(late.nextAfterSeq).toBeUndefined();
+    // Reconstruction sees the transition recorded after the 5,000th record.
+    expect(late.reconstruction).toMatchObject({
+      derivedState: "PLANNING",
+      liveState: "PLANNING",
+      consistentWithLive: true
+    });
+    expect(Object.keys(late.reconstruction.units)).toHaveLength(5100);
+    const middle = readMissionFlightRecord(store.db, "m1", { afterSeq: 4500, limit: 400 });
+    expect(middle.nextAfterSeq).toBe(4900);
+  });
+
+  it("refuses INSERT OR REPLACE of a chained record and of the epoch, and deletion of the epoch", () => {
+    const store = mission();
+    const row = store.db.prepare(`SELECT * FROM mission_flight_records WHERE seq = 2`).get() as Record<
+      string,
+      string | number
+    >;
+    expect(() =>
+      store.db
+        .prepare(
+          `INSERT OR REPLACE INTO mission_flight_records
+             (mission_id, seq, event_id, kind, body_json, created_at, previous_hash, record_hash)
+           VALUES (?, ?, ?, 'forged', '{}', ?, ?, ?)`
+        )
+        .run(row.mission_id, row.seq, row.event_id, row.created_at, row.previous_hash, "f".repeat(64))
+    ).toThrow(/append-only/);
+    // A different seq that reuses an already-chained event is refused too.
+    expect(() =>
+      store.db
+        .prepare(
+          `INSERT OR REPLACE INTO mission_flight_records
+             (mission_id, seq, event_id, kind, body_json, created_at, previous_hash, record_hash)
+           VALUES ('m1', 99, ?, 'forged', '{}', ?, '', ?)`
+        )
+        .run(row.event_id, row.created_at, "f".repeat(64))
+    ).toThrow(/append-only/);
+    expect(() =>
+      store.db.exec(
+        `INSERT OR REPLACE INTO mission_flight_epoch (singleton, last_legacy_event_id, last_legacy_evidence_rowid) VALUES (1, 999999, 999999)`
+      )
+    ).toThrow(/write-once/);
+    expect(() => store.db.exec(`DELETE FROM mission_flight_epoch`)).toThrow(/write-once/);
+    expect(verifyFlightRecord(store.db, "m1").verdict).toBe("verified");
+  });
+
+  it("reflects claims, verification, cancellation and retryable failures in the replay", () => {
+    const store = new CodingMissionStore(":memory:");
+    store.createGeneral({ missionId: "m1", summary: "life", initiatorId: "user-1", now: T0 });
+    const ev = (name: string, body: Record<string, unknown>) => store.recordMissionEvent("m1", name, body, T0);
+    ev("work_unit.created", { unitId: "claimed" });
+    ev("work_unit.claimed", { unitId: "claimed", workerId: "w", attempt: 1 });
+    ev("work_unit.created", { unitId: "verifying" });
+    ev("verification.started", { unitId: "verifying" });
+    ev("work_unit.created", { unitId: "cancelled" });
+    ev("work_unit.cancelled", { unitId: "cancelled", was: "ready" });
+    ev("work_unit.created", { unitId: "retryable" });
+    ev("work_unit.failed", { unitId: "retryable", category: "tool_error", next: "retryable" });
+    ev("work_unit.created", { unitId: "failed" });
+    ev("work_unit.failed", { unitId: "failed", category: "policy", next: "failed" });
+    expect(readMissionFlightRecord(store.db, "m1").reconstruction.units).toEqual({
+      claimed: "claimed",
+      verifying: "verifying",
+      cancelled: "cancelled",
+      retryable: "retryable",
+      failed: "failed"
+    });
   });
 });

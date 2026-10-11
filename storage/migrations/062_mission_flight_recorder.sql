@@ -48,3 +48,24 @@ CREATE TRIGGER mission_flight_epoch_no_change BEFORE UPDATE ON mission_flight_ep
 BEGIN
   SELECT RAISE(ABORT, 'mission_flight_epoch is write-once');
 END;
+
+-- INSERT OR REPLACE resolves a key conflict by deleting the old row without firing DELETE triggers (recursive_triggers
+-- is off), so append-only also needs BEFORE INSERT guards. They fire before conflict resolution and refuse any insert
+-- whose primary key, or whose linked event, already has a record, which closes REPLACE as well as a plain duplicate.
+CREATE TRIGGER mission_flight_records_no_replace BEFORE INSERT ON mission_flight_records
+WHEN EXISTS (SELECT 1 FROM mission_flight_records WHERE mission_id = NEW.mission_id AND seq = NEW.seq)
+  OR (NEW.event_id IS NOT NULL AND EXISTS (SELECT 1 FROM mission_flight_records WHERE event_id = NEW.event_id))
+BEGIN
+  SELECT RAISE(ABORT, 'mission_flight_records is append-only');
+END;
+
+CREATE TRIGGER mission_flight_epoch_no_replace BEFORE INSERT ON mission_flight_epoch
+WHEN EXISTS (SELECT 1 FROM mission_flight_epoch)
+BEGIN
+  SELECT RAISE(ABORT, 'mission_flight_epoch is write-once');
+END;
+
+CREATE TRIGGER mission_flight_epoch_no_delete BEFORE DELETE ON mission_flight_epoch
+BEGIN
+  SELECT RAISE(ABORT, 'mission_flight_epoch is write-once');
+END;

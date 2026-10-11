@@ -191,10 +191,41 @@ export function readFlightRecords(
 }
 
 /**
+ * Runs `work` against one consistent database snapshot. Verification and replay each issue several queries; without a
+ * shared read transaction a concurrent writer committing between them makes a legitimate event look unrecorded, or
+ * lets the returned records include ones the verdict never checked. If the caller already holds a transaction, that
+ * transaction is the snapshot.
+ */
+function withReadSnapshot<T>(db: DatabaseSync, work: () => T): T {
+  if (db.isTransaction) return work();
+  db.exec("BEGIN");
+  try {
+    return work();
+  } finally {
+    db.exec("ROLLBACK");
+  }
+}
+
+/** Visits every record of a mission in order, in bounded batches, so no mission size makes records unreachable. */
+function forEachRecord(db: DatabaseSync, missionId: string, visit: (record: FlightRecord) => void): void {
+  let cursor = 0;
+  for (;;) {
+    const batch = readFlightRecords(db, missionId, { afterSeq: cursor, limit: 5000 });
+    for (const record of batch) visit(record);
+    if (batch.length < 5000) return;
+    cursor = batch[batch.length - 1]!.seq;
+  }
+}
+
+/**
  * Recomputes the whole chain for a mission and cross-checks it against the operational tables. Reads only.
  * Never throws on tampering; tampering is a finding.
  */
 export function verifyFlightRecord(db: DatabaseSync, missionId: string): FlightVerification {
+  return withReadSnapshot(db, () => verifyUnderSnapshot(db, missionId));
+}
+
+function verifyUnderSnapshot(db: DatabaseSync, missionId: string): FlightVerification {
   const findings: FlightFinding[] = [];
   const rows = db
     .prepare(`SELECT * FROM mission_flight_records WHERE mission_id = ? ORDER BY seq`)
@@ -292,13 +323,18 @@ function verifyEvidence(
   legacyCutoff: number,
   findings: FlightFinding[]
 ): number {
-  const recorded = new Map<string, { payloadHash: string; seq: number }>();
+  const recorded = new Map<string, { payloadHash: string; kind: unknown; createdAt: string; seq: number }>();
   for (const row of rows) {
     if (row.kind !== "evidence.recorded") continue;
     try {
-      const body = JSON.parse(row.body_json) as { evidenceId?: unknown; payloadHash?: unknown };
+      const body = JSON.parse(row.body_json) as { evidenceId?: unknown; payloadHash?: unknown; kind?: unknown };
       if (typeof body.evidenceId === "string" && typeof body.payloadHash === "string") {
-        recorded.set(body.evidenceId, { payloadHash: body.payloadHash, seq: row.seq });
+        recorded.set(body.evidenceId, {
+          payloadHash: body.payloadHash,
+          kind: body.kind,
+          createdAt: row.created_at,
+          seq: row.seq
+        });
       }
     } catch {
       // A body that is not valid JSON already fails the record hash or the SQL json_valid check.
@@ -306,9 +342,17 @@ function verifyEvidence(
   }
   const evidence = db
     .prepare(
-      `SELECT rowid AS row_id, evidence_id, payload_hash, payload_json FROM coding_evidence WHERE mission_id = ?`
+      `SELECT rowid AS row_id, evidence_id, kind, created_at, payload_hash, payload_json
+       FROM coding_evidence WHERE mission_id = ?`
     )
-    .all(missionId) as Array<{ row_id: number; evidence_id: string; payload_hash: string; payload_json: string }>;
+    .all(missionId) as Array<{
+    row_id: number;
+    evidence_id: string;
+    kind: string;
+    created_at: string;
+    payload_hash: string;
+    payload_json: string;
+  }>;
   const seen = new Set<string>();
   let legacy = 0;
   for (const row of evidence) {
@@ -331,12 +375,17 @@ function verifyEvidence(
     } catch {
       recomputed = undefined;
     }
-    if (row.payload_hash !== chained.payloadHash || recomputed !== chained.payloadHash) {
+    if (
+      row.payload_hash !== chained.payloadHash ||
+      recomputed !== chained.payloadHash ||
+      row.kind !== chained.kind ||
+      row.created_at !== chained.createdAt
+    ) {
       findings.push({
         kind: "evidence_modified",
         seq: chained.seq,
         evidenceId: row.evidence_id,
-        detail: "evidence payload no longer matches the hash that was chained when it was stored"
+        detail: "evidence payload, kind or timestamp no longer matches what was chained when it was stored"
       });
     }
   }
@@ -383,7 +432,18 @@ export interface MissionFlightRecord {
     liveState: string | null;
     /** null when either side is unknown. */
     consistentWithLive: boolean | null;
-    units: Record<string, "created" | "ready" | "completed" | "failed" | "retry_scheduled">;
+    units: Record<
+      string,
+      | "created"
+      | "ready"
+      | "claimed"
+      | "verifying"
+      | "completed"
+      | "failed"
+      | "retryable"
+      | "retry_scheduled"
+      | "cancelled"
+    >;
   };
   records: FlightReplayRecord[];
   nextAfterSeq?: number;
@@ -399,18 +459,27 @@ export function readMissionFlightRecord(
   missionId: string,
   window: { afterSeq?: number; limit?: number } = {}
 ): MissionFlightRecord {
-  const verification = verifyFlightRecord(db, missionId);
-  const all = readFlightRecords(db, missionId, { limit: 5000 });
+  return withReadSnapshot(db, () => readUnderSnapshot(db, missionId, window));
+}
+
+function readUnderSnapshot(
+  db: DatabaseSync,
+  missionId: string,
+  window: { afterSeq?: number; limit?: number }
+): MissionFlightRecord {
+  const verification = verifyUnderSnapshot(db, missionId);
   const stateHistory: MissionFlightRecord["reconstruction"]["stateHistory"] = [];
   const units: MissionFlightRecord["reconstruction"]["units"] = {};
   const unitEvents: Record<string, MissionFlightRecord["reconstruction"]["units"][string]> = {
     "work_unit.created": "created",
     "work_unit.ready": "ready",
+    "work_unit.claimed": "claimed",
+    "verification.started": "verifying",
     "work_unit.completed": "completed",
-    "work_unit.failed": "failed",
+    "work_unit.cancelled": "cancelled",
     "work_unit.retry_scheduled": "retry_scheduled"
   };
-  for (const record of all) {
+  forEachRecord(db, missionId, (record) => {
     const body = safeParse(record.bodyJson);
     if (record.kind === "mission.created" || record.kind === "coding_mission.created") {
       if (typeof body.state === "string") {
@@ -419,9 +488,13 @@ export function readMissionFlightRecord(
     } else if (typeof body.to === "string" && (typeof body.from === "string" || body.from === null)) {
       stateHistory.push({ seq: record.seq, from: body.from as string | null, to: body.to, at: record.createdAt });
     }
-    const unitStatus = unitEvents[record.kind];
-    if (unitStatus && typeof body.unitId === "string") units[body.unitId] = unitStatus;
-  }
+    if (typeof body.unitId !== "string") return;
+    if (record.kind === "work_unit.failed") units[body.unitId] = body.next === "retryable" ? "retryable" : "failed";
+    else {
+      const unitStatus = unitEvents[record.kind];
+      if (unitStatus) units[body.unitId] = unitStatus;
+    }
+  });
   const derivedState = stateHistory.at(-1)?.to ?? null;
   const live = db.prepare(`SELECT state FROM coding_missions WHERE mission_id = ?`).get(missionId) as
     { state: string } | undefined;
@@ -429,7 +502,7 @@ export function readMissionFlightRecord(
 
   const afterSeq = window.afterSeq ?? 0;
   const limit = Math.min(Math.max(window.limit ?? 200, 1), 1000);
-  const page = all.filter((record) => record.seq > afterSeq).slice(0, limit + 1);
+  const page = readFlightRecords(db, missionId, { afterSeq, limit: limit + 1 });
   const shown = page.slice(0, limit);
   return {
     schemaVersion: FLIGHT_RECORD_SCHEMA_VERSION,
