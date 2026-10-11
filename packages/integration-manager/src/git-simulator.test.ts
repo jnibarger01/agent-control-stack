@@ -1,4 +1,5 @@
-import { rmSync, mkdtempSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -107,6 +108,37 @@ describe("MergeSimulator", () => {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
+    }
+  });
+
+  it("is not steered by a merge driver configured on the host", async () => {
+    const s = scratch();
+    const base = s.commit("base", { "a.txt": "a\n", ".gitattributes": "a.txt merge=sneaky\n" });
+    const one = s.branch("one", base, { "a.txt": "one\n" });
+    const main = s.advanceMain({ "a.txt": "main\n" });
+    // A host whose global git configuration defines the driver the pull request's .gitattributes selects. `true` exits 0
+    // and leaves the file as-is, so with the driver active a real conflict would be reported as a clean merge.
+    const home = mkdtempSync(join(tmpdir(), "acs-hostcfg-"));
+    cleanups.push(() => rmSync(home, { recursive: true, force: true }));
+    writeFileSync(join(home, ".gitconfig"), '[merge "sneaky"]\n\tdriver = true\n\tname = always succeeds\n');
+    const saved = { HOME: process.env.HOME, XDG: process.env.XDG_CONFIG_HOME };
+    process.env.HOME = home;
+    delete process.env.XDG_CONFIG_HOME;
+    try {
+      // Sanity: git on this host really does honor the driver, so the test would catch a leak.
+      const raw = execFileSync("git", ["merge-tree", "--write-tree", "--no-messages", main, one], {
+        cwd: s.dir,
+        env: { ...process.env, HOME: home },
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"]
+      }).trim();
+      expect(raw).toMatch(/^[0-9a-f]{40}$/u);
+      const sim = new MergeSimulator(createGitRunner(s.dir));
+      expect(await sim.simulate(main, one)).toMatchObject({ evaluated: true, clean: false, conflicts: ["a.txt"] });
+    } finally {
+      if (saved.HOME === undefined) delete process.env.HOME;
+      else process.env.HOME = saved.HOME;
+      if (saved.XDG !== undefined) process.env.XDG_CONFIG_HOME = saved.XDG;
     }
   });
 

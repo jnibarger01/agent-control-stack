@@ -69,7 +69,8 @@ export interface GateVerdict {
   failedChecks: Array<{ name: string; category: FailureCategory }>;
 }
 
-export type FailureCategory = "test" | "lint" | "typecheck" | "format" | "security" | "build" | "review-gate" | "deploy" | "unknown";
+export type FailureCategory =
+  "test" | "lint" | "typecheck" | "format" | "security" | "build" | "review-gate" | "deploy" | "unknown";
 
 export interface GatePolicy {
   /** Files whose modification means the change alters the merge policy itself and needs manual review. */
@@ -79,10 +80,22 @@ export interface GatePolicy {
   allowForkPullRequests: boolean;
 }
 
+/**
+ * Mirrors `.github/workflows/jnibarger01-pr-review-merge.yml`: it ignores every author but `jnibarger01`, and refuses to
+ * auto-merge a change to the workflow or to the review instructions it enforces. A test reads that workflow and fails if
+ * these defaults drift from it, because this engine must never be more permissive than the gate it reports on.
+ */
 export const DEFAULT_GATE_POLICY: GatePolicy = {
-  protectedPaths: [".github/workflows/jnibarger01-pr-review-merge.yml"],
+  protectedPaths: [
+    ".github/workflows/jnibarger01-pr-review-merge.yml",
+    ".github/instructions/jnibarger01-pr-review.instructions.md"
+  ],
+  allowedAuthors: ["jnibarger01"],
   allowForkPullRequests: false
 };
+
+/** How the repository will land a pull request. The simulated history differs for each. */
+export type MergeMethod = "merge" | "squash" | "rebase";
 
 export interface MergeSimulation {
   /** merge-tree ran and the result is trustworthy. false means the head or base could not be evaluated. */
@@ -116,6 +129,8 @@ export interface IntegrationReport {
   repository: string;
   baseRef: string;
   baseSha: string;
+  /** The method the simulation modeled, as the repository's settings and the gate would select it. */
+  mergeMethod: MergeMethod;
   generatedAt: string;
   /** Pull request numbers in the order they would merge, earliest first. */
   queue: number[];

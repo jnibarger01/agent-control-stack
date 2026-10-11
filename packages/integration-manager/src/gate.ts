@@ -61,7 +61,10 @@ export function evaluateGate(pr: PullRequestSnapshot, policy: GatePolicy): GateV
     .filter(([, cut]) => cut)
     .map(([what]) => what);
   if (truncated.length > 0) {
-    block("truncated_signals", `source returned partial ${truncated.join(", ")}; a partial view is never treated as clean`);
+    block(
+      "truncated_signals",
+      `source returned partial ${truncated.join(", ")}; a partial view is never treated as clean`
+    );
   }
   if (pr.mergeable === "CONFLICTING") block("conflicting", "GitHub reports merge conflicts");
   if (pr.reviewDecision === "CHANGES_REQUESTED") block("changes_requested", "a review requests changes");
@@ -72,11 +75,17 @@ export function evaluateGate(pr: PullRequestSnapshot, policy: GatePolicy): GateV
 
   const failing = pr.checks.filter(checkIsFailing);
   if (failing.length > 0) {
-    block("failing_checks", `${failing.length} check(s) are failing or cancelled: ${failing.map((c) => c.name).join(", ")}`);
+    block(
+      "failing_checks",
+      `${failing.length} check(s) are failing or cancelled: ${failing.map((c) => c.name).join(", ")}`
+    );
   }
   const waiting = pr.checks.filter(checkIsPending);
   if (waiting.length > 0) {
-    pending.push({ code: "checks_pending", detail: `${waiting.length} check(s) have not finished: ${waiting.map((c) => c.name).join(", ")}` });
+    pending.push({
+      code: "checks_pending",
+      detail: `${waiting.length} check(s) have not finished: ${waiting.map((c) => c.name).join(", ")}`
+    });
   }
   if (pr.mergeable === "UNKNOWN") {
     pending.push({ code: "mergeable_unknown", detail: "GitHub has not computed mergeability yet" });

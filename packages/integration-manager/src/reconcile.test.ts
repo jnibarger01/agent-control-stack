@@ -20,6 +20,7 @@ const run = (s: Scratch, prs: PullRequestSnapshot[], extra: Record<string, unkno
     baseRef: "main",
     source: source(prs),
     git: createGitRunner(s.dir),
+    mergeMethod: "merge" as const,
     now: () => new Date("2026-10-11T00:00:00.000Z"),
     ...extra
   });
@@ -100,7 +101,9 @@ describe("reconcile", () => {
   it("never reports wouldMerge for anything the gate does not mark eligible", async () => {
     const s = scratch();
     const base = s.commit("base", { "a.txt": "a\n", "b.txt": "b\n", "c.txt": "c\n", "d.txt": "d\n", "e.txt": "e\n" });
-    const heads = ["a", "b", "c", "d", "e"].map((f, i) => s.branch(`branch-${i + 1}`, base, { [`${f}.txt`]: `${f} changed\n` }));
+    const heads = ["a", "b", "c", "d", "e"].map((f, i) =>
+      s.branch(`branch-${i + 1}`, base, { [`${f}.txt`]: `${f} changed\n` })
+    );
     const report = await run(s, [
       pr({ number: 1, headSha: heads[0]!, isDraft: true }),
       pr({ number: 2, headSha: heads[1]!, unresolvedThreads: 1 }),
@@ -182,8 +185,68 @@ describe("reconcile", () => {
         repository: "example/repo",
         baseRef: "main",
         source: { listOpenPullRequests: async () => Promise.reject(new Error("gh graphql failed: HTTP 401")) },
-        git: createGitRunner(s.dir)
+        git: createGitRunner(s.dir),
+        mergeMethod: "merge"
       })
     ).rejects.toThrow(/gh graphql failed/);
+  });
+
+  describe("merge method", () => {
+    /** 7 changes a.txt; 3 is stacked on 7 and changes the same line again. */
+    function stacked() {
+      const s = scratch();
+      const base = s.commit("base", { "a.txt": "a\n" });
+      const h7 = s.branch("branch-7", base, { "a.txt": "parent\n" });
+      const h3 = s.branch("branch-3", h7, { "a.txt": "child\n" });
+      return { s, prs: [pr({ number: 7, headSha: h7 }), pr({ number: 3, headSha: h3, baseRef: "branch-7" })] };
+    }
+
+    it("records the method it modeled", async () => {
+      const { s, prs } = stacked();
+      expect((await run(s, prs)).mergeMethod).toBe("merge");
+      expect((await run(s, prs, { mergeMethod: "squash" })).mergeMethod).toBe("squash");
+    });
+
+    it("a merge commit keeps the parent's history, so a stacked child that edits the parent's lines merges", async () => {
+      const { s, prs } = stacked();
+      expect((await run(s, prs)).queue).toEqual([7, 3]);
+    });
+
+    it("a squash does not, so the same stacked child conflicts once its parent has landed", async () => {
+      const { s, prs } = stacked();
+      const report = await run(s, prs, { mergeMethod: "squash" });
+      expect(report.queue).toEqual([7]);
+      expect(find(report, 3)).toMatchObject({
+        wouldMerge: false,
+        afterUpstream: { clean: false, conflicts: ["a.txt"] }
+      });
+      expect(find(report, 3).reasons.join("\n")).toMatch(/conflicts once #7 merges: a\.txt/);
+    });
+
+    it("fails closed on rebase: nothing is reported mergeable", async () => {
+      const { s, prs } = stacked();
+      const report = await run(s, prs, { mergeMethod: "rebase" });
+      expect(report.queue).toEqual([]);
+      expect(report.pullRequests.every((p) => !p.wouldMerge)).toBe(true);
+      expect(find(report, 7).reasons.join("\n")).toMatch(/merge_method_not_modeled/);
+    });
+  });
+
+  it("distinguishes a dependency cycle from a pull request that is only blocked by one", async () => {
+    const s = scratch();
+    const base = s.commit("base", { "a.txt": "a\n" });
+    const h = [1, 2, 3].map((n) => s.branch(`branch-${n}`, base, { [`f${n}.txt`]: "x\n" }));
+    const report = await run(s, [
+      pr({ number: 1, headSha: h[0]!, baseRef: "branch-2" }),
+      pr({ number: 2, headSha: h[1]!, baseRef: "branch-1" }),
+      pr({ number: 3, headSha: h[2]!, baseRef: "branch-1" })
+    ]);
+    expect(find(report, 1).reasons.join("\n")).toMatch(/dependency_cycle/);
+    expect(find(report, 2).reasons.join("\n")).toMatch(/dependency_cycle/);
+    const third = find(report, 3).reasons.join("\n");
+    expect(third).toMatch(/blocked_by_cycle: depends on #1/);
+    expect(third).not.toMatch(/dependency_cycle:/);
+    expect(find(report, 3).standalone.evaluated).toBe(true);
+    expect(report.queue).toEqual([]);
   });
 });

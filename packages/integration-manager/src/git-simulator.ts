@@ -5,13 +5,23 @@ const GIT_TIMEOUT_MS = 60_000;
 const SHA = /^[0-9a-f]{40}$/u;
 
 /**
- * Simulated merge commits need an identity and must not depend on the host's git configuration: a machine or CI runner
- * with no global identity would otherwise fail `commit-tree` and the engine would report nothing mergeable. The identity
- * and dates are fixed, which also makes the synthetic commit ids deterministic.
+ * Simulation must not depend on, or be steered by, the host's git configuration. Simulated merge commits need an identity
+ * (a runner with no global identity would otherwise fail `commit-tree` and report nothing mergeable); the identity and
+ * dates are fixed, which also makes the synthetic commit ids deterministic. Global and system configuration are disabled
+ * outright, so the same repository gives the same verdict on every host.
  */
 const SIMULATION_GIT_ENV = {
   GIT_TERMINAL_PROMPT: "0",
+  // No host configuration at all. A merge driver, attribute file or hook named in the operator's ~/.gitconfig or in
+  // /etc/gitconfig could be selected by a pull request's .gitattributes: it would execute a helper and could turn a real
+  // conflict into a clean result, making the verdict depend on the machine. Only the settings passed here apply.
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_SYSTEM: "/dev/null",
   GIT_CONFIG_NOSYSTEM: "1",
+  GIT_ATTR_NOSYSTEM: "1",
+  // HOME and XDG_CONFIG_HOME also locate ~/.config/git/attributes and ignore files, so point them nowhere.
+  HOME: "/nonexistent-acs-simulation-home",
+  XDG_CONFIG_HOME: "/nonexistent-acs-simulation-xdg",
   GIT_AUTHOR_NAME: "ACS Integration Simulation",
   GIT_AUTHOR_EMAIL: "acs-integration-simulation@users.noreply.github.com",
   GIT_COMMITTER_NAME: "ACS Integration Simulation",

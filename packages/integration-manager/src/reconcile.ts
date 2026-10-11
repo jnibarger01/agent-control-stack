@@ -6,6 +6,7 @@ import {
   DEFAULT_GATE_POLICY,
   INTEGRATION_REPORT_SCHEMA_VERSION,
   type GatePolicy,
+  type MergeMethod,
   type IntegrationReport,
   type MergeSimulation,
   type PullRequestAssessment,
@@ -20,6 +21,11 @@ export interface ReconcileInput {
   source: PullRequestSource;
   /** A runner inside a disposable clone that already contains the base and every pull request head. */
   git: GitRunner;
+  /**
+   * How the repository will land a pull request (see `selectMergeMethod`). Required: the simulated history differs per
+   * method, and guessing would let a stacked change look clean when the real merge conflicts.
+   */
+  mergeMethod: MergeMethod;
   policy?: GatePolicy;
   now?: () => Date;
 }
@@ -29,6 +35,10 @@ const NOT_EVALUATED: MergeSimulation = { evaluated: false, clean: false, conflic
 /**
  * Reconcile open pull requests against the integration target: gate verdicts, dependency order, standalone merge
  * simulation, and a queue simulation that revalidates each pull request after the ones ahead of it have merged.
+ *
+ * `merge` is simulated with a two-parent commit; `squash` with a single-parent commit, because a squash does not record the
+ * pull request's history, so a stacked child still sees its parent's changes as its own. `rebase` replays each commit and
+ * is not modeled: every otherwise-eligible pull request is reported not mergeable rather than guessed at.
  *
  * Invariants: `wouldMerge` is true only when the pull request's gate verdict is `eligible`, every pull request it depends
  * on is also queued, and its merge simulates cleanly after the queue ahead of it. Anything the engine could not evaluate
@@ -69,6 +79,10 @@ export async function reconcile(input: ReconcileInput): Promise<IntegrationRepor
       notQueuedBecause.set(number, `gate ${gate.status}`);
       continue;
     }
+    if (input.mergeMethod === "rebase") {
+      notQueuedBecause.set(number, "merge_method_not_modeled: the repository lands pull requests by rebase");
+      continue;
+    }
     const missing = (analysis.dependsOn.get(number) ?? []).filter((dependency) => !queued.has(dependency));
     if (missing.length > 0) {
       notQueuedBecause.set(number, `depends on ${missing.map((n) => `#${n}`).join(", ")}, which cannot merge first`);
@@ -91,7 +105,11 @@ export async function reconcile(input: ReconcileInput): Promise<IntegrationRepor
       );
       continue;
     }
-    const merged = await simulator.syntheticMerge(simulation.tree!, [tip, pr.headSha]);
+    // A merge commit records the pull request's history; a squash does not, and neither is true of the other.
+    const merged = await simulator.syntheticMerge(
+      simulation.tree!,
+      input.mergeMethod === "merge" ? [tip, pr.headSha] : [tip]
+    );
     if (!merged) {
       notQueuedBecause.set(number, "could not build the simulated merge");
       continue;
@@ -108,6 +126,10 @@ export async function reconcile(input: ReconcileInput): Promise<IntegrationRepor
     for (const blocker of gate.blockers) reasons.push(`${blocker.code}: ${blocker.detail}`);
     for (const waiting of gate.pending) reasons.push(`pending ${waiting.code}: ${waiting.detail}`);
     if (analysis.cyclic.has(pr.number)) reasons.push("dependency_cycle: stacked pull requests depend on each other");
+    if (analysis.blockedByCycle.has(pr.number)) {
+      const via = (analysis.dependsOn.get(pr.number) ?? []).map((n) => `#${n}`).join(", ");
+      reasons.push(`blocked_by_cycle: depends on ${via}, which cannot merge until a dependency cycle is broken`);
+    }
     if (analysis.detached.has(pr.number)) {
       reasons.push(`detached_base: base ${pr.baseRef} is neither ${input.baseRef} nor an open pull request's head`);
     }
@@ -116,7 +138,8 @@ export async function reconcile(input: ReconcileInput): Promise<IntegrationRepor
     if (!alone.evaluated && !analysis.detached.has(pr.number) && !analysis.cyclic.has(pr.number)) {
       reasons.push(`not evaluated: ${alone.detail ?? "unknown"}`);
     }
-    if (alone.evaluated && alone.behindBy > 0) reasons.push(`stale_base: behind ${input.baseRef} by ${alone.behindBy} commit(s)`);
+    if (alone.evaluated && alone.behindBy > 0)
+      reasons.push(`stale_base: behind ${input.baseRef} by ${alone.behindBy} commit(s)`);
     const wouldMerge = queued.has(pr.number) && gate.status === "eligible";
     return {
       number: pr.number,
@@ -139,6 +162,7 @@ export async function reconcile(input: ReconcileInput): Promise<IntegrationRepor
     repository: input.repository,
     baseRef: input.baseRef,
     baseSha,
+    mergeMethod: input.mergeMethod,
     generatedAt: (input.now ?? (() => new Date()))().toISOString(),
     queue,
     pullRequests: assessments,

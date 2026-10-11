@@ -23,6 +23,30 @@ describe("analyzeDependencies", () => {
     expect(a.order).toEqual([3, 2, 1]);
   });
 
+  it("does not match a fork's branch that merely shares a name with an upstream base", () => {
+    const a = analyzeDependencies(
+      [
+        pr({ number: 1, headRef: "feature", isCrossRepository: true }),
+        pr({ number: 2, baseRef: "feature" }),
+        pr({ number: 3, headRef: "feature" }),
+        pr({ number: 4, baseRef: "feature" })
+      ],
+      "main"
+    );
+    // #2 and #4 are based on `feature` in the upstream repository, which only #3's head (same repository) can be.
+    expect(a.dependsOn.get(2)).toEqual([3]);
+    expect(a.dependsOn.get(4)).toEqual([3]);
+    expect(a.order).toEqual([1, 3, 2, 4]);
+  });
+
+  it("treats a base that only a fork provides as detached", () => {
+    const a = analyzeDependencies(
+      [pr({ number: 1, headRef: "feature", isCrossRepository: true }), pr({ number: 2, baseRef: "feature" })],
+      "main"
+    );
+    expect(a.detached.has(2)).toBe(true);
+  });
+
   it("detects a cycle and keeps the rest orderable", () => {
     const a = analyzeDependencies(
       [pr({ number: 1, baseRef: "branch-2" }), pr({ number: 2, baseRef: "branch-1" }), pr({ number: 3 })],
@@ -30,6 +54,38 @@ describe("analyzeDependencies", () => {
     );
     expect([...a.cyclic].sort()).toEqual([1, 2]);
     expect(a.order).toEqual([3]);
+  });
+
+  it("separates cycle members from pull requests that only depend on a cycle, at any depth", () => {
+    const a = analyzeDependencies(
+      [
+        pr({ number: 1, baseRef: "branch-2" }),
+        pr({ number: 2, baseRef: "branch-1" }),
+        pr({ number: 3, baseRef: "branch-1" }),
+        pr({ number: 4, baseRef: "branch-3" }),
+        pr({ number: 5 })
+      ],
+      "main"
+    );
+    expect([...a.cyclic].sort()).toEqual([1, 2]);
+    expect([...a.blockedByCycle].sort()).toEqual([3, 4]);
+    expect(a.order).toEqual([5]);
+  });
+
+  it("finds a longer cycle and a self-contained pair next to it", () => {
+    const a = analyzeDependencies(
+      [
+        pr({ number: 1, baseRef: "branch-3" }),
+        pr({ number: 2, baseRef: "branch-1" }),
+        pr({ number: 3, baseRef: "branch-2" }),
+        pr({ number: 4 }),
+        pr({ number: 5, baseRef: "branch-4" })
+      ],
+      "main"
+    );
+    expect([...a.cyclic].sort()).toEqual([1, 2, 3]);
+    expect(a.blockedByCycle.size).toBe(0);
+    expect(a.order).toEqual([4, 5]);
   });
 
   it("marks a base that is neither the target nor an open head as detached, transitively", () => {

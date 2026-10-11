@@ -7,7 +7,11 @@ const codes = (v: ReturnType<typeof evaluateGate>) => v.blockers.map((b) => b.co
 
 describe("evaluateGate", () => {
   it("passes a clean pull request", () => {
-    expect(evaluateGate(pr({ number: 1 }), DEFAULT_GATE_POLICY)).toMatchObject({ status: "eligible", blockers: [], pending: [] });
+    expect(evaluateGate(pr({ number: 1 }), DEFAULT_GATE_POLICY)).toMatchObject({
+      status: "eligible",
+      blockers: [],
+      pending: []
+    });
   });
 
   it.each([
@@ -34,7 +38,11 @@ describe("evaluateGate", () => {
       { checks: [{ name: "test", status: "COMPLETED" as const, conclusion: null }] },
       "failing_checks"
     ],
-    ["gate policy modified", { changedFiles: [".github/workflows/jnibarger01-pr-review-merge.yml"] }, "gate_policy_modified"],
+    [
+      "gate policy modified",
+      { changedFiles: [".github/workflows/jnibarger01-pr-review-merge.yml"] },
+      "gate_policy_modified"
+    ],
     ["truncated threads", { truncated: { threads: true, checks: false, files: false } }, "truncated_signals"],
     ["truncated checks", { truncated: { threads: false, checks: true, files: false } }, "truncated_signals"],
     ["truncated files", { truncated: { threads: false, checks: false, files: true } }, "truncated_signals"]
@@ -60,14 +68,19 @@ describe("evaluateGate", () => {
     );
     expect(running).toMatchObject({ status: "pending", blockers: [] });
     expect(running.pending.map((p) => p.code)).toEqual(["checks_pending"]);
-    expect(evaluateGate(pr({ number: 1, mergeable: "UNKNOWN" }), DEFAULT_GATE_POLICY).pending.map((p) => p.code)).toEqual([
-      "mergeable_unknown"
-    ]);
+    expect(
+      evaluateGate(pr({ number: 1, mergeable: "UNKNOWN" }), DEFAULT_GATE_POLICY).pending.map((p) => p.code)
+    ).toEqual(["mergeable_unknown"]);
   });
 
   it("a hard blocker wins over pending", () => {
     const verdict = evaluateGate(
-      pr({ number: 1, isDraft: true, mergeable: "UNKNOWN", checks: [{ name: "t", status: "QUEUED", conclusion: null }] }),
+      pr({
+        number: 1,
+        isDraft: true,
+        mergeable: "UNKNOWN",
+        checks: [{ name: "t", status: "QUEUED", conclusion: null }]
+      }),
       DEFAULT_GATE_POLICY
     );
     expect(verdict.status).toBe("blocked");
@@ -76,16 +89,24 @@ describe("evaluateGate", () => {
 
   it("enforces an author allowlist and the fork option", () => {
     const policy = { ...DEFAULT_GATE_POLICY, allowedAuthors: ["jnibarger01"] };
-    expect(evaluateGate(pr({ number: 1, author: "mallory" }), policy).blockers.map((b) => b.code)).toContain("author_not_allowed");
-    expect(evaluateGate(pr({ number: 1 }), policy).status).toBe("eligible");
-    expect(evaluateGate(pr({ number: 1, isCrossRepository: true }), { ...policy, allowForkPullRequests: true }).status).toBe(
-      "eligible"
+    expect(evaluateGate(pr({ number: 1, author: "mallory" }), policy).blockers.map((b) => b.code)).toContain(
+      "author_not_allowed"
     );
+    expect(evaluateGate(pr({ number: 1 }), policy).status).toBe("eligible");
+    expect(
+      evaluateGate(pr({ number: 1, isCrossRepository: true }), { ...policy, allowForkPullRequests: true }).status
+    ).toBe("eligible");
   });
 
   it("collects every blocker rather than stopping at the first", () => {
     const verdict = evaluateGate(
-      pr({ number: 1, isDraft: true, unresolvedThreads: 1, mergeable: "CONFLICTING", reviewDecision: "CHANGES_REQUESTED" }),
+      pr({
+        number: 1,
+        isDraft: true,
+        unresolvedThreads: 1,
+        mergeable: "CONFLICTING",
+        reviewDecision: "CHANGES_REQUESTED"
+      }),
       DEFAULT_GATE_POLICY
     );
     expect(codes(verdict).sort()).toEqual(["changes_requested", "conflicting", "draft", "unresolved_threads"]);
