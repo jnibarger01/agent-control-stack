@@ -503,6 +503,16 @@ export class MissionAuthorityLedger {
    * subset of its parent's (evaluated at the instant it was created), and is bound to the parent hash and grant it claims.
    */
   unitAuthority(missionId: string, unitId: string): UnitAuthorityRecord | undefined {
+    return this.unitAuthorityWalk(missionId, unitId, new Set());
+  }
+
+  /** `walked` holds the units already visited on this ancestry, so a stored loop is an integrity failure, not a crash. */
+  private unitAuthorityWalk(
+    missionId: string,
+    unitId: string,
+    walked: ReadonlySet<string>
+  ): UnitAuthorityRecord | undefined {
+    this.integrity("unit authority ancestry (cycle)", !walked.has(unitId));
     const row = this.store.db
       .prepare("SELECT * FROM work_unit_authority WHERE mission_id = ? AND unit_id = ?")
       .get(missionId, unitId) as Record<string, string | null> | undefined;
@@ -510,7 +520,9 @@ export class MissionAuthorityLedger {
     const definition = this.parseDefinition(row.envelope_json, "unit authority");
     this.integrity("unit authority", definitionHash(definition) === row.envelope_hash);
     const parentUnitId = row.parent_unit_id ? String(row.parent_unit_id) : undefined;
-    const parent = parentUnitId ? this.unitAuthority(missionId, parentUnitId) : undefined;
+    const parent = parentUnitId
+      ? this.unitAuthorityWalk(missionId, parentUnitId, new Set([...walked, unitId]))
+      : undefined;
     if (parentUnitId && !parent) {
       // The mission grant stands in only for a verified root. A missing intermediate record is corruption, not a root.
       const grandparent = this.store.db
