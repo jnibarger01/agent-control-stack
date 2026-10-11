@@ -202,3 +202,159 @@ describe("authority graph: revocation propagation", () => {
     expect(dispatch(ledger, "g1")).toMatchObject({ ok: true });
   });
 });
+
+describe("authority graph: read model", () => {
+  it("shows the delegation tree, how each unit was narrowed, and the grant at the root", () => {
+    const { ledger, claimAndDelegate } = tree();
+    claimAndDelegate(
+      "c2",
+      [
+        child("g2", {
+          requestedAuthority: narrower({
+            scope: [{ kind: "path", id: "/repo/acme/app", coverage: "descendants" }],
+            toolClasses: [{ runtime: "desktop_commander", toolName: "read_file" }],
+            maximumPrivileges: ["fs.read"]
+          })
+        })
+      ],
+      3500
+    );
+    const graph = ledger.authorityGraph("m1");
+    expect(graph).toMatchObject({ schemaVersion: "acs.authority-graph.v1", missionId: "m1", integrity: "verified" });
+    expect(graph.root).toMatchObject({ grantId: "grant-1", approverId: "human-1", state: "active", revocation: null });
+    expect(graph.nodes.map((n) => n.unitId).sort()).toEqual(["c1", "c2", "g1", "g2", "root"]);
+    expect(graph.edges).toEqual(
+      expect.arrayContaining([
+        { from: "mission", to: "root" },
+        { from: "root", to: "c1" },
+        { from: "root", to: "c2" },
+        { from: "c1", to: "g1" },
+        { from: "c2", to: "g2" }
+      ])
+    );
+    const g2 = graph.nodes.find((n) => n.unitId === "g2")!;
+    expect(g2).toMatchObject({ authoritySource: "derived", parentUnitId: "c2", grantId: "grant-1" });
+    expect(g2.narrowing!.notInherited).toEqual({
+      scope: ["path:/repo/acme/docs:descendants"],
+      toolClasses: ["desktop_commander:write_file"],
+      privileges: ["fs.write"]
+    });
+    expect(g2.narrowing!.executingActorChanged).toBe(false);
+    expect(graph.nodes.find((n) => n.unitId === "root")).toMatchObject({ authoritySource: "mission", narrowing: null });
+    expect(graph.counts.active).toBe(5);
+  });
+
+  it("reports a revoked grant on every node with who revoked it, and keeps the history", () => {
+    const { store, ledger } = tree();
+    revokeGrant(store);
+    const graph = ledger.authorityGraph("m1");
+    expect(graph.root).toMatchObject({ state: "revoked", revocation: { actorId: "human-1", reason: "compromised" } });
+    expect(graph.nodes.every((n) => n.effective.state === "revoked")).toBe(true);
+    expect(graph.counts.revoked).toBe(4);
+    expect(graph.integrity).toBe("verified");
+    expect(graph.history.events.map((e) => e.name)).toEqual(
+      expect.arrayContaining(["authority.granted", "child.requested"])
+    );
+  });
+
+  it("never reports a node active that dispatch would refuse", () => {
+    const scenarios: Array<{ name: string; arrange: (t: ReturnType<typeof tree>) => void }> = [
+      { name: "fresh", arrange: () => undefined },
+      { name: "revoked", arrange: (t) => revokeGrant(t.store) },
+      { name: "expired", arrange: (t) => (t.clock.now = at(3 * 3600 * 1000)) },
+      { name: "subject changed", arrange: (t) => (t.grants.subject = "b".repeat(64)) },
+      { name: "subject unavailable", arrange: (t) => (t.grants.subject = undefined) },
+      {
+        name: "superseded",
+        arrange: (t) =>
+          t.store.db
+            .prepare(
+              "INSERT INTO work_unit_child_supersessions (mission_id, child_unit_id, parent_unit_id, reason, created_at) VALUES ('m1', 'c2', 'root', 'test', ?)"
+            )
+            .run(T0)
+      }
+    ];
+    for (const scenario of scenarios) {
+      const t = tree();
+      scenario.arrange(t);
+      const graph = t.ledger.authorityGraph("m1");
+      for (const node of graph.nodes) {
+        const verdict = dispatch(t.ledger, node.unitId);
+        expect(node.effective.state === "active", `${scenario.name}: ${node.unitId}`).toBe(verdict.ok);
+      }
+    }
+  });
+
+  it("reports expiry by ACS's clock", () => {
+    const t = tree();
+    t.clock.now = at(3 * 3600 * 1000);
+    const graph = t.ledger.authorityGraph("m1");
+    expect(graph.root).toMatchObject({ state: "expired" });
+    expect(graph.counts.expired).toBe(4);
+  });
+
+  it("marks a tampered unit and everything derived from it, without throwing", () => {
+    const { store, ledger } = tree();
+    store.db.exec("DROP TRIGGER work_unit_authority_no_update");
+    store.db.exec(
+      `UPDATE work_unit_authority SET envelope_json = replace(envelope_json, '/repo/acme/docs', '/etc') WHERE unit_id = 'c1'`
+    );
+    const graph = ledger.authorityGraph("m1");
+    expect(graph.integrity).toBe("failed");
+    expect(graph.nodes.find((n) => n.unitId === "c1")!.effective.state).toBe("integrity_failed");
+    expect(graph.nodes.find((n) => n.unitId === "g1")!.effective.state).toBe("integrity_failed");
+    expect(graph.nodes.find((n) => n.unitId === "c2")!.effective.state).toBe("active");
+  });
+
+  it("reports a stored ancestry loop as an integrity failure, not a crash", () => {
+    const { store, ledger } = tree();
+    store.db.exec("DROP TRIGGER work_unit_authority_no_update");
+    store.db.exec("UPDATE work_unit_authority SET parent_unit_id = 'g1' WHERE unit_id = 'c1'");
+    const graph = ledger.authorityGraph("m1");
+    expect(graph.integrity).toBe("failed");
+    expect(graph.nodes.find((n) => n.unitId === "g1")!.effective.state).toBe("integrity_failed");
+  });
+
+  it("reports an unbound mission as having no authority and a missing mission as not found", () => {
+    const store = new CodingMissionStore(":memory:");
+    store.createGeneral({ missionId: "m1", summary: "s", budget: { ...DEFAULT_DELEGATION_BUDGET }, now: T0 });
+    store.addWorkUnits(
+      "m1",
+      [{ unitId: "root", kind: "agent", title: "root", payload: { role: "lead", prompt: "p" } }],
+      T0
+    );
+    const ledger = new MissionAuthorityLedger(store, {
+      grants: new FakeGrants(),
+      verifyOperator: () => false,
+      clock: () => at(1000)
+    });
+    const graph = ledger.authorityGraph("m1");
+    expect(graph.root).toMatchObject({ state: "no_authority" });
+    expect(graph.nodes[0]!.effective.state).toBe("no_authority");
+    expect(() => ledger.authorityGraph("absent")).toThrowError(
+      expect.objectContaining({ code: "coding_mission_not_found" })
+    );
+  });
+
+  it("records a denied escalation in the history so the attempt stays visible", () => {
+    const { ledger, store } = tree();
+    store.releaseReadyUnits("m1", at(3600));
+    const token = "tok-escalate";
+    expect(store.claimUnit("m1", "c2", { token, workerId: "w-c2", route: {}, claimedAt: at(3600) })).toMatchObject({
+      ok: true
+    });
+    const result = ledger.requestChildWork({
+      missionId: "m1",
+      parentUnitId: "c2",
+      workerId: "w-c2",
+      claimToken: token,
+      children: [
+        child("evil", { requestedAuthority: narrower({ maximumPrivileges: ["fs.read", "fs.write", "deploy"] }) })
+      ]
+    });
+    expect(result).toMatchObject({ ok: false, outcome: "denied" });
+    const graph = ledger.authorityGraph("m1");
+    expect(graph.nodes.some((n) => n.unitId === "evil")).toBe(false);
+    expect(graph.history.events.map((e) => e.name)).toContain("child.denied");
+  });
+});

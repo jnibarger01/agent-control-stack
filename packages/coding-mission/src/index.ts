@@ -26,6 +26,14 @@ export {
 export * from "./mission-model.js";
 export * from "./mission-intelligence.js";
 export * from "./budget.js";
+export {
+  AUTHORITY_GRAPH_SCHEMA_VERSION,
+  type AuthorityGraph,
+  type AuthorityGraphEvent,
+  type AuthorityGraphNode,
+  type AuthorityNarrowing,
+  type AuthorityNodeState
+} from "./authority-graph.js";
 export type {
   AddWorkUnitsResult,
   BudgetRefusal,

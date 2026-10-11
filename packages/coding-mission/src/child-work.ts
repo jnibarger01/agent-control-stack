@@ -22,6 +22,14 @@ import {
   type AutonomousAuthorityDefinition,
   type MissionAuthorityPolicy
 } from "./authority.js";
+import {
+  AUTHORITY_GRAPH_SCHEMA_VERSION,
+  EMPTY_STATE_COUNTS,
+  summarizeNarrowing,
+  type AuthorityGraph,
+  type AuthorityGraphNode,
+  type AuthorityNodeState
+} from "./authority-graph.js";
 import { budgetToLimits, type BudgetDecision, type BudgetLimits, type MissionBudget } from "./budget.js";
 import {
   IN_FLIGHT_WORK_UNIT_STATUSES,
@@ -550,6 +558,195 @@ export class MissionAuthorityLedger {
       grantId: String(row.grant_id),
       ...(row.purpose ? { purpose: String(row.purpose) } : {}),
       createdAt: String(row.created_at)
+    };
+  }
+
+  /**
+   * Read-only projection of the mission's delegated authority. It never throws on a corrupted record: that node (or the
+   * root) is reported `integrity_failed` and the graph's `integrity` is `failed`. The `effective` state applies the same
+   * checks as `verifyDispatch`, in the same order, without a worker or lane.
+   */
+  authorityGraph(missionId: string): AuthorityGraph {
+    const mission = this.store.get(missionId);
+    if (!mission) throw new ControlStackError("coding_mission_not_found", "coding mission does not exist");
+    const evaluatedAt = this.clock();
+    const now = Date.parse(evaluatedAt);
+    let integrityFailed = false;
+    const failed = (): "integrity_failed" => {
+      integrityFailed = true;
+      return "integrity_failed";
+    };
+
+    let missionAuthority: MissionAuthorityRecord | undefined;
+    let rootFailure: string | undefined;
+    try {
+      missionAuthority = this.missionAuthority(missionId);
+    } catch (error) {
+      if (!(error instanceof ControlStackError && error.code === "authority_integrity")) throw error;
+      rootFailure = error.message;
+    }
+
+    const stateFor = (grantId: string, expiresAt: string, unitId?: string): AuthorityNodeState => {
+      if (unitId) {
+        const gone = this.store.db
+          .prepare("SELECT 1 FROM work_unit_child_supersessions WHERE mission_id = ? AND child_unit_id = ?")
+          .get(missionId, unitId);
+        if (gone) return "superseded";
+      }
+      if (this.grantRevoked(grantId)) return "revoked";
+      try {
+        if (this.currentSubjectHash(missionId) !== this.readGrant(grantId)?.subjectInputHash) return "subject_changed";
+      } catch {
+        return failed();
+      }
+      return Date.parse(expiresAt) > now ? "active" : "expired";
+    };
+
+    const revocation = (grantId: string): { actorId: string; reason: string } | null => {
+      try {
+        const row = this.store.db
+          .prepare("SELECT actor_id, reason FROM autonomous_authority_revocations WHERE grant_id = ?")
+          .get(grantId) as { actor_id: string; reason: string } | undefined;
+        return row ? { actorId: row.actor_id, reason: String(row.reason).slice(0, 200) } : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const units = this.store.workUnits(missionId);
+    const nodes: AuthorityGraphNode[] = units.map((unit) => {
+      const base = {
+        unitId: unit.unitId,
+        parentUnitId: unit.parentUnitId ?? null,
+        depth: unit.depth,
+        unitStatus: unit.status
+      };
+      const empty = { grantId: null, definitionHash: null, derivedFromHash: null, executingActorId: null } as const;
+      try {
+        if (!unit.parentUnitId) {
+          if (!missionAuthority) {
+            const state = rootFailure ? failed() : "no_authority";
+            return {
+              ...base,
+              authoritySource: "none",
+              ...empty,
+              expiresAt: null,
+              purpose: null,
+              createdAt: null,
+              narrowing: null,
+              effective: { state, reason: rootFailure ?? "mission_has_no_authority" }
+            };
+          }
+          const definition = missionAuthority.definition;
+          return {
+            ...base,
+            authoritySource: "mission",
+            grantId: missionAuthority.grantId,
+            definitionHash: missionAuthority.definitionHash,
+            derivedFromHash: null,
+            executingActorId: definition.executingActorId,
+            expiresAt: definition.expiresAt,
+            purpose: null,
+            createdAt: missionAuthority.createdAt,
+            narrowing: null,
+            effective: { state: stateFor(missionAuthority.grantId, definition.expiresAt) }
+          };
+        }
+        const record = this.unitAuthority(missionId, unit.unitId);
+        if (!record) {
+          return {
+            ...base,
+            authoritySource: "none",
+            ...empty,
+            expiresAt: null,
+            purpose: null,
+            createdAt: null,
+            narrowing: null,
+            effective: { state: "no_authority", reason: "unit_authority_missing" }
+          };
+        }
+        const parentDefinition =
+          (unit.parentUnitId ? this.unitAuthority(missionId, unit.parentUnitId)?.definition : undefined) ??
+          missionAuthority?.definition;
+        return {
+          ...base,
+          authoritySource: "derived",
+          grantId: record.grantId,
+          definitionHash: record.definitionHash,
+          derivedFromHash: record.derivedFromHash,
+          executingActorId: record.definition.executingActorId,
+          expiresAt: record.definition.expiresAt,
+          purpose: record.purpose ?? null,
+          createdAt: record.createdAt,
+          narrowing: parentDefinition ? summarizeNarrowing(parentDefinition, record.definition) : null,
+          effective: { state: stateFor(record.grantId, record.definition.expiresAt, unit.unitId) }
+        };
+      } catch (error) {
+        if (!(error instanceof ControlStackError && error.code === "authority_integrity")) throw error;
+        return {
+          ...base,
+          authoritySource: "none",
+          ...empty,
+          expiresAt: null,
+          purpose: null,
+          createdAt: null,
+          narrowing: null,
+          effective: { state: failed(), reason: error.message }
+        };
+      }
+    });
+
+    const counts = EMPTY_STATE_COUNTS();
+    for (const node of nodes) counts[node.effective.state] += 1;
+
+    const HISTORY_LIMIT = 500;
+    const historyRows = this.store.db
+      .prepare(
+        `SELECT event_id, name, body_json, created_at FROM coding_events
+         WHERE mission_id = ? AND (name LIKE 'authority.%' OR name LIKE 'child.%') ORDER BY event_id LIMIT ?`
+      )
+      .all(missionId, HISTORY_LIMIT + 1) as Array<{
+      event_id: number;
+      name: string;
+      body_json: string;
+      created_at: string;
+    }>;
+    const events = historyRows.slice(0, HISTORY_LIMIT).map((row) => {
+      let body: unknown;
+      try {
+        body = JSON.parse(row.body_json) as unknown;
+      } catch {
+        body = null;
+      }
+      return { eventId: row.event_id, name: row.name, createdAt: row.created_at, body };
+    });
+
+    const root: AuthorityGraph["root"] = missionAuthority
+      ? {
+          grantId: missionAuthority.grantId,
+          grantHash: missionAuthority.grantHash,
+          definitionHash: missionAuthority.definitionHash,
+          approverId: missionAuthority.approverId,
+          reason: missionAuthority.reason,
+          executingActorId: missionAuthority.definition.executingActorId,
+          expiresAt: missionAuthority.definition.expiresAt,
+          policy: missionAuthority.policy,
+          state: stateFor(missionAuthority.grantId, missionAuthority.definition.expiresAt),
+          revocation: revocation(missionAuthority.grantId)
+        }
+      : { state: rootFailure ? failed() : "no_authority", reason: rootFailure ?? "mission_has_no_authority" };
+
+    return {
+      schemaVersion: AUTHORITY_GRAPH_SCHEMA_VERSION,
+      missionId,
+      missionState: mission.state,
+      evaluatedAt,
+      integrity: integrityFailed ? "failed" : "verified",
+      root,
+      nodes,
+      edges: nodes.map((node) => ({ from: node.parentUnitId ?? "mission", to: node.unitId })),
+      counts,
+      history: { events, truncated: historyRows.length > HISTORY_LIMIT }
     };
   }
 
