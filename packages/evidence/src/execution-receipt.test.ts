@@ -235,6 +235,30 @@ describe("proof-of-execution receipt integrity", () => {
     expect(verifyExecutionReceipt(buildExecutionReceipt(valid), bound)).toEqual({ ok: true, defects: [] });
   });
 
+  it("accepts verifier engine identifiers longer than 256 characters, as the canonical contract does", () => {
+    const longId = "engine/" + "x".repeat(400);
+    const valid = core();
+    valid.verification.reviewers[0]!.verifierEngineId = longId;
+    const bound = expected();
+    bound.reviewers[0]!.verifierEngineId = longId;
+    expect(verifyExecutionReceipt(buildExecutionReceipt(valid), bound)).toEqual({ ok: true, defects: [] });
+  });
+
+  it("accepts a fully passing decision recording more than eight distinct reviewers", () => {
+    const many = Array.from({ length: 12 }, (_, i) => ({
+      reviewerPrincipalId: `reviewer_m${i}`,
+      verifierEngineId: `engine_m${i}`,
+      verifierProviderId: `provider_m${i}`,
+      verdict: "pass" as const,
+      audit: { eventId: `review_m${i}`, eventHash: (i + 10).toString(16).padStart(64, "e") }
+    }));
+    const valid = core();
+    valid.verification.reviewers = copyReviewers(many);
+    const bound = expected();
+    bound.reviewers = copyReviewers(many);
+    expect(verifyExecutionReceipt(buildExecutionReceipt(valid), bound)).toEqual({ ok: true, defects: [] });
+  });
+
   it("rejects untrusted approval claims and unknown fields", () => {
     const receipt = buildExecutionReceipt(core());
     expect(verifyExecutionReceipt({ ...receipt, modelClaimsApproved: true }, expected()).ok).toBe(false);

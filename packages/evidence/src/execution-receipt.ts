@@ -20,8 +20,11 @@ const id = z
   .min(1)
   .max(128)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
-/** Engine and provider identifiers. The canonical verification contract accepts any non-empty id. */
-const engineId = z.string().min(1).max(256);
+/**
+ * Engine and provider identifiers. The canonical verification contract (verificationResultSchema
+ * verifierEngineId) accepts any non-empty id with no upper bound, so no narrower limit is imposed here.
+ */
+const engineId = z.string().min(1);
 /** Principal and actor identities. The ACS registry accepts any non-empty id, including external ids with @ or /. */
 const actorId = z.string().trim().min(1).max(4096);
 const isoTimestamp = z.string().refine((value) => !Number.isNaN(Date.parse(value)), "invalid timestamp");
@@ -58,8 +61,14 @@ const reviewerRef = z
   })
   .strict();
 const policyDecisionSchema = z.enum(["allow", "require_approval"]);
-/** A canonical attempt can legitimately have zero reviewers when its requirement needs none. */
-const MAX_REVIEWERS = 8;
+/**
+ * Recorded reviewers: a canonical verification decision may reference up to 64 passing review
+ * findings (work-items governance.ts reviewFindingHashes max 64). A canonical attempt can
+ * legitimately have zero reviewers when its requirement needs none.
+ */
+const MAX_REVIEWERS = 64;
+/** Reviewers *required* by the canonical requirement (work-items governance.ts reviewersRequired max 8). */
+const MAX_REVIEWERS_REQUIRED = 8;
 /**
  * Every approval the lease consumed: one primary approvalId plus up to 64 additionalApprovalIds
  * (work-items attempt.ts: additionalApprovals max 64). The total is therefore 1 + 64.
@@ -269,7 +278,7 @@ export const receiptBindingSchema = z
     implementerEngineId: engineId,
     implementerProviderId: engineId,
     reviewers: z.array(reviewerRef).max(MAX_REVIEWERS),
-    reviewersRequired: z.number().int().min(0).max(MAX_REVIEWERS),
+    reviewersRequired: z.number().int().min(0).max(MAX_REVIEWERS_REQUIRED),
     requireIndependentPrincipal: z.boolean(),
     requireIndependentProvider: z.boolean(),
     criteriaPassed: z.number().int().positive().max(512),
