@@ -77,6 +77,10 @@ describe("operator thirty", () => {
     expect(classifyAgentActivity("2026-10-10T17:58:00.000Z", now)).toBe("active");
     expect(classifyAgentActivity("2026-10-10T17:40:00.000Z", now)).toBe("idle");
     expect(detectDuplicateIntents([{ id: "a", intent: "Restart  API" }, { id: "b", intent: "restart api" }, { id: "c", intent: "other" }])).toEqual({ "restart api": ["a", "b"] });
+    const proto = detectDuplicateIntents([{ id: "p1", intent: "__proto__" }, { id: "p2", intent: "__proto__" }]);
+    expect(Object.getPrototypeOf(proto)).toBeNull();
+    expect(Object.keys(proto)).toEqual(["__proto__"]);
+    expect(proto["__proto__"]).toEqual(["p1", "p2"]);
     expect(policyDenialRate([])).toBeUndefined();
     expect(policyDenialRate([{ outcome: "deny" }, { outcome: "allow" }])).toBe(0.5);
     expect(detectRetryStorms([{ id: "storm", retrySequence: 3 }, { id: "ok", retrySequence: 1 }])).toEqual(["storm"]);

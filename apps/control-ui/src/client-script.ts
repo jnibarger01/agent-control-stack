@@ -1344,11 +1344,13 @@ const viewAliases = {
   dispatch: 'dispatch',
   'create-task': 'overview'
 };
-function showView(name) {
+function showView(name, options) {
   const view = viewAliases[name] || 'overview';
   syncPageHeading(view);
   document.body.dataset.activeView = view;
-  try { localStorage.setItem(${JSON.stringify(LAST_VIEW_STORAGE_KEY)}, view); } catch {}
+  // The hashless startup default must not overwrite the saved view before
+  // bindOperatorThirty restores it.
+  if (!(options && options.persist === false)) try { localStorage.setItem(${JSON.stringify(LAST_VIEW_STORAGE_KEY)}, view); } catch {}
   document.querySelectorAll('nav a[data-nav]').forEach((link) => {
     link.classList.toggle('active', link.dataset.nav === view);
   });
@@ -1401,7 +1403,7 @@ document.querySelector('aside nav')?.addEventListener('click', (event) => {
   const href = link.getAttribute('href') || '#overview';
   history.pushState(null, '', href);
 });
-showView((location.hash || '#overview').replace('#', ''));
+showView((location.hash || '#overview').replace('#', ''), { persist: !!location.hash });
 openWorkItemFromLocation();
 ${codingMissionPanelSource()}`;
 }

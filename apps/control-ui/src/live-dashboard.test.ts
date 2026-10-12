@@ -96,7 +96,7 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     const app = bootLive({
       workItems: [
         item("wrk_src", { intent: "same intent" }),
-        item("wrk_retry", { intent: "same intent", lineageType: "retry" } as Partial<Item>),
+        item("wrk_retry", { intent: "same intent", lineageType: "retry", sourceWorkItemId: "wrk_src" } as Partial<Item>),
         item("wrk_proto_a", { intent: "__proto__" }),
         item("wrk_proto_b", { intent: "__proto__" }),
         item("wrk_future", { createdAt: "2999-01-01T00:00:00.000Z" })
@@ -107,6 +107,62 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     await app.flush();
     expect(app.text("#insight-ages")).toContain("unknown 1");
     expect(app.text("#insight-dupes")).toBe("1 duplicate intent group");
+  });
+
+  it("restores the saved view on a hashless reload instead of persisting the startup default", async () => {
+    const app = bootLive(
+      { workItems: [item("wrk_a")], events: [], now: NOW },
+      {},
+      { beforeParse: (w) => (w.localStorage as Storage).setItem("acs.mc.lastView", "audit") }
+    );
+    await app.advance(0);
+    expect(app.window.localStorage.getItem("acs.mc.lastView")).toBe("audit");
+    expect(app.document.body.dataset.activeView).toBe("audit");
+  });
+
+  it("groups duplicates by lineage root, not by lineage presence", async () => {
+    const app = bootLive({
+      workItems: [
+        item("wrk_src", { intent: "same intent" }),
+        item("wrk_src_retry", { intent: "same intent", lineageType: "retry", sourceWorkItemId: "wrk_src" } as Partial<Item>),
+        item("wrk_x", { intent: "clone intent" }),
+        item("wrk_x_clone", { intent: "clone intent", lineageType: "clone", sourceWorkItemId: "wrk_x" } as Partial<Item>),
+        item("wrk_y_clone", { intent: "clone intent", lineageType: "clone", sourceWorkItemId: "wrk_y" } as Partial<Item>)
+      ],
+      events: [],
+      now: NOW
+    });
+    await app.flush();
+    // "same intent" is one lineage (not a duplicate); "clone intent" spans roots wrk_x and wrk_y.
+    expect(app.text("#insight-dupes")).toBe("1 duplicate intent group");
+  });
+
+  it("computes the denial rate from the structured policy decision only", async () => {
+    const decided = (sequence: number, decision: string, workItemId: string) =>
+      ({
+        sequence,
+        id: `evt_${sequence}`,
+        name: "policy.decided",
+        timeUnixNano: String(BigInt(1_790_000_000_000 + sequence) * 1_000_000n),
+        attributes: { "work_item.id": workItemId, "policy.decision": decision },
+        body: { decision }
+      }) as unknown as MissionControlViewModel["events"][number];
+    const app = bootLive({
+      workItems: [item("wrk_a")],
+      events: [decided(1, "allow", "wrk_deny_cleanup"), decided(2, "deny", "wrk_b")],
+      now: NOW
+    });
+    await app.flush();
+    expect(app.text("#insight-denial")).toBe("50% denied in view");
+  });
+
+  it("does not label a missing or corrupt execution mode as strict", async () => {
+    const app = bootLive({ workItems: [item("wrk_a")], events: [], executionModeProblem: "corrupt", now: NOW });
+    await app.flush();
+    expect(app.text("#insight-execution")).toMatch(/missing or corrupt/);
+    const strict = bootLive({ workItems: [item("wrk_a")], events: [], executionMode: "strict", now: NOW });
+    await strict.flush();
+    expect(strict.text("#insight-execution")).toMatch(/^Strict mode/);
   });
 
   it("does not pull server-only renderer code into the client graph (#21)", () => {

@@ -369,23 +369,28 @@ function renderOperatorInsights() {
   const agentNode = document.getElementById('insight-agents');
   if (agentNode) agentNode.textContent = 'active ' + activity.active + ', idle ' + activity.idle + ', stale ' + activity.stale + ', unknown ' + activity.unknown;
   // Map, not a plain object: intents are untrusted and may normalize to keys
-  // such as __proto__ or constructor. Retries and clones (data-lineage set)
-  // copy their source intent by design, so they are not duplicate intents.
+  // such as __proto__ or constructor. Retries and clones copy their source
+  // intent by design, so members of one lineage count once: each row is keyed
+  // by its lineage root (source id, else itself) and a group is a duplicate
+  // only when it spans more than one distinct root.
   const groups = new Map();
   rows.forEach(function (row) {
     const key = row.getAttribute('data-intent-norm') || '';
-    if (!key || row.getAttribute('data-lineage')) return;
-    const group = groups.get(key) || [];
-    group.push(row.getAttribute('data-work-item') || '');
-    groups.set(key, group);
+    if (!key) return;
+    const id = row.getAttribute('data-work-item') || '';
+    const root = (row.getAttribute('data-lineage') && row.getAttribute('data-lineage-source')) || id;
+    const roots = groups.get(key) || new Set();
+    roots.add(root);
+    groups.set(key, roots);
   });
-  const dupes = Array.from(groups.keys()).filter(function (key) { return groups.get(key).length > 1; });
+  const dupes = Array.from(groups.keys()).filter(function (key) { return groups.get(key).size > 1; });
   const dupeNode = document.getElementById('insight-dupes');
   if (dupeNode) dupeNode.textContent = dupes.length ? dupes.length + ' duplicate intent group' + (dupes.length === 1 ? '' : 's') : 'No duplicate intents in view.';
   const decisions = Array.from(document.querySelectorAll('#events-timeline li')).filter(function (node) {
     return (node.querySelector('strong') && node.querySelector('strong').textContent) === 'policy.decided';
   });
-  const denied = decisions.filter(function (node) { return /deny/i.test(node.textContent || ''); }).length;
+  // Use the structured policy.decision attribute only, never row text.
+  const denied = decisions.filter(function (node) { return node.getAttribute('data-policy-decision') === 'deny'; }).length;
   const denialNode = document.getElementById('insight-denial');
   if (denialNode) denialNode.textContent = decisions.length ? Math.round((denied / decisions.length) * 100) + '% denied in view' : 'No policy decisions in view.';
   const storms = rows.filter(function (row) {
@@ -397,10 +402,13 @@ function renderOperatorInsights() {
   if (executionNode) {
     const admin = document.querySelector('[data-execution-mode="admin"]');
     const adminOn = !!(admin && admin.checked);
+    const strict = document.querySelector('[data-execution-mode="strict"]');
+    const strictOn = !!(strict && strict.checked);
     const dryRun = rows.some(function (row) { return !!row.querySelector('[data-execution-mode="dry_run"]'); });
     if (adminOn && dryRun) executionNode.textContent = 'Admin mode is on, but a visible result is still dry-run. Admin mode does not prove live execution.';
     else if (adminOn) executionNode.textContent = operatorThirty.adminWarning + ' This display does not grant execution authority.';
-    else executionNode.textContent = 'Strict mode. Display does not grant execution authority.';
+    else if (strictOn) executionNode.textContent = 'Strict mode. Display does not grant execution authority.';
+    else executionNode.textContent = 'Execution mode is missing or corrupt; treat as fail-closed. Display does not grant execution authority.';
   }
 }
 function renderOperatorFilterSummary() {

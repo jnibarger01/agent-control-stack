@@ -248,7 +248,7 @@ export function workQueueItems(
       const agentId = workItemAgentId(item, attempts, leases);
       const intentNorm = escapeHtml(normalizeIntentKey(redactSecrets(item.intent)));
       const glyph = escapeHtml(statusGlyph(item.status));
-      return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}" data-risk="${escapeHtml(item.risk)}" data-title="${escapeHtml(item.title)}" data-agent-id="${escapeHtml(agentId)}" data-created-at="${escapeHtml(item.createdAt)}" data-retry-sequence="${escapeHtml(String(item.retrySequence ?? 0))}" data-lineage="${escapeHtml(item.lineageType ?? "")}" data-intent-norm="${intentNorm}"><span>${pill(item.status)} ${pill(item.risk)} ${executionModeChip(item)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(redactSecrets(item.intent))}</small>${executionPlanBadge(plan, admission)}${executionSummary(attempts, leases)}${workItemError(item)}<span class="status-glyph" title="${escapeHtml(item.status)}">${glyph}</span><span class="relative-time" data-relative-time="${escapeHtml(item.createdAt)}"></span></button>`;
+      return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}" data-risk="${escapeHtml(item.risk)}" data-title="${escapeHtml(item.title)}" data-agent-id="${escapeHtml(agentId)}" data-created-at="${escapeHtml(item.createdAt)}" data-retry-sequence="${escapeHtml(String(item.retrySequence ?? 0))}" data-lineage="${escapeHtml(item.lineageType ?? "")}" data-lineage-source="${escapeHtml(item.sourceWorkItemId ?? "")}" data-intent-norm="${intentNorm}"><span>${pill(item.status)} ${pill(item.risk)} ${executionModeChip(item)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(redactSecrets(item.intent))}</small>${executionPlanBadge(plan, admission)}${executionSummary(attempts, leases)}${workItemError(item)}<span class="status-glyph" title="${escapeHtml(item.status)}">${glyph}</span><span class="relative-time" data-relative-time="${escapeHtml(item.createdAt)}"></span></button>`;
     })
     .join("");
 }
@@ -440,12 +440,23 @@ export function connectorsPanel(): string {
   </div>`;
 }
 
+/** Structured policy decision (body.decision, else the policy.decision attribute), as visibility.ts reads it. */
+function policyDecisionAttr(event: StoredAuditEvent): string {
+  if (event.name !== "policy.decided") return "";
+  const body = event.body && typeof event.body === "object" ? (event.body as Record<string, unknown>) : {};
+  const attributes = (event.attributes ?? {}) as Record<string, unknown>;
+  const decision = body.decision ?? attributes["policy.decision"];
+  return decision === "allow" || decision === "require_approval" || decision === "deny"
+    ? ` data-policy-decision="${decision}"`
+    : "";
+}
+
 export function eventTimeline(events: StoredAuditEvent[]): string {
   if (!events.length) return `<p class="empty">No audit events recorded.</p>`;
   return `<ol class="timeline">${events
     .map(
       (event) =>
-        `<li${event.sequence === undefined ? "" : ` data-sequence="${escapeHtml(String(event.sequence))}"`}><time>${time(nanoToIso(event.timeUnixNano))}</time><strong>${escapeHtml(event.name)}</strong>${auditAttributesHtml(event.attributes)}</li>`
+        `<li${event.sequence === undefined ? "" : ` data-sequence="${escapeHtml(String(event.sequence))}"`}${policyDecisionAttr(event)}><time>${time(nanoToIso(event.timeUnixNano))}</time><strong>${escapeHtml(event.name)}</strong>${auditAttributesHtml(event.attributes)}</li>`
     )
     .join("")}</ol>`;
 }

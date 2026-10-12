@@ -127,7 +127,8 @@ export function detectDuplicateIntents(items: readonly { id: string; intent: str
     list.push(item.id);
     groups.set(key, list);
   }
-  const duplicates: Record<string, string[]> = {};
+  // Prototype-free: untrusted intents may normalize to "__proto__".
+  const duplicates: Record<string, string[]> = Object.create(null) as Record<string, string[]>;
   for (const [key, ids] of groups) {
     if (ids.length > 1) duplicates[key] = ids;
   }
