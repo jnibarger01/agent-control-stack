@@ -4,7 +4,7 @@ import type { WorkItemStore } from "./store.js";
 
 /** A read-only projection. It never executes or authorizes historical actions. */
 export const MISSION_TIME_TRAVEL_VERSION = "acs.mission-time-travel.v1" as const;
-type Ledger = Pick<WorkItemStore, "verifyAuditChain" | "getMissionTrace">;
+type Ledger = Pick<WorkItemStore, "verifyAuditChain" | "getMissionTrace" | "readEvents">;
 export interface TimeTravelEvent {
   sequence: number;
   id: string;
@@ -121,6 +121,28 @@ export function verifyMissionTimeTravel(value: MissionTimeTravelSnapshot, store:
   }
 }
 
+/** Verifier exceptions (e.g. malformed persisted rows) map to the canonical integrity error. */
+function verifiedChain(store: Ledger): ReturnType<Ledger["verifyAuditChain"]> {
+  try {
+    return store.verifyAuditChain();
+  } catch {
+    fail("time_travel_audit_integrity_failed");
+  }
+}
+
+/** Sequence of the newest audit event, bound to the verified chain head hash. */
+function auditHeadSequence(store: Ledger, headHash: string): number {
+  let newest;
+  try {
+    newest = store.readEvents({ beforeSequence: Number.MAX_SAFE_INTEGER, limit: 1 }).at(-1);
+  } catch {
+    fail("time_travel_audit_integrity_failed");
+  }
+  if (!newest) return headHash === "" ? 0 : fail("time_travel_audit_changed_during_read");
+  if (newest.eventHash !== headHash) fail("time_travel_audit_changed_during_read");
+  return newest.sequence;
+}
+
 /**
  * Full-chain verification before and after a bounded projection, using the
  * canonical mission trace reader. Pages are observational, not a single
@@ -140,8 +162,14 @@ export function readMissionTimeTravel(
     maxEvents > 2000
   )
     fail("time_travel_invalid_limit");
-  const initial = store.verifyAuditChain();
+  const initial = verifiedChain(store);
   if (!initial.ok) fail("time_travel_audit_integrity_failed");
+  if (options.asOfSequence !== undefined) {
+    // A cutoff must name a completed point in history: reject cutoffs past the
+    // verified audit head, which could still gain events on a repeated query.
+    const head = auditHeadSequence(store, initial.headHash);
+    if (options.asOfSequence > head) fail("time_travel_cutoff_beyond_head");
+  }
 
   let afterSequence = 0;
   const seen = new Set<string>();
@@ -205,7 +233,7 @@ export function readMissionTimeTravel(
       finished = true;
     }
   }
-  const final = store.verifyAuditChain();
+  const final = verifiedChain(store);
   if (!final.ok || final.headHash !== initial.headHash || final.eventCount !== initial.eventCount)
     fail("time_travel_audit_changed_during_read");
   const body = {
@@ -230,7 +258,7 @@ export function compareMissionTimeTravel(
 ): {
   equal: boolean;
   firstDivergence?: number;
-  reason?: "different_mission" | "added" | "removed" | "changed";
+  reason?: "different_mission" | "added" | "removed" | "changed" | "metadata";
 } {
   if (!locallyConsistent(a) || !locallyConsistent(b))
     fail("time_travel_snapshot_integrity_failed");
@@ -243,5 +271,8 @@ export function compareMissionTimeTravel(
     if (domainHash(MISSION_TIME_TRAVEL_VERSION + ".event", left) !== domainHash(MISSION_TIME_TRAVEL_VERSION + ".event", right))
       return { equal: false, firstDivergence: Math.min(left.sequence, right.sequence), reason: "changed" };
   }
+  // Identical mission events but distinct authenticated snapshot metadata
+  // (cutoff, audit head, event count) are distinct snapshots, not equal ones.
+  if (a.snapshotHash !== b.snapshotHash) return { equal: false, reason: "metadata" };
   return { equal: true };
 }

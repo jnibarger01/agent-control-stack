@@ -212,4 +212,50 @@ describe("mission time travel", () => {
       ctx.close();
     }
   });
+  it("maps audit verifier exceptions (malformed persisted rows) to the canonical integrity error", () => {
+    const ctx = fixture();
+    try {
+      // The schema rejects invalid JSON on write, so simulate a row that fails
+      // deserialization inside the verifier (rowToEvent throws SyntaxError).
+      const ledger = {
+        getMissionTrace: ctx.store.getMissionTrace.bind(ctx.store),
+        readEvents: ctx.store.readEvents.bind(ctx.store),
+        verifyAuditChain: () => {
+          throw new SyntaxError("Unexpected token n in JSON");
+        }
+      };
+      expect(() => readMissionTimeTravel(ledger as never, ctx.work.id)).toThrow("time_travel_audit_integrity_failed");
+    } finally {
+      ctx.close();
+    }
+  });
+
+  it("rejects cutoffs beyond the verified audit head", () => {
+    const ctx = fixture();
+    try {
+      ctx.store.recordSystemEvent({ name: "tool.called", attributes: { "work_item.id": ctx.work.id } });
+      const head = readMissionTimeTravel(ctx.store, ctx.work.id);
+      const headSequence = ctx.store.readEvents({ beforeSequence: Number.MAX_SAFE_INTEGER, limit: 1 }).at(-1)!.sequence;
+      expect(readMissionTimeTravel(ctx.store, ctx.work.id, { asOfSequence: headSequence }).events).toEqual(head.events);
+      expect(() => readMissionTimeTravel(ctx.store, ctx.work.id, { asOfSequence: headSequence + 1 })).toThrow(
+        "time_travel_cutoff_beyond_head"
+      );
+    } finally {
+      ctx.close();
+    }
+  });
+
+  it("does not report snapshots with different audit metadata as equal", () => {
+    const ctx = fixture();
+    try {
+      const before = readMissionTimeTravel(ctx.store, ctx.work.id);
+      ctx.store.recordSystemEvent({ name: "unrelated.event", attributes: { "work_item.id": "other-mission" } });
+      const after = readMissionTimeTravel(ctx.store, ctx.work.id);
+      expect(after.events).toEqual(before.events);
+      expect(after.snapshotHash).not.toBe(before.snapshotHash);
+      expect(compareMissionTimeTravel(before, after)).toEqual({ equal: false, reason: "metadata" });
+    } finally {
+      ctx.close();
+    }
+  });
 });
