@@ -216,6 +216,40 @@ export class McpHttpClient {
     return { status: response.status, body };
   }
 
+  /**
+   * Posts `message`, retrying transient failures: an unreachable edge (network
+   * error) and 5xx server errors are retried with short bounded backoff. A 4xx
+   * refusal, a `not_connected` result, or a non-retryable transport error is
+   * returned/raised immediately without retry.
+   */
+  private async postWithRetry(message: Record<string, unknown>, attempts = 3): Promise<{ status: number; body: Record<string, unknown> | undefined }> {
+    let lastError: McpTransportError | undefined;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (attempt > 0) {
+        await new Promise((resolve) => setTimeout(resolve, Math.min(250 * 2 ** (attempt - 1), 1000)));
+      }
+      try {
+        const result = await this.post(message);
+        // A 5xx is a transient server-side failure; retry unless this was the last attempt.
+        if (result.status >= 500 && attempt < attempts - 1) continue;
+        return result;
+      } catch (error) {
+        if (!(error instanceof McpTransportError) || error.outcome.retryable !== true) throw error;
+        lastError = error;
+      }
+    }
+    throw lastError ?? new McpTransportError('retry exhausted', outcome('managed_authorization_unavailable', {
+      code: 'edge_unreachable', message: 'retry exhausted', retryable: true,
+    }));
+  }
+
+  /** Drops the current session and re-establishes it (used after a stale 404). */
+  private async reinitialize(): Promise<void> {
+    this.initialized = false;
+    this.sessionId = undefined;
+    await this.initialize();
+  }
+
   private refusal(status: number, body: Record<string, unknown> | undefined): McpTransportError {
     if (status === 401) {
       return new McpTransportError('unauthorized', outcome('not_connected', {
@@ -235,7 +269,7 @@ export class McpHttpClient {
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
-    const { status, body } = await this.post({
+    const { status, body } = await this.postWithRetry({
       jsonrpc: '2.0',
       id: this.nextId++,
       method: 'initialize',
@@ -247,13 +281,17 @@ export class McpHttpClient {
       }
       throw this.refusal(status, body);
     }
-    await this.post({ jsonrpc: '2.0', method: 'notifications/initialized' });
+    await this.postWithRetry({ jsonrpc: '2.0', method: 'notifications/initialized' });
     this.initialized = true;
   }
 
   async listTools(): Promise<Array<Record<string, unknown>>> {
     await this.initialize();
-    const { status, body } = await this.post({ jsonrpc: '2.0', id: this.nextId++, method: 'tools/list', params: {} });
+    let { status, body } = await this.postWithRetry({ jsonrpc: '2.0', id: this.nextId++, method: 'tools/list', params: {} });
+    if (status === 404) {
+      await this.reinitialize();
+      ({ status, body } = await this.postWithRetry({ jsonrpc: '2.0', id: this.nextId++, method: 'tools/list', params: {} }));
+    }
     if (status !== 200 || !body) throw this.refusal(status, body);
     if ('error' in body) throw new McpTransportError('tools/list failed', classifyJsonRpcError(body.error as Record<string, unknown>));
     return ((body.result as { tools?: Array<Record<string, unknown>> } | undefined)?.tools) ?? [];
@@ -263,12 +301,21 @@ export class McpHttpClient {
   async callTool(name: string, args: Record<string, unknown>): Promise<JcCallOutcome> {
     try {
       await this.initialize();
-      const { status, body } = await this.post({
+      let { status, body } = await this.postWithRetry({
         jsonrpc: '2.0',
         id: this.nextId++,
         method: 'tools/call',
         params: { name, arguments: args },
       });
+      if (status === 404) {
+        await this.reinitialize();
+        ({ status, body } = await this.postWithRetry({
+          jsonrpc: '2.0',
+          id: this.nextId++,
+          method: 'tools/call',
+          params: { name, arguments: args },
+        }));
+      }
       if (status !== 200 || !body) throw this.refusal(status, body);
       if ('error' in body) return classifyJsonRpcError(body.error as Record<string, unknown>);
       return classifyToolResult((body.result ?? {}) as Record<string, unknown>);
