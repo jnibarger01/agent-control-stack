@@ -113,8 +113,19 @@ await test('client: tools/call is NOT retried on a 503 (may already have execute
   const { sends, client } = fakeEdge({ onToolCall: (n, msg) => (n < 3 ? json({ error: 'server' }, 503) : TOOL_OK(msg)) });
   const result = await client.callTool('start_process', { command: 'x' });
   assert.equal(sends['tools/call'], 1, 'a 5xx tools/call must be sent exactly once');
-  assert.equal(result.kind, 'managed_authorization_unavailable');
-  assert.equal(result.retryable, true, 'the caller gets a retryable outcome instead');
+  assert.equal(result.kind, 'execution_unknown', 'a bare 503 may follow execution: never "nothing ran"');
+  assert.equal(result.exitCode, JC_EXIT.executionUnknown);
+  assert.equal(result.retryable, false, 'a bare 503 on tools/call must not be marked retryable');
+  assert.match(result.message, /may have executed.*HTTP 503/u);
+});
+
+await test('client: a managed_authorization_* refusal body on a 503 stays unavailable + retryable', async () => {
+  const { sends, client } = fakeEdge({ onToolCall: () => json({ error: 'managed_authorization_unavailable', code: 'managed_fail_closed', detail: 'ACS down' }, 503) });
+  const result = await client.callTool('start_process', { command: 'x' });
+  assert.equal(sends['tools/call'], 1);
+  assert.equal(result.kind, 'managed_authorization_unavailable', 'an edge refusal provably did not run');
+  assert.equal(result.code, 'managed_fail_closed');
+  assert.equal(result.retryable, true);
 });
 
 await test('client: tools/call is NOT retried on a 502/504', async () => {
@@ -122,7 +133,8 @@ await test('client: tools/call is NOT retried on a 502/504', async () => {
     const { sends, client } = fakeEdge({ onToolCall: () => json({ error: 'gw' }, status) });
     const result = await client.callTool('write_file', { path: '/x', content: 'y' });
     assert.equal(sends['tools/call'], 1, `HTTP ${status} tools/call must be sent exactly once`);
-    assert.equal(result.code, `edge_http_${status}`);
+    assert.equal(result.kind, 'execution_unknown');
+    assert.equal(result.retryable, false);
   }
 });
 
@@ -219,8 +231,17 @@ await test('client: 404-then-5xx and 404-then-404 send tools/call at most twice 
     const result = await client.callTool('start_process', { command: 'x' });
     assert.equal(sends['tools/call'], 2, 'one re-init, and the resend never retries');
     assert.equal(sends.initialize, 2);
-    assert.match(result.code, /^edge_http_(503|404)$/u);
+    assert.ok(result.kind === 'execution_unknown' || result.code === 'edge_http_404', `unexpected ${result.kind}/${result.code}`);
   }
+});
+
+await test('client: 404 then 503 on tools/call is execution_unknown (2 sends)', async () => {
+  const { sends, client } = fakeEdge({ sessions: true, onToolCall: (n) => (n === 1 ? new Response('', { status: 404 }) : json({ error: 'server' }, 503)) });
+  const result = await client.callTool('start_process', { command: 'x' });
+  assert.equal(sends['tools/call'], 2);
+  assert.equal(result.kind, 'execution_unknown', 'the post-reinit 503 may follow execution');
+  assert.equal(result.retryable, false);
+  assert.equal(result.exitCode, JC_EXIT.executionUnknown);
 });
 
 await test('client: tools/list re-inits on a session-bearing 404 (status alone)', async () => {

@@ -322,7 +322,7 @@ export class McpHttpClient {
     await this.initialize();
   }
 
-  private refusal(status: number, body: Record<string, unknown> | undefined): McpTransportError {
+  private refusal(status: number, body: Record<string, unknown> | undefined, method?: string): McpTransportError {
     if (status === 401) {
       return new McpTransportError('unauthorized', outcome('not_connected', {
         code: 'unauthorized',
@@ -331,6 +331,16 @@ export class McpHttpClient {
     }
     if (body && typeof body.error === 'string' && body.error.startsWith('managed_authorization_')) {
       return new McpTransportError('refused', classifyEdgeRefusalBody(body));
+    }
+    // A non-managed 5xx on a non-idempotent call: the upstream may have run it
+    // before failing (502/503/504 from a proxy or the server itself). Only an
+    // edge refusal body (managed_authorization_*, handled above) proves it did not.
+    if (status >= 500 && method !== undefined && !IDEMPOTENT_METHODS.has(method)) {
+      return new McpTransportError('execution unknown', outcome('execution_unknown', {
+        code: 'execution_unknown',
+        message: `${method} may have executed: the edge answered HTTP ${status}${body ? ` ${JSON.stringify(body).slice(0, 300)}` : ''}. Verify its effects before re-running it.`,
+        retryable: false,
+      }));
     }
     return new McpTransportError(`HTTP ${status}`, outcome('managed_authorization_unavailable', {
       code: `edge_http_${status}`,
@@ -393,7 +403,7 @@ export class McpHttpClient {
           params: { name, arguments: args },
         }));
       }
-      if (status !== 200 || !body) throw this.refusal(status, body);
+      if (status !== 200 || !body) throw this.refusal(status, body, 'tools/call');
       if ('error' in body) return classifyJsonRpcError(body.error as Record<string, unknown>);
       return classifyToolResult((body.result ?? {}) as Record<string, unknown>);
     } catch (error) {
