@@ -171,11 +171,23 @@ verifier yet, and the real grant reader is only wired in tests.
 
 ## Not yet in this runtime
 
-- A caller of the composition root. `createGovernedExecution` exists and is tested, but no controller, gateway route
-  or CLI constructs it yet, so nothing in production dispatches through it today.
+- A process that constructs `GovernedUnitRunner`. The runner exists and is tested, but no worker, gateway route or CLI
+  builds it yet, so nothing in production runs a governed unit today. It needs lane adapters and a worker-to-actor
+  mapping, which are deployment decisions.
 - Checkpoint/resume as worker adapters on the execution ledger, the CUA worker, and recovery policy.
 - A driver for the `general` mission kind. The legacy coding path has no budget row (uncapped).
 - Delegating to a different executing actor (`authorityNarrowingViolations` refuses it deliberately and it needs its own decision).
+
+## Unit runner
+
+`GovernedUnitRunner.runUnit({ missionId, unitId, workerId, lane })` (`unit-runner.ts`) is the first caller of
+`beginDispatch`: it claims the unit, dispatches it through the governed root, runs the lane's `WorkUnitExecutorAdapter`
+and applies the result. A lane with no adapter is refused before anything is claimed. If authority refuses the
+dispatch, the refusal is already durable, no attempt exists, no adapter runs, and the claimed unit is failed as
+`policy_denied` (non-retryable) instead of being left running; reopening it takes an explicit retry. An adapter that
+throws becomes a failed result with the external state marked uncertain. Of two concurrent runs of one unit, one executes
+and the other reports `claim_conflict`. A crash between the claim and the dispatch leaves a running claim that existing
+stale-claim recovery handles; the runner adds no recovery of its own.
 
 ## Composition root
 
