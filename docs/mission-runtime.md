@@ -173,8 +173,6 @@ verifier yet, and the real grant reader is only wired in tests.
 
 - Lanes other than `coder` in the worker. `resumeGovernedUnits` only builds a coder-lane adapter; `jc`, `dc` and `mcp`
   units need a `ToolLaneInvoker` per lane wired to those composition roots, which is not done.
-- Executor-level fencing for governed coder units. `CoderExecutionAdapter` calls the coder port without the claim
-  token, so a fencing executor cannot refuse a revoked claim; the legacy path passes it.
 - Checkpoint/resume as worker adapters on the execution ledger, the CUA worker, and recovery policy.
 - A driver for the `general` mission kind. The legacy coding path has no budget row (uncapped).
 - Delegating to a different executing actor (`authorityNarrowingViolations` refuses it deliberately and it needs its own decision).
@@ -187,7 +185,9 @@ and applies the result. A lane with no adapter is refused before anything is cla
 dispatch, the refusal is already durable, no attempt exists, no adapter runs, and the claimed unit is failed as
 `policy_denied` (non-retryable) instead of being left running; reopening it takes an explicit retry. An adapter that
 throws becomes a failed result with the external state marked uncertain. Of two concurrent runs of one unit, one executes
-and the other reports `claim_conflict`. A crash between the claim and the dispatch leaves a running claim that existing
+and the other reports `claim_conflict`. The runner hands the live claim token to the adapter (`ExecutionClaim`), and `CoderExecutionAdapter` forwards it to the
+coder port, so a fencing executor can refuse a claim it has revoked, as on the legacy path. Other adapters may ignore it.
+A crash between the claim and the dispatch leaves a running claim that existing
 stale-claim recovery handles; the runner adds no recovery of its own.
 
 ## Worker hook

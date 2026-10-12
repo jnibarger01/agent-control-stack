@@ -92,7 +92,7 @@ export class GovernedUnitRunner {
 
     let result: ResultEnvelope;
     try {
-      result = await adapter.execute(dispatch, input.signal);
+      result = await adapter.execute(dispatch, input.signal, { claimToken: token });
     } catch (error) {
       // An adapter that throws leaves the outcome unknown, so the result says the external state may have changed.
       result = {

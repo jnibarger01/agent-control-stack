@@ -202,9 +202,14 @@ function resultBase(dispatch: DispatchEnvelope, now: string): Omit<ResultEnvelop
   };
 }
 
+/** The live claim an execution runs under. The envelope carries only its hash, so a fencing executor needs this. */
+export interface ExecutionClaim {
+  claimToken: string;
+}
+
 export interface WorkUnitExecutorAdapter {
   readonly lane: ExecutorLane;
-  execute(dispatch: DispatchEnvelope, signal?: AbortSignal): Promise<ResultEnvelope>;
+  execute(dispatch: DispatchEnvelope, signal?: AbortSignal, claim?: ExecutionClaim): Promise<ResultEnvelope>;
 }
 
 export class CoderExecutionAdapter implements WorkUnitExecutorAdapter {
@@ -216,7 +221,7 @@ export class CoderExecutionAdapter implements WorkUnitExecutorAdapter {
     private readonly now: () => string = () => new Date().toISOString()
   ) {}
 
-  async execute(dispatch: DispatchEnvelope, signal?: AbortSignal): Promise<ResultEnvelope> {
+  async execute(dispatch: DispatchEnvelope, signal?: AbortSignal, claim?: ExecutionClaim): Promise<ResultEnvelope> {
     if (dispatch.lane !== this.lane) {
       throw new ControlStackError("execution_lane_mismatch", `coder adapter cannot execute ${dispatch.lane}`);
     }
@@ -234,7 +239,8 @@ export class CoderExecutionAdapter implements WorkUnitExecutorAdapter {
       const outcome = await this.coder.execute({
         mission,
         operationId: dispatch.unitId,
-        workerId: dispatch.workerId
+        workerId: dispatch.workerId,
+        ...(claim ? { claimToken: claim.claimToken } : {})
       });
       const finishedAt = this.now();
       if (outcome.status === "succeeded" && outcome.value) {
