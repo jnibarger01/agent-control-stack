@@ -21,6 +21,8 @@ export const JC_EXIT = Object.freeze({
   approvalRequired: 4,
   authorityUnavailable: 5,
   notConnected: 6,
+  /** A non-idempotent call failed ambiguously after send: it may have executed. */
+  executionUnknown: 7,
 });
 
 export type JcOutcomeKind =
@@ -30,7 +32,8 @@ export type JcOutcomeKind =
   | 'managed_authorization_denied'
   | 'managed_authorization_required'
   | 'managed_authorization_unavailable'
-  | 'not_connected';
+  | 'not_connected'
+  | 'execution_unknown';
 
 export interface JcCallOutcome {
   kind: JcOutcomeKind;
@@ -99,13 +102,6 @@ export function isProvablyUndelivered(error: unknown): boolean {
   return false;
 }
 
-/** A 404 the server confirms is a stale/unknown session, i.e. rejected before dispatch. */
-function isSessionNotFound(status: number, body: Record<string, unknown> | undefined): boolean {
-  if (status !== 404 || !body || !body.error || typeof body.error !== 'object') return false;
-  const message = (body.error as { message?: unknown }).message;
-  return typeof message === 'string' && /session/iu.test(message) && /not found|unknown|expired/iu.test(message);
-}
-
 const PROTOCOL_VERSION = '2025-06-18';
 
 // Refusal codes that mean "ACS decided no" rather than "ACS could not decide".
@@ -125,6 +121,7 @@ function outcome(kind: JcOutcomeKind, fields: Partial<JcCallOutcome> = {}): JcCa
     managed_authorization_required: JC_EXIT.approvalRequired,
     managed_authorization_unavailable: JC_EXIT.authorityUnavailable,
     not_connected: JC_EXIT.notConnected,
+    execution_unknown: JC_EXIT.executionUnknown,
   }[kind];
   return { kind, exitCode, ...fields };
 }
@@ -214,6 +211,13 @@ export interface McpHttpClientOptions {
   timeoutMs?: number;
 }
 
+interface PostResult {
+  status: number;
+  body: Record<string, unknown> | undefined;
+  /** Whether this request carried an mcp-session-id header. */
+  sentSession: boolean;
+}
+
 export class McpHttpClient {
   private sessionId: string | undefined;
   private nextId = 1;
@@ -224,7 +228,7 @@ export class McpHttpClient {
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
-  private async post(message: Record<string, unknown>): Promise<{ status: number; body: Record<string, unknown> | undefined }> {
+  private async post(message: Record<string, unknown>): Promise<PostResult> {
     const token = await this.options.token();
     if (!token) {
       throw new McpTransportError('not connected', outcome('not_connected', {
@@ -232,6 +236,7 @@ export class McpHttpClient {
         message: 'no /jc/mcp credential: run `jace-commander connect` (or set JC_MCP_TOKEN)',
       }));
     }
+    const sentSession = this.sessionId !== undefined;
     let response: Response;
     try {
       response = await this.fetchImpl(this.options.url, {
@@ -266,7 +271,7 @@ export class McpHttpClient {
     } else if (text.includes('data:')) {
       body = parseSse(text);
     }
-    return { status: response.status, body };
+    return { status: response.status, body, sentSession };
   }
 
   /**
@@ -279,7 +284,7 @@ export class McpHttpClient {
    * send, or any other ambiguous failure is returned/raised to the caller
    * immediately, because the server may already have executed the call.
    */
-  private async postWithRetry(message: Record<string, unknown>, attempts = 3): Promise<{ status: number; body: Record<string, unknown> | undefined }> {
+  private async postWithRetry(message: Record<string, unknown>, attempts = 3): Promise<PostResult> {
     const idempotent = typeof message.method === 'string' && IDEMPOTENT_METHODS.has(message.method);
     let lastError: McpTransportError | undefined;
     for (let attempt = 0; attempt < attempts; attempt++) {
@@ -293,7 +298,15 @@ export class McpHttpClient {
         return result;
       } catch (error) {
         if (!(error instanceof McpTransportError) || error.outcome.retryable !== true) throw error;
-        if (!idempotent && !error.undelivered) throw error;
+        if (!idempotent && !error.undelivered) {
+          // Sent (or possibly sent) and then failed: the server may have run it.
+          // Never report "nothing ran" or retryable here.
+          throw new McpTransportError('execution unknown', outcome('execution_unknown', {
+            code: 'execution_unknown',
+            message: `${String(message.method)} may have executed: the request was sent but no response arrived (${error.outcome.message ?? 'transport error'}). Verify its effects before re-running it.`,
+            retryable: false,
+          }));
+        }
         lastError = error;
       }
     }
@@ -346,8 +359,8 @@ export class McpHttpClient {
 
   async listTools(): Promise<Array<Record<string, unknown>>> {
     await this.initialize();
-    let { status, body } = await this.postWithRetry({ jsonrpc: '2.0', id: this.nextId++, method: 'tools/list', params: {} });
-    if (status === 404) {
+    let { status, body, sentSession } = await this.postWithRetry({ jsonrpc: '2.0', id: this.nextId++, method: 'tools/list', params: {} });
+    if (status === 404 && sentSession) {
       await this.reinitialize();
       ({ status, body } = await this.postWithRetry({ jsonrpc: '2.0', id: this.nextId++, method: 'tools/list', params: {} }));
     }
@@ -360,15 +373,18 @@ export class McpHttpClient {
   async callTool(name: string, args: Record<string, unknown>): Promise<JcCallOutcome> {
     try {
       await this.initialize();
-      let { status, body } = await this.postWithRetry({
+      let { status, body, sentSession } = await this.postWithRetry({
         jsonrpc: '2.0',
         id: this.nextId++,
         method: 'tools/call',
         params: { name, arguments: args },
       });
-      // Resend once after re-init only when the server confirms the 404 is a
-      // stale session (rejected before dispatch). Any other 404 is returned.
-      if (isSessionNotFound(status, body)) {
+      // MCP Streamable HTTP session contract: a 404 for a request that carried
+      // an mcp-session-id means the session is terminated/unknown and was
+      // rejected before dispatch; start a new session and resend ONCE. A 404
+      // without a session id is not a session signal and is never resent. The
+      // resend has no 404 branch and never retries on 5xx (worst case 2 sends).
+      if (status === 404 && sentSession) {
         await this.reinitialize();
         ({ status, body } = await this.postWithRetry({
           jsonrpc: '2.0',
