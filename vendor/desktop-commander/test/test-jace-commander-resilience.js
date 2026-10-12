@@ -149,6 +149,28 @@ await test('client: tools/call IS retried on provable non-delivery (connection r
   assert.equal(result.code, 'edge_unreachable');
 });
 
+await test('client: EHOSTUNREACH/ENETUNREACH after send (no connect syscall) does NOT retry tools/call', async () => {
+  for (const code of ['EHOSTUNREACH', 'ENETUNREACH']) {
+    for (const syscall of [undefined, 'read', 'write']) {
+      const err = connError(code);
+      if (syscall) err.cause.syscall = syscall;
+      const { sends, client } = fakeEdge({ onToolCall: () => { throw err; } });
+      const result = await client.callTool('start_process', { command: 'x' });
+      assert.equal(sends['tools/call'], 1, `${code} (syscall=${syscall}) may be post-send and must be sent exactly once`);
+      assert.equal(result.code, 'edge_unreachable');
+    }
+  }
+});
+
+await test('client: EHOSTUNREACH/ENETUNREACH from connect() IS retried (never sent)', async () => {
+  for (const code of ['EHOSTUNREACH', 'ENETUNREACH']) {
+    const { sends, client } = fakeEdge({ onToolCall: (n, msg) => { if (n < 2) { const e = connError(code); e.cause.syscall = 'connect'; throw e; } return TOOL_OK(msg); } });
+    const result = await client.callTool('read_file', { path: '/x' });
+    assert.equal(result.kind, 'ok');
+    assert.equal(sends['tools/call'], 2, `${code} during connect() is safe to resend`);
+  }
+});
+
 await test('client: a confirmed stale-session 404 re-inits once and resends tools/call once', async () => {
   const { sends, client } = fakeEdge({ onToolCall: (n, msg) => (n === 1 ? json({ jsonrpc: '2.0', id: null, error: { code: -32001, message: 'Session not found' } }, 404) : TOOL_OK(msg)) });
   const result = await client.callTool('read_file', { path: '/x' });

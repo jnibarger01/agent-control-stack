@@ -70,7 +70,14 @@ const IDEMPOTENT_METHODS = new Set(['initialize', 'notifications/initialized', '
  * HTTP request bytes were written. Timeouts (including connect timeouts),
  * aborts, resets and "socket closed" are NOT here: they are ambiguous.
  */
-const PRE_SEND_ERROR_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH']);
+const PRE_SEND_ERROR_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']);
+/**
+ * EHOSTUNREACH/ENETUNREACH can also arrive via ICMP on an already-established
+ * keep-alive socket AFTER the request was written, so they count as never-sent
+ * only when raised by the connect/DNS syscall itself.
+ */
+const PRE_SEND_IF_CONNECT_CODES = new Set(['EHOSTUNREACH', 'ENETUNREACH']);
+const PRE_SEND_SYSCALLS = new Set(['connect', 'getaddrinfo']);
 
 /** True only when a fetch failure provably happened before any request bytes were sent. */
 export function isProvablyUndelivered(error: unknown): boolean {
@@ -82,7 +89,11 @@ export function isProvablyUndelivered(error: unknown): boolean {
   while (current && typeof current === 'object' && !seen.has(current)) {
     seen.add(current);
     const code = (current as { code?: unknown }).code;
-    if (typeof code === 'string') return PRE_SEND_ERROR_CODES.has(code);
+    if (typeof code === 'string') {
+      if (PRE_SEND_ERROR_CODES.has(code)) return true;
+      const syscall = (current as { syscall?: unknown }).syscall;
+      return PRE_SEND_IF_CONNECT_CODES.has(code) && typeof syscall === 'string' && PRE_SEND_SYSCALLS.has(syscall);
+    }
     current = (current as { cause?: unknown }).cause;
   }
   return false;
