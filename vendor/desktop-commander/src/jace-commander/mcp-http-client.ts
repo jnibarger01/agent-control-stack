@@ -48,9 +48,51 @@ export interface JcCallOutcome {
 }
 
 export class McpTransportError extends Error {
-  constructor(message: string, readonly outcome: JcCallOutcome) {
+  /**
+   * @param undelivered true only when the request provably never reached the
+   *   server (no request bytes were sent), so resending cannot double-execute.
+   */
+  constructor(message: string, readonly outcome: JcCallOutcome, readonly undelivered = false) {
     super(message);
   }
+}
+
+/**
+ * Methods that are safe to resend after an ambiguous failure (5xx, timeout,
+ * reset after send): they have no side effects on the server beyond session
+ * setup. tools/call is deliberately NOT here: it can execute write_file,
+ * start_process, privileged_exec, mission submit, ...
+ */
+const IDEMPOTENT_METHODS = new Set(['initialize', 'notifications/initialized', 'tools/list']);
+
+/**
+ * Connect-phase error codes: the TCP connection (or DNS lookup) failed, so no
+ * HTTP request bytes were written. Timeouts (including connect timeouts),
+ * aborts, resets and "socket closed" are NOT here: they are ambiguous.
+ */
+const PRE_SEND_ERROR_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH']);
+
+/** True only when a fetch failure provably happened before any request bytes were sent. */
+export function isProvablyUndelivered(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const name = (error as { name?: unknown }).name;
+  if (name === 'AbortError' || name === 'TimeoutError') return false;
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === 'string') return PRE_SEND_ERROR_CODES.has(code);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/** A 404 the server confirms is a stale/unknown session, i.e. rejected before dispatch. */
+function isSessionNotFound(status: number, body: Record<string, unknown> | undefined): boolean {
+  if (status !== 404 || !body || !body.error || typeof body.error !== 'object') return false;
+  const message = (body.error as { message?: unknown }).message;
+  return typeof message === 'string' && /session/iu.test(message) && /not found|unknown|expired/iu.test(message);
 }
 
 const PROTOCOL_VERSION = '2025-06-18';
@@ -198,7 +240,7 @@ export class McpHttpClient {
         code: 'edge_unreachable',
         message: `cannot reach ${this.options.url}: ${(error as Error).message}`,
         retryable: true,
-      }));
+      }), isProvablyUndelivered(error));
     }
     const session = response.headers.get('mcp-session-id');
     if (session) this.sessionId = session;
@@ -217,12 +259,17 @@ export class McpHttpClient {
   }
 
   /**
-   * Posts `message`, retrying transient failures: an unreachable edge (network
-   * error) and 5xx server errors are retried with short bounded backoff. A 4xx
-   * refusal, a `not_connected` result, or a non-retryable transport error is
-   * returned/raised immediately without retry.
+   * Posts `message` with bounded backoff retry.
+   *
+   * Idempotent methods (initialize, notifications/initialized, tools/list) are
+   * retried on 5xx and on any retryable transport error. Every other method
+   * (tools/call) is retried ONLY on provable non-delivery: a connect/DNS error
+   * raised before any request bytes were sent. A 5xx, timeout, reset after
+   * send, or any other ambiguous failure is returned/raised to the caller
+   * immediately, because the server may already have executed the call.
    */
   private async postWithRetry(message: Record<string, unknown>, attempts = 3): Promise<{ status: number; body: Record<string, unknown> | undefined }> {
+    const idempotent = typeof message.method === 'string' && IDEMPOTENT_METHODS.has(message.method);
     let lastError: McpTransportError | undefined;
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (attempt > 0) {
@@ -230,11 +277,12 @@ export class McpHttpClient {
       }
       try {
         const result = await this.post(message);
-        // A 5xx is a transient server-side failure; retry unless this was the last attempt.
-        if (result.status >= 500 && attempt < attempts - 1) continue;
+        // A 5xx is a transient server-side failure; only idempotent methods may be resent.
+        if (idempotent && result.status >= 500 && attempt < attempts - 1) continue;
         return result;
       } catch (error) {
         if (!(error instanceof McpTransportError) || error.outcome.retryable !== true) throw error;
+        if (!idempotent && !error.undelivered) throw error;
         lastError = error;
       }
     }
@@ -307,7 +355,9 @@ export class McpHttpClient {
         method: 'tools/call',
         params: { name, arguments: args },
       });
-      if (status === 404) {
+      // Resend once after re-init only when the server confirms the 404 is a
+      // stale session (rejected before dispatch). Any other 404 is returned.
+      if (isSessionNotFound(status, body)) {
         await this.reinitialize();
         ({ status, body } = await this.postWithRetry({
           jsonrpc: '2.0',

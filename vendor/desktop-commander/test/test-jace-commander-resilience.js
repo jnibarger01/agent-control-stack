@@ -3,7 +3,8 @@
  * Jace Commander auth/reliability hardening regressions:
  *  A. FileNonceStore lazy expiry (O(1) replay check, amortized sweep, cap)
  *  B. single-flight token refresh (mcp-auth + device-login)
- *  C. McpHttpClient bounded retry on transient 5xx + session re-init on 404
+ *  C. McpHttpClient retry safety: only idempotent methods retry on 5xx/timeout;
+ *     tools/call is resent only on provable non-delivery or a confirmed stale-session 404
  *  D. OAuth discovery fetches carry an abort signal (bounded)
  */
 import assert from 'node:assert/strict';
@@ -83,44 +84,108 @@ await test('refresh: concurrent mcpAccessToken calls share one token request', a
 // ---------------------------------------------------------------------------
 // C. McpHttpClient retry + session re-init
 // ---------------------------------------------------------------------------
-await test('client: a transient 5xx is retried and the call still succeeds', async () => {
-  let calls = 0;
-  const fake = async (_url, init) => {
+const INIT_OK = (msg) => json({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-03-26', capabilities: {}, serverInfo: { name: 'fake', version: '1' } } });
+const TOOL_OK = (msg) => json({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'ok' }] } });
+const connError = (code) => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error(`connect ${code}`), { code }) });
+/** Fake edge: counts sends per method; `onToolCall(n, msg)` decides each tools/call answer. */
+function fakeEdge({ onToolCall, onList, onInit } = {}) {
+  const sends = { initialize: 0, 'notifications/initialized': 0, 'tools/list': 0, 'tools/call': 0 };
+  const fetchImpl = async (_url, init) => {
     const msg = JSON.parse(init.body);
-    if (msg.method === 'initialize') return json({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-03-26', capabilities: {}, serverInfo: { name: 'fake', version: '1' } } });
+    sends[msg.method] = (sends[msg.method] ?? 0) + 1;
+    if (msg.method === 'initialize') return onInit ? onInit(sends.initialize, msg) : INIT_OK(msg);
     if (msg.method === 'notifications/initialized') return new Response('', { status: 202 });
-    if (msg.method === 'tools/call') {
-      calls += 1;
-      if (calls < 3) return json({ error: 'server' }, 503);
-      return json({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'ok' }] } });
-    }
+    if (msg.method === 'tools/list') return onList ? onList(sends['tools/list'], msg) : json({ jsonrpc: '2.0', id: msg.id, result: { tools: [] } });
+    if (msg.method === 'tools/call') return onToolCall(sends['tools/call'], msg);
     return new Response('', { status: 200 });
   };
-  const client = new McpHttpClient({ url: 'http://edge.test/jc/mcp', token: async () => 't', fetchImpl: fake });
-  const result = await client.callTool('read_file', { path: '/x' });
-  assert.equal(result.kind, 'ok');
-  assert.equal(calls, 3, 'transient 5xx must be retried up to the attempt bound');
+  return { sends, client: new McpHttpClient({ url: 'http://edge.test/jc/mcp', token: async () => 't', fetchImpl }) };
+}
+
+await test('client: tools/call is NOT retried on a 503 (may already have executed)', async () => {
+  const { sends, client } = fakeEdge({ onToolCall: (n, msg) => (n < 3 ? json({ error: 'server' }, 503) : TOOL_OK(msg)) });
+  const result = await client.callTool('start_process', { command: 'x' });
+  assert.equal(sends['tools/call'], 1, 'a 5xx tools/call must be sent exactly once');
+  assert.equal(result.kind, 'managed_authorization_unavailable');
+  assert.equal(result.retryable, true, 'the caller gets a retryable outcome instead');
 });
 
-await test('client: a stale 404 triggers exactly one session re-init then succeeds', async () => {
-  let inits = 0;
-  let calls = 0;
-  const fake = async (_url, init) => {
-    const msg = JSON.parse(init.body);
-    if (msg.method === 'initialize') { inits += 1; return json({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-03-26', capabilities: {}, serverInfo: { name: 'fake', version: '1' } } }); }
-    if (msg.method === 'notifications/initialized') return new Response('', { status: 202 });
-    if (msg.method === 'tools/call') {
-      calls += 1;
-      if (calls === 1) return json({ error: 'not found' }, 404);
-      return json({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'ok' }] } });
-    }
-    return new Response('', { status: 200 });
-  };
-  const client = new McpHttpClient({ url: 'http://edge.test/jc/mcp', token: async () => 't', fetchImpl: fake });
+await test('client: tools/call is NOT retried on a 502/504', async () => {
+  for (const status of [502, 504]) {
+    const { sends, client } = fakeEdge({ onToolCall: () => json({ error: 'gw' }, status) });
+    const result = await client.callTool('write_file', { path: '/x', content: 'y' });
+    assert.equal(sends['tools/call'], 1, `HTTP ${status} tools/call must be sent exactly once`);
+    assert.equal(result.code, `edge_http_${status}`);
+  }
+});
+
+await test('client: tools/call is NOT retried on a timeout', async () => {
+  const { sends, client } = fakeEdge({ onToolCall: () => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); } });
+  const result = await client.callTool('start_process', { command: 'x' });
+  assert.equal(sends['tools/call'], 1, 'a timed-out tools/call must be sent exactly once');
+  assert.equal(result.code, 'edge_unreachable');
+  assert.equal(result.retryable, true);
+});
+
+await test('client: tools/call is NOT retried on a reset after send / ambiguous network error', async () => {
+  for (const err of [connError('ECONNRESET'), connError('UND_ERR_SOCKET'), connError('UND_ERR_CONNECT_TIMEOUT'), new TypeError('fetch failed'), new Error('other side closed')]) {
+    const { sends, client } = fakeEdge({ onToolCall: () => { throw err; } });
+    const result = await client.callTool('privileged_exec', { command: 'x' });
+    assert.equal(sends['tools/call'], 1, `ambiguous failure (${err.cause?.code ?? err.message}) must be sent exactly once`);
+    assert.equal(result.code, 'edge_unreachable');
+  }
+});
+
+await test('client: tools/call IS retried on provable non-delivery (connection refused / DNS)', async () => {
+  for (const code of ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']) {
+    const { sends, client } = fakeEdge({ onToolCall: (n, msg) => { if (n < 3) throw connError(code); return TOOL_OK(msg); } });
+    const result = await client.callTool('read_file', { path: '/x' });
+    assert.equal(result.kind, 'ok', `${code} before send is safe to resend`);
+    assert.equal(sends['tools/call'], 3, `${code}: bounded to 3 sends`);
+  }
+  const { sends, client } = fakeEdge({ onToolCall: () => { throw connError('ECONNREFUSED'); } });
+  const result = await client.callTool('read_file', { path: '/x' });
+  assert.equal(sends['tools/call'], 3, 'persistent ECONNREFUSED is bounded to 3 sends');
+  assert.equal(result.code, 'edge_unreachable');
+});
+
+await test('client: a confirmed stale-session 404 re-inits once and resends tools/call once', async () => {
+  const { sends, client } = fakeEdge({ onToolCall: (n, msg) => (n === 1 ? json({ jsonrpc: '2.0', id: null, error: { code: -32001, message: 'Session not found' } }, 404) : TOOL_OK(msg)) });
   const result = await client.callTool('read_file', { path: '/x' });
   assert.equal(result.kind, 'ok');
-  assert.equal(inits, 2, 'a stale session must be re-initialized exactly once');
-  assert.equal(calls, 2, 'the tool call must be retried once after re-init');
+  assert.equal(sends.initialize, 2, 'a stale session must be re-initialized exactly once');
+  assert.equal(sends['tools/call'], 2, 'the tool call is resent once after a confirmed pre-dispatch 404');
+});
+
+await test('client: an unconfirmed 404 is NOT resent', async () => {
+  const { sends, client } = fakeEdge({ onToolCall: (n, msg) => (n === 1 ? json({ error: 'not found' }, 404) : TOOL_OK(msg)) });
+  const result = await client.callTool('write_file', { path: '/x', content: 'y' });
+  assert.equal(sends['tools/call'], 1, 'a 404 not confirmed as a stale session must not be resent');
+  assert.equal(sends.initialize, 1);
+  assert.equal(result.code, 'edge_http_404');
+});
+
+await test('client: 404-then-5xx sends tools/call at most twice (was up to 6)', async () => {
+  const { sends, client } = fakeEdge({ onToolCall: (n) => (n === 1 ? json({ jsonrpc: '2.0', id: null, error: { code: -32001, message: 'Session not found' } }, 404) : json({ error: 'server' }, 503)) });
+  const result = await client.callTool('start_process', { command: 'x' });
+  assert.equal(sends['tools/call'], 2, 'the post-reinit resend must not itself retry on 5xx');
+  assert.equal(result.code, 'edge_http_503');
+});
+
+await test('client: idempotent initialize / tools/list still retry on 5xx and network errors', async () => {
+  {
+    const { sends, client } = fakeEdge({ onInit: (n, msg) => (n < 3 ? json({ error: 'server' }, 503) : INIT_OK(msg)), onList: (n, msg) => (n < 3 ? json({ error: 'server' }, 503) : json({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'a' }] } })) });
+    const tools = await client.listTools();
+    assert.equal(tools.length, 1);
+    assert.equal(sends.initialize, 3, 'initialize is retried on 5xx');
+    assert.equal(sends['tools/list'], 3, 'tools/list is retried on 5xx');
+  }
+  {
+    const { sends, client } = fakeEdge({ onInit: (n, msg) => { if (n < 2) throw new DOMException('timeout', 'TimeoutError'); return INIT_OK(msg); }, onList: (n, msg) => { if (n < 2) throw connError('ECONNRESET'); return json({ jsonrpc: '2.0', id: msg.id, result: { tools: [] } }); } });
+    await client.listTools();
+    assert.equal(sends.initialize, 2, 'initialize is retried on timeout');
+    assert.equal(sends['tools/list'], 2, 'tools/list is retried on an ambiguous network error');
+  }
 });
 
 // ---------------------------------------------------------------------------
