@@ -567,6 +567,8 @@ function readUnderSnapshot(
     "work_unit.cancelled": "cancelled",
     "work_unit.retry_scheduled": "retry_scheduled",
     "work_unit.claim_released": "pending",
+    "work_unit.recovered": "pending",
+    "work_unit.poisoned": "failed",
     "work_unit.unknown": "unknown"
   };
   forEachRecord(db, missionId, (record) => {

@@ -37,6 +37,16 @@ export {
 } from "./flight-recorder.js";
 export * from "./budget.js";
 export {
+  DEFAULT_RECOVERY_POLICY,
+  RECOVERY_POLICY_LIMITS,
+  recoveryBackoffMs,
+  resolveRecoveryPolicy,
+  type RecoveryDecision,
+  type RecoveryOutcome,
+  type RecoveryPolicy,
+  type WorkUnitEscalation
+} from "./recovery-policy.js";
+export {
   AUTHORITY_GRAPH_SCHEMA_VERSION,
   type AuthorityGraph,
   type AuthorityGraphEvent,
@@ -58,3 +68,4 @@ export * from "./cua-execution.js";
 export * from "./verification-gate.js";
 export * from "./authority.js";
 export * from "./child-work.js";
+export * from "./governed-runtime.js";

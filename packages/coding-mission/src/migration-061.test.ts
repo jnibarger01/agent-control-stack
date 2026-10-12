@@ -47,10 +47,11 @@ describe("migration 061: cua executor lane", () => {
 
     applyControlPlaneMigrations(db);
 
-    expect(db.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 2").all()).toEqual([
-      { version: 62 },
-      { version: 61 }
-    ]);
+    // The late 061 slice is applied alongside the already-recorded 062 and any later migrations.
+    expect(db.prepare("SELECT version FROM schema_migrations WHERE version >= 61 ORDER BY version ASC").all()).toEqual(
+      migrations.filter((entry) => entry.version >= 61).map((entry) => ({ version: entry.version }))
+    );
+    expect(db.prepare("SELECT version FROM schema_migrations WHERE version = 61").get()).toEqual({ version: 61 });
     expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(
       db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mission_flight_records'").get()
