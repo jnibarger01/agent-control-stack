@@ -288,21 +288,17 @@ export class WorkUnitVerificationGate {
         if (changed.changes !== 1) {
           throw new ControlStackError("coding_mission_claim_conflict", "verified completion lost its durable binding");
         }
-        this.store.db
-          .prepare(
-            `INSERT INTO coding_events (mission_id, name, body_json, created_at)
-             VALUES (?, 'work_unit.completed', ?, ?)`
-          )
-          .run(
-            context.missionId,
-            JSON.stringify({
-              unitId: context.unitId,
-              resultHash: context.binding.resultHash,
-              verified: true,
-              executionAttemptId: context.binding.attemptId
-            }),
-            decidedAt
-          );
+        this.store.recordMissionEvent(
+          context.missionId,
+          "work_unit.completed",
+          {
+            unitId: context.unitId,
+            resultHash: context.binding.resultHash,
+            verified: true,
+            executionAttemptId: context.binding.attemptId
+          },
+          decidedAt
+        );
         outcome = "succeeded";
       } else if (decided.outcome === "failed") {
         outcome = this.store.failUnit(context.missionId, context.unitId, context.claimToken, {
@@ -322,27 +318,23 @@ export class WorkUnitVerificationGate {
         durablePayload,
         decidedAt
       );
-      this.store.db
-        .prepare(
-          `INSERT INTO coding_events (mission_id, name, body_json, created_at)
-           VALUES (?, 'verification.completed', ?, ?)`
-        )
-        .run(
-          context.missionId,
-          JSON.stringify({
-            runId,
-            unitId: context.unitId,
-            attempt: context.binding.unitAttempt,
-            executionAttemptId: context.binding.attemptId,
-            criteriaHash: context.requirement.criteriaHash,
-            policy: context.policy,
-            outcome,
-            ...(decided.verdict ? { verdict: decided.verdict } : {}),
-            ...(decided.reason ? { reason: decided.reason } : {}),
-            verifierEngineIds: decided.verifierEngineIds
-          }),
-          decidedAt
-        );
+      this.store.recordMissionEvent(
+        context.missionId,
+        "verification.completed",
+        {
+          runId,
+          unitId: context.unitId,
+          attempt: context.binding.unitAttempt,
+          executionAttemptId: context.binding.attemptId,
+          criteriaHash: context.requirement.criteriaHash,
+          policy: context.policy,
+          outcome,
+          ...(decided.verdict ? { verdict: decided.verdict } : {}),
+          ...(decided.reason ? { reason: decided.reason } : {}),
+          verifierEngineIds: decided.verifierEngineIds
+        },
+        decidedAt
+      );
 
       return {
         outcome,
@@ -604,11 +596,6 @@ export class WorkUnitVerificationGate {
       body,
       now
     );
-    this.store.db
-      .prepare(
-        `INSERT INTO coding_events (mission_id, name, body_json, created_at)
-         VALUES (?, 'verification.authority_denied', ?, ?)`
-      )
-      .run(missionId, JSON.stringify(body), now);
+    this.store.recordMissionEvent(missionId, "verification.authority_denied", body, now);
   }
 }

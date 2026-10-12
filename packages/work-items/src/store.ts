@@ -1443,6 +1443,8 @@ export interface WorkItemStore {
   /** Deep health view: recomputes database integrity, foreign keys, migrations, and the full audit chain. */
   health(): StoreHealth;
   verifyAuditChain(): AuditChainVerification;
+  /** Revalidates a cached audit verdict when another database connection may have changed the chain. */
+  assertAuditChainIntegrity(): void;
   transition(id: string, status: WorkItemStatus, options?: PrivilegedTransitionOptions): WorkItem;
   approveWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem;
   blockWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem;
@@ -6027,6 +6029,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   verifyAuditChain(): AuditChainVerification {
     return verifyAuditChain(this.readAllEvents());
+  }
+
+  assertAuditChainIntegrity(): void {
+    this.assertAuditIntegrityFreshForWrite();
   }
 
   readinessHealth(): StoreHealth {
