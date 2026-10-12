@@ -115,6 +115,8 @@ const SAFE_REASON = /^[A-Za-z0-9_.:/#-]{1,120}$/u;
 
 /** The existing human-issued grant store (`SqliteWorkItemStore` satisfies this). Read-only. */
 export interface GrantReader {
+  /** Optional for non-database adapters; production adapters must fail closed on invalid backing audit history. */
+  assertIntegrity?(): void;
   getAutonomousAuthority(grantId: string): AutonomousAuthorityGrant | undefined;
   /**
    * The current subject-input hash of the mission's execution inputs (`executionPlanSubjectInputHash`), or undefined if it
@@ -433,6 +435,7 @@ export class MissionAuthorityLedger {
    */
   private readGrant(grantId: string): AutonomousAuthorityGrant | undefined {
     try {
+      this.options.grants.assertIntegrity?.();
       return this.options.grants.getAutonomousAuthority(grantId);
     } catch {
       throw new ControlStackError("authority_integrity", "the authority grant failed verification");

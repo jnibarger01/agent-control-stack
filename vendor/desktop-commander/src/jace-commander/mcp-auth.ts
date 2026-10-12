@@ -50,6 +50,9 @@ export function forgetMcpToken(stateDir: string): void {
 
 const b64u = (buffer: Buffer) => buffer.toString('base64url');
 
+/** OAuth discovery/registration/token fetches must never hang the login. */
+const OAUTH_TIMEOUT_MS = 10_000;
+
 async function json(response: Response): Promise<Record<string, unknown>> {
   const text = await response.text();
   try {
@@ -68,11 +71,11 @@ interface Discovery {
 
 export async function discover(mcpUrl: string, fetchImpl: typeof fetch = fetch): Promise<Discovery> {
   const url = new URL(mcpUrl);
-  const prm = await json(await fetchImpl(`${url.origin}/.well-known/oauth-protected-resource${url.pathname}`));
+  const prm = await json(await fetchImpl(`${url.origin}/.well-known/oauth-protected-resource${url.pathname}`, { signal: AbortSignal.timeout(OAUTH_TIMEOUT_MS) }));
   const resource = String(prm.resource ?? '');
   if (resource !== mcpUrl.replace(/\/$/, '')) throw new Error(`protected-resource metadata names ${resource}, not ${mcpUrl}`);
   const issuer = Array.isArray(prm.authorization_servers) ? String(prm.authorization_servers[0]) : url.origin;
-  const as = await json(await fetchImpl(`${issuer.replace(/\/$/, '')}/.well-known/oauth-authorization-server`));
+  const as = await json(await fetchImpl(`${issuer.replace(/\/$/, '')}/.well-known/oauth-authorization-server`, { signal: AbortSignal.timeout(OAUTH_TIMEOUT_MS) }));
   for (const key of ['authorization_endpoint', 'token_endpoint', 'registration_endpoint']) {
     if (typeof as[key] !== 'string') throw new Error(`authorization server metadata is missing ${key}`);
   }
@@ -109,6 +112,7 @@ export async function connect(options: ConnectOptions): Promise<StoredMcpToken> 
     const registration = await json(await fetchImpl(found.registrationEndpoint, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
+      signal: AbortSignal.timeout(OAUTH_TIMEOUT_MS),
       body: JSON.stringify({
         client_name: 'jace-commander-cli',
         redirect_uris: [redirectUri],
@@ -146,6 +150,7 @@ export async function connect(options: ConnectOptions): Promise<StoredMcpToken> 
     const token = await json(await fetchImpl(found.tokenEndpoint, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      signal: AbortSignal.timeout(OAUTH_TIMEOUT_MS),
       body: new URLSearchParams({
         grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: redirectUri,
         client_id: clientId, resource: found.resource,
@@ -166,6 +171,9 @@ export async function connect(options: ConnectOptions): Promise<StoredMcpToken> 
   }
 }
 
+/** In-flight refreshes keyed by `${stateDir}::${mcpUrl}`; single-flight dedupe. */
+const refreshInFlight = new Map<string, Promise<string | undefined>>();
+
 /**
  * The bearer token for `mcpUrl`: JC_MCP_TOKEN, else the stored token
  * (refreshed when within 60 s of expiry). A stored token for a different
@@ -182,26 +190,42 @@ export async function mcpAccessToken(
   if (!stored || stored.mcpUrl !== mcpUrl.replace(/\/$/, '')) return undefined;
   if (stored.expiresAt - Date.now() > 60_000) return stored.accessToken;
   if (!stored.refreshToken) return undefined;
+  const refreshToken = stored.refreshToken;
+  // Single-flight: concurrent callers that all see an expired token share one
+  // refresh. Otherwise each POSTs /token and the last write wins; if the issuer
+  // rotates refresh tokens an earlier rotation is invalidated, forcing a full
+  // re-login on the next call.
+  const key = `${stateDir}::${stored.mcpUrl}`;
+  const inFlight = refreshInFlight.get(key);
+  if (inFlight) return inFlight;
+  const promise = (async (): Promise<string | undefined> => {
+    try {
+      const found = await discover(mcpUrl, fetchImpl);
+      const token = await json(await fetchImpl(found.tokenEndpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'refresh_token', refresh_token: refreshToken, client_id: stored.clientId, resource: found.resource,
+        }).toString(),
+        signal: AbortSignal.timeout(10_000),
+      }));
+      if (typeof token.access_token !== 'string') return undefined;
+      const refreshed: StoredMcpToken = {
+        ...stored,
+        accessToken: token.access_token,
+        ...(typeof token.refresh_token === 'string' ? { refreshToken: token.refresh_token } : {}),
+        expiresAt: Date.now() + Number(token.expires_in ?? 3600) * 1000,
+      };
+      saveMcpToken(stateDir, refreshed);
+      return refreshed.accessToken;
+    } catch {
+      return undefined;
+    }
+  })();
+  refreshInFlight.set(key, promise);
   try {
-    const found = await discover(mcpUrl, fetchImpl);
-    const token = await json(await fetchImpl(found.tokenEndpoint, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'refresh_token', refresh_token: stored.refreshToken, client_id: stored.clientId, resource: found.resource,
-      }).toString(),
-      signal: AbortSignal.timeout(10_000),
-    }));
-    if (typeof token.access_token !== 'string') return undefined;
-    const refreshed: StoredMcpToken = {
-      ...stored,
-      accessToken: token.access_token,
-      ...(typeof token.refresh_token === 'string' ? { refreshToken: token.refresh_token } : {}),
-      expiresAt: Date.now() + Number(token.expires_in ?? 3600) * 1000,
-    };
-    saveMcpToken(stateDir, refreshed);
-    return refreshed.accessToken;
-  } catch {
-    return undefined;
+    return await promise;
+  } finally {
+    refreshInFlight.delete(key);
   }
 }

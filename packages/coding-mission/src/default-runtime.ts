@@ -127,7 +127,10 @@ export function codingMissionPortsFromEnv(
     },
     coder: {
       execute: ({ mission, workerId }) => executeMarker(config, git, mission, workerId),
-      observe: ({ mission }) => observeMarker(config, git, mission)
+      observe: ({ mission }) => observeMarker(config, git, mission),
+      // executeMarker converges: a marker already committed for the mission is returned as the result, so a stale holder
+      // running it again repeats no side effect. This is what lets recovery treat an absent observation as safe.
+      idempotent: true
     },
     reconciler: {
       reconcile: async ({ mission }) => reconcileCheckout(config, git, mission)
