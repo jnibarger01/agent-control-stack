@@ -69,3 +69,5 @@ export * from "./authority.js";
 export * from "./child-work.js";
 export * from "./governed-runtime.js";
 export * from "./unit-runner.js";
+export * from "./governed-driver.js";
+export * from "./governed-worker.js";

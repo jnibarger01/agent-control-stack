@@ -171,9 +171,10 @@ verifier yet, and the real grant reader is only wired in tests.
 
 ## Not yet in this runtime
 
-- A process that constructs `GovernedUnitRunner`. The runner exists and is tested, but no worker, gateway route or CLI
-  builds it yet, so nothing in production runs a governed unit today. It needs lane adapters and a worker-to-actor
-  mapping, which are deployment decisions.
+- Lanes other than `coder` in the worker. `resumeGovernedUnits` only builds a coder-lane adapter; `jc`, `dc` and `mcp`
+  units need a `ToolLaneInvoker` per lane wired to those composition roots, which is not done.
+- Executor-level fencing for governed coder units. `CoderExecutionAdapter` calls the coder port without the claim
+  token, so a fencing executor cannot refuse a revoked claim; the legacy path passes it.
 - Checkpoint/resume as worker adapters on the execution ledger, the CUA worker, and recovery policy.
 - A driver for the `general` mission kind. The legacy coding path has no budget row (uncapped).
 - Delegating to a different executing actor (`authorityNarrowingViolations` refuses it deliberately and it needs its own decision).
@@ -188,6 +189,20 @@ dispatch, the refusal is already durable, no attempt exists, no adapter runs, an
 throws becomes a failed result with the external state marked uncertain. Of two concurrent runs of one unit, one executes
 and the other reports `claim_conflict`. A crash between the claim and the dispatch leaves a running claim that existing
 stale-claim recovery handles; the runner adds no recovery of its own.
+
+## Worker hook
+
+`runWorkerOnce` calls `resumeGovernedUnits(dbPath)` once per cycle, after the coding-mission resume. It is **off unless
+`ACS_GOVERNED_WORKER_ACTORS`** (a JSON object of worker id to actor id) is set. Then `ACS_GOVERNED_WORKER_ID` must be one of
+its keys, and `ACS_GOVERNED_MAX_UNITS` (1 to 10, default 1) caps units per pass. A malformed value fails the cycle loudly
+(`governed_worker_config_invalid`) rather than leaving governed work silently off or running under an identity nobody
+chose. A pass also needs the coding executor config (`codingMissionPortsFromEnv`); without it, it does nothing.
+
+A pass opens the governed root, runs up to the cap of ready `coding` units of **governed** `general` missions through the
+coder lane (`runGovernedUnits`: sequential, bounded, a refusal does not stop the pass), and always releases its
+connections. Missions with no authority binding are skipped unless a caller sets `requireGovernance: false`. No operator
+is verified in this process, so it cannot loosen a mission's policy. The actor map is a `Map`, so a worker id cannot
+resolve through `Object.prototype`.
 
 ## Composition root
 

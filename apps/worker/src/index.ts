@@ -17,7 +17,7 @@ import {
 } from "@agent-control-stack/procedural-learning";
 import { executeSandboxed, type SandboxResult } from "@agent-control-stack/sandbox";
 import { resolve, sep } from "node:path";
-import { resumeConfiguredCodingMissions } from "@agent-control-stack/coding-mission";
+import { resumeConfiguredCodingMissions, resumeGovernedUnits } from "@agent-control-stack/coding-mission";
 import { ControlStackError, domainHash, stableHash } from "@agent-control-stack/shared";
 import {
   admittedPlanHash,
@@ -92,6 +92,8 @@ export interface WorkerOptions {
   authenticatedClaim?: AuthenticatedWorkerClaim;
   /** Replaces the default coding-mission resume. Tests use this to avoid the process environment. */
   resumeCodingMissions?: (dbPath: string) => Promise<void>;
+  /** Replaces the default governed-unit pass (off unless ACS_GOVERNED_WORKER_ACTORS is set). Tests use this. */
+  resumeGovernedUnits?: (dbPath: string) => Promise<unknown>;
 }
 
 export interface WorkerResult {
@@ -186,6 +188,8 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
   await resumeDispatchedMissions(dbPath);
   if (options.resumeCodingMissions) await options.resumeCodingMissions(dbPath);
   else await resumeConfiguredCodingMissions(dbPath);
+  if (options.resumeGovernedUnits) await options.resumeGovernedUnits(dbPath);
+  else await resumeGovernedUnits(dbPath);
   const executionBackend = options.executionBackend ?? resolveExecutionBackend();
   const workItems = new SqliteWorkItemStore(dbPath);
   const learning = options.learning ?? new ProceduralLearning(dbPath);
