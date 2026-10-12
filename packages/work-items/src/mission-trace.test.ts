@@ -262,4 +262,74 @@ describe("mission audit projection", () => {
       ctx.close();
     }
   }, 20_000);
+  it("applies the as-of cutoff to revision history", () => {
+    const ctx = fixture();
+    try {
+      const mission = ctx.mission;
+      const build = (revision: number) => {
+        const definition: ChangeSetDefinition = {
+          schemaVersion: "acs.change-set.v1",
+          missionId: mission.id,
+          subjectInputHash: executionPlanSubjectInputHash(mission),
+          executingActorId: "planner",
+          objective: `revision ${revision}`,
+          scope: [{ kind: "path", id: "/repo" }],
+          maximumPrivileges: ["fs.read"],
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+          constraints: { maxRuntimeMs: 1_000, maxParallelOperations: 1, failureBehavior: "stop" },
+          verification: [],
+          operations: [
+            {
+              operationId: "inspect",
+              runtime: "desktop_commander",
+              toolName: "read_file",
+              action: { kind: "fs.read", description: "inspect", params: { path: "/repo/a.ts" } },
+              resources: [{ kind: "path", id: "/repo" }],
+              requestedPrivileges: ["fs.read"],
+              effect: "read_only",
+              expectedSideEffects: [],
+              dependsOn: [],
+              retry: { maxAttempts: 1, idempotencyKey: "inspect" }
+            }
+          ]
+        };
+        return definition;
+      };
+      let head: string | null = null;
+      for (let revision = 1; revision <= 3; revision++)
+        head = ctx.store.submitChangeSet({
+          definition: build(revision),
+          submissionId: `revision-${revision}`,
+          expectedHeadHash: head,
+          createdByActorId: "planner"
+        }).manifestHash;
+      const submissions = ctx.store.readEvents({ name: "change_set.submitted", limit: 10 });
+      expect(submissions).toHaveLength(3);
+      const cutoff = submissions[1]!.sequence;
+
+      const tamper = (revision: number) => {
+        const db = new DatabaseSync(ctx.path);
+        try {
+          db.exec("DROP TRIGGER IF EXISTS change_set_revisions_no_update");
+          db.prepare("UPDATE change_set_revisions SET snapshot_json = ? WHERE mission_id = ? AND revision = ?").run(
+            JSON.stringify({ revision, parentManifestHash: null, definition: build(999) }),
+            mission.id,
+            revision
+          );
+        } finally {
+          db.close();
+        }
+      };
+      // A revision submitted after the cutoff is outside the historical view:
+      // it neither counts toward limits nor is verified by the as-of read.
+      tamper(3);
+      expect(ctx.store.getMissionTrace(mission.id, { asOfSequence: cutoff }).events.length).toBeGreaterThan(0);
+      expect(() => ctx.store.getMissionTrace(mission.id)).toThrow(/integrity|failed/u);
+      // Ancestry at or before the cutoff is still verified.
+      tamper(1);
+      expect(() => ctx.store.getMissionTrace(mission.id, { asOfSequence: cutoff })).toThrow(/integrity|failed/u);
+    } finally {
+      ctx.close();
+    }
+  }, 20_000);
 });

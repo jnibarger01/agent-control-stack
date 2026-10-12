@@ -258,4 +258,34 @@ describe("mission time travel", () => {
       ctx.close();
     }
   });
+  it("classifies Change Set authority events as authorization and keeps operation correlations", () => {
+    const ctx = fixture();
+    try {
+      ctx.store.recordSystemEvent({
+        name: "change_set.operation_permitted",
+        attributes: { "work_item.id": ctx.work.id },
+        body: { workItemId: ctx.work.id, operationId: "op_a", permitId: "permit_a", approvalId: "approval_a" }
+      });
+      ctx.store.recordSystemEvent({
+        name: "change_set.operation_permitted",
+        attributes: { "work_item.id": ctx.work.id },
+        body: { workItemId: ctx.work.id, operationId: "op_b", permitId: "permit_b", authorizationId: "auth_b" }
+      });
+      ctx.store.recordSystemEvent({ name: "change_set.completed", attributes: { "work_item.id": ctx.work.id } });
+      const snapshot = readMissionTimeTravel(ctx.store, ctx.work.id);
+      const permits = snapshot.events.filter((event) => event.name === "change_set.operation_permitted");
+      expect(permits.map((event) => event.category)).toEqual(["authorization", "authorization"]);
+      expect(snapshot.events.find((event) => event.name === "change_set.completed")!.category).toBe("lifecycle");
+      expect(permits[0]!.operationIdHash).toBe(domainHash(MISSION_TIME_TRAVEL_VERSION + ".operation", "op_a"));
+      expect(permits[0]!.permitIdHash).toBeDefined();
+      expect(permits[0]!.approvalIdHash).toBeDefined();
+      expect(permits[1]!.authorizationIdHash).toBeDefined();
+      expect(permits[0]!.operationIdHash).not.toBe(permits[1]!.operationIdHash);
+      expect(permits[0]!.workItemIdHash).toBeDefined();
+      expect(JSON.stringify(snapshot)).not.toMatch(/op_a|permit_a|approval_a|auth_b/u);
+      expect(verifyMissionTimeTravel(snapshot, ctx.store)).toBe(true);
+    } finally {
+      ctx.close();
+    }
+  });
 });

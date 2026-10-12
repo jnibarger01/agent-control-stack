@@ -14,6 +14,12 @@ export interface TimeTravelEvent {
   previousHash: string;
   category: "authorization" | "routing" | "execution" | "verification" | "lifecycle" | "other";
   actorIdHash?: string;
+  workItemIdHash?: string;
+  operationIdHash?: string;
+  permitIdHash?: string;
+  approvalIdHash?: string;
+  authorizationIdHash?: string;
+  grantIdHash?: string;
   attemptIdHash?: string;
   leaseIdHash?: string;
   actionHash?: string;
@@ -37,10 +43,38 @@ function correlationDigest(value: unknown, field: string): string | undefined {
     ? domainHash(MISSION_TIME_TRAVEL_VERSION + "." + field, value)
     : undefined;
 }
+// Operation and authority correlations, so events from different Change Set
+// children can be attributed to the operation and permit that produced them.
+const OPERATION_CORRELATIONS = [
+  ["workItemId", "workItemIdHash", "work_item"],
+  ["operationId", "operationIdHash", "operation"],
+  ["permitId", "permitIdHash", "permit"],
+  ["approvalId", "approvalIdHash", "approval"],
+  ["authorizationId", "authorizationIdHash", "authorization"],
+  ["grantId", "grantIdHash", "grant"]
+] as const;
+function correlationDigests(correlation: Record<string, string>): Partial<TimeTravelEvent> {
+  const out: Partial<Record<(typeof OPERATION_CORRELATIONS)[number][1], string>> = {};
+  for (const [source, target, field] of OPERATION_CORRELATIONS) {
+    const digest = correlationDigest(correlation[source], field);
+    if (digest) out[target] = digest;
+  }
+  return out;
+}
 function safeEvidenceHash(value: unknown): string | undefined {
   return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value) ? value : undefined;
 }
+// Change Set events that record approval, policy or permit decisions are
+// authority events, not generic Change Set lifecycle.
+const CHANGE_SET_AUTHORITY_EVENTS = new Set([
+  "change_set.approved",
+  "change_set.approval_revoked",
+  "change_set.policy_evaluated",
+  "change_set.operation_permitted",
+  "change_set.grant_authorized"
+]);
 function category(name: string): TimeTravelEvent["category"] {
+  if (CHANGE_SET_AUTHORITY_EVENTS.has(name)) return "authorization";
   if (/^(policy|approval|authorization|capability|grant|admin)[._]/u.test(name)) return "authorization";
   if (/^(route|routing|dispatch)[._]/u.test(name)) return "routing";
   if (/^(execution|worker|tool|lease|attempt|command|work_unit)[._]/u.test(name)) return "execution";
@@ -62,6 +96,12 @@ const timeTravelEventSchema = z.object({
   previousHash: z.union([z.literal(""), hashSchema]),
   category: z.enum(["authorization", "routing", "execution", "verification", "lifecycle", "other"]),
   actorIdHash: hashSchema.optional(),
+  workItemIdHash: hashSchema.optional(),
+  operationIdHash: hashSchema.optional(),
+  permitIdHash: hashSchema.optional(),
+  approvalIdHash: hashSchema.optional(),
+  authorizationIdHash: hashSchema.optional(),
+  grantIdHash: hashSchema.optional(),
   attemptIdHash: hashSchema.optional(),
   leaseIdHash: hashSchema.optional(),
   actionHash: hashSchema.optional(),
@@ -204,6 +244,7 @@ export function readMissionTimeTravel(
         ...(correlationDigest(correlation.actorId, "actor")
           ? { actorIdHash: correlationDigest(correlation.actorId, "actor") }
           : {}),
+        ...correlationDigests(correlation),
         ...(correlationDigest(correlation.attemptId, "attempt")
           ? { attemptIdHash: correlationDigest(correlation.attemptId, "attempt") }
           : {}),

@@ -76,9 +76,16 @@ export function readMissionTrace(
   });
   // A historical revision remains traceable after amendment; do not follow only the
   // head. Bounding the history is the resource guard.
+  // An as-of read only counts revisions whose submission audit event is at or
+  // before the cutoff, so later amendments cannot break a historical snapshot.
   const revisions = db
-    .prepare(`SELECT revision FROM change_set_revisions WHERE mission_id = ? LIMIT 2049`)
-    .all(missionId) as Array<{ revision: number }>;
+    .prepare(
+      `SELECT r.revision FROM change_set_revisions r
+      JOIN audit_events submission_event ON submission_event.id = r.audit_event_id
+      WHERE r.mission_id = ? AND (? IS NULL OR submission_event.sequence <= ?)
+      ORDER BY r.revision ASC LIMIT 2049`
+    )
+    .all(missionId, asOfSequence ?? null, asOfSequence ?? null) as Array<{ revision: number }>;
   if (revisions.length > 2048)
     throw new ControlStackError("mission_trace_resource_limit", "too many historical revisions");
   // Verify the whole revision ancestry exactly once. readChangeSet with no revision
@@ -86,7 +93,9 @@ export function readMissionTrace(
   // contiguity, parent bindings, canonical hashes and each submission audit event.
   // Calling it per revision re-verified the whole ancestry each time, which was
   // quadratic in the amendment count and rehashed the same audit events repeatedly.
-  store.getChangeSet(missionId);
+  // As of a cutoff, verify ancestry only through the latest revision at or before it.
+  if (asOfSequence === undefined) store.getChangeSet(missionId);
+  else if (revisions.length > 0) store.getChangeSet(missionId, revisions.at(-1)!.revision);
   const workIds = JSON.stringify([missionId, ...operations.map((link) => link.workItemId)]);
   const traceIds = (
     db
