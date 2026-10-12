@@ -78,6 +78,37 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     expect(copyButton?.disabled).toBe(false);
   });
 
+  it("pins from the modal work drawer and records recents from the shared selection path", async () => {
+    const app = bootLive({ workItems: [item("wrk_pin_me"), item("wrk_other")], events: [], now: NOW });
+    await app.flush();
+    app.document.querySelector<HTMLElement>('[data-work-item="wrk_pin_me"]')!.click();
+    const pinButton = app.document.querySelector<HTMLButtonElement>("#work-drawer #operator-pin-drawer");
+    expect(pinButton).not.toBeNull();
+    pinButton!.click();
+    expect(JSON.parse(app.window.localStorage.getItem("acs.mc.pins") ?? "[]")).toContain("wrk_pin_me");
+    // A non-click selection (as from inspect buttons, keyboard, or URLs) is recorded too.
+    (app.window as unknown as { selectWorkItem: (id: string) => void }).selectWorkItem("wrk_other");
+    const recents = [...app.document.querySelectorAll("#operator-recent a")].map((link) => link.textContent);
+    expect(recents).toEqual(["wrk_other", "wrk_pin_me"]);
+  });
+
+  it("keeps unknown ages visible, ignores lineage copies and survives prototype-named intents", async () => {
+    const app = bootLive({
+      workItems: [
+        item("wrk_src", { intent: "same intent" }),
+        item("wrk_retry", { intent: "same intent", lineageType: "retry" } as Partial<Item>),
+        item("wrk_proto_a", { intent: "__proto__" }),
+        item("wrk_proto_b", { intent: "__proto__" }),
+        item("wrk_future", { createdAt: "2999-01-01T00:00:00.000Z" })
+      ],
+      events: [],
+      now: NOW
+    });
+    await app.flush();
+    expect(app.text("#insight-ages")).toContain("unknown 1");
+    expect(app.text("#insight-dupes")).toBe("1 duplicate intent group");
+  });
+
   it("does not pull server-only renderer code into the client graph (#21)", () => {
     const html = renderDashboard({ workItems: [item("wrk_a")], events: [], now: NOW });
     const match = /const pageMeta = (\{.*?\});/u.exec(html);

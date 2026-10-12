@@ -354,7 +354,7 @@ function renderOperatorInsights() {
     else ages.ancient += 1;
   });
   const ageNode = document.getElementById('insight-ages');
-  if (ageNode) ageNode.textContent = 'fresh ' + ages.fresh + ', aging ' + ages.aging + ', stale ' + ages.stale + ', ancient ' + ages.ancient;
+  if (ageNode) ageNode.textContent = 'fresh ' + ages.fresh + ', aging ' + ages.aging + ', stale ' + ages.stale + ', ancient ' + ages.ancient + ', unknown ' + ages.unknown;
   const activity = { active: 0, idle: 0, stale: 0, unknown: 0 };
   document.querySelectorAll('#agent-roster-body [data-agent]').forEach(function (node) {
     const seenValue = node.getAttribute('data-last-seen');
@@ -368,14 +368,18 @@ function renderOperatorInsights() {
   });
   const agentNode = document.getElementById('insight-agents');
   if (agentNode) agentNode.textContent = 'active ' + activity.active + ', idle ' + activity.idle + ', stale ' + activity.stale + ', unknown ' + activity.unknown;
-  const groups = {};
+  // Map, not a plain object: intents are untrusted and may normalize to keys
+  // such as __proto__ or constructor. Retries and clones (data-lineage set)
+  // copy their source intent by design, so they are not duplicate intents.
+  const groups = new Map();
   rows.forEach(function (row) {
     const key = row.getAttribute('data-intent-norm') || '';
-    if (!key) return;
-    groups[key] = groups[key] || [];
-    groups[key].push(row.getAttribute('data-work-item') || '');
+    if (!key || row.getAttribute('data-lineage')) return;
+    const group = groups.get(key) || [];
+    group.push(row.getAttribute('data-work-item') || '');
+    groups.set(key, group);
   });
-  const dupes = Object.keys(groups).filter(function (key) { return groups[key].length > 1; });
+  const dupes = Array.from(groups.keys()).filter(function (key) { return groups.get(key).length > 1; });
   const dupeNode = document.getElementById('insight-dupes');
   if (dupeNode) dupeNode.textContent = dupes.length ? dupes.length + ' duplicate intent group' + (dupes.length === 1 ? '' : 's') : 'No duplicate intents in view.';
   const decisions = Array.from(document.querySelectorAll('#events-timeline li')).filter(function (node) {
@@ -431,6 +435,18 @@ function copySelectedOperatorId() {
     if (typeof announce === 'function') announce('Could not copy work item id');
   });
 }
+function toggleSelectedOperatorPin() {
+  const id = typeof selectedWorkItemId === 'string' ? selectedWorkItemId.trim() : '';
+  if (!id) {
+    if (typeof announce === 'function') announce('Select a work item before pinning');
+    return;
+  }
+  const pins = operatorParseIds(operatorStorageGet(operatorThirty.keys.pins));
+  const next = pins.indexOf(id) === -1 ? [id].concat(pins).slice(0, 20) : pins.filter(function (pin) { return pin !== id; });
+  operatorStorageSet(operatorThirty.keys.pins, JSON.stringify(next));
+  applyOperatorPins();
+  if (typeof announce === 'function') announce(next.indexOf(id) === -1 ? 'Unpinned ' + id : 'Pinned ' + id);
+}
 function applyOperatorThirty() {
   applyOperatorDensity();
   applyOperatorFocus();
@@ -472,18 +488,18 @@ function bindOperatorThirty() {
     copyButton.addEventListener('click', copySelectedOperatorId);
     workDrawer.querySelector('.drawer-head')?.appendChild(copyButton);
   }
-  document.getElementById('operator-pin')?.addEventListener('click', function () {
-    const id = typeof selectedWorkItemId === 'string' ? selectedWorkItemId.trim() : '';
-    if (!id) {
-      if (typeof announce === 'function') announce('Select a work item before pinning');
-      return;
-    }
-    const pins = operatorParseIds(operatorStorageGet(operatorThirty.keys.pins));
-    const next = pins.indexOf(id) === -1 ? [id].concat(pins).slice(0, 20) : pins.filter(function (pin) { return pin !== id; });
-    operatorStorageSet(operatorThirty.keys.pins, JSON.stringify(next));
-    applyOperatorPins();
-    if (typeof announce === 'function') announce(next.indexOf(id) === -1 ? 'Unpinned ' + id : 'Pinned ' + id);
-  });
+  document.getElementById('operator-pin')?.addEventListener('click', toggleSelectedOperatorPin);
+  // The drawer is modal (the toolbar is inert while it is open), so the pin
+  // action must also live in the drawer, like copy.
+  if (workDrawer && !document.getElementById('operator-pin-drawer')) {
+    const pinButton = document.createElement('button');
+    pinButton.type = 'button';
+    pinButton.id = 'operator-pin-drawer';
+    pinButton.className = 'tool-button';
+    pinButton.textContent = 'Pin work item';
+    pinButton.addEventListener('click', toggleSelectedOperatorPin);
+    workDrawer.querySelector('.drawer-head')?.appendChild(pinButton);
+  }
   document.getElementById('operator-admin-warning')?.addEventListener('click', function () {
     if (typeof announce === 'function') announce(operatorThirty.adminWarning + ' Confirmation is still required. This button does not change execution mode.');
   });
@@ -509,8 +525,6 @@ function bindOperatorThirty() {
     });
   });
   document.addEventListener('click', function (event) {
-    const row = event.target && event.target.closest ? event.target.closest('[data-work-item]') : null;
-    if (row) rememberOperatorWorkItem(row.getAttribute('data-work-item'));
     const skip = event.target && event.target.closest ? event.target.closest('a.skip-link') : null;
     if (!skip) return;
     const href = skip.getAttribute('href') || '';

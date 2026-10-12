@@ -121,6 +121,9 @@ function selectWorkItem(id, options) {
   });
   openWorkDrawer();
   selectedWorkItemId = id;
+  // Shared selection path: every way of opening an item (queue rows, inspect
+  // buttons, keyboard, restored URLs, recents) records it as recently viewed.
+  if (typeof rememberOperatorWorkItem === 'function') rememberOperatorWorkItem(id);
   if (!fromLocation) writeSelectedItemToLocation(id);
   if (options && options.scroll) {
     const row = document.querySelector('[data-work-item="' + cssAttr(id) + '"]');

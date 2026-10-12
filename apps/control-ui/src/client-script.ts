@@ -336,7 +336,9 @@ function agentCardsMarkup(agents) {
     const heartbeat = agent.lastHeartbeatAt ? ('Heartbeat ' + formatClientTime(agent.lastHeartbeatAt)) : 'No heartbeat observed';
     const capabilityCount = Array.isArray(agent.capabilities) ? agent.capabilities.length : 0;
     const error = agent.lastError ? '<span class="agent-card-error">' + escapeClient(redactClient(agent.lastError)) + '</span>' : '';
-    return '<button type="button" class="agent-card" data-agent="' + id + '" data-agent-id="' + id + '" aria-label="Open ' + name + '">' +
+    const lastSeen = agent.lastHeartbeatAt || agent.lastEventAt || '';
+    const lastSeenAttr = lastSeen ? ' data-last-seen="' + escapeClient(lastSeen) + '"' : '';
+    return '<button type="button" class="agent-card" data-agent="' + id + '" data-agent-id="' + id + '"' + lastSeenAttr + ' aria-label="Open ' + name + '">' +
       '<span class="agent-card-head">' +
         '<span class="agent-avatar" aria-hidden="true">' + initial + '</span>' +
         '<span class="agent-card-identity"><strong>' + name + '</strong><small>' + id + '</small></span>' +
