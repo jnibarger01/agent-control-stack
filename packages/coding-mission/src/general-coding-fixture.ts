@@ -12,7 +12,8 @@ import {
 } from "./general-coding-adapter.js";
 import { createGovernedExecution, type GovernedExecution } from "./governed-runtime.js";
 import { GovernedUnitRunner } from "./unit-runner.js";
-import type { WorkUnitExecutorAdapter } from "./worker-execution.js";
+import type { WorkUnitKind } from "./mission-model.js";
+import type { ExecutorLane, WorkUnitExecutorAdapter } from "./worker-execution.js";
 
 /** Test fixture: a governed general mission with one coding unit `u1`, on the real grant store. */
 export const HUMAN = "human-issuer";
@@ -38,10 +39,16 @@ export interface Options {
   /** Scope as a function of the repository path, so tests can grant less than the repository. */
   scope?: (repository: string) => AutonomousAuthorityDefinition["scope"];
   expiresInMs?: number;
+  /** Replaces the default coding unit, for lanes other than coder. */
+  unit?: { kind: WorkUnitKind; payload: Record<string, unknown> };
+  /** Use this directory as the world's root instead of a fresh temp directory (it is still removed on cleanup). */
+  root?: string;
+  lane?: ExecutorLane;
+  privileges?: AutonomousAuthorityDefinition["maximumPrivileges"];
 }
 
 export function world(options: Options = {}) {
-  const root = mkdtempSync(join(tmpdir(), "acs-general-"));
+  const root = options.root ?? mkdtempSync(join(tmpdir(), "acs-general-"));
   dirs.push(root);
   const repository = join(root, "repos", "acs");
   const base = Date.now();
@@ -67,7 +74,7 @@ export function world(options: Options = {}) {
     executingActorId: ACTOR,
     scope: options.scope?.(repository) ?? [{ kind: "repository", id: repository, coverage: "descendants" }],
     toolClasses: options.toolClasses ?? [{ runtime: "sandbox", toolName: "edit" }],
-    maximumPrivileges: ["fs.read"],
+    maximumPrivileges: options.privileges ?? ["fs.read"],
     expiresAt: iso(options.expiresInMs ?? 3_600_000),
     limits: {
       maxOperations: 50,
@@ -103,7 +110,13 @@ export function world(options: Options = {}) {
     maxFiles: 3,
     ...options.payload
   };
-  exec.missions.addWorkUnits(item.id, [{ unitId: "u1", kind: "coding", title: "edit", payload }], iso(0));
+  exec.missions.addWorkUnits(
+    item.id,
+    [
+      { unitId: "u1", kind: options.unit?.kind ?? "coding", title: "edit", payload: options.unit?.payload ?? payload }
+    ] as never,
+    iso(0)
+  );
   exec.authority.grantMissionAuthority({ missionId: item.id, grantId: grant.grantId });
 
   const requests: GeneralCodingRequest[] = [];
@@ -130,7 +143,7 @@ export function world(options: Options = {}) {
       missionId: item.id,
       unitId: "u1",
       workerId: "coder-worker",
-      lane: "coder",
+      lane: options.lane ?? "coder",
       ...(signal ? { signal } : {})
     });
   const unit = () => exec.missions.workUnits(item.id).find((u) => u.unitId === "u1")!;
@@ -141,7 +154,9 @@ export function world(options: Options = {}) {
     return {
       state: row.state,
       category: row.failure_category,
-      report: row.report_json ? (JSON.parse(row.report_json) as { failure?: { nativeCode?: string } }) : undefined
+      report: row.report_json
+        ? (JSON.parse(row.report_json) as { failure?: { nativeCode?: string }; externalStateUncertain?: boolean })
+        : undefined
     };
   };
   const runnerFor = runner;
