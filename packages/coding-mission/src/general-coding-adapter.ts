@@ -76,11 +76,14 @@ function physicalPath(path: string): string | undefined {
   }
 }
 
-/** Containment is judged on physical paths, so a symlink inside a scope cannot carry the repository outside it. */
-function covers(scope: AutonomousAuthorityDefinition["scope"], repository: string): boolean {
+/**
+ * Containment is judged on physical paths, so a symlink inside a scope cannot carry the repository outside it. Returns
+ * the resolved physical path when the scope covers it, otherwise undefined.
+ */
+function covers(scope: AutonomousAuthorityDefinition["scope"], repository: string): string | undefined {
   const path = physicalPath(repository);
-  if (path === undefined) return false;
-  return scope.some((allowed) => {
+  if (path === undefined) return undefined;
+  const covered = scope.some((allowed) => {
     if (allowed.kind !== "repository" && allowed.kind !== "path") return false;
     if (!isAbsolute(allowed.id)) return false;
     const root = physicalPath(allowed.id);
@@ -90,6 +93,7 @@ function covers(scope: AutonomousAuthorityDefinition["scope"], repository: strin
     const suffix = relative(root, path);
     return suffix !== ".." && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix);
   });
+  return covered ? path : undefined;
 }
 
 /** A reported file is acceptable only if it is one of the declared paths or lies under a declared directory. */
@@ -204,9 +208,11 @@ export class GeneralCodingExecutionAdapter implements WorkUnitExecutorAdapter {
 
     if (!definition.toolClasses.some((tool) => tool.runtime === REQUIRED_RUNTIME))
       return deny("tool_class_not_granted");
-    if (!covers(definition.scope, task.repository)) return deny("repository_out_of_scope");
+    const repository = covers(definition.scope, task.repository);
+    if (repository === undefined) return deny("repository_out_of_scope");
     if (task.maxRuntimeMs > definition.limits.maxRuntimeMs) return deny("runtime_exceeds_authority");
-    return { denied: false, task, claimToken: claim.claimToken };
+    // Pin the task to the physical path that was checked, so a symlink swapped later cannot redirect the executor.
+    return { denied: false, task: { ...task, repository }, claimToken: claim.claimToken };
   }
 
   private denied(dispatch: DispatchEnvelope, category: FailureCategory, code: string): ResultEnvelope {
@@ -247,6 +253,12 @@ export class GeneralCodingExecutionAdapter implements WorkUnitExecutorAdapter {
         resolveTimeout("timeout");
       }, budgetMs);
     });
+    // The checked path must still be the physical path right before the executor starts (TOCTOU, #361).
+    if (physicalPath(task.repository) !== task.repository) {
+      clearTimeout(timer);
+      callerSignal?.removeEventListener("abort", onCallerAbort);
+      return this.denied(dispatch, "policy_denied", "repository_moved");
+    }
     const execution = this.executor.execute({ task, claimToken, signal: abort.signal });
     execution.catch(() => undefined); // a late failure after the bound is not an unhandled rejection
     try {
