@@ -3,9 +3,13 @@
  *
  * Trust model (D3): the model must not be able to widen its own authority.
  *  - The SYSTEM policy may loosen anything above the built-in defaults only if
- *    the JC process cannot modify it: the file and every parent directory are
- *    not symlinks, not group/world-writable, and access(W_OK) FAILS for this
- *    process's effective uid (so a root-run JC is also rejected).
+ *    the JC process cannot modify it: the file and every parent directory up to
+ *    / are ROOT-OWNED (uid 0, restoring #324's rule), not group/world-writable
+ *    (no sticky-bit exception), not owned by the JC uid, and access(W_OK) FAILS
+ *    for this process's effective uid (so a root-run JC is also rejected). A
+ *    symlink is accepted only if root owns it and its realpath is a root-owned,
+ *    symlink-free chain; the file is opened O_NOFOLLOW and the fd is fstat-ed
+ *    against the checked inode before it is read (root-controlled-file.ts).
  *  - The optional USER policy (<stateDir>/policy.user.json) may only TIGHTEN.
  *    Anything that loosens is rejected, so a model that can write the state
  *    directory still cannot gain authority.
@@ -22,6 +26,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { assertRootControlledPath, readRootControlledFile, RootControlledFileError, type RootControlledFileIo } from './root-controlled-file.js';
 import {
   JC_CLASS_DECISION_VALUES,
   JC_DEFAULT_CLASS_DECISIONS,
@@ -78,6 +83,8 @@ export interface JcPolicyOptions {
   requireImmutable?: boolean;
   /** Roots from JC_FS_ROOTS, the base a user layer may narrow when the system layer sets none. */
   baseFsRoots?: readonly string[];
+  /** Tests only: filesystem/uid seam for the root-ownership check. */
+  rootIo?: RootControlledFileIo;
 }
 
 class PolicyError extends Error {}
@@ -255,29 +262,26 @@ function inside(root: string, candidate: string): boolean {
 }
 
 /**
- * Throws unless nothing in the file's path chain can be modified by this
- * process. Uses lstat + mode bits + access(W_OK) for the effective uid.
+ * Throws unless the file and every parent up to `/` are root-owned, not group/world-writable, not owned or
+ * writable by the JC account, and any symlink resolves to a root-owned, symlink-free chain
+ * (see root-controlled-file.ts). `io` is a test seam; production uses the real filesystem.
  */
-export function assertPolicyImmutable(filePath: string): void {
-  let current = path.resolve(filePath);
-  for (;;) {
-    const stat = fs.lstatSync(current);
-    if (stat.isSymbolicLink()) throw new PolicyError(`${current} is a symlink`);
-    // An owner can always chmod the path writable again, so a read-only mode on a path the
-    // JC account owns proves nothing. Every component must belong to someone else.
-    const me = process.geteuid?.();
-    if (me !== undefined && me !== 0 && stat.uid === me) throw new PolicyError(`${current} is owned by the JC account (uid ${me}); it could make it writable again`);
-    if ((stat.mode & 0o022) !== 0) throw new PolicyError(`${current} is group/world-writable`);
-    try {
-      fs.accessSync(current, fs.constants.W_OK);
-      throw new PolicyError(`${current} is writable by the JC process (uid ${process.geteuid?.() ?? '?'}); a policy the process can edit cannot loosen anything`);
-    } catch (error) {
-      if (error instanceof PolicyError) throw error;
-      // EACCES / EROFS: not writable by us, which is what we require.
-    }
-    const parent = path.dirname(current);
-    if (parent === current) return;
-    current = parent;
+export function assertPolicyImmutable(filePath: string, io?: RootControlledFileIo): void {
+  try {
+    assertRootControlledPath(filePath, { io });
+  } catch (error) {
+    if (error instanceof RootControlledFileError) throw new PolicyError(error.message);
+    throw error;
+  }
+}
+
+/** Check-and-read on one inode (O_NOFOLLOW + fstat), so the bytes parsed are the bytes that were checked. */
+function readImmutablePolicyFile(file: string, io?: RootControlledFileIo): string {
+  try {
+    return readRootControlledFile(file, MAX_POLICY_BYTES, { io });
+  } catch (error) {
+    if (error instanceof RootControlledFileError) throw new PolicyError(error.message);
+    throw error;
   }
 }
 
@@ -376,8 +380,10 @@ export function loadJcPolicy(options: JcPolicyOptions): JcPolicyLoad {
   try {
     let raw: string | undefined;
     try {
-      raw = readPolicyFile(options.systemPath);
+      // Strict mode reads through the root-controlled check so check and read hit the same inode.
+      raw = requireImmutable && !unsafeDev ? readImmutablePolicyFile(options.systemPath, options.rootIo) : readPolicyFile(options.systemPath);
     } catch (error) {
+      if (error instanceof PolicyError && requireImmutable && !unsafeDev) immutable = false;
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'ENOENT' && !options.systemPathExplicit) raw = undefined;
       else if (code === 'ENOENT') throw new PolicyError(`configured policy ${options.systemPath} does not exist`);
@@ -387,16 +393,9 @@ export function loadJcPolicy(options: JcPolicyOptions): JcPolicyLoad {
     if (raw !== undefined) {
       anyConfigured = true;
       const doc = parseDocument(raw, 'system');
-      if (requireImmutable && !unsafeDev) {
+      if (requireImmutable && unsafeDev) {
         try {
-          assertPolicyImmutable(options.systemPath);
-        } catch (error) {
-          immutable = false;
-          throw error;
-        }
-      } else if (requireImmutable && unsafeDev) {
-        try {
-          assertPolicyImmutable(options.systemPath);
+          assertPolicyImmutable(options.systemPath, options.rootIo);
         } catch {
           immutable = false; // accepted only because JC_POLICY_UNSAFE_DEV is set; surfaced everywhere
         }

@@ -108,10 +108,13 @@ The model must not be able to widen its own authority.
 
 - **Rule.** A policy file may *loosen* anything above the built-in defaults
   only if the JC process cannot modify it: the file and every parent directory
-  must not be a symlink, must not be group/world-writable, and
-  `access(W_OK)` must **fail** for the process's effective uid on the file and
-  its directory chain. This holds for a root-owned policy and for an
-  operator-owned one when JC runs as a distinct account.
+  must be **owned by root** (amended 2026-10-13 by Jace's decision, restoring
+  #324's rule; an operator-owned policy is no longer accepted), must not be
+  group/world-writable (no sticky-bit exception), must not be owned by the JC
+  uid, and `access(W_OK)` must **fail** for the process's effective uid on the
+  file and its directory chain. A symlink is accepted only if root owns it and
+  it resolves to a root-owned, symlink-free chain; the read uses `O_NOFOLLOW`
+  plus an `fstat` inode match against the checked file.
 - **Two layers.** The *system layer* is `/etc/jace-commander/policy.json`
   (override path: `JC_POLICY_PATH`). It is subject to the rule above. An
   optional *user layer* `<stateDir>/policy.user.json` may only **tighten**:
