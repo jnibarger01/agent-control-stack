@@ -443,6 +443,52 @@ describe("dispatch deadline and lane authorization", () => {
     });
   });
 
+  it("never authorizes the cua lane: verifyDispatch returns lane_not_permitted", () => {
+    const f = governed();
+    expect(
+      f.ledger.verifyDispatch({
+        missionId: f.item.id,
+        unitId: "root",
+        workerId: f.claim.workerId,
+        lane: "cua",
+        attempt: 1
+      })
+    ).toEqual({ ok: false, reason: "lane_not_permitted" });
+    expect(() => dispatchRoot(f, { lane: "cua" })).toThrow(/lane_not_permitted/u);
+    expect(attempts(f)).toBe(0);
+  });
+
+  it("refuses cua in an ungoverned mission before any attempt is recorded", () => {
+    const missions = new CodingMissionStore(":memory:");
+    missions.createGeneral({ missionId: "m1", summary: "cua", now: "2026-10-10T00:00:00.000Z" });
+    missions.addWorkUnits(
+      "m1",
+      [{ unitId: "u1", kind: "cua", title: "browse", payload: { kind: "cua", objective: "inspect" } }],
+      "2026-10-10T00:00:00.000Z"
+    );
+    missions.releaseReadyUnits("m1", "2026-10-10T00:00:00.000Z");
+    const claim = { token: "tok", workerId: "w1", route: {}, claimedAt: "2026-10-10T00:00:01.000Z" };
+    expect(missions.claimUnit("m1", "u1", claim)).toMatchObject({ ok: true });
+    const dispatcher = new WorkUnitExecutionLedger(missions);
+    expect(() =>
+      dispatcher.beginDispatch({
+        missionId: "m1",
+        unitId: "u1",
+        claimToken: "tok",
+        workerId: "w1",
+        lane: "cua",
+        now: "2026-10-10T00:00:02.000Z"
+      })
+    ).toThrow(/cua_requires_governed_mission/u);
+    expect(missions.db.prepare("SELECT count(*) AS n FROM work_unit_execution_attempts").get()).toEqual({ n: 0 });
+    expect(
+      missions
+        .events("m1")
+        .filter((e) => e.name === "authority.denied")
+        .map((e) => (e.body as { reason: string }).reason)
+    ).toEqual(["cua_requires_governed_mission"]);
+  });
+
   it("never authorizes the mcp lane: no grant can express it", () => {
     const f = governed();
     expect(() => dispatchRoot(f, { lane: "mcp" })).toThrow(/lane_not_permitted/u);

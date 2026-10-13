@@ -464,6 +464,17 @@ export class WorkUnitExecutionLedger {
       const governed = this.store.db
         .prepare("SELECT 1 AS present FROM mission_authority WHERE mission_id = ?")
         .get(input.missionId);
+      if (!governed && input.lane === "cua") {
+        // CUA drives a real browser, so it runs only inside a governed mission whose authority is verified per dispatch.
+        this.store.recordMissionEvent(
+          input.missionId,
+          "authority.denied",
+          { operation: "dispatch", unitId: input.unitId, lane: input.lane, reason: "cua_requires_governed_mission" },
+          input.now
+        );
+        denial = new ControlStackError("dispatch_authority_denied", "dispatch refused: cua_requires_governed_mission");
+        return undefined;
+      }
       if (governed) {
         let refusal: string | undefined;
         if (!this.options.authority) {

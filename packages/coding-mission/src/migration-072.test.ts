@@ -97,7 +97,27 @@ describe("migration 072: cua executor lane", () => {
       claimedAt: "2026-10-10T00:00:01.000Z"
     };
     expect(store.claimUnit("m1", "u1", claim)).toMatchObject({ ok: true });
-    const dispatch = new WorkUnitExecutionLedger(store).beginDispatch({
+    // cua dispatches only in a governed mission; a stand-in verifier admits it so the schema path is exercised.
+    store.db
+      .prepare(
+        `INSERT INTO mission_authority (mission_id, envelope_json, envelope_hash, policy_json, policy_hash, approver_id,
+           reason, grant_id, grant_hash, created_at) VALUES ('m1', '{}', ?, '{}', ?, 'human', 'r', 'g1', ?, 't')`
+      )
+      .run("a".repeat(64), "b".repeat(64), "c".repeat(64));
+    const ledger = new WorkUnitExecutionLedger(store, {
+      clock: () => "2026-10-10T00:00:01.000Z",
+      authority: {
+        verifyDispatch: () => ({
+          ok: true,
+          grantId: "g1",
+          unitAuthorityHash: "d".repeat(64),
+          executingActorId: "worker-1",
+          maxRuntimeMs: 3_600_000,
+          expiresAt: "2099-01-01T00:00:00.000Z"
+        })
+      }
+    });
+    const dispatch = ledger.beginDispatch({
       missionId: "m1",
       unitId: "u1",
       claimToken: claim.token,

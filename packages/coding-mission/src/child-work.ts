@@ -160,7 +160,9 @@ const LANE_RUNTIME: Record<ExecutorLane, string | undefined> = {
   // The coder lane runs the repository edit, which the authority schema names `sandbox`.
   coder: "sandbox",
   // The authority schema has no MCP runtime, so no grant can authorize this lane. It is refused, not waved through.
-  mcp: undefined
+  mcp: undefined,
+  // The authority schema has no browser runtime yet, so no grant can authorize the cua lane. It fails closed like mcp.
+  cua: undefined
 };
 
 /** Lanes an authority grants a tool runtime for. The same mapping `verifyDispatch` enforces. */

@@ -144,7 +144,27 @@ function claimed(payload: ReturnType<typeof script> | { kind: "cua"; objective: 
     claimedAt: T1
   };
   expect(store.claimUnit("m1", "u1", claim)).toMatchObject({ ok: true, attempt: 1 });
-  const ledger = new WorkUnitExecutionLedger(store);
+  // CUA runs only in governed missions. The real grant schema has no browser runtime yet (R2), so these adapter tests
+  // bind the mission and stand in a verifier that admits this dispatch; the real verifier refuses cua today.
+  store.db
+    .prepare(
+      `INSERT INTO mission_authority (mission_id, envelope_json, envelope_hash, policy_json, policy_hash, approver_id,
+         reason, grant_id, grant_hash, created_at) VALUES ('m1', '{}', ?, '{}', ?, 'human', 'cua test', 'g1', ?, ?)`
+    )
+    .run("a".repeat(64), "b".repeat(64), "c".repeat(64), T0);
+  const ledger = new WorkUnitExecutionLedger(store, {
+    clock: () => T1,
+    authority: {
+      verifyDispatch: () => ({
+        ok: true,
+        grantId: "g1",
+        unitAuthorityHash: "d".repeat(64),
+        executingActorId: "worker-1",
+        maxRuntimeMs: 3_600_000,
+        expiresAt: "2099-01-01T00:00:00.000Z"
+      })
+    }
+  });
   const dispatch = ledger.beginDispatch({
     missionId: "m1",
     unitId: "u1",
