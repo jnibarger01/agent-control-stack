@@ -1,0 +1,392 @@
+#!/usr/bin/env node
+/**
+ * Passkey (WebAuthn UV) approvals for approverd: jc.decide.v2 decide_begin / decide_complete.
+ * Jace's decision 2026-10-13; #355 review F1-F5; R/V findings in #356.
+ * Synthetic P-256 authenticators are generated here; no real keys, no real root (fake fs seam for the anchor).
+ */
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { isoCBOR } from '@simplewebauthn/server/helpers';
+import { Approverd, ensureApproverKey } from '../dist/jace-commander/approverd.js';
+import { JcHumanAssertionGate, JC_DECIDE_PROTOCOL_VERSION } from '../dist/jace-commander/approval-protocol.js';
+import { JcPasskeyVerifier, MemorySignCountStore, loadPasskeyTrustAnchor } from '../dist/jace-commander/passkey-verifier.js';
+import { APPROVE_EXIT, runApproveCommand } from '../dist/jace-commander/approve-cli.js';
+import { readTraceFile } from '../dist/jace-commander/looptrace.js';
+
+let passed = 0;
+async function test(name, fn) {
+  await fn();
+  passed += 1;
+  console.log(`  ✓ ${name}`);
+}
+
+const RP_ID = 'localhost';
+const ORIGIN = 'http://localhost:7391';
+const ANCHOR = '/etc/jace-commander/passkeys.json';
+const RUNTIME = 'jc-test-runtime';
+const PRIV = { argv: ['/usr/bin/id'] };
+const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'jc-passkey-')));
+let clock = Date.now();
+const now = () => clock;
+
+// ---- synthetic authenticator ----------------------------------------------------
+function makeAuthenticator(operatorId = 'jace') {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const jwk = publicKey.export({ format: 'jwk' });
+  const cose = isoCBOR.encode(new Map([[1, 2], [3, -7], [-1, 1], [-2, new Uint8Array(Buffer.from(jwk.x, 'base64url'))], [-3, new Uint8Array(Buffer.from(jwk.y, 'base64url'))]]));
+  const credentialId = crypto.randomBytes(16).toString('base64url');
+  const userHandle = crypto.randomBytes(16).toString('base64url');
+  let counter = 0;
+  return {
+    credentialId, userHandle, operatorId,
+    entry: { credentialId, publicKey: Buffer.from(cose).toString('base64url'), userHandle, operatorId },
+    setCounter(n) { counter = n; },
+    sign(challenge, { rpId = RP_ID, origin = ORIGIN, uv = true, up = true, counterOverride, type = 'webauthn.get', handle = userHandle } = {}) {
+      const c = counterOverride ?? ++counter;
+      const clientDataJSON = Buffer.from(JSON.stringify({ type, challenge, origin, crossOrigin: false }));
+      const flags = (up ? 0x01 : 0) | (uv ? 0x04 : 0);
+      const cnt = Buffer.alloc(4); cnt.writeUInt32BE(c);
+      const authData = Buffer.concat([crypto.createHash('sha256').update(rpId).digest(), Buffer.from([flags]), cnt]);
+      const signature = crypto.sign('sha256', Buffer.concat([authData, crypto.createHash('sha256').update(clientDataJSON).digest()]), privateKey);
+      return {
+        id: credentialId, rawId: credentialId, type: 'public-key', clientExtensionResults: {},
+        response: { clientDataJSON: clientDataJSON.toString('base64url'), authenticatorData: authData.toString('base64url'), signature: signature.toString('base64url'), ...(handle ? { userHandle: handle } : {}) },
+      };
+    },
+  };
+}
+
+// ---- fake root-owned filesystem for the trust anchor --------------------------------
+function anchorIo(content, overrides = {}) {
+  const nodes = {
+    '/': { uid: 0, mode: 0o40755, type: 'dir', ino: 1 },
+    '/etc': { uid: 0, mode: 0o40755, type: 'dir', ino: 2 },
+    '/etc/jace-commander': { uid: 0, mode: 0o40755, type: 'dir', ino: 3 },
+    [ANCHOR]: { uid: 0, mode: 0o100644, type: 'file', ino: 4 },
+    ...overrides,
+  };
+  const st = (n) => ({ uid: n.uid, mode: n.mode, dev: 1, ino: n.ino, size: Buffer.byteLength(content()), isFile: () => n.type === 'file', isDirectory: () => n.type === 'dir', isSymbolicLink: () => n.type === 'link' });
+  return {
+    lstat: (p) => { if (!nodes[p]) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); return st(nodes[p]); },
+    realpath: (p) => p,
+    openNoFollow: (p) => { if (!nodes[p]) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); return 7; },
+    fstat: () => st(nodes[ANCHOR]),
+    read: () => Buffer.from(content()),
+    close: () => {},
+    writable: () => false,
+    geteuid: () => 1500,
+  };
+}
+
+let seq = 0;
+async function setup({ authenticators = [makeAuthenticator()], io, humanVerifier, approvalTtlMs, verifierTimeoutMs, anchorContent } = {}) {
+  seq += 1;
+  const base = path.join(root, `p${seq}`);
+  const keyPath = path.join(base, 'key', 'approver.key');
+  const keyInfo = ensureApproverKey(keyPath, 'jc-approver-test');
+  const anchor = { version: 'jc.passkeys.v1', credentials: authenticators.map((a) => a.entry) };
+  const content = anchorContent ?? (() => JSON.stringify(anchor));
+  const config = {
+    runtimeId: RUNTIME, stateDir: path.join(base, 'state'), keyPath, keyId: keyInfo.keyId,
+    requestSocket: path.join(base, 'request', 'request.sock'), decideSocket: path.join(base, 'decide', 'decide.sock'),
+    passkey: { trustAnchorPath: ANCHOR, rpId: RP_ID, origin: ORIGIN, ...(verifierTimeoutMs ? { verifierTimeoutMs } : {}) },
+    ...(approvalTtlMs ? { approvalTtlMs } : {}),
+  };
+  const trustAnchorIo = io ?? anchorIo(content);
+  const daemon = new Approverd(config, { now, trustAnchorIo, ...(humanVerifier ? { humanVerifier: humanVerifier(trustAnchorIo) } : {}) });
+  await daemon.start();
+  return { daemon, config, a: authenticators[0], authenticators };
+}
+
+const request = (env, tool = 'privileged_exec', args = PRIV) => env.daemon.handleRequestOp({ op: 'authorize', runtimeId: RUNTIME, tool, arguments: { ...args, argv: [...args.argv, `--n=${++seq}`] } });
+const show = (env, id) => env.daemon.handleDecideOp({ op: 'show', id }).approval;
+const begin = (env, id, extra = {}) => env.daemon.handleDecideOp({ op: 'decide_begin', protocol: JC_DECIDE_PROTOCOL_VERSION, id, confirmHash: show(env, id).invocationHash, ...extra });
+const assertion = (b, webauthn, extra = {}) => ({ approvalId: b.approvalId, challenge: b.challenge, invocationHash: b.invocationHash, operatorId: 'jace', issuedAt: b.issuedAt, expiresAt: b.expiresAt, webauthn, ...extra });
+const complete = (env, b, webauthn, extra = {}, id = b.approvalId) => Promise.resolve(env.daemon.handleDecideOp({ op: 'decide_complete', protocol: JC_DECIDE_PROTOCOL_VERSION, id, decision: 'approve', assertion: assertion(b, webauthn, extra) }));
+const fresh = async (env) => { const p = request(env); assert.equal(p.state, 'pending'); const b = begin(env, p.approvalId); assert.equal(b.ok, true, JSON.stringify(b)); return b; };
+const statusOf = (env, id) => show(env, id).status;
+
+// ------------------------------------------------------------------------------------
+
+await test('happy path: UV passkey approves; audit records the principal with webauthn-uv; the token mints once', async () => {
+  const env = await setup();
+  const b = await fresh(env);
+  assert.equal(Buffer.from(b.challenge, 'base64url').length, 32);
+  assert.equal(b.expiresAt - b.issuedAt, 30_000);
+  assert.equal(b.webauthn.rpId, RP_ID);
+  assert.equal(b.webauthn.origin, ORIGIN);
+  assert.equal(b.webauthn.userVerification, 'required');
+  assert.deepEqual(b.webauthn.allowCredentials.map((c) => c.id), [env.a.credentialId]);
+  const done = await complete(env, b, env.a.sign(b.webauthn.challenge));
+  assert.equal(done.ok, true, JSON.stringify(done));
+  assert.equal(done.approverIdAssurance, 'webauthn-uv');
+  assert.equal(statusOf(env, b.approvalId), 'approved');
+  const audit = readTraceFile(path.join(env.config.stateDir, 'audit.jsonl')).events.filter((e) => e.type === 'approval_decision');
+  assert.equal(audit.at(-1).payload.approverIdAssurance, 'webauthn-uv');
+  assert.equal(audit.at(-1).payload.approverId, 'jace');
+  assert.equal(audit.at(-1).payload.credentialId, env.a.credentialId);
+  const granted = env.daemon.handleRequestOp({ op: 'authorize', runtimeId: RUNTIME, tool: 'privileged_exec', arguments: show(env, b.approvalId).arguments });
+  assert.equal(granted.state, 'granted');
+  await env.daemon.stop();
+});
+
+await test('no assertion is denied and does not burn the challenge (F4)', async () => {
+  const env = await setup();
+  const b = await fresh(env);
+  for (const bad of [undefined, null, {}, { id: env.a.credentialId }]) {
+    assert.equal((await complete(env, b, bad)).ok, false);
+  }
+  assert.equal((await env.daemon.handleDecideOp({ op: 'decide_complete', protocol: JC_DECIDE_PROTOCOL_VERSION, id: b.approvalId, decision: 'approve' })).code, 'INVALID_REQUEST');
+  assert.equal(statusOf(env, b.approvalId), 'pending');
+  assert.equal((await complete(env, b, env.a.sign(b.webauthn.challenge))).ok, true);
+  await env.daemon.stop();
+});
+
+await test('UV=0 (and UP=0) assertions are denied', async () => {
+  const env = await setup();
+  let b = await fresh(env);
+  assert.equal((await complete(env, b, env.a.sign(b.webauthn.challenge, { uv: false }))).code, 'PASSKEY_DENIED');
+  assert.equal(statusOf(env, b.approvalId), 'pending');
+  b = await fresh(env);
+  assert.equal((await complete(env, b, env.a.sign(b.webauthn.challenge, { up: false, uv: false }))).code, 'PASSKEY_DENIED');
+  await env.daemon.stop();
+});
+
+await test('wrong RP ID, wrong origin and wrong ceremony type are denied', async () => {
+  const env = await setup();
+  for (const opts of [{ rpId: 'evil.example' }, { origin: 'http://localhost:9999' }, { origin: 'https://localhost:7391' }, { type: 'webauthn.create' }]) {
+    const b = await fresh(env);
+    assert.equal((await complete(env, b, env.a.sign(b.webauthn.challenge, opts))).code, 'PASSKEY_DENIED', JSON.stringify(opts));
+    assert.equal(statusOf(env, b.approvalId), 'pending');
+  }
+  await env.daemon.stop();
+});
+
+await test('an assertion for a different approval id or invocation hash is denied', async () => {
+  const env = await setup();
+  const one = await fresh(env);
+  const two = await fresh(env);
+  // Signed over approval two's challenge, submitted for approval one.
+  assert.equal((await complete(env, one, env.a.sign(two.webauthn.challenge))).code, 'PASSKEY_DENIED');
+  // Gate fields of two sent under id one.
+  assert.equal((await complete(env, two, env.a.sign(two.webauthn.challenge), {}, one.approvalId)).code, 'INVALID_REQUEST');
+  // A different invocation hash (structural mismatch: denied, challenge kept, then the right one succeeds).
+  const three = await fresh(env);
+  assert.equal((await complete(env, three, env.a.sign(three.webauthn.challenge), { invocationHash: two.invocationHash })).code, 'PASSKEY_DENIED');
+  assert.equal(statusOf(env, one.approvalId), 'pending');
+  assert.equal(statusOf(env, three.approvalId), 'pending');
+  assert.equal(statusOf(env, two.approvalId), 'pending');
+  await env.daemon.stop();
+});
+
+await test('a replayed assertion is denied (same approval and a new approval)', async () => {
+  const env = await setup();
+  const b = await fresh(env);
+  const signed = env.a.sign(b.webauthn.challenge);
+  assert.equal((await complete(env, b, signed)).ok, true);
+  assert.equal((await complete(env, b, signed)).ok, false);
+  const next = await fresh(env);
+  assert.equal((await complete(env, next, signed, { challenge: next.challenge })).code, 'PASSKEY_DENIED');
+  assert.equal(statusOf(env, next.approvalId), 'pending');
+  await env.daemon.stop();
+});
+
+await test('a challenge cannot be reused: begin while live is refused (F4); a consumed challenge is unknown', async () => {
+  const env = await setup();
+  const b = await fresh(env);
+  assert.equal(begin(env, b.approvalId).code, 'CHALLENGE_LIVE');
+  assert.equal((await complete(env, b, env.a.sign(b.webauthn.challenge, { uv: false }))).code, 'PASSKEY_DENIED');
+  // The failed (but structurally valid) attempt consumed it; the old challenge is gone.
+  assert.equal((await complete(env, b, env.a.sign(b.webauthn.challenge))).code, 'CHALLENGE_UNKNOWN');
+  const again = begin(env, b.approvalId);
+  assert.equal(again.ok, true);
+  assert.notEqual(again.challenge, b.challenge);
+  assert.equal((await complete(env, again, env.a.sign(again.webauthn.challenge))).ok, true);
+  await env.daemon.stop();
+});
+
+await test('an expired challenge is denied; expired challenges are swept on issue (F5)', async () => {
+  const env = await setup();
+  const b = await fresh(env);
+  clock += 30_001;
+  assert.equal((await complete(env, b, env.a.sign(b.webauthn.challenge))).ok, false);
+  assert.equal(statusOf(env, b.approvalId), 'pending');
+  const gate = new JcHumanAssertionGate({ verify: async () => false }, { now });
+  const rec = (i) => ({ id: `r${i}`, runtimeId: RUNTIME, tool: 'write_file', status: 'pending', invocationHash: 'a'.repeat(64), expiresAt: new Date(clock + 600_000).toISOString() });
+  for (let i = 0; i < 5; i += 1) gate.issue(rec(i));
+  assert.equal(gate.size, 5);
+  clock += 30_001;
+  gate.issue(rec(99));
+  assert.equal(gate.size, 1);
+  await env.daemon.stop();
+});
+
+await test('a sign counter that goes backwards (or repeats) is denied', async () => {
+  const env = await setup();
+  let b = await fresh(env);
+  env.a.setCounter(10);
+  assert.equal((await complete(env, b, env.a.sign(b.webauthn.challenge))).ok, true); // counter 11
+  b = await fresh(env);
+  assert.equal((await complete(env, b, env.a.sign(b.webauthn.challenge, { counterOverride: 5 }))).code, 'PASSKEY_DENIED');
+  b = await fresh(env);
+  assert.equal((await complete(env, b, env.a.sign(b.webauthn.challenge, { counterOverride: 11 }))).code, 'PASSKEY_DENIED');
+  b = await fresh(env);
+  assert.equal((await complete(env, b, env.a.sign(b.webauthn.challenge, { counterOverride: 12 }))).ok, true);
+  // Counters persist in approverd's state dir.
+  assert.equal(JSON.parse(fs.readFileSync(path.join(env.config.stateDir, 'passkey-counters.json'), 'utf8'))[env.a.credentialId], 12);
+  await env.daemon.stop();
+});
+
+await test('a record decided or expired between begin and complete is not approved (F1 re-check)', async () => {
+  let release;
+  const slowVerifier = (io) => {
+    const real = new JcPasskeyVerifier({ rpId: RP_ID, origin: ORIGIN, loadTrustAnchor: () => loadPasskeyTrustAnchor(ANCHOR, io), signCounts: new MemorySignCountStore() });
+    return { precheck: (x) => real.precheck(x), allowCredentials: () => real.allowCredentials(), verify: async (x, c) => { await new Promise((r) => { release = r; }); return real.verify(x, c); } };
+  };
+  const env = await setup({ humanVerifier: slowVerifier });
+  // Decided meanwhile (rejected through the legacy path, which stays allowed for rejection).
+  let b = await fresh(env);
+  let pending = complete(env, b, env.a.sign(b.webauthn.challenge));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(env.daemon.handleDecideOp({ op: 'decide', id: b.approvalId, decision: 'reject', confirmHash: b.invocationHash, approverId: 'op' }).ok, true);
+  release();
+  assert.equal((await pending).code, 'NOT_PENDING');
+  assert.equal(statusOf(env, b.approvalId), 'rejected');
+  await env.daemon.stop();
+  // Expired meanwhile: record TTL shorter than the challenge window.
+  const short = await setup({ humanVerifier: slowVerifier, approvalTtlMs: 10_000 });
+  b = await fresh(short);
+  pending = complete(short, b, short.a.sign(b.webauthn.challenge));
+  await new Promise((r) => setImmediate(r));
+  clock += 10_001;
+  release();
+  const res = await pending;
+  assert.equal(res.ok, false);
+  assert.ok(['EXPIRED', 'PASSKEY_DENIED'].includes(res.code), res.code);
+  assert.equal(statusOf(short, b.approvalId), 'expired');
+  await short.daemon.stop();
+});
+
+await test('legacy one-step decide is refused for privileged approvals while a verifier is configured, even if it is down', async () => {
+  const broken = await setup({ anchorContent: () => { throw new Error('anchor unavailable'); } });
+  const p = request(broken);
+  const hash = show(broken, p.approvalId).invocationHash;
+  assert.equal(broken.daemon.handleDecideOp({ op: 'decide', id: p.approvalId, decision: 'approve', confirmHash: hash, approverId: 'jace' }).code, 'PASSKEY_REQUIRED');
+  assert.equal(begin(broken, p.approvalId).code, 'PASSKEY_UNAVAILABLE');
+  assert.equal(statusOf(broken, p.approvalId), 'pending');
+  // Rejecting through the legacy path stays possible (it can only deny).
+  assert.equal(broken.daemon.handleDecideOp({ op: 'decide', id: p.approvalId, decision: 'reject', confirmHash: hash, approverId: 'jace' }).ok, true);
+  // Non-privileged classes keep the legacy flow (default requiredRiskClasses = ['privileged']).
+  const w = broken.daemon.handleRequestOp({ op: 'authorize', runtimeId: RUNTIME, tool: 'write_file', arguments: { path: '/work/a', content: 'x' } });
+  assert.equal(broken.daemon.handleDecideOp({ op: 'decide', id: w.approvalId, decision: 'approve', confirmHash: show(broken, w.approvalId).invocationHash, approverId: 'jace' }).ok, true);
+  // Unknown protocol versions are refused.
+  assert.equal(broken.daemon.handleDecideOp({ op: 'decide_begin', protocol: 'jc.decide.v1', id: p.approvalId, confirmHash: hash }).code, 'PROTOCOL_UNSUPPORTED');
+  await broken.daemon.stop();
+});
+
+await test('a verifier error denies; a hung verifier times out as a deny without consuming the record (#356 f)', async () => {
+  let fail = false;
+  const a0 = makeAuthenticator();
+  const env = await setup({ authenticators: [a0], anchorContent: () => { if (fail) throw new Error('down'); return JSON.stringify({ version: 'jc.passkeys.v1', credentials: [a0.entry] }); } });
+  const b = await fresh(env);
+  fail = true;
+  assert.equal((await complete(env, b, env.a.sign(b.webauthn.challenge))).code, 'PASSKEY_DENIED');
+  assert.equal(statusOf(env, b.approvalId), 'pending');
+  await env.daemon.stop();
+  const hung = await setup({ humanVerifier: () => ({ allowCredentials: () => [], verify: () => new Promise(() => {}) }), verifierTimeoutMs: 50 });
+  const h = await fresh(hung);
+  assert.equal((await complete(hung, h, { id: 'x', rawId: 'x', type: 'public-key', response: {} })).code, 'PASSKEY_TIMEOUT');
+  assert.equal(statusOf(hung, h.approvalId), 'pending');
+  assert.equal(begin(hung, h.approvalId).ok, true);
+  await hung.daemon.stop();
+});
+
+await test('an unregistered credential, a mismatched user handle and a wrong claimed operator (F2) are denied', async () => {
+  const env = await setup();
+  const stranger = makeAuthenticator('jace');
+  let b = await fresh(env);
+  assert.equal((await complete(env, b, stranger.sign(b.webauthn.challenge))).code, 'PASSKEY_DENIED');
+  b = await fresh(env);
+  assert.equal((await complete(env, b, env.a.sign(b.webauthn.challenge, { handle: crypto.randomBytes(16).toString('base64url') }))).code, 'PASSKEY_DENIED');
+  b = await fresh(env);
+  assert.equal((await complete(env, b, env.a.sign(b.webauthn.challenge), { operatorId: 'mallory' })).code, 'PASSKEY_DENIED');
+  assert.equal(statusOf(env, b.approvalId), 'pending');
+  await env.daemon.stop();
+});
+
+await test('a trust anchor that is non-root-owned, group/world-writable, or under a writable parent is rejected', async () => {
+  const a = makeAuthenticator();
+  const content = () => JSON.stringify({ version: 'jc.passkeys.v1', credentials: [a.entry] });
+  for (const [label, override] of [
+    ['owned by uid 1000', { [ANCHOR]: { uid: 1000, mode: 0o100644, type: 'file', ino: 4 } }],
+    ['owned by the approverd account', { [ANCHOR]: { uid: 1500, mode: 0o100444, type: 'file', ino: 4 } }],
+    ['group-writable', { [ANCHOR]: { uid: 0, mode: 0o100664, type: 'file', ino: 4 } }],
+    ['world-writable', { [ANCHOR]: { uid: 0, mode: 0o100646, type: 'file', ino: 4 } }],
+    ['writable parent', { '/etc/jace-commander': { uid: 0, mode: 0o40777, type: 'dir', ino: 3 } }],
+    ['non-root parent', { '/etc/jace-commander': { uid: 1000, mode: 0o40755, type: 'dir', ino: 3 } }],
+  ]) {
+    const io = anchorIo(content, override);
+    assert.throws(() => loadPasskeyTrustAnchor(ANCHOR, io), /owned|writable/, label);
+    const env = await setup({ authenticators: [a], io });
+    const p = request(env);
+    assert.equal(begin(env, p.approvalId).code, 'PASSKEY_UNAVAILABLE', label);
+    await env.daemon.stop();
+  }
+  // Root-owned 0644 under a root chain loads.
+  assert.equal(loadPasskeyTrustAnchor(ANCHOR, anchorIo(content)).credentials.length, 1);
+});
+
+await test('two concurrent completes for the same challenge: exactly one wins', async () => {
+  const env = await setup();
+  const b = await fresh(env);
+  const signed = env.a.sign(b.webauthn.challenge);
+  const results = await Promise.all([complete(env, b, signed), complete(env, b, signed)]);
+  assert.deepEqual(results.map((r) => r.ok).sort(), [false, true]);
+  assert.equal(statusOf(env, b.approvalId), 'approved');
+  await env.daemon.stop();
+});
+
+await test('a clock that moved backwards denies and drops the challenge (#356 b)', async () => {
+  const env = await setup();
+  const b = await fresh(env);
+  clock -= 5_000;
+  assert.equal((await complete(env, b, env.a.sign(b.webauthn.challenge))).code, 'CLOCK_ERROR');
+  clock += 5_000;
+  assert.equal((await complete(env, b, env.a.sign(b.webauthn.challenge))).code, 'CHALLENGE_UNKNOWN');
+  assert.equal(statusOf(env, b.approvalId), 'pending');
+  await env.daemon.stop();
+});
+
+await test('the gate validates its verifier and timeout (#356 d)', () => {
+  assert.throws(() => new JcHumanAssertionGate(undefined), TypeError);
+  assert.throws(() => new JcHumanAssertionGate({}), TypeError);
+  assert.throws(() => new JcHumanAssertionGate({ verify: async () => false, precheck: 'yes' }), TypeError);
+  assert.throws(() => new JcHumanAssertionGate({ verify: async () => false }, { verifierTimeoutMs: 0 }), RangeError);
+  assert.throws(() => new JcHumanAssertionGate({ verify: async () => false }, { verifierTimeoutMs: 30_001 }), RangeError);
+  assert.throws(() => new Approverd({ runtimeId: RUNTIME, stateDir: root, keyPath: 'k', keyId: 'k', requestSocket: 'r', decideSocket: 'd', passkey: { trustAnchorPath: ANCHOR, rpId: RP_ID, origin: 'http://evil.example' } }));
+  assert.throws(() => new Approverd({ runtimeId: RUNTIME, stateDir: root, keyPath: 'k', keyId: 'k', requestSocket: 'r', decideSocket: 'd', passkey: { trustAnchorPath: 'relative.json', rpId: RP_ID, origin: ORIGIN } }));
+});
+
+await test('approve CLI: decide_begin, typed hash, browser ceremony, decide_complete over the real decide socket', async () => {
+  const env = await setup();
+  const p = request(env);
+  const lines = [];
+  const io = { stdout: (t) => lines.push(t), stderr: (t) => lines.push(t), isTty: true, prompt: async () => show(env, p.approvalId).invocationHash.slice(0, 8) };
+  const code = await runApproveCommand('approve', [p.approvalId], {
+    decideSocket: env.config.decideSocket, approverId: 'jace', io,
+    passkeyCeremony: async (b) => env.a.sign(b.webauthn.challenge),
+  });
+  assert.equal(code, APPROVE_EXIT.ok, lines.join('\n'));
+  assert.equal(statusOf(env, p.approvalId), 'approved');
+  // Without a ceremony the CLI refuses rather than falling back to the legacy decide.
+  const q = request(env);
+  const code2 = await runApproveCommand('approve', [q.approvalId], { decideSocket: env.config.decideSocket, approverId: 'jace', io: { ...io, prompt: async () => show(env, q.approvalId).invocationHash.slice(0, 8) } });
+  assert.equal(code2, APPROVE_EXIT.failed);
+  assert.equal(statusOf(env, q.approvalId), 'pending');
+  await env.daemon.stop();
+});
+
+console.log(`jace-commander passkey approval: ${passed} passed`);

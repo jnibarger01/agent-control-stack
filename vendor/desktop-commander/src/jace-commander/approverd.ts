@@ -18,6 +18,13 @@
  * Flow (approval lifetime is separate from execution lifetime):
  *   authorize(tool,args)  -> state `pending`  (a request record, TTL ~15 min)
  *   human `decide`        -> `approved`       (bound to the exact invocation hash)
+ *     or, when `passkey` is configured (Jace's decision 2026-10-13), the two-step
+ *     jc.decide.v2 flow: `decide_begin` issues a 30 s single-use challenge bound to
+ *     the record; `decide_complete` carries a WebAuthn UV assertion, and after it
+ *     verifies, the LIVE record is re-checked (pending, unexpired, same hash and
+ *     expiry) in the same synchronous step that sets its status (F1). With a
+ *     verifier configured, a legacy `decide` approve of a passkey-required class
+ *     (default: privileged) is refused, even while the verifier is unavailable.
  *   authorize(same call)  -> state `granted`  (claims the approval ONCE and mints a
  *                                              jc.local.v1 token valid <= 30 s)
  * A claimed approval is consumed: a failed execution, a changed argument or a
@@ -38,6 +45,14 @@ import {
 } from './local-token.js';
 import { JsonlTraceChain, readTraceFile, verifyChain } from './looptrace.js';
 import { jcRiskClassOf } from './providers.js';
+import {
+  JC_DECIDE_PROTOCOL_VERSION,
+  JcHumanAssertionGate,
+  webauthnChallengeFor,
+  type JcHumanAssertion,
+  type JcHumanVerifier,
+} from './approval-protocol.js';
+import type { RootControlledFileIo } from './root-controlled-file.js';
 
 export const DEFAULT_APPROVAL_TTL_MS = 15 * 60_000;
 export const DEFAULT_TOKEN_TTL_MS = 25_000;
@@ -62,11 +77,30 @@ export interface ApproverdConfig {
   approvalTtlMs?: number;
   tokenTtlMs?: number;
   maxPending?: number;
+  /** Opt-in WebAuthn passkey approvals. Once set it is mandatory for `requiredRiskClasses` and fails closed. */
+  passkey?: ApproverdPasskeyConfig;
+}
+
+export interface ApproverdPasskeyConfig {
+  /** Root-owned JSON file of registered credentials (see `jace-commander passkey-register`). */
+  trustAnchorPath: string;
+  /** Pinned WebAuthn RP ID, e.g. `localhost`. */
+  rpId: string;
+  /** Pinned expected origin, e.g. `http://localhost:7391`. */
+  origin: string;
+  /** Risk classes whose approval requires a passkey; default ['privileged']. */
+  requiredRiskClasses?: string[];
+  /** Verifier deadline (ms), default 10 s, max 30 s. */
+  verifierTimeoutMs?: number;
 }
 
 export interface ApproverdDeps {
   now?: () => number;
   randomBytes?: (size: number) => Buffer;
+  /** Tests only: replaces the WebAuthn verifier (still requires `config.passkey`). */
+  humanVerifier?: JcHumanVerifier & { allowCredentials?(): Array<{ id: string; transports?: string[] }> };
+  /** Tests only: filesystem seam for the trust-anchor root-ownership check. */
+  trustAnchorIo?: RootControlledFileIo;
 }
 
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'claimed' | 'expired';
@@ -175,6 +209,12 @@ export class Approverd {
   private readonly audit: JsonlTraceChain;
   private privateKey: crypto.KeyObject | undefined;
   private servers: net.Server[] = [];
+  private gate: JcHumanAssertionGate | undefined;
+  private humanVerifier: ApproverdDeps['humanVerifier'];
+  private readonly passkeyClasses: ReadonlySet<string>;
+  /** True whenever `passkey` is configured; the legacy-decide refusal depends on this alone (fail closed). */
+  private readonly passkeyConfigured: boolean;
+  private readonly deps: ApproverdDeps;
 
   constructor(private readonly config: ApproverdConfig, deps: ApproverdDeps = {}) {
     this.now = deps.now ?? Date.now;
@@ -182,6 +222,41 @@ export class Approverd {
     if (!ID_PATTERN.test(config.runtimeId)) throw new TypeError('runtimeId must match the ID grammar');
     this.approvalsDir = path.join(config.stateDir, 'approvals');
     this.audit = new JsonlTraceChain(path.join(config.stateDir, 'audit.jsonl'), 'jc-approverd');
+    this.deps = deps;
+    const passkey = config.passkey;
+    this.passkeyConfigured = passkey !== undefined;
+    if (passkey !== undefined) {
+      if (!passkey || typeof passkey.trustAnchorPath !== 'string' || !path.isAbsolute(passkey.trustAnchorPath)) throw new TypeError('passkey.trustAnchorPath must be an absolute path');
+      assertRelyingPartyShape(passkey.rpId, passkey.origin);
+      const classes = passkey.requiredRiskClasses ?? ['privileged'];
+      if (!Array.isArray(classes) || classes.length === 0 || !classes.every((c) => typeof c === 'string')) throw new TypeError('passkey.requiredRiskClasses must be a non-empty list');
+      this.passkeyClasses = new Set(classes);
+    } else {
+      this.passkeyClasses = new Set();
+    }
+  }
+
+  /**
+   * Loads the WebAuthn verifier. It is imported lazily so an approverd without `passkey` keeps its
+   * dependency-free install closure; with `passkey` configured a missing library makes start() fail.
+   */
+  private async initPasskey(): Promise<void> {
+    const passkey = this.config.passkey;
+    if (!passkey) return;
+    let verifier = this.deps.humanVerifier;
+    if (!verifier) {
+      const mod = await import('./passkey-verifier.js');
+      mod.assertPasskeyRelyingParty(passkey.rpId, passkey.origin);
+      const io = this.deps.trustAnchorIo;
+      verifier = new mod.JcPasskeyVerifier({
+        rpId: passkey.rpId,
+        origin: passkey.origin,
+        loadTrustAnchor: () => mod.loadPasskeyTrustAnchor(passkey.trustAnchorPath, io),
+        signCounts: new mod.FileSignCountStore(path.join(this.config.stateDir, 'passkey-counters.json')),
+      });
+    }
+    this.humanVerifier = verifier;
+    this.gate = new JcHumanAssertionGate(verifier, { now: this.now, randomBytes: this.rand, verifierTimeoutMs: passkey.verifierTimeoutMs });
   }
 
   // -- lifecycle --
@@ -189,6 +264,7 @@ export class Approverd {
   async start(): Promise<void> {
     fs.mkdirSync(this.approvalsDir, { recursive: true, mode: 0o700 });
     this.privateKey = loadPrivateKey(this.config.keyPath);
+    await this.initPasskey();
     // The request group (the server identity) and the decide group (humans) must be disjoint,
     // or the model could reach decide.sock and approve its own requests.
     const requestGid = resolveGid(this.config.requestGroup);
@@ -305,7 +381,7 @@ export class Approverd {
 
   // -- decide socket (the human operator) --
 
-  handleDecideOp(message: unknown): Json {
+  handleDecideOp(message: unknown): Json | Promise<Json> {
     if (!isRecord(message) || typeof message.op !== 'string') return { ok: false, code: 'INVALID_REQUEST' };
     this.expireStale();
     switch (message.op) {
@@ -322,6 +398,10 @@ export class Approverd {
       }
       case 'decide':
         return this.decide(message);
+      case 'decide_begin':
+        return this.decideBegin(message);
+      case 'decide_complete':
+        return this.decideComplete(message);
       default:
         return { ok: false, code: 'UNKNOWN_OP' };
     }
@@ -333,6 +413,9 @@ export class Approverd {
     if (message.decision !== 'approve' && message.decision !== 'reject') return { ok: false, code: 'INVALID_REQUEST' };
     if (typeof message.approverId !== 'string' || !ID_PATTERN.test(message.approverId)) return { ok: false, code: 'INVALID_REQUEST' };
     if (record.status !== 'pending') return { ok: false, code: record.status === 'expired' ? 'EXPIRED' : 'NOT_PENDING' };
+    // With a verifier configured, approving a passkey-required class needs jc.decide.v2. This depends only
+    // on configuration, never on the verifier being reachable, so it fails closed. Rejecting stays allowed.
+    if (this.passkeyConfigured && message.decision === 'approve' && this.passkeyClasses.has(record.riskClass)) return { ok: false, code: 'PASSKEY_REQUIRED' };
     // The human must have seen THIS invocation: the client echoes its hash.
     if (message.confirmHash !== record.invocationHash) return { ok: false, code: 'CONFIRMATION_MISMATCH' };
     const action = message.decision === 'approve' ? 'approved' : 'rejected';
@@ -345,7 +428,93 @@ export class Approverd {
     record.decidedAt = new Date(this.now()).toISOString();
     record.approverId = message.approverId;
     this.persist(record);
+    this.gate?.cancel(record.id);
     return { ok: true, approvalId: record.id, status: record.status };
+  }
+
+  /** jc.decide.v2 step 1: the human started approving; issue a 30 s challenge bound to this record. */
+  private decideBegin(message: Json): Json {
+    if (message.protocol !== JC_DECIDE_PROTOCOL_VERSION) return { ok: false, code: 'PROTOCOL_UNSUPPORTED', protocol: JC_DECIDE_PROTOCOL_VERSION };
+    if (!this.passkeyConfigured || !this.config.passkey) return { ok: false, code: 'PASSKEY_NOT_CONFIGURED' };
+    if (!this.gate) return { ok: false, code: 'PASSKEY_UNAVAILABLE' };
+    const record = typeof message.id === 'string' ? this.records.get(message.id) : undefined;
+    if (!record) return { ok: false, code: 'NOT_FOUND' };
+    if (record.status !== 'pending') return { ok: false, code: record.status === 'expired' ? 'EXPIRED' : 'NOT_PENDING' };
+    if (message.confirmHash !== record.invocationHash) return { ok: false, code: 'CONFIRMATION_MISMATCH' };
+    let allowCredentials: Array<{ id: string; transports?: string[] }> = [];
+    try {
+      allowCredentials = this.humanVerifier?.allowCredentials?.() ?? [];
+    } catch {
+      return { ok: false, code: 'PASSKEY_UNAVAILABLE' };
+    }
+    let challenge;
+    try {
+      challenge = this.gate.issue(record);
+    } catch (error) {
+      return { ok: false, code: (error as Error).message === 'JC_APPROVAL_CHALLENGE_LIVE' ? 'CHALLENGE_LIVE' : 'INVALID_REQUEST' };
+    }
+    return {
+      ok: true,
+      protocol: JC_DECIDE_PROTOCOL_VERSION,
+      approvalId: record.id,
+      invocationHash: record.invocationHash,
+      challenge: challenge.challenge,
+      issuedAt: challenge.issuedAt,
+      expiresAt: challenge.expiresAt,
+      webauthn: {
+        challenge: webauthnChallengeFor(challenge),
+        rpId: this.config.passkey.rpId,
+        origin: this.config.passkey.origin,
+        userVerification: 'required',
+        allowCredentials,
+        timeoutMs: Math.max(0, challenge.expiresAt - this.now()),
+      },
+    };
+  }
+
+  /**
+   * jc.decide.v2 step 2: verify the WebAuthn assertion, then (synchronously, no await in between) re-read
+   * the live record and require it to still be pending, unexpired, with the same hash and expiry (F1).
+   */
+  private async decideComplete(message: Json): Promise<Json> {
+    if (message.protocol !== JC_DECIDE_PROTOCOL_VERSION) return { ok: false, code: 'PROTOCOL_UNSUPPORTED', protocol: JC_DECIDE_PROTOCOL_VERSION };
+    if (!this.passkeyConfigured) return { ok: false, code: 'PASSKEY_NOT_CONFIGURED' };
+    if (!this.gate) return { ok: false, code: 'PASSKEY_UNAVAILABLE' };
+    if (typeof message.id !== 'string' || message.decision !== 'approve' || !isRecord(message.assertion)) return { ok: false, code: 'INVALID_REQUEST' };
+    const assertion = message.assertion as unknown as JcHumanAssertion;
+    if (assertion.approvalId !== message.id) return { ok: false, code: 'INVALID_REQUEST' };
+    let accepted;
+    try {
+      accepted = await this.gate.accept(assertion);
+    } catch (error) {
+      const code = (error as Error).message;
+      return {
+        ok: false,
+        code: code === 'JC_APPROVAL_UNKNOWN' ? 'CHALLENGE_UNKNOWN'
+          : code === 'JC_APPROVAL_VERIFIER_TIMEOUT' ? 'PASSKEY_TIMEOUT'
+            : code === 'JC_APPROVAL_CLOCK' ? 'CLOCK_ERROR' : 'PASSKEY_DENIED',
+      };
+    }
+    // ---- atomic re-check and mutation: nothing below awaits ----
+    this.expireStale();
+    const record = this.records.get(message.id);
+    if (!record) return { ok: false, code: 'NOT_FOUND' };
+    if (record.status !== 'pending') return { ok: false, code: record.status === 'expired' ? 'EXPIRED' : 'NOT_PENDING' };
+    if (!(Date.parse(record.expiresAt) > this.now())) return { ok: false, code: 'EXPIRED' };
+    if (record.invocationHash !== accepted.challenge.invocationHash || record.expiresAt !== accepted.challenge.recordExpiresAt
+      || record.runtimeId !== accepted.challenge.runtimeId || record.tool !== accepted.challenge.tool) {
+      return { ok: false, code: 'CONFIRMATION_MISMATCH' };
+    }
+    if (!ID_PATTERN.test(accepted.operatorId)) return { ok: false, code: 'PASSKEY_DENIED' };
+    if (!this.auditAppend('approval_decision', { approvalId: record.id, action: 'approved', approverId: accepted.operatorId,
+      approverIdAssurance: 'webauthn-uv', credentialId: accepted.credentialId, protocol: JC_DECIDE_PROTOCOL_VERSION, invocationHash: record.invocationHash })) {
+      return { ok: false, code: 'AUDIT_UNAVAILABLE' };
+    }
+    record.status = 'approved';
+    record.decidedAt = new Date(this.now()).toISOString();
+    record.approverId = accepted.operatorId;
+    this.persist(record);
+    return { ok: true, approvalId: record.id, status: record.status, approverId: accepted.operatorId, approverIdAssurance: 'webauthn-uv' };
   }
 
   // -- internals --
@@ -356,6 +525,7 @@ export class Approverd {
       if ((record.status === 'pending' || record.status === 'approved') && Date.parse(record.expiresAt) <= now) {
         record.status = 'expired';
         this.persist(record);
+        this.gate?.cancel(record.id);
       }
     }
   }
@@ -449,7 +619,7 @@ export class Approverd {
     return true;
   }
 
-  private listen(socketPath: string, group: string | number | undefined, handle: (message: unknown) => Json): Promise<net.Server> {
+  private listen(socketPath: string, group: string | number | undefined, handle: (message: unknown) => Json | Promise<Json>): Promise<net.Server> {
     const dir = path.dirname(socketPath);
     fs.mkdirSync(dir, { recursive: true, mode: 0o750 });
     fs.chmodSync(dir, 0o750);
@@ -473,13 +643,13 @@ export class Approverd {
         const newline = buffered.indexOf('\n');
         if (newline < 0) return;
         handled = true;
-        let reply: Json;
-        try {
-          reply = handle(JSON.parse(buffered.slice(0, newline)));
-        } catch {
-          reply = { ok: false, code: 'INVALID_REQUEST' };
-        }
-        connection.end(`${JSON.stringify(reply)}\n`);
+        const line = buffered.slice(0, newline);
+        // decide_complete awaits the verifier; keep the connection open past the idle timer meanwhile.
+        connection.setTimeout(0);
+        void Promise.resolve()
+          .then(() => handle(JSON.parse(line)))
+          .catch((): Json => ({ ok: false, code: 'INVALID_REQUEST' }))
+          .then((reply) => { if (!connection.destroyed) connection.end(`${JSON.stringify(reply)}\n`); });
       });
       connection.on('error', () => { /* a dropped peer must never crash the approver */ });
     });
@@ -494,6 +664,20 @@ export class Approverd {
       });
     });
   }
+}
+
+/** Shape check for the pinned RP (the full check runs again in passkey-verifier.ts). */
+function assertRelyingPartyShape(rpId: unknown, origin: unknown): void {
+  if (typeof rpId !== 'string' || !/^[a-z0-9.-]{1,253}$/.test(rpId)) throw new TypeError('passkey rpId must be a lowercase hostname');
+  let url: URL;
+  try {
+    url = new URL(String(origin));
+  } catch {
+    throw new TypeError('passkey origin must be a URL');
+  }
+  if (url.origin !== origin) throw new TypeError('passkey origin must be a bare origin');
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && url.hostname === 'localhost')) throw new TypeError('passkey origin must be https (or http://localhost)');
+  if (url.hostname !== rpId && !url.hostname.endsWith(`.${rpId}`)) throw new TypeError('passkey origin host must equal or be a subdomain of rpId');
 }
 
 function resolveGid(group: string | number | undefined): number | undefined {

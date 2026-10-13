@@ -5,10 +5,18 @@
  * additionally requires an interactive TTY on stdin AND stdout and a typed
  * confirmation of the invocation hash, so a script, a piped process or a model
  * driving a child process cannot approve its own request.
+ *
+ * When approverd has passkeys configured (Jace's decision 2026-10-13), `approve` uses the
+ * jc.decide.v2 flow: after showing the request it calls `decide_begin` (the 30 s challenge
+ * window starts there), asks for the typed hash prefix, runs the WebAuthn ceremony in a
+ * browser on this machine (passkey-ceremony.ts, user verification required) and sends the
+ * assertion with `decide_complete`. approverd answers PASSKEY_NOT_CONFIGURED when it has no
+ * verifier, and only then is the legacy one-step `decide` used.
  */
 import os from 'node:os';
 import { approverCall, ApproverUnavailable } from './approver-client.js';
 import { redactArgv, redactSecrets } from './looptrace.js';
+import { JC_DECIDE_PROTOCOL_VERSION } from './approval-protocol.js';
 
 export interface ApproveIo {
   stdout(text: string): void;
@@ -22,7 +30,11 @@ export interface ApproveDeps {
   decideSocket: string | undefined;
   approverId?: string;
   io: ApproveIo;
+  /** Runs the human WebAuthn ceremony for a decide_begin reply and returns the credential JSON. */
+  passkeyCeremony?: (begin: Record<string, unknown>) => Promise<Record<string, unknown>>;
 }
+
+const COMPLETE_TIMEOUT_MS = 35_000;
 
 export const APPROVE_EXIT = Object.freeze({ ok: 0, failed: 1, usage: 2, notAllowed: 3, unavailable: 5 });
 
@@ -88,11 +100,46 @@ export async function runApproveCommand(command: 'approve' | 'reject' | 'pending
       ...displayArgs(approval.arguments).split('\n').map((line) => `    ${line}`),
       '',
     ].join('\n'));
+    let begin: Record<string, unknown> | undefined;
+    if (command === 'approve') {
+      const started = await approverCall(deps.decideSocket, { op: 'decide_begin', protocol: JC_DECIDE_PROTOCOL_VERSION, id, confirmHash: hash });
+      if (started.ok === true) begin = started;
+      else if (started.code !== 'PASSKEY_NOT_CONFIGURED') {
+        io.stderr(`jace-commander: could not start the passkey approval (${String(started.code ?? 'unknown')})`);
+        return APPROVE_EXIT.failed;
+      }
+    }
     const prefix = hash.slice(0, 8);
     const answer = (await io.prompt(`Type ${prefix} to ${command} this exact action, anything else cancels: `)).trim();
     if (answer !== prefix) {
       io.stderr('cancelled; nothing was decided');
       return APPROVE_EXIT.failed;
+    }
+    if (begin) {
+      if (!deps.passkeyCeremony) {
+        io.stderr('jace-commander: this approval requires a passkey, but no passkey ceremony is available');
+        return APPROVE_EXIT.failed;
+      }
+      let credential: Record<string, unknown>;
+      try {
+        credential = await deps.passkeyCeremony(begin);
+      } catch (error) {
+        io.stderr(`jace-commander: passkey ceremony failed (${error instanceof Error ? error.message : 'error'}); nothing was decided`);
+        return APPROVE_EXIT.failed;
+      }
+      const completed = await approverCall(deps.decideSocket, {
+        op: 'decide_complete', protocol: JC_DECIDE_PROTOCOL_VERSION, id, decision: 'approve',
+        assertion: {
+          approvalId: id, challenge: begin.challenge, invocationHash: hash, operatorId: approverId,
+          issuedAt: begin.issuedAt, expiresAt: begin.expiresAt, webauthn: credential,
+        },
+      }, COMPLETE_TIMEOUT_MS);
+      if (completed.ok !== true) {
+        io.stderr(`jace-commander: decision refused (${String(completed.code ?? 'unknown')})`);
+        return APPROVE_EXIT.failed;
+      }
+      io.stdout(`approved ${id} with a passkey (${String(completed.approverId)}). Retry the identical tool call now; the approval is single-use.`);
+      return APPROVE_EXIT.ok;
     }
     const decided = await approverCall(deps.decideSocket, { op: 'decide', id, decision: command, confirmHash: hash, approverId });
     if (decided.ok !== true) {

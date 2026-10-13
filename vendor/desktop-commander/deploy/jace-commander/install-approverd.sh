@@ -26,7 +26,7 @@ node_real="$(readlink -f "$NODE_BIN")"
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 SRC="$REPO/dist"
-FILES=(managed-acs.js jace-commander/approverd-cli.js jace-commander/approverd.js jace-commander/contract.js jace-commander/local-token.js jace-commander/looptrace.js jace-commander/providers.js jace-commander/manifest.generated.js)
+FILES=(managed-acs.js jace-commander/approval-protocol.js jace-commander/approverd-cli.js jace-commander/approverd.js jace-commander/contract.js jace-commander/local-token.js jace-commander/looptrace.js jace-commander/providers.js jace-commander/manifest.generated.js)
 for f in "${FILES[@]}"; do
   [[ -f "$SRC/$f" ]] || { echo "missing $SRC/$f; run npm run build first" >&2; exit 1; }
 done
@@ -47,6 +47,13 @@ fi
 # Code approverd runs is root-owned: the agent must not be able to edit what holds the signing key.
 install -d -o root -g root -m 0755 /opt/jace-commander /opt/jace-commander/dist /opt/jace-commander/dist/jace-commander
 for f in "${FILES[@]}"; do install -o root -g root -m 0644 "$SRC/$f" "/opt/jace-commander/dist/$f"; done
+# Passkey approvals (opt-in, docs/jace-commander-passkey-approvals.md) are loaded lazily by approverd only when
+# its config has a `passkey` block. They also need @simplewebauthn/server installed root-owned under
+# /opt/jace-commander/node_modules; this script does not fetch packages.
+PASSKEY_FILES=(jace-commander/passkey-verifier.js jace-commander/root-controlled-file.js)
+for f in "${PASSKEY_FILES[@]}"; do
+  if [[ -f "$SRC/$f" ]]; then install -o root -g root -m 0644 "$SRC/$f" "/opt/jace-commander/dist/$f"; fi
+done
 printf '{"type":"module","private":true}\n' > /opt/jace-commander/package.json
 chmod 0644 /opt/jace-commander/package.json
 

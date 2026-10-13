@@ -23,6 +23,7 @@ import { privilegedHelperAvailable } from './privileged-client.js';
 import { JC_PRESETS, isJcPreset, type JcPreset } from './authorizers.js';
 import { createJcServer } from './server.js';
 import { runApproveCommand } from './approve-cli.js';
+import { runLocalCeremony } from './passkey-ceremony.js';
 import readline from 'node:readline/promises';
 import { JC_TOOLS } from './tool-descriptors.js';
 import { VERSION } from '../version.js';
@@ -265,6 +266,18 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
       const terminal = Boolean(process.stdin.isTTY && process.stdout.isTTY);
       return runApproveCommand(command, rest, {
         decideSocket,
+        approverId: env.JC_APPROVER_ID,
+        passkeyCeremony: (begin) => {
+          const webauthn = begin.webauthn as Record<string, unknown>;
+          return runLocalCeremony({
+            mode: 'get',
+            origin: String(webauthn.origin),
+            options: { challenge: webauthn.challenge, rpId: webauthn.rpId, allowCredentials: webauthn.allowCredentials, userVerification: 'required', timeout: webauthn.timeoutMs },
+            timeoutMs: Math.max(1, Number(webauthn.timeoutMs) || 0),
+            summary: `Approve ${String(begin.approvalId)}\ninvocation ${String(begin.invocationHash)}`,
+            onUrl: (url) => out.stderr(`Open on this machine and use your passkey: ${url}`),
+          });
+        },
         io: {
           stdout: out.stdout,
           stderr: out.stderr,
