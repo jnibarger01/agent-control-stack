@@ -140,4 +140,36 @@ describe("runGeneralCodingUnits", () => {
     const summary = await runGeneralCodingUnits(runner, w.exec.missions, { workerId: "coder-worker" });
     expect(summary.results).toHaveLength(0);
   });
+
+  it("starts nothing for a non-finite or fractional cap", async () => {
+    const { w, runner, status } = setup(3);
+    for (const maxUnits of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 1.5, "2" as never]) {
+      const summary = await runGeneralCodingUnits(runner, w.exec.missions, { workerId: "coder-worker", maxUnits });
+      expect(summary.results, String(maxUnits)).toHaveLength(0);
+    }
+    expect(status("u1")).toBe("pending");
+  });
+
+  it("starts no new unit once maxWallMs has elapsed", async () => {
+    const { w, runner, status } = setup(2);
+    // The clock jumps past the bound as soon as the first unit has finished.
+    const nowMs = () => (w.exec.missions.workUnits(w.item.id).some((u) => u.status === "succeeded") ? 1_000 : 0);
+    const summary = await runGeneralCodingUnits(runner, w.exec.missions, {
+      workerId: "coder-worker",
+      maxUnits: 3,
+      maxWallMs: 100,
+      nowMs
+    });
+    expect(summary.results.filter((r) => r.status !== "skipped")).toHaveLength(1);
+    expect(status("x01")).toBe("pending");
+  });
+
+  it("starts nothing for an invalid maxWallMs", async () => {
+    const { w, runner, status } = setup();
+    for (const maxWallMs of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+      const summary = await runGeneralCodingUnits(runner, w.exec.missions, { workerId: "coder-worker", maxWallMs });
+      expect(summary.results).toHaveLength(0);
+    }
+    expect(status("u1")).toBe("pending");
+  });
 });

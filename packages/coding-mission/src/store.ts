@@ -1242,6 +1242,46 @@ export class CodingMissionStore {
       .all(missionId) as unknown as UnitRow[];
   }
 
+  /**
+   * The live-claim columns of one unit, read without parsing its payload, so a unit whose stored payload no longer parses
+   * can still be fenced, failed and released by the result path.
+   */
+  workUnitClaim(
+    missionId: string,
+    unitId: string
+  ):
+    | {
+        status: WorkUnit["status"];
+        claimToken?: string;
+        workerId?: string;
+        attempt: number;
+        verificationPolicy: WorkUnit["verificationPolicy"];
+      }
+    | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT status, claim_token, worker_id, attempt, verification_policy
+         FROM coding_operations WHERE mission_id = ? AND operation_id = ?`
+      )
+      .get(missionId, unitId) as
+      | {
+          status: WorkUnit["status"];
+          claim_token: string | null;
+          worker_id: string | null;
+          attempt: number;
+          verification_policy: WorkUnit["verificationPolicy"];
+        }
+      | undefined;
+    if (!row) return undefined;
+    return {
+      status: row.status,
+      attempt: row.attempt,
+      verificationPolicy: row.verification_policy,
+      ...(row.claim_token ? { claimToken: row.claim_token } : {}),
+      ...(row.worker_id ? { workerId: row.worker_id } : {})
+    };
+  }
+
   /** Generalized view of the mission's operation rows. */
   workUnits(missionId: string): WorkUnit[] {
     return this.unitRows(missionId).map((row) => ({

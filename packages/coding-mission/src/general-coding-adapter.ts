@@ -1,4 +1,5 @@
-import { isAbsolute, relative, sep } from "node:path";
+import { lstatSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { ControlStackError, redactValue, stableHash } from "@agent-control-stack/shared";
 import type { AutonomousAuthorityDefinition } from "./authority.js";
 import type { MissionAuthorityLedger } from "./child-work.js";
@@ -48,12 +49,45 @@ export type BoundaryAuthority = Pick<MissionAuthorityLedger, "verifyDispatch" | 
 /** Runtime a coding unit needs from its authority (the coder lane runs in the sandbox runtime). */
 const REQUIRED_RUNTIME = "sandbox";
 
-function covers(scope: AutonomousAuthorityDefinition["scope"], path: string): boolean {
+/**
+ * The physical path `path` names: the realpath of the path itself when it exists, otherwise the realpath of its nearest
+ * existing ancestor with the missing segments appended. Undefined (fail closed) on any other error, including a path
+ * that exists as a dangling or unreadable symlink, since where it would point is not knowable now.
+ */
+function physicalPath(path: string): string | undefined {
+  const missing: string[] = [];
+  let current = path;
+  for (;;) {
+    try {
+      return join(realpathSync(current), ...missing.reverse());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") return undefined;
+      try {
+        lstatSync(current);
+        return undefined; // the entry exists (a dangling symlink) but cannot be resolved
+      } catch (lstatError) {
+        if ((lstatError as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") return undefined;
+      }
+      const parent = dirname(current);
+      if (parent === current) return undefined;
+      missing.push(basename(current));
+      current = parent;
+    }
+  }
+}
+
+/** Containment is judged on physical paths, so a symlink inside a scope cannot carry the repository outside it. */
+function covers(scope: AutonomousAuthorityDefinition["scope"], repository: string): boolean {
+  const path = physicalPath(repository);
+  if (path === undefined) return false;
   return scope.some((allowed) => {
     if (allowed.kind !== "repository" && allowed.kind !== "path") return false;
-    if (allowed.id === path) return true;
+    if (!isAbsolute(allowed.id)) return false;
+    const root = physicalPath(allowed.id);
+    if (root === undefined) return false;
+    if (root === path) return true;
     if (allowed.coverage !== "descendants") return false;
-    const suffix = relative(allowed.id, path);
+    const suffix = relative(root, path);
     return suffix !== ".." && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix);
   });
 }
@@ -119,7 +153,13 @@ export class GeneralCodingExecutionAdapter implements WorkUnitExecutorAdapter {
       code
     });
     if (!claim || stableHash(claim.claimToken) !== dispatch.claimTokenHash) return deny("claim_mismatch");
-    const unit = this.store.workUnits(dispatch.missionId).find((candidate) => candidate.unitId === dispatch.unitId);
+    let unit: ReturnType<CodingMissionStore["workUnits"]>[number] | undefined;
+    try {
+      unit = this.store.workUnits(dispatch.missionId).find((candidate) => candidate.unitId === dispatch.unitId);
+    } catch {
+      // An unreadable stored unit is a refusal, so the runner records the failure and releases the claim.
+      return deny("unit_unreadable");
+    }
     if (
       !unit ||
       unit.kind !== "coding" ||
@@ -194,7 +234,12 @@ export class GeneralCodingExecutionAdapter implements WorkUnitExecutorAdapter {
       dispatch.authority.deadlineAt === undefined
         ? Number.POSITIVE_INFINITY
         : Date.parse(dispatch.authority.deadlineAt) - Date.parse(this.now());
-    const budgetMs = Math.max(1, Math.min(task.maxRuntimeMs, remaining));
+    const budgetMs = Math.min(task.maxRuntimeMs, remaining);
+    // No time left (or an unparseable deadline): report the deadline without ever starting the executor.
+    if (!(budgetMs > 0)) {
+      callerSignal?.removeEventListener("abort", onCallerAbort);
+      return deadlineResult(dispatch, this.now());
+    }
     let timer: NodeJS.Timeout | undefined;
     const expired = new Promise<"timeout">((resolveTimeout) => {
       timer = setTimeout(() => {

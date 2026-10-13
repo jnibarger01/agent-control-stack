@@ -1,3 +1,5 @@
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GeneralCodingOutcome } from "./general-coding-adapter.js";
@@ -361,6 +363,123 @@ describe("GeneralCodingExecutionAdapter", () => {
       await expect(adapter.execute({ lane: "dc" } as unknown as Parameters<typeof adapter.execute>[0])).rejects.toThrow(
         /cannot execute dc/u
       );
+    });
+  });
+
+  describe("R/V fail-closed findings", () => {
+    it("does not start the executor when the dispatch deadline equals now", async () => {
+      const w = world();
+      const inner = w.adapter(w.executor(() => w.good()));
+      await w.run([
+        {
+          lane: "coder",
+          execute: (dispatch, signal, claim) =>
+            inner.execute({ ...dispatch, authority: { ...dispatch.authority, deadlineAt: w.state.now } }, signal, claim)
+        }
+      ]);
+      expect(w.requests).toHaveLength(0);
+      expect(w.unit().status).not.toBe("succeeded");
+    });
+
+    it("does not start the executor when the dispatch deadline has passed", async () => {
+      const w = world();
+      const inner = w.adapter(w.executor(() => w.good()));
+      await w.run([
+        {
+          lane: "coder",
+          execute: (dispatch, signal, claim) =>
+            inner.execute({ ...dispatch, authority: { ...dispatch.authority, deadlineAt: w.iso(0) } }, signal, claim)
+        }
+      ]);
+      expect(w.requests).toHaveLength(0);
+      expect(w.unit().status).not.toBe("succeeded");
+    });
+
+    describe("symlinks", () => {
+      const outsides: string[] = [];
+      afterEach(() => {
+        for (const dir of outsides.splice(0)) rmSync(dir, { recursive: true, force: true });
+      });
+      const parentScope = (repository: string) => [
+        { kind: "repository" as const, id: join(repository, ".."), coverage: "descendants" as const }
+      ];
+      const retarget = (w: ReturnType<typeof world>, repository: string) =>
+        w.exec.missions.db
+          .prepare("UPDATE coding_operations SET payload_json = ? WHERE mission_id = ? AND operation_id = 'u1'")
+          .run(JSON.stringify({ ...(w.unit().payload as object), repository }), w.item.id);
+
+      it("refuses a repository that is a symlink inside scope pointing outside it", async () => {
+        const outside = mkdtempSync(join(tmpdir(), "acs-outside-"));
+        outsides.push(outside);
+        const w = world({ scope: parentScope });
+        mkdirSync(join(w.repository, ".."), { recursive: true });
+        const link = join(w.repository, "..", "link");
+        symlinkSync(outside, link);
+        retarget(w, link);
+        await w.run([w.adapter(w.executor(() => w.good()))]);
+        expect(w.requests).toHaveLength(0);
+        expect(w.attempt().report?.failure?.nativeCode).toBe("repository_out_of_scope");
+      });
+
+      it("refuses a not-yet-existing repository beneath an escaping symlink", async () => {
+        const outside = mkdtempSync(join(tmpdir(), "acs-outside-"));
+        outsides.push(outside);
+        const w = world({ scope: parentScope });
+        mkdirSync(join(w.repository, ".."), { recursive: true });
+        const link = join(w.repository, "..", "link");
+        symlinkSync(outside, link);
+        retarget(w, join(link, "nested", "repo"));
+        await w.run([w.adapter(w.executor(() => w.good()))]);
+        expect(w.requests).toHaveLength(0);
+        expect(w.attempt().report?.failure?.nativeCode).toBe("repository_out_of_scope");
+      });
+
+      it("refuses a dangling symlink repository", async () => {
+        const w = world({ scope: parentScope });
+        mkdirSync(join(w.repository, ".."), { recursive: true });
+        const link = join(w.repository, "..", "dangling");
+        symlinkSync(join(tmpdir(), "acs-does-not-exist-", String(Date.now())), link);
+        retarget(w, link);
+        await w.run([w.adapter(w.executor(() => w.good()))]);
+        expect(w.requests).toHaveLength(0);
+        expect(w.attempt().report?.failure?.nativeCode).toBe("repository_out_of_scope");
+      });
+
+      it("still runs a repository reached through a symlink that stays inside scope", async () => {
+        const w = world({ scope: parentScope });
+        mkdirSync(w.repository, { recursive: true });
+        const link = join(w.repository, "..", "alias");
+        symlinkSync(w.repository, link);
+        retarget(w, link);
+        await w.run([w.adapter(w.executor(() => w.good()))]);
+        expect(w.requests).toHaveLength(1);
+        expect(w.unit().status).toBe("succeeded");
+      });
+    });
+
+    it("fails the unit and releases its claim when the stored unit cannot be read", async () => {
+      const w = world();
+      const inner = w.adapter(w.executor(() => w.good()));
+      await w.run([
+        {
+          lane: "coder",
+          execute: (dispatch, signal, claim) => {
+            w.exec.missions.db
+              .prepare("UPDATE coding_operations SET payload_json = ? WHERE mission_id = ? AND operation_id = 'u1'")
+              // Valid JSON, so the row is stored, but not a payload the store can parse back.
+              .run(JSON.stringify({ kind: "coding", repository: 42 }), w.item.id);
+            return inner.execute(dispatch, signal, claim);
+          }
+        }
+      ]);
+      expect(w.requests).toHaveLength(0);
+      const row = w.exec.missions.db
+        .prepare("SELECT status, claim_token FROM coding_operations WHERE mission_id = ? AND operation_id = 'u1'")
+        .get(w.item.id) as { status: string; claim_token: string | null };
+      expect(row.status).toBe("failed");
+      // A failed unit is no longer claimable work in flight; its attempt is closed rather than left running.
+      expect(w.attempt().state).not.toBe("running");
+      expect(w.attempt().report?.failure?.nativeCode).toBe("unit_unreadable");
     });
   });
 });

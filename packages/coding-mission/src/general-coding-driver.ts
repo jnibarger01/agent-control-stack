@@ -9,6 +9,13 @@ export interface GeneralCodingDriverOptions {
   maxUnits?: number;
   /** How many of the most recently updated missions one pass looks at. Default 50. */
   missionScanLimit?: number;
+  /**
+   * Optional wall-clock bound for the whole pass, in ms. No new unit starts once it has elapsed (a unit already running is
+   * bounded by its own `maxRuntimeMs`). A value that is not a finite non-negative number starts nothing.
+   */
+  maxWallMs?: number;
+  /** Clock for `maxWallMs`, in epoch ms. Default `Date.now`. */
+  nowMs?: () => number;
 }
 
 export type GeneralCodingDriverResult = (RunUnitResult | { status: "skipped"; reason: string }) & {
@@ -42,9 +49,14 @@ export async function runGeneralCodingUnits(
   missions: CodingMissionStore,
   options: GeneralCodingDriverOptions
 ): Promise<GeneralCodingDriverSummary> {
-  const maxUnits = Math.min(MAX_UNITS_PER_PASS, Math.max(0, Math.floor(options.maxUnits ?? DEFAULT_MAX_UNITS)));
+  const maxUnits = boundedMaxUnits(options.maxUnits);
   const summary: GeneralCodingDriverSummary = { missionsConsidered: 0, results: [] };
+  const nowMs = options.nowMs ?? Date.now;
+  const startedAt = nowMs();
+  const wallValid = options.maxWallMs === undefined || (Number.isFinite(options.maxWallMs) && options.maxWallMs >= 0);
+  const outOfTime = () => !wallValid || (options.maxWallMs !== undefined && nowMs() - startedAt >= options.maxWallMs);
   const started = () => summary.results.filter((result) => result.status !== "skipped").length;
+  if (maxUnits === 0 || outOfTime()) return summary;
 
   const candidates = missions
     .listRecent(options.missionScanLimit ?? DEFAULT_SCAN_LIMIT)
@@ -52,7 +64,7 @@ export async function runGeneralCodingUnits(
     .sort((left, right) => left.missionId.localeCompare(right.missionId));
 
   for (const mission of candidates) {
-    if (started() >= maxUnits) break;
+    if (started() >= maxUnits || outOfTime()) break;
     if (!hasAuthorityBinding(missions, mission.missionId)) continue;
     summary.missionsConsidered += 1;
     const units = missions.workUnits(mission.missionId);
@@ -66,7 +78,7 @@ export async function runGeneralCodingUnits(
       )
       .sort((left, right) => left.unitId.localeCompare(right.unitId));
     for (const unit of eligible) {
-      if (started() >= maxUnits) break;
+      if (started() >= maxUnits || outOfTime()) break;
       const base = { missionId: mission.missionId, unitId: unit.unitId };
       try {
         parseGeneralCodingTask(unit.payload);
@@ -79,6 +91,16 @@ export async function runGeneralCodingUnits(
     }
   }
   return summary;
+}
+
+/**
+ * The step cap, fail-closed: an omitted value takes the default; anything that is not a finite non-negative integer
+ * (NaN, Infinity, a negative or fractional number, a non-number) starts nothing; the rest is clamped to the ceiling.
+ */
+function boundedMaxUnits(value: unknown): number {
+  if (value === undefined) return DEFAULT_MAX_UNITS;
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) return 0;
+  return Math.min(MAX_UNITS_PER_PASS, value);
 }
 
 function hasAuthorityBinding(missions: CodingMissionStore, missionId: string): boolean {
