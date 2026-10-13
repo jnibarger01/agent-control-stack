@@ -11,6 +11,7 @@
     { "path": "packages/temporal-memory" },
     { "path": "packages/procedural-learning" },
     { "path": "packages/advisory" },
+    { "path": "packages/local-advisor" },
     { "path": "packages/evidence" },
     { "path": "packages/sandbox" },
     { "path": "packages/dc-tool-manifest" },
