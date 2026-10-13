@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { domainHash, stableHash } from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
 import {
   CuaExecutionAdapter,
@@ -12,7 +13,7 @@ import {
 } from "./cua-execution.js";
 import { parseWorkUnitPayload, type CuaAction } from "./mission-model.js";
 import { CodingMissionStore } from "./store.js";
-import { cuaCheckpointReceiptHash, cuaResultHash } from "./cua-evidence.js";
+import { cuaActionHash, cuaCheckpointReceiptHash, cuaResultHash } from "./cua-evidence.js";
 import { WorkUnitExecutionLedger, resultBase } from "./worker-execution.js";
 
 const T0 = "2026-10-10T00:00:00.000Z";
@@ -971,6 +972,29 @@ describe("R1: evidence-bound CUA acceptance", () => {
       });
     expect(row.receipt_hash).toBe(hashFor("browser"));
     expect(hashFor("browser-profile-2")).not.toBe(row.receipt_hash);
+  });
+
+  it("uses domain-separated hashes for checkpoints, actions and results", async () => {
+    const { adapter, dispatch, checkpoints } = harness(twoStep());
+    const result = await adapter.execute(dispatch);
+    const rows = checkpoints();
+    const actions = (dispatch.payload as { actions: unknown[] }).actions;
+    const core = {
+      kind: "cua_navigate",
+      attemptId: dispatch.attemptId,
+      sequence: 0,
+      application: "browser",
+      actionHash: rows[0]!.action_hash,
+      state: "committed",
+      origin: rows[0]!.origin,
+      screenshotHash: null
+    };
+    expect(rows[0]!.receipt_hash).toBe(domainHash("acs.cua-checkpoint.v1", core));
+    expect(rows[0]!.receipt_hash).not.toBe(stableHash({ domain: "acs.cua-checkpoint.v1", ...core }));
+    expect(rows[0]!.action_hash).toBe(domainHash("acs.cua-action.v1", actions[0]));
+    expect(cuaActionHash(actions[0] as never)).not.toBe(stableHash(actions[0]));
+    expect(result.result?.resultHash).toBe(domainHash("acs.cua-result.v1", { receipts: result.receipts }));
+    expect(cuaResultHash(result.receipts)).not.toBe(stableHash({ receipts: result.receipts }));
   });
 
   it("refuses to resume an attempt with a different selected application", async () => {
