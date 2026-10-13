@@ -9,7 +9,7 @@ import type { HealthTarget, QueryConfig } from "@agent-control-stack/looptrace-q
  *   LOOPTRACE_GRANT_KEY_FILE    file with the HMAC key (hex or raw, >=16 bytes, mode 0600/0400)
  *   LOOPTRACE_RELEASE_ROOTS     path-list of release roots, e.g. $HOME/releases
  *   LOOPTRACE_HEALTH_TARGETS    JSON object name -> http(s) URL (operator allowlist for service_healthy)
- *   LOOPTRACE_JC_TRACE_ROOTS    path-list (reserved; JC chain correlation is not enabled in this build)
+ *   LOOPTRACE_JC_TRACE_ROOTS    path-list of Jace Commander trace dirs, e.g. ~/.jace-commander/traces (jc-mcp-<pid>-<ts>.jsonl)
  *   LOOPTRACE_HERMES_STATE_DB   path (reserved; Hermes correlation is not enabled in this build)
  */
 export function readKeyFile(path: string): Buffer {

@@ -69,7 +69,10 @@ export const EVENT_TYPES = [
   "observation.release",
   "observation.session",
   "verification.required",
-  "verification.decided"
+  "verification.decided",
+  "jc.session",
+  "jc.tool.finished",
+  "jc.coverage"
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -98,7 +101,12 @@ export const EVENT_STAGE: Record<EventType, EventStage> = {
   "observation.release": "observation",
   "observation.session": LIFECYCLE_STAGE,
   "verification.required": "verification",
-  "verification.decided": "verification"
+  "verification.decided": "verification",
+  // JC events are the executor's own (asserted) record. They stay in the lifecycle stage so they can never count as an
+  // observed ACS stage (tool_execution / result) and thereby satisfy a required one.
+  "jc.session": LIFECYCLE_STAGE,
+  "jc.tool.finished": LIFECYCLE_STAGE,
+  "jc.coverage": LIFECYCLE_STAGE
 };
 
 export const SEVERITIES = ["info", "low", "medium", "high", "critical"] as const;

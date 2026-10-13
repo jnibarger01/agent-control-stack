@@ -8,3 +8,4 @@ export * from "./verify.js";
 export * from "./service.js";
 export { AcsReadStore } from "./sources/acs-store.js";
 export * from "./sources/observers.js";
+export { JcTraceReader, JC_LIMITS } from "./sources/jc-trace.js";

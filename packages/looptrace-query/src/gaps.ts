@@ -448,6 +448,96 @@ export function analyzeWorkItem(v: View, now: Date): Gap[] {
   return gaps;
 }
 
+/**
+ * Jace Commander local-trace analysis. JC events are the executor's own (asserted) record: they can add gaps and conflicts,
+ * but never establish success. Three levels are kept apart: process-session integrity (`jc.session`), per-call outcome
+ * (`jc.tool.finished`), and work-item completion, which only ACS can state.
+ */
+export function jcConflicts(v: View): EvidenceEvent[] {
+  // ACS says the work item succeeded, yet JC reports ONLY failed tool calls for it. (A failed call next to a successful
+  // one is a retry, and JC succeeding while ACS fails is expected: a call can work in a mission that does not.)
+  if (v.status !== "succeeded") return [];
+  const done = v.of("jc.tool.finished").filter((e) => e.facts.jc_ok === true || e.facts.jc_ok === false);
+  if (done.length === 0 || done.some((e) => e.facts.jc_ok === true)) return [];
+  return done;
+}
+
+export function analyzeJc(v: View): Gap[] {
+  const gaps: Gap[] = [];
+  const sessions = v.of("jc.session");
+  const calls = v.of("jc.tool.finished");
+  const coverage = v.of("jc.coverage");
+  if (sessions.length === 0 && calls.length === 0 && coverage.length === 0) return gaps;
+
+  const broken = sessions.filter((e) => e.status === "broken");
+  if (broken.length > 0) {
+    gaps.push({
+      code: "JC_CHAIN_BROKEN",
+      severity: "high",
+      affected_stage: "integrity",
+      description: "A Jace Commander process-session trace naming this work item failed hash-chain verification; its contents were NOT used as evidence.",
+      required_evidence: "an intact hash-chained JC session trace",
+      evidence_refs: v.refs(...broken)
+    });
+  }
+  const malformed = sessions.filter((e) => e.status === "malformed");
+  if (malformed.length > 0) {
+    gaps.push({
+      code: "JC_TRACE_MALFORMED",
+      severity: "medium",
+      affected_stage: "integrity",
+      description: "A Jace Commander trace file names this work item but could not be parsed or was over the read bound; its contents are unverifiable and were NOT used.",
+      required_evidence: "a well-formed JC session trace within the read bounds",
+      evidence_refs: v.refs(...malformed)
+    });
+  }
+  if (coverage.length > 0) {
+    gaps.push({
+      code: "JC_COVERAGE_INCOMPLETE",
+      severity: "medium",
+      affected_stage: "sources",
+      description: "Some Jace Commander trace roots or files could not be read, were skipped as oversize/non-regular, or lay beyond the scan bound; JC evidence for this work item may be missing.",
+      required_evidence: "every configured JC trace root and file readable within bounds",
+      evidence_refs: v.refs(...coverage)
+    });
+  }
+  const unknownOutcome = calls.filter((e) => e.facts.jc_ok !== true && e.facts.jc_ok !== false);
+  if (unknownOutcome.length > 0) {
+    gaps.push({
+      code: "JC_OUTCOME_MALFORMED",
+      severity: "medium",
+      affected_stage: "tool_execution",
+      description: `${unknownOutcome.length} JC tool-call record(s) for this work item have no boolean 'ok'; their outcome is unknown.`,
+      required_evidence: "tool_call_finished with a boolean ok",
+      evidence_refs: v.refs(...unknownOutcome)
+    });
+  }
+  const failed = calls.filter((e) => e.facts.jc_ok === false);
+  if (failed.length > 0) {
+    const codes = [...new Set(failed.map((e) => e.facts.jc_code).filter((c): c is string => typeof c === "string"))].sort().slice(0, 5);
+    gaps.push({
+      code: "JC_TOOL_CALL_FAILED",
+      severity: "low",
+      affected_stage: "tool_execution",
+      description: `JC reports ${failed.length} failed tool call(s) for this work item${codes.length ? ` (codes: ${codes.join(", ")})` : ""}. This is one call's outcome, not the work item's.`,
+      required_evidence: "a successful retry or an ACS result explaining the failed call",
+      evidence_refs: v.refs(...failed)
+    });
+  }
+  const conflicts = jcConflicts(v);
+  if (conflicts.length > 0) {
+    gaps.push({
+      code: "JC_ACS_OUTCOME_CONFLICT",
+      severity: "high",
+      affected_stage: "result",
+      description: `ACS records this work item as '${v.status}', but the only JC tool-call outcomes recorded for it are failures.`,
+      required_evidence: "agreeing JC and ACS outcomes, or an independent observation resolving them",
+      evidence_refs: v.refs(v.state, ...conflicts)
+    });
+  }
+  return gaps;
+}
+
 export function analyzeCorrelation(c: Correlated, v: View | null): Gap[] {
   const gaps: Gap[] = [];
   if (c.conflicts.length > 0) {
@@ -525,7 +615,7 @@ export function completenessOf(gaps: Gap[], eventCount: number, reports: SourceR
 }
 
 export function buildGapReport(v: View, c: Correlated, reports: SourceReport[], now: Date): GapReport {
-  const gaps = [...analyzeWorkItem(v, now), ...analyzeCorrelation(c, v), ...sourceGaps(reports)].sort(
+  const gaps = [...analyzeWorkItem(v, now), ...analyzeJc(v), ...analyzeCorrelation(c, v), ...sourceGaps(reports)].sort(
     (a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] || a.code.localeCompare(b.code)
   );
   const observed = observedStages(v);

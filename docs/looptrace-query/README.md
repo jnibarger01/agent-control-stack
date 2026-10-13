@@ -75,7 +75,8 @@ UNAUTHENTICATED, SOURCE_NOT_CONFIGURED, SOURCE_UNAVAILABLE, UNSUPPORTED_ASSERTIO
 | `LOOPTRACE_GRANT_KEY_FILE` | HMAC key file |
 | `LOOPTRACE_RELEASE_ROOTS` | roots scanned for `<component>/.../RELEASE.json` (optional) |
 | `LOOPTRACE_HEALTH_TARGETS` | JSON `{name: http(s)-url}` allow-list (optional) |
-| `LOOPTRACE_JC_TRACE_ROOTS`, `LOOPTRACE_HERMES_STATE_DB` | reserved; adapters NOT implemented |
+| `LOOPTRACE_JC_TRACE_ROOTS` | operator-configured directories of Jace Commander traces, e.g. `~/.jace-commander/traces` (`jc-mcp-<pid>-<epoch>.jsonl`, hash-chained; path-list separated like `PATH`) |
+| `LOOPTRACE_HERMES_STATE_DB` | reserved; Hermes adapter NOT implemented |
 
 Issue a grant (operator action; prints the token, keep it secret):
 `LOOPTRACE_GRANT_KEY_FILE=<key> node apps/looptrace-mcp/dist/cli.js issue-grant --sub hermes --scopes trace,gaps,verify --visibility all --ttl-seconds 3600`
@@ -99,8 +100,24 @@ Tests use clearly synthetic fixtures (`src/fixture.ts`) to stage tamper/contradi
 
 ## Known limitations
 
-- Jace Commander local-chain correlation and Hermes session correlation are **not implemented**; they are reported
-  as `not_configured` in `sources`. JC outcomes are visible only as ACS-recorded capability/tool events.
+- **Hermes** session correlation is **not implemented** (reported `not_configured`).
+- **Jace Commander (JC)** trace correlation reads the format JC really writes (checked against `vendor/desktop-commander/src/jace-commander`
+  and all 34 real traces on the build host): one hash-chained file per MCP **process**, `run_id` = `jc-mcp-<pid>-<epoch>`, holding
+  `tool_call_finished {tool, argumentsSha256, ok, code?, workItemId?}` (the work item id comes from the ACS authorization for that call).
+  - Three levels are kept apart. *Session integrity* (`jc.session`: did the whole process chain verify, how many events could not be
+    attributed), *tool-call outcome* (`jc.tool.finished`: JC's own `ok`/`code` for one call), and *work-item completion*, which is
+    **never** taken from JC: a successful JC call does not show the mission succeeded.
+  - Events match a work item only by `payload.workItemId` (exact). Events without it, or with an invalid one, are counted on the
+    session event (`jc_events_without_work_item`, flag `jc_events_unattributed`), never guessed. Other work items' events are not emitted.
+  - JC events are `asserted`, use the lifecycle stage (so they cannot satisfy a required ACS stage) and can add gaps or block a PASS,
+    never create one. Gaps: `JC_CHAIN_BROKEN` (contents then unused), `JC_TRACE_MALFORMED`, `JC_COVERAGE_INCOMPLETE` (unreadable
+    root, oversize/non-regular file, files beyond the scan bound), `JC_OUTCOME_MALFORMED`, `JC_TOOL_CALL_FAILED` (low, per call) and
+    `JC_ACS_OUTCOME_CONFLICT` (ACS says succeeded while the only JC outcomes for it are failures; `operation_completed` is then INCONCLUSIVE).
+  - `run_completed` / `run_failed` / `trace_sealed` are **not required**: JC never writes them.
+  - Remaining gaps: JC's `tool_call_started` carries no work item id, so a crash mid-call cannot be attributed to a work item (only the
+    session-level `jc_unmatched_starts` fact); JC records neither attempt nor lease ids, so JC evidence cannot be tied to a specific ACS
+    attempt; a valid chain shows no edit but not completeness (a truncated tail is undetectable) nor that effects occurred; the
+    work item ids in the real traces were not present in any ACS database on the build host, so ACS-side correlation is untested live.
 - ACS does not record the executor's release identity (`MISSING_RELEASE_IDENTITY`); `installed` != running.
 - `installed` release observation expects `RELEASE.json` under configured roots; the live `~/releases/acs/<sha>-name`
   layout was not matched (reports INCONCLUSIVE, not a false PASS).

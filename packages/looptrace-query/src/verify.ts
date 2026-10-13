@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { View, buildGapReport } from "./gaps.js";
+import { View, buildGapReport, jcConflicts } from "./gaps.js";
 import type { Correlated } from "./correlate.js";
 import { isTrusted, type EvidenceEvent } from "./model.js";
 import { observeHealth, observeInstalledReleases, type FetchLike } from "./sources/observers.js";
@@ -198,6 +198,10 @@ function operationCompleted(v: View, c: Correlated, reports: SourceReport[], now
   const simulated = results.filter((e) => e.facts.simulated === true);
   if (simulated.length > 0) {
     return result(T, "INCONCLUSIVE", "the recorded result is from a simulated (dry-run) execution and proves no real change", refs(state, ...simulated), "none");
+  }
+  const jcDisagree = jcConflicts(v);
+  if (jcDisagree.length > 0) {
+    return result(T, "INCONCLUSIVE", "ACS records success but the Jace Commander trace reports only failed tool calls for this work item; an unresolved conflict between the executor's own record and ACS cannot support a PASS", refs(state, ...jcDisagree), "asserted");
   }
   const validated = validations.filter((e) => e.facts.passed === true && isTrusted(e.integrity.trust));
   const accepted = decisions.filter((e) => {

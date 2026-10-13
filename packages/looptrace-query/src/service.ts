@@ -4,6 +4,7 @@ import { correlate, type Correlated } from "./correlate.js";
 import { View, buildGapReport, type GapReport } from "./gaps.js";
 import { CONTRACT_VERSION, EVIDENCE_SCHEMA_VERSION, sha256Hex, type EvidenceEvent } from "./model.js";
 import { AcsReadStore } from "./sources/acs-store.js";
+import { JcTraceReader } from "./sources/jc-trace.js";
 import type { FetchLike } from "./sources/observers.js";
 import { Deadline, LIMITS, QueryError, type Lookup, type QueryConfig, type SourceReport } from "./types.js";
 import { overall, parseAssertions, verifyAssertions, type AssertionResult, type Verdict } from "./verify.js";
@@ -100,8 +101,28 @@ export class LoopTraceQueryService {
         views.push({ view: new View(wid, collected.events), correlated: correlate(collected.events), notes: collected.notes });
       }
       reports.push({ source: "acs", status: "ok", events: acsEvents, detail: acsNotes.join("; ").slice(0, 400) || undefined });
+      let jcReport: SourceReport = { source: "jace_commander_chain", status: "not_configured", events: 0, detail: "no JC trace root configured (LOOPTRACE_JC_TRACE_ROOTS); JC outcomes are visible only as ACS-recorded capability/tool events" };
+      if (this.config.jcTraceRoots.length > 0) {
+        const reader = new JcTraceReader(this.config.jcTraceRoots, this.config.now);
+        let jcEvents = 0;
+        let jcRuns = 0;
+        let jcStatus: SourceReport["status"] = "ok";
+        let jcDetail = "";
+        for (const entry of views) {
+          const r = reader.collect(entry.view.workItemId);
+          if (r.status === "unavailable") jcStatus = "unavailable";
+          jcDetail = r.detail || jcDetail;
+          jcEvents += r.events.length;
+          jcRuns += r.runs;
+          if (r.events.length > 0) {
+            entry.view = new View(entry.view.workItemId, [...entry.view.events, ...r.events]);
+            entry.correlated = correlate(entry.view.events);
+          }
+        }
+        jcReport = { source: "jace_commander_chain", status: jcStatus, events: jcEvents, detail: (jcStatus === "ok" ? `${jcRuns} JC process-session trace(s) name this work item; JC events are the executor's own (asserted) record and never prove work-item completion. ${jcDetail}` : jcDetail).trim().slice(0, 300) };
+      }
+      reports.push(jcReport);
       reports.push(
-        { source: "jace_commander_chain", status: this.config.jcTraceRoots.length ? "unavailable" : "not_configured", events: 0, detail: "JC local trace correlation is not enabled in this build; JC outcomes are visible only as ACS-recorded capability/tool events" },
         { source: "hermes", status: this.config.hermesStateDb ? "unavailable" : "not_configured", events: 0, detail: "Hermes session metadata correlation is not enabled in this build" }
       );
       return { principal, lookup, matchedBy: resolved.matchedBy, views, reports };
@@ -164,7 +185,7 @@ export class LoopTraceQueryService {
     const now = this.config.now();
     const reports: Array<{ work_item_id: string } & GapReport> = loaded.views.map((v) => ({
       work_item_id: v.view.workItemId,
-      ...buildGapReport(v.view, v.correlated, loaded.reports.filter((r) => r.source === "acs"), now)
+      ...buildGapReport(v.view, v.correlated, loaded.reports.filter((r) => r.source === "acs" || r.source === "jace_commander_chain"), now)
     }));
     return {
       contract_version: CONTRACT_VERSION,
@@ -215,7 +236,7 @@ export class LoopTraceQueryService {
     // Every verdict names the evidence it rests on; when nothing supports it, the examined subject is named.
     const subject = view.of("request.received")[0]?.evidence_ref;
     for (const r of results) if (r.evidence_refs.length === 0 && subject) r.evidence_refs = [subject];
-    const gaps = buildGapReport(view, correlated, loaded.reports.filter((r) => r.source === "acs"), now);
+    const gaps = buildGapReport(view, correlated, loaded.reports.filter((r) => r.source === "acs" || r.source === "jace_commander_chain"), now);
     return {
       contract_version: CONTRACT_VERSION,
       generated_at: now.toISOString(),
