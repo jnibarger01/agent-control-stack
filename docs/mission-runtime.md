@@ -209,9 +209,33 @@ production database.
   anywhere. Turning it on is an operational action (`ACS_CODING_MISSION_GOVERNED=1`, plus operator-bound worker actors and a
   grant per mission).
 - The generalized work-unit path and the `jc`, `dc` and `mcp` lanes have no production driver yet; only the `coder` lane runs.
+  `GovernedUnitRunner` (`unit-runner.ts`) runs one general-mission work unit end to end, but no worker, gateway route or CLI
+  constructs it yet.
 - Checkpoint/resume as worker adapters on the execution ledger, the CUA worker, and recovery policy.
 - A driver for the `general` mission kind. The legacy coding path has no budget row (uncapped).
 - Delegating to a different executing actor (`authorityNarrowingViolations` refuses it deliberately and it needs its own decision).
+
+## Unit runner
+
+`GovernedUnitRunner.runUnit({ missionId, unitId, workerId, lane })` (`unit-runner.ts`) runs one **general-mission** work unit
+end to end: it claims the unit, dispatches it through the governed root, runs the lane's `WorkUnitExecutorAdapter` and applies
+the result. (The coding-mission controller has its own governed path; see "Production entry point" above.) A lane with no
+adapter is refused before anything is claimed. If authority refuses the dispatch, the refusal is already durable, no attempt
+exists, no adapter runs, and the claimed unit is failed as `policy_denied` (non-retryable) instead of being left running;
+reopening it takes an explicit retry. An expired authority is recorded as `authority_expired` and any other refusal as
+`policy_denied`. This differs from the controller, which returns the unit to `pending` and degrades the mission. Any other
+failure of the dispatch (for example a verified unit with no implementer identity) happens before anything ran, so the claim
+is released and the error rethrown instead of leaving the unit in `running`. A unit with a verification policy needs
+`implementerEngineId` in the runner options; the runner never invents one.
+
+The executor is raced against the deadline ACS set on the dispatch. At the deadline it is signalled to stop, ACS stops waiting,
+and the outcome is recorded as `unknown` with the external state marked uncertain, as in the controller. A governed dispatch
+(one that names a grant) with no deadline fails closed and never calls the executor; a mission with no authority binding has no
+deadline and runs as before. An adapter that throws becomes a failed result with the external state marked uncertain, and its message is redacted
+before it is persisted. A "succeeded" result without a non-empty result hash and a list of string files is converted to a
+failed `invalid_output` result, because the ledger itself only checks that a result object exists. Of two
+concurrent runs of one unit, one executes and the other reports `claim_conflict`. A crash between the claim and the dispatch
+leaves a running claim that existing stale-claim recovery handles; the runner adds no recovery of its own.
 
 ## Composition root
 
