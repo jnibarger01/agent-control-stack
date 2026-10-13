@@ -4415,7 +4415,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           .send({ code: "independent_reviewer_required", error: "dedicated reviewer authority required" });
       return workItems.reviewChangeSetOperation(request.params.id, changeSetReviewBodySchema.parse(request.body), {
         via: "policy_gate",
-        actorId: credential.actorId
+        actorId: credential.actorId,
+        // Server-written verifier identity: the authenticated credential, never a request-body claim.
+        verifierEngineId: `acs-credential:${credential.id}`
       });
     } catch (error) {
       return sendError(reply, error);

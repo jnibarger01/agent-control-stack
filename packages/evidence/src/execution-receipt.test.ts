@@ -100,10 +100,13 @@ const core = (): ExecutionReceiptCore => {
       attemptId: "attempt_1",
       actionHash: H("c"),
       admittedPlanHash: H("a"),
+      attemptPlanHash: H("b"),
       capabilityId: "cap_1",
       leaseId: "lease_1",
       claimTokenHash: H("4"),
       policyDecision: "require_approval",
+      policyVersion: "acs.policy.v1",
+      policyDecisionHash: H("1"),
       approvals: [approvalCopy()],
       audit: { eventId: "auth_1", eventHash: H("5") }
     },
@@ -123,6 +126,7 @@ const core = (): ExecutionReceiptCore => {
       diffHash: H("f"),
       status: "succeeded",
       resultId: "result_1",
+      resultPayloadHash: H("3"),
       audit: { eventId: "readback_1", eventHash: H("7") }
     }
   };
@@ -135,16 +139,20 @@ const expected = (): ReceiptBinding => ({
   actorId: "operator_1",
   actionHash: H("c"),
   admittedPlanHash: H("a"),
+  attemptPlanHash: H("b"),
   manifestHash: buildEvidenceManifest(manifestInput).manifestHash,
   validation: canonicalValidation(),
   leaseId: "lease_1",
   claimTokenHash: H("4"),
   capabilityId: "cap_1",
   policyDecision: "require_approval",
+  policyVersion: "acs.policy.v1",
+  policyDecisionHash: H("1"),
   approvals: [approvalCopy()],
   policyAudit: { eventId: "auth_1", eventHash: H("5") },
   attemptOutcome: "succeeded",
   resultId: "result_1",
+  resultPayloadHash: H("3"),
   implementerPrincipalId: "executor_1",
   implementerEngineId: "codex",
   implementerProviderId: "openai",
@@ -593,5 +601,68 @@ describe("proof-of-execution receipt integrity", () => {
       bound.approvals = many.map((approval) => ({ ...approval, audit: { ...approval.audit } }));
       expect(verifyExecutionReceipt(buildExecutionReceipt(changed), bound)).toEqual({ ok: true, defects: [] });
     });
+  });
+});
+
+describe("canonical hash bindings (review #306)", () => {
+  it("rejects a self-consistent manifest planHash that differs from the attempt plan", () => {
+    const changed = core();
+    changed.manifest = buildEvidenceManifest({ ...manifestInput, planHash: H("9") });
+    changed.verification.manifestHash = changed.manifest.manifestHash;
+    changed.authorization.attemptPlanHash = H("9");
+    const bound = expected();
+    bound.manifestHash = changed.manifest.manifestHash;
+    expect(verifyExecutionReceipt(buildExecutionReceipt(changed), bound).defects).toContain(
+      "attempt_plan_binding_mismatch"
+    );
+  });
+
+  it("rejects a receipt whose manifest planHash differs from its attempt plan hash", () => {
+    const changed = core();
+    changed.authorization.attemptPlanHash = H("9");
+    expect(receiptDefects(changed)).toContain("attempt_plan_mismatch");
+  });
+
+  it("rejects a result payload hash that differs from the canonical result", () => {
+    const bound = expected();
+    bound.resultPayloadHash = H("8");
+    expect(verifyExecutionReceipt(buildExecutionReceipt(core()), bound).defects).toContain(
+      "result_payload_binding_mismatch"
+    );
+  });
+
+  it("rejects a receipt citing another policy decision with the same coarse outcome", () => {
+    const hashBound = expected();
+    hashBound.policyDecisionHash = H("8");
+    expect(verifyExecutionReceipt(buildExecutionReceipt(core()), hashBound).defects).toContain(
+      "policy_decision_hash_mismatch"
+    );
+    const versionBound = expected();
+    versionBound.policyVersion = "acs.policy.v2";
+    expect(verifyExecutionReceipt(buildExecutionReceipt(core()), versionBound).defects).toContain(
+      "policy_version_mismatch"
+    );
+  });
+
+  it("accepts zero passed criteria when the canonical requirement needs zero reviewers", () => {
+    const changed = core();
+    changed.verification.reviewers = [];
+    changed.verification.criteriaPassed = 0;
+    const bound = expected();
+    bound.reviewers = [];
+    bound.reviewersRequired = 0;
+    bound.criteriaPassed = 0;
+    bound.requireIndependentPrincipal = false;
+    bound.requireIndependentProvider = false;
+    expect(verifyExecutionReceipt(buildExecutionReceipt(changed), bound)).toEqual({ ok: true, defects: [] });
+  });
+
+  it("rejects zero passed criteria when the canonical requirement needs reviewers", () => {
+    const changed = core();
+    changed.verification.criteriaPassed = 0;
+    const bound = expected();
+    bound.criteriaPassed = 0;
+    // The binding itself refuses zero criteria against a non-zero requirement.
+    expect(verifyExecutionReceipt(buildExecutionReceipt(changed), bound).defects).toContain("invalid_binding_schema");
   });
 });

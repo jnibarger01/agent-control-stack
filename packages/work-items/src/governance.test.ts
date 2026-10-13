@@ -540,3 +540,47 @@ describe("reviewer grants — single-consume, append-only (proof 4 storage side)
     }
   });
 });
+
+describe("review findings carry a server-written verifier engine (review #306, migration 071)", () => {
+  const finding = {
+    findingHash: H("7"),
+    findingId: "review_finding_engine",
+    workItemId: "",
+    attemptId: "",
+    reviewerPrincipalId: "claude",
+    reviewerProvider: "anthropic",
+    evidenceManifestHash: H("e"),
+    verdict: "PASS" as const,
+    finding: { verdict: "PASS" }
+  };
+
+  it("stores the engine from the server-side options and records it in the audit event", () => {
+    recordManifest(H("e"));
+    const recorded = store.recordReviewFinding(
+      { ...finding, workItemId, attemptId },
+      { ...via, verifierEngineId: "acs-credential:reviewer-1" }
+    );
+    expect(recorded.verifierEngineId).toBe("acs-credential:reviewer-1");
+    expect(store.listReviewFindings(attemptId)[0]!.verifierEngineId).toBe("acs-credential:reviewer-1");
+    const event = store.readEvents({ limit: 1000 }).find((entry) => entry.name === "review.finding_recorded")!;
+    expect(event.body).toMatchObject({ verifierEngineId: "acs-credential:reviewer-1" });
+    expect(event.attributes).toMatchObject({ "review.verifier_engine_id": "acs-credential:reviewer-1" });
+  });
+
+  it("refuses an engine claim in the finding input itself", () => {
+    recordManifest(H("e"));
+    expect(() =>
+      store.recordReviewFinding(
+        { ...finding, workItemId, attemptId, verifierEngineId: "forged" } as unknown as Parameters<
+          typeof store.recordReviewFinding
+        >[0],
+        via
+      )
+    ).toThrow();
+  });
+
+  it("records an unknown engine as null rather than inventing one", () => {
+    recordManifest(H("e"));
+    expect(store.recordReviewFinding({ ...finding, workItemId, attemptId }, via).verifierEngineId).toBeNull();
+  });
+});

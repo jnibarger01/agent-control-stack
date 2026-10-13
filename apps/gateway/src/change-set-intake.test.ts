@@ -2203,6 +2203,8 @@ describe("Change Set result verification", () => {
           }
           const reviewed = await review();
           expect(reviewed.statusCode, reviewed.body).toBe(200);
+          // The verifier engine is written by the server from the authenticated credential, never the body.
+          expect(store.listReviewFindings(body.attemptId)[0]!.verifierEngineId).toBe("acs-credential:service-reviewer");
           if (scenario === "two reviewers") {
             expect(store.getVerificationDecision(body.attemptId)).toBeUndefined();
             expect((await review()).statusCode).toBe(200);

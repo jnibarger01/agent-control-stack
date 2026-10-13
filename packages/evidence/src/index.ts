@@ -93,3 +93,12 @@ export {
   type ObservationWorkerState,
   type TraceClassifier
 } from "./observation-worker.js";
+export {
+  receiptBindingFromCanonicalRecords,
+  verifyExecutionReceiptAgainstRecords,
+  executionReceiptRow,
+  ReceiptBindingInconsistentError,
+  type CanonicalReceiptRecords,
+  type CanonicalReceiptContext,
+  type ExecutionReceiptRow
+} from "./canonical-receipt-binding.js";

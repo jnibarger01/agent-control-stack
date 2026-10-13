@@ -61,6 +61,8 @@ const reviewerRef = z
   })
   .strict();
 const policyDecisionSchema = z.enum(["allow", "require_approval"]);
+/** Lease policyVersion (work-items attemptLeaseSchema). */
+const policyVersionSchema = z.string().min(1).max(128);
 /**
  * Recorded reviewers: a canonical verification decision may reference up to 64 passing review
  * findings (work-items governance.ts reviewFindingHashes max 64). A canonical attempt can
@@ -146,10 +148,15 @@ export const executionReceiptCoreSchema = z
         attemptId: id,
         actionHash: hash,
         admittedPlanHash: hash,
+        /** The plan hash recorded on the canonical attempt and lease. The manifest's planHash must equal it. */
+        attemptPlanHash: hash,
         capabilityId: id,
         leaseId: id,
         claimTokenHash: hash,
         policyDecision: policyDecisionSchema,
+        /** Policy version and decision fingerprint recorded on the lease that authorized the attempt. */
+        policyVersion: policyVersionSchema,
+        policyDecisionHash: hash,
         approvals: z.array(approvalRef).max(MAX_APPROVALS),
         audit: auditRef
       })
@@ -163,7 +170,8 @@ export const executionReceiptCoreSchema = z
         reviewers: z.array(reviewerRef).max(MAX_REVIEWERS),
         verdict: z.literal("pass"),
         manifestHash: hash,
-        criteriaPassed: z.number().int().positive().max(512),
+        /** Zero is valid only when the canonical requirement needs no reviewers (checked against the binding). */
+        criteriaPassed: z.number().int().nonnegative().max(512),
         criteriaFailed: z.literal(0),
         audit: auditRef
       })
@@ -175,6 +183,8 @@ export const executionReceiptCoreSchema = z
         /** Receipts only attest a succeeded readback. The canonical outcome decides whether that holds. */
         status: z.literal("succeeded"),
         resultId: id,
+        /** Payload hash recomputed from the canonical stored execution result. */
+        resultPayloadHash: hash,
         audit: auditRef
       })
       .strict()
@@ -196,6 +206,7 @@ export function receiptDefects(core: ExecutionReceiptCore): string[] {
   if (m.attemptId !== a.attemptId) defects.push("attempt_mismatch");
   if (m.actionHash !== a.actionHash) defects.push("action_mismatch");
   if (m.admittedPlanHash !== a.admittedPlanHash) defects.push("admitted_plan_mismatch");
+  if (m.planHash !== a.attemptPlanHash) defects.push("attempt_plan_mismatch");
   if (v.manifestHash !== m.manifestHash) defects.push("verification_manifest_mismatch");
   if (!m.testEvidence || !m.testEvidence.passed || m.testEvidence.checksPassed < 1 || m.testEvidence.checksFailed !== 0)
     defects.push("tests_not_proven");
@@ -263,17 +274,22 @@ export const receiptBindingSchema = z
     actorId,
     actionHash: hash,
     admittedPlanHash: hash,
+    /** Plan hash of the canonical attempt (equal to its lease's planHash). */
+    attemptPlanHash: hash,
     manifestHash: hash,
     validation: canonicalValidationRunRef,
     leaseId: id,
     claimTokenHash: hash,
     capabilityId: id,
     policyDecision: policyDecisionSchema,
+    policyVersion: policyVersionSchema,
+    policyDecisionHash: hash,
     approvals: z.array(approvalRef).max(MAX_APPROVALS),
     policyAudit: auditRef,
     /** The canonical terminal outcome of the attempt. A receipt for any other outcome cannot verify. */
     attemptOutcome: attemptOutcomeSchema,
     resultId: id,
+    resultPayloadHash: hash,
     implementerPrincipalId: actorId,
     implementerEngineId: engineId,
     implementerProviderId: engineId,
@@ -281,12 +297,16 @@ export const receiptBindingSchema = z
     reviewersRequired: z.number().int().min(0).max(MAX_REVIEWERS_REQUIRED),
     requireIndependentPrincipal: z.boolean(),
     requireIndependentProvider: z.boolean(),
-    criteriaPassed: z.number().int().positive().max(512),
+    criteriaPassed: z.number().int().nonnegative().max(512),
     verificationAudit: auditRef,
     readbackAudit: auditRef
   })
   .strict()
-  .superRefine(requireApprovalMatchesDecision);
+  .superRefine(requireApprovalMatchesDecision)
+  .superRefine((value, context) => {
+    if (value.criteriaPassed === 0 && value.reviewersRequired > 0)
+      context.addIssue({ code: "custom", path: ["criteriaPassed"], message: "zero criteria need a zero requirement" });
+  });
 export type ReceiptBinding = z.infer<typeof receiptBindingSchema>;
 
 const sameRef = (x: { eventId: string; eventHash: string }, y: { eventId: string; eventHash: string }) =>
@@ -375,6 +395,7 @@ export function verifyExecutionReceipt(receipt: unknown, expected: unknown): { o
   check(m.workerId === b.workerId, "worker_binding_mismatch");
   check(m.actionHash === b.actionHash, "action_binding_mismatch");
   check(m.admittedPlanHash === b.admittedPlanHash, "plan_binding_mismatch");
+  check(m.planHash === b.attemptPlanHash && a.attemptPlanHash === b.attemptPlanHash, "attempt_plan_binding_mismatch");
   check(m.manifestHash === b.manifestHash, "manifest_binding_mismatch");
   check(sameValidation(core.validation, b.validation), "validation_binding_mismatch");
   const validationChecksPassed = b.validation.checks.filter((entry) => entry.passed).length;
@@ -393,6 +414,8 @@ export function verifyExecutionReceipt(receipt: unknown, expected: unknown): { o
   check(a.claimTokenHash === b.claimTokenHash, "claim_mismatch");
   check(a.capabilityId === b.capabilityId, "capability_mismatch");
   check(a.policyDecision === b.policyDecision, "policy_decision_mismatch");
+  check(a.policyVersion === b.policyVersion, "policy_version_mismatch");
+  check(a.policyDecisionHash === b.policyDecisionHash, "policy_decision_hash_mismatch");
   check(sameApprovalSet(a.approvals, b.approvals), "approval_binding_mismatch");
   check(sameRef(a.audit, b.policyAudit), "policy_audit_mismatch");
 
@@ -418,7 +441,9 @@ export function verifyExecutionReceipt(receipt: unknown, expected: unknown): { o
   }
   check(r.status === b.attemptOutcome, "attempt_outcome_mismatch");
   check(r.resultId === b.resultId, "result_binding_mismatch");
+  check(r.resultPayloadHash === b.resultPayloadHash, "result_payload_binding_mismatch");
   check(v.criteriaPassed === b.criteriaPassed, "criteria_binding_mismatch");
+  check(v.criteriaPassed > 0 || b.reviewersRequired === 0, "criteria_insufficient");
   check(sameRef(v.audit, b.verificationAudit), "verification_audit_mismatch");
   check(sameRef(r.audit, b.readbackAudit), "readback_audit_mismatch");
   return { ok: defects.length === 0, defects };
