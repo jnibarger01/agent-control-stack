@@ -175,6 +175,7 @@ function integrityViolations(v: View): EvidenceEvent[] {
     ((f.audit_chain_broken as number) > 0 ||
       (f.trace_chain_broken as number) > 0 ||
       f.audit_tail_truncated === true ||
+      f.audit_rows_missing === true ||
       f.trace_tail_truncated === true);
   return [
     ...v.events.filter((e) => e.integrity.chain === "broken" || e.integrity.hash_verified === false),
@@ -277,6 +278,10 @@ function operationCompleted(v: View, c: Correlated, reports: SourceReport[], now
 
 function approvalValid(v: View): AssertionResult {
   const T = "approval_valid" as const;
+  // Defense in depth (the integrity gate already ERRORs on this): approvals are only ever vouched for by the audit chain.
+  if (!v.state || typeof v.state.facts.audit_events !== "number" || v.state.facts.audit_events === 0) {
+    return result(T, "ERROR", "no audit evidence exists for this work item; an approval cannot be validated without the audit chain", refs(v.state ?? undefined), "none");
+  }
   const admissions = v.of("dispatch.admitted");
   const policy = v.of("policy.decided");
   const required = admissions.some((e) => e.facts.requires_approval === true) || policy.some((e) => e.decision === "require_approval");

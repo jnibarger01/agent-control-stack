@@ -119,6 +119,7 @@ Tests use clearly synthetic fixtures (`test/fixture.ts`, outside `src/` so it is
     work item, since truncation can remove exactly those records) is reported as `jc.coverage` with status
     `completeness_unproven` / gap `JC_COMPLETENESS_UNPROVEN` (low), and an `operation_completed` that would otherwise PASS returns
     INCONCLUSIVE with a reason starting `completeness unproven:`. Deleting a whole JC session file remains undetectable.
+  - With JC configured, an empty JC root (no session files at all) still allows PASS: there is no session whose completeness could be checked.
   - Remaining gaps: JC's `tool_call_started` carries no work item id, so a crash mid-call cannot be attributed to a work item (only the
     session-level `jc_unmatched_starts` fact); JC records neither attempt nor lease ids, so JC evidence cannot be tied to a specific ACS
     attempt; a valid chain shows no edit but not completeness (a truncated tail is undetectable) nor that effects occurred; the
@@ -130,7 +131,9 @@ Tests use clearly synthetic fixtures (`test/fixture.ts`, outside `src/` so it is
 - Head anchors: the global audit chain's newest `sequence` must equal SQLite's own AUTOINCREMENT high-water mark
   (`sqlite_sequence`, never lowered by DELETE), and the newest `trace_outbox` row must sit at `trace_chain_state.seq` and hash to
   its `head_hash`. A shortfall is `audit_tail_truncated` / `trace_tail_truncated` (ERROR). When no stored head exists the state
-  carries `audit_head_unproven` / `trace_head_unproven` and a would-be PASS becomes INCONCLUSIVE (`completeness unproven: ...`).
+  carries `audit_head_unproven` / `trace_head_unproven`. An existing work item with zero audit rows is `audit_rows_missing`
+  (ERROR; `store.create` always writes one), even if `sqlite_sequence` was wiped too, and its approvals keep `no_audit_anchor`.
+  A missing head alone turns a would-be PASS into INCONCLUSIVE (`completeness unproven: ...`).
   These anchors live in the same database: a writer able to rewrite rows, re-hash the chain and also lower `sqlite_sequence` /
   rewrite `trace_chain_state` can still forge a consistent shorter history. Only an external anchor would close that.
 - ACS does not record the executor's release identity (`MISSING_RELEASE_IDENTITY`); `installed` != running.

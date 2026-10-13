@@ -597,6 +597,31 @@ describe("looptrace_verify: audit/trace chain integrity gates every assertion (f
     expect(v.assertions[0].reason).toMatch(/^completeness unproven: the ACS audit chain has no stored head/u);
   });
 
+  it("all audit rows AND the sqlite_sequence row wiped (looks like a fresh table): every assertion is ERROR", async () => {
+    const clean = setup([{}]);
+    const mh = await manifestHash(clean);
+    const s = setup([seeded((db) => {
+      db.prepare("DELETE FROM audit_events").run();
+      db.prepare("DELETE FROM sqlite_sequence WHERE name = 'audit_events'").run();
+    })]);
+    const t = (await s.svc.trace({ work_item_id: s.ids[0] }, grant())) as Json;
+    expect(t.events.find((e: Json) => e.event_type === "lifecycle.state").facts).toMatchObject({ audit_events: 0, audit_rows_missing: true });
+    const v = await verify(s, STORED(mh));
+    expect(v.assertions.map((a: Json) => a.verdict)).toEqual(["ERROR", "ERROR", "ERROR", "ERROR", "ERROR"]);
+  });
+
+  it("only this work item's audit rows deleted (other items intact): ERROR, and the approval loses its audit anchor", async () => {
+    const s = setup([seeded((db, id) => {
+      db.prepare(`DELETE FROM audit_events WHERE json_extract(attributes, '$."work_item.id"') = ?`).run(id);
+      db.prepare("DELETE FROM sqlite_sequence WHERE name = 'audit_events'").run();
+    }), {}]);
+    const t = (await s.svc.trace({ work_item_id: s.ids[0] }, grant())) as Json;
+    const approval = t.events.find((e: Json) => e.stage === "approval" && e.facts.audit_anchor_expected !== undefined);
+    expect(approval.flags).toContain("no_audit_anchor");
+    expect(approval.facts.audit_anchor_expected).toBe(true);
+    expect((await verify(s, [{ type: "approval_valid" }])).assertions[0].verdict).toBe("ERROR");
+  });
+
   it("no stored trace chain head: completeness is reported unproven", async () => {
     const s = setup([seeded((db) => db.prepare("DELETE FROM trace_chain_state").run())]);
     expect((await verify(s, [{ type: "operation_completed" }])).verdict).toBe("INCONCLUSIVE");

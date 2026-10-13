@@ -431,12 +431,12 @@ export class AcsReadStore {
     // ---- approvals (plan-bound and legacy per-action)
     for (const r of this.all("SELECT * FROM execution_plan_approvals WHERE work_item_id = ? ORDER BY created_at LIMIT 50", workItemId)) {
       const id = String(r.approval_id);
-      drafts.push(approvalDraft("execution_plan_approvals", id, r, str(r, "status") ?? "unknown", auditIdsByApproval.has(id), auditRows.length > 0));
+      drafts.push(approvalDraft("execution_plan_approvals", id, r, str(r, "status") ?? "unknown", auditIdsByApproval.has(id)));
     }
     for (const r of this.all("SELECT * FROM approval_records WHERE work_item_id = ? ORDER BY created_at LIMIT 50", workItemId)) {
       const id = `${workItemId}:${String(r.action_hash)}`;
       drafts.push(
-        approvalDraft("approval_records", id, { ...r, approved_by_actor_id: r.approved_by }, str(r, "status") ?? "unknown", auditIdsByApproval.has(id), auditRows.length > 0, true)
+        approvalDraft("approval_records", id, { ...r, approved_by_actor_id: r.approved_by }, str(r, "status") ?? "unknown", auditIdsByApproval.has(id), true)
       );
     }
 
@@ -663,6 +663,10 @@ export class AcsReadStore {
         audit_chain_broken: auditBroken,
         trace_events: outbox.length,
         trace_chain_broken: traceBroken,
+        // The work item row exists (we are past the lookup) and store.create always writes its creation audit row, so
+        // an existing work item with zero audit rows means its audit history was deleted, even when the table and its
+        // sqlite_sequence row were wiped together to look like a fresh, never-written table.
+        audit_rows_missing: auditRows.length === 0,
         audit_tail_truncated: auditHead.truncated,
         audit_head_unproven: auditHead.unproven,
         trace_tail_truncated: traceHead.truncated,
@@ -768,7 +772,7 @@ function resultDraft(table: string, r: Row, legacy: boolean): Draft {
   };
 }
 
-function approvalDraft(table: string, id: string, r: Row, st: string, anchored: boolean, auditPresent: boolean, legacy = false): Draft {
+function approvalDraft(table: string, id: string, r: Row, st: string, anchored: boolean, legacy = false): Draft {
   const type: EventType =
     st === "consumed" ? "approval.consumed" : st === "invalidated" || st === "expired" ? "approval.invalidated" : "approval.granted";
   return {
@@ -790,11 +794,13 @@ function approvalDraft(table: string, id: string, r: Row, st: string, anchored: 
       request_hash: str(r, "request_hash"),
       plan_hash: str(r, "plan_hash"),
       audit_anchored: anchored,
-      audit_anchor_expected: auditPresent
+      // store.create always writes an audit row, so an approval is expected to be audit-anchored even when the
+      // work item has no audit rows at all (zero rows is tampering, not a reason to stop expecting the anchor).
+      audit_anchor_expected: !legacy
     },
     refs: { approval_id: id.slice(0, 190) },
     untrusted: { reason: String(r.reason ?? "").slice(0, 2000) },
-    flags: auditPresent && !anchored && !legacy ? ["no_audit_anchor"] : [],
+    flags: !anchored && !legacy ? ["no_audit_anchor"] : [],
     raw: { id, st, a: r.action_hash, c: r.created_at }
   };
 }
