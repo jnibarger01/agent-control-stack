@@ -906,6 +906,78 @@ describe("R1: evidence-bound CUA acceptance", () => {
     expect(checkpoints().map((row) => row.state)).toEqual(["committed", "committed"]);
   });
 
+  it("keeps concurrent attempts on one adapter instance independent (lock owner is per execution)", async () => {
+    const { store, ledger } = claimed(twoStep());
+    store.addWorkUnits("m1", [{ unitId: "u2", kind: "cua", title: "browse 2", payload: twoStep() }], T0);
+    store.releaseReadyUnits("m1", T0);
+    const claim2 = {
+      token: "claim-two",
+      workerId: "worker-1",
+      route: { lane: "cua" as const, implementerEngineId: "browser-worker" },
+      claimedAt: T1
+    };
+    expect(store.claimUnit("m1", "u2", claim2)).toMatchObject({ ok: true });
+    const dispatchA = store.db
+      .prepare("SELECT attempt_id FROM work_unit_execution_attempts WHERE unit_id = 'u1'")
+      .get() as {
+      attempt_id: string;
+    };
+    const dispatchB = ledger.beginDispatch({
+      missionId: "m1",
+      unitId: "u2",
+      claimToken: claim2.token,
+      workerId: claim2.workerId,
+      lane: "cua",
+      authority: { leaseId: "lease-2", fencingToken: 8, actionHash: "a".repeat(64) },
+      now: T1
+    });
+    const firstDispatch = ledger.beginDispatch({
+      missionId: "m1",
+      unitId: "u1",
+      claimToken: "claim-super-secret",
+      workerId: "worker-1",
+      lane: "cua",
+      authority: { leaseId: "lease-1", fencingToken: 7, actionHash: "a".repeat(64) },
+      now: T1
+    });
+    expect(firstDispatch.attemptId).toBe(dispatchA.attempt_id);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let gated = true;
+    const browser: CuaBrowserProvider = {
+      async open() {
+        const page = new FakePage();
+        page.current = "about:blank";
+        if (gated) {
+          gated = false;
+          const original = page.goto.bind(page);
+          page.goto = async (url: string) => {
+            await gate;
+            await original(url);
+          };
+        }
+        return page;
+      }
+    };
+    const adapter = new CuaExecutionAdapter(store, browser, "browser", () => T2);
+    const first = adapter.execute(firstDispatch);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // A second attempt runs to completion on the SAME adapter while the first is mid-action.
+    await expect(adapter.execute(dispatchB)).resolves.toMatchObject({ outcome: "succeeded" });
+    release();
+    await expect(first).resolves.toMatchObject({ outcome: "succeeded" });
+    const states = store.db
+      .prepare("SELECT unit_id, state FROM cua_action_checkpoints ORDER BY unit_id, sequence")
+      .all() as Array<{ unit_id: string; state: string }>;
+    expect(states.map((row) => `${row.unit_id}:${row.state}`)).toEqual([
+      "u1:committed",
+      "u1:committed",
+      "u2:committed",
+      "u2:committed"
+    ]);
+    expect(store.db.prepare("SELECT COUNT(*) AS n FROM cua_execution_locks").get()).toMatchObject({ n: 0 });
+  });
+
   it("recovers a planned checkpoint only after the previous owner's lock expired", async () => {
     const { adapter, dispatch, store, checkpoints } = harness(twoStep());
     const first = await adapter.execute(dispatch);
