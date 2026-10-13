@@ -164,6 +164,14 @@ const operations = {
     "method": "GET",
     "path": "/coding-missions/{id}"
   },
+  "bindCodingMissionAuthority": {
+    "method": "POST",
+    "path": "/coding-missions/{id}/authority"
+  },
+  "getCodingMissionAuthorityGraph": {
+    "method": "GET",
+    "path": "/coding-missions/{id}/authority-graph"
+  },
   "getCodingMissionFlightRecord": {
     "method": "GET",
     "path": "/coding-missions/{id}/flight-record"
