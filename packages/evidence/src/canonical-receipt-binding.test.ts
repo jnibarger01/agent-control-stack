@@ -16,7 +16,11 @@ import {
   type CanonicalReceiptContext,
   type CanonicalReceiptRecords
 } from "./canonical-receipt-binding.js";
-import { buildExecutionReceipt, executionValidationChecksHash, type ExecutionReceiptCore } from "./execution-receipt.js";
+import {
+  buildExecutionReceipt,
+  executionValidationChecksHash,
+  type ExecutionReceiptCore
+} from "./execution-receipt.js";
 
 const H = (c: string) => c.repeat(64);
 const T = "2026-10-08T12:00:00.000Z";
@@ -153,7 +157,8 @@ const context = (): CanonicalReceiptContext => ({
   policyAudit: { eventId: "auth_1", eventHash: H("5") },
   verificationAudit: { eventId: "verify_1", eventHash: H("6") },
   readbackAudit: { eventId: "readback_1", eventHash: H("0") },
-  reviewAudit: { [H("7")]: { eventId: "review_1", eventHash: H("2") } }
+  reviewAudit: { [H("7")]: { eventId: "review_1", eventHash: H("2") } },
+  reviewerCredentialExists: (credentialId) => credentialId === "reviewer-a"
 });
 
 const core = (): ExecutionReceiptCore => ({
@@ -256,6 +261,21 @@ describe("receipt binding derived only from stored canonical records", () => {
     expect(verifyExecutionReceiptAgainstRecords(buildExecutionReceipt(core()), changed, context()).defects).toContain(
       "review_engine_unknown"
     );
+  });
+
+  it.each([
+    ["a forged, non-credential engine id", "claude-opus"],
+    ["a well-formed credential id with no credential behind it", "acs-credential:does-not-exist"],
+    ["a credential prefix with an empty id", "acs-credential:"]
+  ])("refuses %s as review_engine_unknown, even when the receipt agrees", (_name, engine) => {
+    const changed = records();
+    changed.reviews = [{ ...changed.reviews[0]!, verifierEngineId: engine }];
+    const receipt = core();
+    receipt.verification.reviewers[0]!.verifierEngineId = engine;
+    expect(verifyExecutionReceiptAgainstRecords(buildExecutionReceipt(receipt), changed, context()).defects).toEqual([
+      "receipt_binding_inconsistent",
+      "review_engine_unknown"
+    ]);
   });
 
   it("derives zero criteria for an accepted decision with zero required reviewers", () => {

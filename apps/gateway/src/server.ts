@@ -434,7 +434,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     adminModeTtlMs: options.adminModeTtlMs ?? adminModeTtlFromEnv(),
     // The gateway is the one process that refuses to boot on a bad trace config.
     traceConfigValidation: "eager",
-    observationEnabled: jevObservationEnabled
+    observationEnabled: jevObservationEnabled,
+    // Review findings may only record a verifier engine naming a configured credential. `auth` is assigned below and
+    // this runs only at review time, after construction.
+    reviewerCredentialExists: (credentialId) => auth?.credentials?.some((entry) => entry.id === credentialId) ?? false
   });
   const mcpClientService = new McpClientService(workItems, options.mcpClientPolicy ?? parseMcpClientPolicy());
   // eslint-disable-next-line prefer-const -- the store hook above may fire before this assignment

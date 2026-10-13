@@ -1163,6 +1163,11 @@ function validateAdminModeTtl(value: number): number {
 }
 
 export interface SqliteWorkItemStoreOptions {
+  /**
+   * Resolves a reviewer credential id (the `<id>` in `acs-credential:<id>`) to a configured credential. Review
+   * findings may only record a verifier engine that resolves; without a resolver no engine can be recorded.
+   */
+  reviewerCredentialExists?: (credentialId: string) => boolean;
   leaseMs?: number;
   heartbeatTtlMs?: number;
   /**
@@ -1658,6 +1663,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
   /** Memoized lazy validation result: undefined = not checked yet, null = valid. */
   private traceConfigError: ControlStackError | null | undefined;
 
+  private readonly reviewerCredentialExists: ((credentialId: string) => boolean) | undefined;
+
   constructor(dbPath: string, options: SqliteWorkItemStoreOptions = {}) {
     // Trace producer identity: validated lazily at trace time by default (a bad value
     // never stops the store from opening, and never fails an approval); "eager" refuses
@@ -1669,6 +1676,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     this.leaseMs = options.leaseMs ?? 5 * 60 * 1000;
+    this.reviewerCredentialExists = options.reviewerCredentialExists;
     this.heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
     // No implicit expiry: admin mode is sticky unless a caller explicitly asks
     // for a bounded elevation.
@@ -4638,7 +4646,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
       if (existing) return { value: existing, events: [] };
       const createdAt = (parsed.now ?? new Date()).toISOString();
       const verifierEngineId =
-        options.verifierEngineId === undefined ? null : parseReviewEngineId(options.verifierEngineId);
+        options.verifierEngineId === undefined
+          ? null
+          : resolveReviewEngineId(options.verifierEngineId, this.reviewerCredentialExists);
       this.db
         .prepare(
           `INSERT INTO review_findings
@@ -9908,11 +9918,21 @@ function isTerminalStatus(status: WorkItemStatus): boolean {
   return TERMINAL_WORK_ITEM_STATUSES.includes(status);
 }
 
-function parseReviewEngineId(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed.length < 1 || trimmed.length > 4096)
-    throw new ControlStackError("review_engine_invalid", "verifier engine id must be 1-4096 characters");
-  return trimmed;
+const REVIEWER_CREDENTIAL_ENGINE = /^acs-credential:([A-Za-z0-9][A-Za-z0-9._:@/-]{0,255})$/u;
+
+/**
+ * The credential id inside a server-written verifier engine id (`acs-credential:<credential id>`), or undefined when
+ * the value is not in that exact format. Callers must still resolve the id to a configured credential.
+ */
+export function reviewerCredentialIdFromEngineId(value: string): string | undefined {
+  return REVIEWER_CREDENTIAL_ENGINE.exec(value)?.[1];
+}
+
+function resolveReviewEngineId(value: string, exists: ((credentialId: string) => boolean) | undefined): string {
+  const credentialId = reviewerCredentialIdFromEngineId(value);
+  if (credentialId === undefined || !exists || !exists(credentialId))
+    throw new ControlStackError("review_engine_unknown", "verifier engine does not resolve to a known credential");
+  return value;
 }
 
 /**

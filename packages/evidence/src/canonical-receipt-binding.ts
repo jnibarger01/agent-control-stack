@@ -1,5 +1,6 @@
 import { ControlStackError } from "@agent-control-stack/shared";
 import {
+  reviewerCredentialIdFromEngineId,
   storedExecutionResultPayloadHash,
   type AttemptLease,
   type ExecutionAttempt,
@@ -50,6 +51,12 @@ export interface CanonicalReceiptContext {
   verificationAudit: AuditRef;
   readbackAudit: AuditRef;
   reviewAudit: Readonly<Record<string, AuditRef>>;
+  /**
+   * Resolves a reviewer credential id to a configured credential (the gateway's credential set). A stored verifier
+   * engine binds only when it is `acs-credential:<id>` and that credential exists; anything else is
+   * review_engine_unknown.
+   */
+  reviewerCredentialExists: (credentialId: string) => boolean;
 }
 
 export class ReceiptBindingInconsistentError extends ControlStackError {
@@ -107,6 +114,9 @@ export function receiptBindingFromCanonicalRecords(
     if (review.verdict !== "PASS") fail("review_not_pass");
     // The engine must come from the stored review record, written by the server at review time.
     const verifierEngineId = review.verifierEngineId ?? fail("review_engine_unknown");
+    const credentialId = reviewerCredentialIdFromEngineId(verifierEngineId) ?? fail("review_engine_unknown");
+    if (typeof context.reviewerCredentialExists !== "function" || !context.reviewerCredentialExists(credentialId))
+      fail("review_engine_unknown");
     const audit = context.reviewAudit[findingHash] ?? fail("review_audit_missing");
     return {
       reviewerPrincipalId: review.reviewerPrincipalId,

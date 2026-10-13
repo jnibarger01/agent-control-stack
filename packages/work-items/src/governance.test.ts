@@ -554,7 +554,15 @@ describe("review findings carry a server-written verifier engine (review #306, m
     finding: { verdict: "PASS" }
   };
 
+  /** Reopen the fixture database with a credential resolver, as the gateway constructs it. */
+  function withResolver(): SqliteWorkItemStore {
+    store.close();
+    store = new SqliteWorkItemStore(dbPath, { reviewerCredentialExists: (id) => id === "reviewer-1" });
+    return store;
+  }
+
   it("stores the engine from the server-side options and records it in the audit event", () => {
+    withResolver();
     recordManifest(H("e"));
     const recorded = store.recordReviewFinding(
       { ...finding, workItemId, attemptId },
@@ -577,6 +585,28 @@ describe("review findings carry a server-written verifier engine (review #306, m
         via
       )
     ).toThrow();
+  });
+
+  it.each([
+    ["a forged, non-credential engine id", "claude-opus"],
+    ["a well-formed credential id with no credential behind it", "acs-credential:does-not-exist"]
+  ])("refuses %s at write time", (_name, engine) => {
+    withResolver();
+    recordManifest(H("e"));
+    expect(() =>
+      store.recordReviewFinding({ ...finding, workItemId, attemptId }, { ...via, verifierEngineId: engine })
+    ).toThrow(/known credential/);
+    expect(store.listReviewFindings(attemptId)).toEqual([]);
+  });
+
+  it("refuses any engine when the store has no credential resolver", () => {
+    recordManifest(H("e"));
+    expect(() =>
+      store.recordReviewFinding(
+        { ...finding, workItemId, attemptId },
+        { ...via, verifierEngineId: "acs-credential:reviewer-1" }
+      )
+    ).toThrow(/known credential/);
   });
 
   it("records an unknown engine as null rather than inventing one", () => {
