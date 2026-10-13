@@ -31,6 +31,26 @@ export type {
   BuildEvidenceManifestInput
 } from "./evidence-manifest.js";
 
+export {
+  EXECUTION_RECEIPT_SCHEMA_VERSION,
+  EXECUTION_RECEIPT_HASH_DOMAIN,
+  executionReceiptCoreSchema,
+  executionReceiptSchema,
+  receiptBindingSchema,
+  executionValidationChecksHash,
+  executionReceiptHash,
+  receiptDefects,
+  buildExecutionReceipt,
+  verifyExecutionReceipt,
+  ExecutionReceiptIncompleteError
+} from "./execution-receipt.js";
+export type {
+  ExecutionReceipt,
+  ExecutionReceiptCore,
+  ReceiptBinding,
+  ValidationCheckBinding
+} from "./execution-receipt.js";
+
 export { computeWorkspaceRevision, detectWorkspaceDrift } from "./workspace-revision.js";
 export type { WorkspaceRevisionResult, WorkspaceDriftResult } from "./workspace-revision.js";
 
@@ -73,3 +93,12 @@ export {
   type ObservationWorkerState,
   type TraceClassifier
 } from "./observation-worker.js";
+export {
+  receiptBindingFromCanonicalRecords,
+  verifyExecutionReceiptAgainstRecords,
+  executionReceiptRow,
+  ReceiptBindingInconsistentError,
+  type CanonicalReceiptRecords,
+  type CanonicalReceiptContext,
+  type ExecutionReceiptRow
+} from "./canonical-receipt-binding.js";
