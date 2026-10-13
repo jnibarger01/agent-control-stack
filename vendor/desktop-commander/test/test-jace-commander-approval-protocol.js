@@ -18,7 +18,11 @@ const assertionFor = (c, extra = {}) => ({
 
 // Verifier accepts: success once, then replay is unknown.
 let calls = 0;
-const gate = new JcHumanAssertionGate({ verify: async () => { calls++; return true; } }, { now: clock });
+// Deterministic challenges: each one fills its bytes with a small counter (0x01, 0x02, ...), so challenges
+// differ from each other but never start with 'x' in hex or base64, which keeps the 'x' + slice(1) mutation a real change.
+let fill = 0;
+const randomBytes = (size) => Buffer.alloc(size, (++fill % 0x7f) || 1);
+const gate = new JcHumanAssertionGate({ verify: async () => { calls++; return true; } }, { now: clock, randomBytes });
 let c = gate.issue(record());
 assert.equal(c.expiresAt - c.issuedAt, 30_000);
 assert.match(c.invocationHash, /^[0-9a-f]{64}$/);
@@ -37,7 +41,7 @@ for (const verify of [async () => false, async () => { throw new Error('boom'); 
 // Binding mismatches are denied without consulting the verifier.
 calls = 0;
 const bad = [
-  (ch) => ({ challenge: 'x' + ch.challenge.slice(1) }),
+  (ch) => { assert.notEqual(ch.challenge[0], 'x'); return { challenge: 'x' + ch.challenge.slice(1) }; },
   () => ({ invocationHash: computeLocalInvocationHash('rt-1', 'write_file', { other: 1 }) }),
   () => ({ operatorId: '' }),
   () => ({ issuedAt: now + 1 }),
