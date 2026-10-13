@@ -212,13 +212,18 @@ export type CuaAction =
   | { type: "observe" }
   | { type: "click"; selector: string }
   | { type: "type"; selector: string; text: string }
+  /**
+   * A secret is never carried as a value. `secretRef` names a secret-broker scope that is leased and resolved only at
+   * execution time, so payload_json and dispatch_json hold the reference, not the secret.
+   */
+  | { type: "type"; selector: string; secretRef: string }
   | { type: "scroll"; dx: number; dy: number }
   | { type: "navigate"; url: string };
 
 const CUA_ACTION_FIELDS: Record<CuaActionType, readonly string[]> = {
   observe: ["type"],
   click: ["type", "selector"],
-  type: ["type", "selector", "text"],
+  type: ["type", "selector", "text", "secretRef"],
   scroll: ["type", "dx", "dy"],
   navigate: ["type", "url"]
 };
@@ -237,6 +242,26 @@ function parseExactHttpOrigin(value: unknown): string | undefined {
   return value === url.origin ? url.origin : undefined;
 }
 
+/** Secret-broker scope names (secret-broker scopeNameSchema). */
+const SECRET_REF = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const isSecretRef = (value: unknown): value is string => typeof value === "string" && SECRET_REF.test(value);
+/** Fields whose input is a credential. Literal text into them must be a `secretRef`. */
+const SECRET_SELECTOR =
+  /pass(word|wd|code|phrase)|\bpass\b|secret|token|otp|one-?time|\bpin\b|api[-_]?key|credential|\bcvv\b|\bcvc\b|card-?number|cc-?(number|csc)|current-password|new-password/iu;
+/** Value patterns of common credentials, refused as literal text even under an innocuous selector. */
+const SECRET_VALUE_PATTERNS: readonly RegExp[] = [
+  /\bbearer\s+[A-Za-z0-9._~+/-]{8,}/iu,
+  /\b(gh[pousr]|github_pat)_[A-Za-z0-9_]{16,}/u,
+  /\bsk-[A-Za-z0-9_-]{16,}/u,
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}/u,
+  /\bAKIA[0-9A-Z]{16}\b/u,
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/u,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/u
+];
+export function looksLikeSecretValue(text: string): boolean {
+  return SECRET_VALUE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 function parseCuaAction(value: unknown): CuaAction | undefined {
   if (
     !isRecord(value) ||
@@ -250,9 +275,16 @@ function parseCuaAction(value: unknown): CuaAction | undefined {
   if (type === "observe") return { type };
   if (type === "click") return isString(value.selector, 512) ? { type, selector: value.selector } : undefined;
   if (type === "type") {
-    return isString(value.selector, 512) && isString(value.text, 4096)
-      ? { type, selector: value.selector, text: value.text }
-      : undefined;
+    if (!isString(value.selector, 512)) return undefined;
+    // Exactly one of a literal or a broker reference. A literal is refused when the field or the value looks secret.
+    if (value.secretRef !== undefined) {
+      return value.text === undefined && isSecretRef(value.secretRef)
+        ? { type, selector: value.selector, secretRef: value.secretRef }
+        : undefined;
+    }
+    if (!isString(value.text, 4096)) return undefined;
+    if (SECRET_SELECTOR.test(value.selector) || looksLikeSecretValue(value.text)) return undefined;
+    return { type, selector: value.selector, text: value.text };
   }
   if (type === "scroll") {
     const bounded = (entry: unknown) =>

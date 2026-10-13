@@ -28,10 +28,127 @@ export interface CuaPage {
   };
   goto(url: string): Promise<unknown>;
   close(): Promise<void>;
+  /** The browser context the page lives in. The origin allowlist is enforced on the whole context. */
+  context(): CuaBrowserContext;
+}
+
+/** Subset of Playwright's Route. */
+export interface CuaRoute {
+  request(): { url(): string };
+  continue(): Promise<void>;
+  abort(errorCode?: string): Promise<void>;
+}
+
+/** Subset of Playwright's BrowserContext: request interception and the set of open pages, including popups. */
+export interface CuaBrowserContext {
+  route(url: string, handler: (route: CuaRoute) => unknown): Promise<void>;
+  pages(): CuaPage[];
+  on(event: "page", listener: (page: CuaPage) => void): unknown;
 }
 
 export interface CuaBrowserProvider {
   open(application: string): Promise<CuaPage>;
+}
+
+/** Who a typed secret is resolved for. Every field comes from the fenced dispatch, never from the payload. */
+export interface CuaSecretPrincipal {
+  workerId: string;
+  missionId: string;
+  unitId: string;
+  attemptId: string;
+  application: string;
+}
+
+/** Resolves a `secretRef` at execution time. The value is used for one fill and never persisted or returned. */
+export interface CuaSecretResolver {
+  resolve(secretRef: string, principal: CuaSecretPrincipal): Promise<string>;
+}
+
+/** Structural subset of secret-broker's SecretBroker and SecretHandle, so this package needs no new dependency. */
+export interface CuaSecretBroker {
+  lease(request: {
+    scope: string;
+    ttlMs: number;
+    principal: { workerId: string; workItemId: string; attemptId: string; engineId: string };
+    purpose: string;
+    maxUses?: number;
+  }): Promise<CuaSecretHandle>;
+  revoke(handle: CuaSecretHandle): Promise<void>;
+}
+export interface CuaSecretHandle {
+  injectInto(
+    env: Record<string, string | undefined>,
+    redeemer: { workerId: string; workItemId: string; attemptId: string; engineId: string }
+  ): void;
+}
+
+/**
+ * A CuaSecretResolver backed by the secret broker: lease the scope for this attempt, redeem it once into a private
+ * object, and revoke the lease. `envName` maps a scope to the variable the broker injects it as (default: the scope).
+ */
+export function secretBrokerCuaResolver(
+  broker: CuaSecretBroker,
+  options: { ttlMs?: number; envName?: (scope: string) => string } = {}
+): CuaSecretResolver {
+  return {
+    async resolve(secretRef, principal) {
+      const leasePrincipal = {
+        workerId: principal.workerId,
+        workItemId: `${principal.missionId}:${principal.unitId}`,
+        attemptId: principal.attemptId,
+        engineId: principal.application
+      };
+      const handle = await broker.lease({
+        scope: secretRef,
+        ttlMs: options.ttlMs ?? 60_000,
+        principal: leasePrincipal,
+        purpose: "cua-type-secret",
+        maxUses: 1
+      });
+      try {
+        const sink: Record<string, string | undefined> = {};
+        handle.injectInto(sink, leasePrincipal);
+        const value = sink[options.envName?.(secretRef) ?? secretRef];
+        if (typeof value !== "string" || value.length === 0) {
+          throw new ControlStackError("cua_secret_unavailable", "secret reference did not resolve");
+        }
+        return value;
+      } finally {
+        await broker.revoke(handle).catch(() => undefined);
+      }
+    }
+  };
+}
+
+export interface CuaExecutionOptions {
+  /** Resolves `secretRef` type actions. Without it, a script that types a secret is refused before any action. */
+  secrets?: CuaSecretResolver;
+  /** Deadline for every single browser call (open, route setup, action, close). Default 30s. */
+  actionTimeoutMs?: number;
+}
+
+const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
+
+/** A browser call that hit its deadline or the abort signal. Its effect is unknown. */
+class CuaInterrupted extends Error {
+  constructor(readonly reason: "timeout" | "aborted") {
+    super(`cua browser call ${reason}`);
+  }
+}
+
+/** True when a URL is about:blank or on an exact allowlisted http(s) origin. */
+function requestAllowed(url: string, origins: readonly string[]): boolean {
+  if (url === "about:blank") return true;
+  const origin = pageOrigin(url);
+  return origin !== null && origin !== "about:blank" && origins.includes(origin);
+}
+
+/** Per-session state for the browser boundary. */
+interface CuaSession {
+  page: CuaPage;
+  context: CuaBrowserContext;
+  /** Set when any page other than the governed page appeared in the context (a popup or window.open). */
+  foreignPage: boolean;
 }
 
 /** Opens a Playwright-shaped page and starts it at about:blank before any governed action. */
@@ -136,8 +253,100 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     private readonly store: CodingMissionStore,
     private readonly browser: CuaBrowserProvider,
     private readonly application: string,
-    private readonly now: () => string = () => new Date().toISOString()
+    private readonly now: () => string = () => new Date().toISOString(),
+    private readonly options: CuaExecutionOptions = {}
   ) {}
+
+  private get timeoutMs(): number {
+    return this.options.actionTimeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS;
+  }
+
+  /** Race one browser call against the per-call deadline and the abort signal. */
+  private async bounded<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (signal?.aborted) throw new CuaInterrupted("aborted");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    const pending = Promise.resolve().then(work);
+    // The losing call may still settle later; its outcome is already recorded as uncertain.
+    pending.catch(() => undefined);
+    try {
+      return await Promise.race([
+        pending,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new CuaInterrupted("timeout")), this.timeoutMs);
+          // Defer by one task so a call that already settled when the abort fired reports its real outcome.
+          onAbort = () => setTimeout(() => reject(new CuaInterrupted("aborted")), 0);
+          signal?.addEventListener("abort", onAbort, { once: true });
+        })
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  /** Open the governed page and enforce the origin allowlist on its whole context before any action. */
+  private async openSession(origins: readonly string[], signal?: AbortSignal): Promise<CuaSession> {
+    const page = await this.bounded(() => this.browser.open(this.application), signal);
+    const session: CuaSession = { page, context: undefined as unknown as CuaBrowserContext, foreignPage: false };
+    try {
+      if (typeof page.context !== "function") {
+        throw new ControlStackError("cua_context_unavailable", "browser page exposes no context");
+      }
+      session.context = page.context();
+      session.context.on("page", (opened) => {
+        if (opened === page) return;
+        session.foreignPage = true;
+        void Promise.resolve()
+          .then(() => opened.close())
+          .catch(() => undefined);
+      });
+      await this.bounded(
+        () =>
+          session.context.route("**/*", (route) =>
+            requestAllowed(route.request().url(), origins) ? route.continue() : route.abort("blockedbyclient")
+          ),
+        signal
+      );
+    } catch (error) {
+      await this.closeSession(session);
+      throw error;
+    }
+    return session;
+  }
+
+  /**
+   * True when any page other than the governed one appeared in the context (popups are closed as they open, and
+   * their requests are already held to the allowlist by the context route). The governed page's own landing is
+   * checked separately after every action.
+   */
+  private contextEscaped(session: CuaSession): boolean {
+    if (session.foreignPage) return true;
+    let pages: CuaPage[];
+    try {
+      pages = session.context.pages();
+    } catch {
+      return true;
+    }
+    return pages.some((candidate) => candidate !== session.page);
+  }
+
+  /** Close every page in the session, each bounded by the deadline. A close failure never replaces a result. */
+  private async closeSession(session: CuaSession): Promise<void> {
+    let pages: CuaPage[] = [session.page];
+    try {
+      if (session.context) pages = [session.page, ...session.context.pages().filter((p) => p !== session.page)];
+    } catch {
+      // Fall back to the governed page alone.
+    }
+    for (const candidate of pages) {
+      try {
+        await this.bounded(() => candidate.close());
+      } catch {
+        // A close failure or timeout must not replace a fenced result or invite a retry.
+      }
+    }
+  }
 
   async execute(dispatch: DispatchEnvelope, signal?: AbortSignal): Promise<ResultEnvelope> {
     if (dispatch.lane !== this.lane) {
@@ -173,8 +382,12 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     const origins = payload.allowedOrigins ?? [];
     const actions = payload.actions ?? [];
     if (actions.length === 0) return this.succeeded(dispatch, []);
+    if (!this.options.secrets && actions.some((action) => action.type === "type" && "secretRef" in action)) {
+      return this.failed(dispatch, "policy_denied", "cua_secret_unavailable", "no secret resolver is configured", []);
+    }
 
     this.assertFence(dispatch);
+    let session: CuaSession | undefined;
     let page: CuaPage | undefined;
     let committedMutation = false;
     let requireAllowlisted = false;
@@ -219,15 +432,23 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
         }
         if (!page) {
           try {
-            page = await this.browser.open(this.application);
+            session = await this.openSession(origins, signal);
+            page = session.page;
           } catch (error) {
             if (isFenceError(error)) throw error;
             this.finish(dispatch, sequence, action.type, hash, "uncertain", { uncertain: true, origin: null });
+            if (error instanceof CuaInterrupted && error.reason === "aborted") {
+              return this.cancelled(dispatch, true, receipts);
+            }
             return this.unknownResult(dispatch, receipts);
           }
         }
         try {
-          const effect = await this.perform(page, action, origins, requireAllowlisted);
+          // Ownership is re-checked immediately before every browser action. A stale worker stops here, before acting.
+          // The window between this check and the browser call cannot be closed; an effect inside it is uncertain.
+          this.assertFence(dispatch);
+          const effect = await this.perform(dispatch, page, action, origins, requireAllowlisted, signal);
+          if (session && this.contextEscaped(session)) effect.uncertain = true;
           if (effect.uncertain) {
             this.finish(dispatch, sequence, action.type, hash, "uncertain", effect);
             return this.unknownResult(dispatch, receipts);
@@ -247,19 +468,16 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
             origin = null;
           }
           this.finish(dispatch, sequence, action.type, hash, "uncertain", { uncertain: true, origin });
+          if (error instanceof CuaInterrupted && error.reason === "aborted") {
+            return this.cancelled(dispatch, true, receipts);
+          }
           return this.unknownResult(dispatch, receipts);
         }
         if (signal?.aborted) return this.cancelled(dispatch, committedMutation, receipts);
       }
       return this.succeeded(dispatch, receipts);
     } finally {
-      if (page) {
-        try {
-          await page.close();
-        } catch {
-          // A close failure must not replace a fenced result or invite a retry.
-        }
-      }
+      if (session) await this.closeSession(session);
     }
   }
 
@@ -275,28 +493,45 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
   }
 
   private async perform(
+    dispatch: DispatchEnvelope,
     page: CuaPage,
     action: CuaAction,
     origins: readonly string[],
-    requireAllowlisted: boolean
+    requireAllowlisted: boolean,
+    signal?: AbortSignal
   ): Promise<ActionEffect> {
     let screenshotHash: string | undefined;
     if (action.type === "observe") {
-      const bytes = await page.screenshot();
+      const bytes = await this.bounded(() => page.screenshot(), signal);
       if (!(bytes instanceof Uint8Array)) {
         throw new ControlStackError("cua_observation_invalid", "screenshot was not bytes");
       }
       screenshotHash = sha256Bytes(bytes);
     } else if (action.type === "click") {
-      await page.locator(action.selector).click();
+      await this.bounded(() => page.locator(action.selector).click(), signal);
     } else if (action.type === "type") {
-      await page.locator(action.selector).fill(action.text);
+      if ("secretRef" in action) {
+        const resolver = this.options.secrets;
+        if (!resolver) throw new ControlStackError("cua_secret_unavailable", "no secret resolver is configured");
+        const principal: CuaSecretPrincipal = {
+          workerId: dispatch.workerId,
+          missionId: dispatch.missionId,
+          unitId: dispatch.unitId,
+          attemptId: dispatch.attemptId,
+          application: this.application
+        };
+        // The resolved value lives only in this call frame: it is never hashed, stored, logged or returned.
+        const value = await this.bounded(() => resolver.resolve(action.secretRef, principal), signal);
+        await this.bounded(() => page.locator(action.selector).fill(value), signal);
+      } else {
+        await this.bounded(() => page.locator(action.selector).fill(action.text), signal);
+      }
     } else if (action.type === "scroll") {
-      await page.mouse.wheel(action.dx, action.dy);
+      await this.bounded(() => page.mouse.wheel(action.dx, action.dy), signal);
     } else {
       const approved = approvedNavigation(action.url, origins);
       if (!approved) return { uncertain: true, origin: null };
-      await page.goto(approved.href);
+      await this.bounded(() => page.goto(approved.href), signal);
     }
     const url = page.url();
     return {

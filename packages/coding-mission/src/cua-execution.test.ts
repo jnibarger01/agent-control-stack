@@ -1,6 +1,15 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { CuaExecutionAdapter, PlaywrightCuaBrowser, type CuaBrowserProvider, type CuaPage } from "./cua-execution.js";
+import {
+  CuaExecutionAdapter,
+  PlaywrightCuaBrowser,
+  secretBrokerCuaResolver,
+  type CuaBrowserContext,
+  type CuaBrowserProvider,
+  type CuaExecutionOptions,
+  type CuaPage,
+  type CuaRoute
+} from "./cua-execution.js";
 import { parseWorkUnitPayload, type CuaAction } from "./mission-model.js";
 import { CodingMissionStore } from "./store.js";
 import { WorkUnitExecutionLedger } from "./worker-execution.js";
@@ -12,8 +21,55 @@ const ORIGIN = "https://app.example";
 const SECRET = "super-secret-phrase";
 const SHOT = Buffer.from("PNG-SECRET-BYTES");
 
+/** A Playwright-shaped context: a context-wide route, its page list, and the "page" event for popups. */
+class FakeContext implements CuaBrowserContext {
+  routes: Array<(route: CuaRoute) => unknown> = [];
+  extraPages: CuaPage[] = [];
+  listeners: Array<(page: CuaPage) => void> = [];
+  blocked: string[] = [];
+  allowed: string[] = [];
+  constructor(private readonly owner: FakePage) {}
+
+  async route(_url: string, handler: (route: CuaRoute) => unknown): Promise<void> {
+    this.routes.push(handler);
+  }
+
+  pages(): CuaPage[] {
+    return [this.owner, ...this.extraPages];
+  }
+
+  on(_event: "page", listener: (page: CuaPage) => void): void {
+    this.listeners.push(listener);
+  }
+
+  /** Simulate a request leaving any page in the context; returns whether the route let it through. */
+  async request(url: string): Promise<boolean> {
+    let verdict = true;
+    for (const handler of this.routes) {
+      await handler({
+        request: () => ({ url: () => url }),
+        continue: async () => {
+          this.allowed.push(url);
+        },
+        abort: async () => {
+          verdict = false;
+          this.blocked.push(url);
+        }
+      });
+    }
+    return verdict;
+  }
+
+  /** Simulate a popup (window.open / target=_blank) opening in the context. */
+  popup(page: CuaPage): void {
+    this.extraPages.push(page);
+    for (const listener of this.listeners) listener(page);
+  }
+}
+
 class FakePage implements CuaPage {
   current = "https://preset.example/";
+  fakeContext: FakeContext = new FakeContext(this);
   calls: string[] = [];
   failClick = false;
   redirectTo: string | undefined;
@@ -23,6 +79,10 @@ class FakePage implements CuaPage {
 
   url(): string {
     return this.current;
+  }
+
+  context(): CuaBrowserContext {
+    return this.fakeContext;
   }
 
   async close(): Promise<void> {
@@ -97,7 +157,11 @@ function claimed(payload: ReturnType<typeof script> | { kind: "cua"; objective: 
   return { store, ledger, dispatch, claim };
 }
 
-function harness(payload: ReturnType<typeof script> | { kind: "cua"; objective: string }, application = "browser") {
+function harness(
+  payload: ReturnType<typeof script> | { kind: "cua"; objective: string },
+  application = "browser",
+  options: CuaExecutionOptions = {}
+) {
   const ctx = claimed(payload);
   const page = new FakePage();
   let opens = 0;
@@ -109,7 +173,7 @@ function harness(payload: ReturnType<typeof script> | { kind: "cua"; objective: 
       return page;
     }
   };
-  const adapter = new CuaExecutionAdapter(ctx.store, browser, application, () => T2);
+  const adapter = new CuaExecutionAdapter(ctx.store, browser, application, () => T2, options);
   const checkpoints = () =>
     ctx.store.db
       .prepare(
@@ -493,5 +557,223 @@ describe("governed CUA browser execution", () => {
     await expect(browser.open("browser")).rejects.toThrow("about:blank reset failed");
     expect(page.closed).toBe(true);
     expect(page.calls).toEqual(["goto:about:blank"]);
+  });
+});
+
+const BROKERED = "hunter2-brokered-value";
+
+describe("R4: typed secrets are broker-resolved references", () => {
+  it("accepts a secretRef and refuses literal secrets in the payload", () => {
+    expect(
+      parseWorkUnitPayload("cua", script([{ type: "type", selector: "#password", secretRef: "APP_LOGIN" }]))
+    ).toMatchObject({ actions: [{ type: "type", selector: "#password", secretRef: "APP_LOGIN" }] });
+    const bad = (action: Record<string, unknown>) => () =>
+      parseWorkUnitPayload("cua", { objective: "x", actions: [action] });
+    expect(bad({ type: "type", selector: "#password", text: "hunter2" })).toThrow(/bad actions/);
+    expect(bad({ type: "type", selector: "input[name=api_key]", text: "abc" })).toThrow(/bad actions/);
+    expect(bad({ type: "type", selector: "#q", text: "ghp_" + "a".repeat(36) })).toThrow(/bad actions/);
+    expect(bad({ type: "type", selector: "#q", text: "Bearer abcdefghijklmnop" })).toThrow(/bad actions/);
+    expect(bad({ type: "type", selector: "#q", text: "sk-" + "b".repeat(32) })).toThrow(/bad actions/);
+    expect(bad({ type: "type", selector: "#password", text: "x", secretRef: "APP_LOGIN" })).toThrow(/bad actions/);
+    expect(bad({ type: "type", selector: "#password", secretRef: "bad ref!" })).toThrow(/bad actions/);
+  });
+
+  it("resolves the secret only at execution and never persists it in payload, dispatch, checkpoints or result", async () => {
+    const resolved: Array<[string, Record<string, string>]> = [];
+    const { adapter, dispatch, page, store, checkpoints } = harness(
+      script([
+        { type: "navigate", url: `${ORIGIN}/login` },
+        { type: "type", selector: "#password", secretRef: "APP_LOGIN" }
+      ]),
+      "browser",
+      {
+        secrets: {
+          async resolve(ref, principal) {
+            resolved.push([ref, { ...principal }]);
+            return BROKERED;
+          }
+        }
+      }
+    );
+    const result = await adapter.execute(dispatch);
+    expect(result).toMatchObject({ outcome: "succeeded" });
+    expect(page.calls).toContain(`fill:#password:${BROKERED}`);
+    expect(resolved).toEqual([
+      [
+        "APP_LOGIN",
+        { workerId: "worker-1", missionId: "m1", unitId: "u1", attemptId: dispatch.attemptId, application: "browser" }
+      ]
+    ]);
+    const persisted = JSON.stringify([
+      store.db.prepare("SELECT payload_json FROM coding_operations").all(),
+      store.db.prepare("SELECT dispatch_json FROM work_unit_execution_attempts").all(),
+      checkpoints(),
+      result,
+      dispatch
+    ]);
+    expect(persisted).toContain("APP_LOGIN");
+    expect(persisted).not.toContain(BROKERED);
+  });
+
+  it("refuses a secretRef script before any browser call when no resolver is configured", async () => {
+    const { adapter, dispatch, page, opens, checkpoints } = harness(
+      script([{ type: "type", selector: "#password", secretRef: "APP_LOGIN" }])
+    );
+    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+      outcome: "failed",
+      failure: { category: "policy_denied", nativeCode: "cua_secret_unavailable" }
+    });
+    expect(opens()).toBe(0);
+    expect(page.calls).toEqual([]);
+    expect(checkpoints()).toEqual([]);
+  });
+
+  it("leases the scope once for the dispatch principal through the secret broker and revokes it", async () => {
+    const events: string[] = [];
+    const handle = {
+      injectInto(env: Record<string, string | undefined>, redeemer: Record<string, string>) {
+        events.push(`inject:${JSON.stringify(redeemer)}`);
+        env.APP_LOGIN = BROKERED;
+      }
+    };
+    const resolver = secretBrokerCuaResolver({
+      async lease(request) {
+        events.push(`lease:${request.scope}:${request.maxUses}:${JSON.stringify(request.principal)}`);
+        return handle;
+      },
+      async revoke(revoked) {
+        expect(revoked).toBe(handle);
+        events.push("revoke");
+      }
+    });
+    const value = await resolver.resolve("APP_LOGIN", {
+      workerId: "worker-1",
+      missionId: "m1",
+      unitId: "u1",
+      attemptId: "att1",
+      application: "browser"
+    });
+    expect(value).toBe(BROKERED);
+    const principal = JSON.stringify({
+      workerId: "worker-1",
+      workItemId: "m1:u1",
+      attemptId: "att1",
+      engineId: "browser"
+    });
+    expect(events).toEqual([`lease:APP_LOGIN:1:${principal}`, `inject:${principal}`, "revoke"]);
+  });
+});
+
+describe("R3: browser boundary", () => {
+  it("enforces the origin allowlist on the whole context before the first action", async () => {
+    const { adapter, dispatch, page } = harness(script([{ type: "navigate", url: `${ORIGIN}/inbox` }]));
+    await expect(adapter.execute(dispatch)).resolves.toMatchObject({ outcome: "succeeded" });
+    expect(page.fakeContext.routes).toHaveLength(1);
+    await expect(page.fakeContext.request(`${ORIGIN}/api`)).resolves.toBe(true);
+    await expect(page.fakeContext.request("https://evil.example/exfil")).resolves.toBe(false);
+    await expect(page.fakeContext.request("javascript:alert(1)")).resolves.toBe(false);
+    expect(page.fakeContext.blocked).toEqual(["https://evil.example/exfil", "javascript:alert(1)"]);
+  });
+
+  it("treats a popup as an escape: closes it, marks the action uncertain and stops", async () => {
+    const { adapter, dispatch, page, checkpoints } = harness(
+      script([{ type: "navigate", url: `${ORIGIN}/inbox` }, { type: "click", selector: "#open" }, { type: "observe" }])
+    );
+    const popup = new FakePage();
+    popup.current = "https://evil.example/";
+    const original = page.locator.bind(page);
+    page.locator = (selector: string) => ({
+      ...original(selector),
+      click: async () => {
+        page.calls.push(`click:${selector}`);
+        page.fakeContext.popup(popup);
+      }
+    });
+    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+      outcome: "unknown",
+      externalStateUncertain: true
+    });
+    expect(checkpoints().map((row) => [row.action_type, row.state])).toEqual([
+      ["navigate", "committed"],
+      ["click", "uncertain"]
+    ]);
+    expect(page.calls).not.toContain("screenshot");
+    await Promise.resolve();
+    expect(popup.closed).toBe(true);
+    expect(page.closed).toBe(true);
+  });
+
+  it("fails closed when the page exposes no browser context", async () => {
+    const { adapter, dispatch, page, checkpoints } = harness(script([{ type: "observe" }]));
+    (page as unknown as { context: unknown }).context = undefined;
+    await expect(adapter.execute(dispatch)).resolves.toMatchObject({ outcome: "unknown" });
+    expect(page.calls).not.toContain("screenshot");
+    expect(checkpoints().map((row) => row.state)).toEqual(["uncertain"]);
+    expect(page.closed).toBe(true);
+  });
+
+  it("re-checks ownership immediately before each browser action", async () => {
+    const ctx = harness(script([{ type: "observe" }]));
+    const { adapter, dispatch, page, store } = ctx;
+    // The claim moves to another worker after the checkpoint is planned but before the action runs.
+    const browser = (adapter as unknown as { browser: CuaBrowserProvider }).browser;
+    const open = browser.open.bind(browser);
+    browser.open = async (application: string) => {
+      const opened = await open(application);
+      store.db.prepare("UPDATE coding_operations SET worker_id = 'worker-2' WHERE operation_id = 'u1'").run();
+      return opened;
+    };
+    await expect(adapter.execute(dispatch)).rejects.toMatchObject({ code: "coding_mission_claim_conflict" });
+    expect(page.calls).not.toContain("screenshot");
+    expect(page.closed).toBe(true);
+  });
+
+  it("bounds every browser call by a deadline and closes the page", async () => {
+    const { adapter, dispatch, page, checkpoints } = harness(script([{ type: "observe" }]), "browser", {
+      actionTimeoutMs: 30
+    });
+    page.screenshot = () => new Promise<Uint8Array>(() => undefined);
+    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+      outcome: "unknown",
+      externalStateUncertain: true
+    });
+    expect(checkpoints().map((row) => row.state)).toEqual(["uncertain"]);
+    expect(page.closed).toBe(true);
+  });
+
+  it("aborts a hung browser call on the signal as an uncertain cancellation", async () => {
+    const controller = new AbortController();
+    const { adapter, dispatch, page, checkpoints } = harness(
+      script([
+        { type: "navigate", url: `${ORIGIN}/inbox` },
+        { type: "click", selector: "#hang" }
+      ]),
+      "browser",
+      { actionTimeoutMs: 60_000 }
+    );
+    const original = page.locator.bind(page);
+    page.locator = (selector: string) => ({
+      ...original(selector),
+      click: () => {
+        setTimeout(() => controller.abort(), 10);
+        return new Promise<void>(() => undefined);
+      }
+    });
+    await expect(adapter.execute(dispatch, controller.signal)).resolves.toMatchObject({
+      outcome: "cancelled",
+      externalStateUncertain: true
+    });
+    expect(checkpoints().map((row) => [row.action_type, row.state])).toEqual([
+      ["navigate", "committed"],
+      ["click", "uncertain"]
+    ]);
+    expect(page.closed).toBe(true);
+  });
+
+  it("bounds browser open by the deadline", async () => {
+    const ctx = claimed(script([{ type: "observe" }]));
+    const browser: CuaBrowserProvider = { open: () => new Promise<CuaPage>(() => undefined) };
+    const adapter = new CuaExecutionAdapter(ctx.store, browser, "browser", () => T2, { actionTimeoutMs: 30 });
+    await expect(adapter.execute(ctx.dispatch)).resolves.toMatchObject({ outcome: "unknown" });
   });
 });
