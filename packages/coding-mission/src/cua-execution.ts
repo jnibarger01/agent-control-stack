@@ -370,6 +370,12 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     return this.options.lockTtlMs ?? Math.max(5 * 60_000, 4 * this.timeoutMs);
   }
 
+  /**
+   * Single-host assumption (L2): lock expiry uses this process's clock. The store is embedded SQLite, whose `now` is
+   * the same local clock, so there is no shared DB clock to use. Executors sharing a store need clock skew well under
+   * lockTtlMs. Skew past that can only let a second host take the lock early, which the fence/owner checks turn into a
+   * fail-closed cua_execution_lock_lost for the first run. See docs/mission-runtime.md.
+   */
   private acquireLock(dispatch: DispatchEnvelope): string {
     const owner = randomUUID();
     const now = this.now();
