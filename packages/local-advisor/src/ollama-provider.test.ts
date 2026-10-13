@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { OllamaProvider, DEFAULT_OLLAMA_BASE_URL } from "./ollama-provider.js";
+import { OllamaProvider, DEFAULT_OLLAMA_BASE_URL, chatModelNames } from "./ollama-provider.js";
 import { ProviderError } from "./provider.js";
 
 const HEX = "c".repeat(64);
@@ -153,5 +153,17 @@ describe("OllamaProvider: failures, retries, cancellation", () => {
     expect(() => new OllamaProvider({ model: "m", maxConcurrency: 9 })).toThrow();
     expect(() => new OllamaProvider({ model: "m", retries: 10 })).toThrow();
     expect(() => new OllamaProvider({ model: "m", expectedDigest: "sha256:xyz" as `sha256:${string}` })).toThrow();
+  });
+});
+
+describe("chatModelNames", () => {
+  it("keeps completion models and drops non-chat capabilities", () => {
+    const names = chatModelNames([
+      { name: "nimble:latest", digest: DIGEST, capabilities: ["decision"] },
+      { name: "embeddinggemma:latest", digest: DIGEST, capabilities: ["embedding"] },
+      { name: "qwen2.5-coder:7b", digest: DIGEST, capabilities: ["completion", "tools"] },
+      { name: "legacy:7b", digest: DIGEST }
+    ]);
+    expect([...names].sort()).toEqual(["legacy:7b", "qwen2.5-coder:7b"]);
   });
 });

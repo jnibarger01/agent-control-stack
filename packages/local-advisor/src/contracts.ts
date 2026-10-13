@@ -17,6 +17,7 @@ export type AdvisorStatus = (typeof ADVISOR_STATUSES)[number];
 export const ADVISOR_REASONS = [
   "no_evidence",
   "provider_unavailable",
+  "memory_pressure",
   "model_not_installed",
   "model_digest_mismatch",
   "provider_timeout",
@@ -43,7 +44,8 @@ export const evidenceItemSchema = z
   .strict();
 export type EvidenceItem = z.infer<typeof evidenceItemSchema>;
 
-export const advisorRequestSchema = z
+/** Raw object shape of `advisor.v1` requests. Exposed so MCP tools can reuse it without the `operation` field. */
+export const advisorRequestObject = z
   .object({
     schemaVersion: z.literal(ADVISOR_SCHEMA_VERSION),
     requestId: identifier,
@@ -63,13 +65,14 @@ export const advisorRequestSchema = z
       })
       .strict()
   })
-  .strict()
-  .superRefine((request, ctx) => {
+  .strict();
+
+export const advisorRequestSchema = advisorRequestObject.superRefine((request, ctx) => {
     const ids = request.context.evidence.map((item) => item.id);
     if (new Set(ids).size !== ids.length) {
       ctx.addIssue({ code: "custom", path: ["context", "evidence"], message: "evidence ids must be unique" });
     }
-  });
+});
 export type AdvisorRequest = z.infer<typeof advisorRequestSchema>;
 
 /**

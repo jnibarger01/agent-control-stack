@@ -72,7 +72,8 @@ export const EVENT_TYPES = [
   "verification.decided",
   "jc.session",
   "jc.tool.finished",
-  "jc.coverage"
+  "jc.coverage",
+  "advisor.recorded"
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -106,7 +107,9 @@ export const EVENT_STAGE: Record<EventType, EventStage> = {
   // observed ACS stage (tool_execution / result) and thereby satisfy a required one.
   "jc.session": LIFECYCLE_STAGE,
   "jc.tool.finished": LIFECYCLE_STAGE,
-  "jc.coverage": LIFECYCLE_STAGE
+  "jc.coverage": LIFECYCLE_STAGE,
+  // Advisor output is asserted lifecycle evidence. It must not satisfy an ACS stage or produce PASS.
+  "advisor.recorded": LIFECYCLE_STAGE
 };
 
 export const SEVERITIES = ["info", "low", "medium", "high", "critical"] as const;

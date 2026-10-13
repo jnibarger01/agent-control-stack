@@ -3,7 +3,8 @@ export type ProviderErrorKind =
   | "aborted"
   | "digest_mismatch"
   | "model_not_installed"
-  | "malformed_response";
+  | "malformed_response"
+  | "memory_pressure";
 
 /** A provider failure. Failures are never converted into a review verdict by the advisor. */
 export class ProviderError extends Error {

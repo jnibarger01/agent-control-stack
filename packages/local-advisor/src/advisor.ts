@@ -17,6 +17,7 @@ import { canonicalJson, randomNonce, sha256Ref } from "./util.js";
 
 export interface RunAdvisorOptions {
   readonly now?: () => number;
+  readonly signal?: AbortSignal;
 }
 
 interface RedactedEvidence {
@@ -109,6 +110,8 @@ export async function runAdvisor(
   });
 
   const controller = new AbortController();
+  if (options.signal?.aborted) controller.abort();
+  else options.signal?.addEventListener("abort", () => controller.abort(), { once: true });
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
@@ -132,6 +135,7 @@ export async function runAdvisor(
             ? finish({ status: "timeout", reason: "provider_timeout" })
             : finish({ status: "unavailable", reason: "cancelled" });
         }
+        if (error.kind === "memory_pressure") return finish({ status: "unavailable", reason: "memory_pressure" });
         if (error.kind === "digest_mismatch") return finish({ status: "unavailable", reason: "model_digest_mismatch" });
         if (error.kind === "model_not_installed") return finish({ status: "unavailable", reason: "model_not_installed" });
         if (error.kind === "malformed_response") {
