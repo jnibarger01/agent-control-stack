@@ -253,6 +253,27 @@ describe("governed unit runner deadline", () => {
     expect(w.calls).toHaveLength(0);
   });
 
+  it("hands the adapter the live claim on both the governed and the ungoverned path", async () => {
+    for (const governed of [true, false]) {
+      const w = world({ governed });
+      const seen: Array<unknown> = [];
+      const adapter: WorkUnitExecutorAdapter = {
+        lane: "dc",
+        async execute(dispatch, _signal, claim) {
+          seen.push(claim);
+          return w.ok(dispatch);
+        }
+      };
+      await new GovernedUnitRunner({
+        execution: w.exec,
+        adapters: [adapter],
+        now: () => w.state.now,
+        newClaimToken: () => "tok-1"
+      }).runUnit(w.input);
+      expect(seen).toEqual([{ claimToken: "tok-1" }]);
+    }
+  });
+
   it("runs a mission with no authority binding without inventing a deadline", async () => {
     const w = world({ governed: false });
     const result = await w.runner([w.adapter(w.ok)]).runUnit(w.input);
