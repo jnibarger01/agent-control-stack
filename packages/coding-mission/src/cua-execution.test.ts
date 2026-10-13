@@ -5,6 +5,7 @@ import {
   CuaExecutionAdapter,
   PlaywrightCuaBrowser,
   secretBrokerCuaResolver,
+  type CuaAuthorityRecheck,
   type CuaBrowserContext,
   type CuaBrowserProvider,
   type CuaExecutionOptions,
@@ -15,7 +16,7 @@ import { parseWorkUnitPayload, type CuaAction } from "./mission-model.js";
 import { CodingMissionStore } from "./store.js";
 import { cuaActionHash, cuaCheckpointReceiptHash, cuaResultHash } from "./cua-evidence.js";
 import { WorkUnitExecutionLedger, resultBase, type DispatchEnvelope } from "./worker-execution.js";
-import { setupRealGrants } from "./child-work-real-grants-fixture.js";
+import { HUMAN, setupRealGrants } from "./child-work-real-grants-fixture.js";
 
 const T0 = "2026-10-10T00:00:00.000Z";
 const T1 = "2026-10-10T00:00:01.000Z";
@@ -23,6 +24,8 @@ const T2 = "2026-10-10T00:00:02.000Z";
 const ORIGIN = "https://app.example";
 const SECRET = "super-secret-phrase";
 const SHOT = Buffer.from("PNG-SECRET-BYTES");
+/** Stand-in live authority re-check for adapter tests that are not about authority; R2 tests use the real ledger. */
+const ALLOW: CuaAuthorityRecheck = { browserAuthorityVerdict: () => ({ ok: true }) };
 
 /** A Playwright-shaped context: a context-wide route, its page list, and the "page" event for popups. */
 class FakeContext implements CuaBrowserContext {
@@ -196,7 +199,7 @@ function harness(
       return page;
     }
   };
-  const adapter = new CuaExecutionAdapter(ctx.store, browser, application, () => T2, options);
+  const adapter = new CuaExecutionAdapter(ctx.store, browser, application, () => T2, { authority: ALLOW, ...options });
   const checkpoints = () =>
     ctx.store.db
       .prepare(
@@ -796,7 +799,10 @@ describe("R3: browser boundary", () => {
   it("bounds browser open by the deadline", async () => {
     const ctx = claimed(script([{ type: "observe" }]));
     const browser: CuaBrowserProvider = { open: () => new Promise<CuaPage>(() => undefined) };
-    const adapter = new CuaExecutionAdapter(ctx.store, browser, "browser", () => T2, { actionTimeoutMs: 30 });
+    const adapter = new CuaExecutionAdapter(ctx.store, browser, "browser", () => T2, {
+      authority: ALLOW,
+      actionTimeoutMs: 30
+    });
     await expect(adapter.execute(ctx.dispatch)).resolves.toMatchObject({ outcome: "unknown" });
   });
 });
@@ -960,7 +966,7 @@ describe("R1: evidence-bound CUA acceptance", () => {
         return page;
       }
     };
-    const adapter = new CuaExecutionAdapter(store, browser, "browser", () => T2);
+    const adapter = new CuaExecutionAdapter(store, browser, "browser", () => T2, { authority: ALLOW });
     const first = adapter.execute(firstDispatch);
     await new Promise((resolve) => setTimeout(resolve, 20));
     // A second attempt runs to completion on the SAME adapter while the first is mid-action.
@@ -1211,10 +1217,165 @@ describe("R2: the executor runs only the stored dispatch", () => {
         }
       },
       "browser",
-      () => f.iso(2_100)
+      () => f.iso(2_100),
+      { authority: f.ledger }
     );
     const result = await adapter.execute(dispatch);
     expect(result.outcome).toBe("succeeded");
     expect(opens).toBe(1);
+  });
+});
+
+describe("R2: live authority re-check at the browser boundary", () => {
+  const actions: CuaAction[] = [{ type: "navigate", url: `${ORIGIN}/` }, { type: "observe" }];
+  const browserTool = {
+    runtime: "browser" as const,
+    toolName: "cua" as const,
+    allowedOrigins: [ORIGIN],
+    allowedApplications: ["browser"]
+  };
+
+  /** A governed cua attempt under a real human-issued browser grant, dispatched by the real verifier. */
+  function realGrant(options: { authority?: (ledger: CuaAuthorityRecheck) => CuaAuthorityRecheck } = {}) {
+    const f = setupRealGrants({ cuaRootPayload: script(actions), extraToolClasses: [browserTool] });
+    f.ledger.grantMissionAuthority({ missionId: f.item.id, grantId: f.grant.grantId });
+    expect(f.missions.claimUnit(f.item.id, "root", f.claim)).toMatchObject({ ok: true });
+    const dispatcher = new WorkUnitExecutionLedger(f.missions, { authority: f.ledger });
+    const dispatch = dispatcher.beginDispatch({
+      missionId: f.item.id,
+      unitId: "root",
+      claimToken: f.claim.token,
+      workerId: f.claim.workerId,
+      lane: "cua",
+      now: f.iso(2_000)
+    });
+    const page = new FakePage();
+    let opens = 0;
+    const authority = options.authority ? options.authority(f.ledger) : f.ledger;
+    const adapter = new CuaExecutionAdapter(
+      f.missions,
+      {
+        async open() {
+          opens += 1;
+          page.current = "about:blank";
+          return page;
+        }
+      },
+      "browser",
+      () => f.state.now,
+      { authority }
+    );
+    return { ...f, dispatch, adapter, page, opens: () => opens };
+  }
+  const refusedBeforeBrowser = async (h: ReturnType<typeof realGrant>, code: string) => {
+    const result = await h.adapter.execute(h.dispatch);
+    expect(result).toMatchObject({ outcome: "failed" });
+    expect(JSON.stringify(result)).toContain(code);
+    expect(h.opens()).toBe(0);
+    expect(h.page.calls).toEqual([]);
+  };
+
+  it("passes a still-valid grant and opens the browser", async () => {
+    const h = realGrant();
+    h.state.now = h.iso(2_100);
+    await expect(h.adapter.execute(h.dispatch)).resolves.toMatchObject({ outcome: "succeeded" });
+    expect(h.opens()).toBe(1);
+  });
+
+  it("refuses a grant revoked after dispatch before opening the browser", async () => {
+    const h = realGrant();
+    h.items.revokeAutonomousAuthority(h.grant.grantId, HUMAN, "stop", { via: "policy_gate", actorId: HUMAN });
+    await refusedBeforeBrowser(h, "cua_authority_revoked");
+  });
+
+  it("refuses an expired grant before opening the browser", async () => {
+    const h = realGrant();
+    h.state.now = h.iso(3_600_000);
+    await refusedBeforeBrowser(h, "cua_authority_expired");
+  });
+
+  it("refuses once now >= deadlineAt, before opening the browser", async () => {
+    const h = realGrant();
+    const deadline = h.dispatch.authority.deadlineAt!;
+    expect(Date.parse(deadline)).toBeLessThan(Date.parse(h.iso(3_600_000)));
+    h.state.now = deadline;
+    await refusedBeforeBrowser(h, "cua_authority_deadline_passed");
+  });
+
+  it("refuses when the live grant no longer covers the stored origins or applications", async () => {
+    // Grant definitions are immutable, so narrowing is modelled by the live verdict for a narrower scope.
+    for (const narrowed of [{ origins: ["https://other.example"] }, { applications: ["other-app"] }]) {
+      const h = realGrant({
+        authority: (ledger) => ({
+          browserAuthorityVerdict: (input) => ledger.browserAuthorityVerdict({ ...input, ...narrowed })
+        })
+      });
+      await refusedBeforeBrowser(h, "cua_browser_scope_not_covered");
+    }
+  });
+
+  it("refuses when the browser tool class is no longer present", async () => {
+    const h = realGrant({
+      authority: () => ({ browserAuthorityVerdict: () => ({ ok: false, reason: "cua_browser_grant_missing" }) })
+    });
+    await refusedBeforeBrowser(h, "cua_browser_grant_missing");
+    // And the real ledger reports it for a grant without one.
+    const f = setupRealGrants({ cuaRootPayload: script(actions) });
+    f.ledger.grantMissionAuthority({ missionId: f.item.id, grantId: f.grant.grantId });
+    expect(
+      f.ledger.browserAuthorityVerdict({
+        missionId: f.item.id,
+        unitId: "root",
+        origins: [ORIGIN],
+        applications: ["browser"],
+        deadlineAt: f.iso(10_000)
+      })
+    ).toEqual({ ok: false, reason: "cua_browser_grant_missing" });
+  });
+
+  it("fails closed when the grant lookup throws, or no re-check is configured", async () => {
+    const throwing = realGrant({
+      authority: () => ({
+        browserAuthorityVerdict: () => {
+          throw new Error("store unavailable");
+        }
+      })
+    });
+    await refusedBeforeBrowser(throwing, "cua_authority_unavailable");
+    const h = realGrant();
+    h.items.close();
+    await refusedBeforeBrowser(h, "cua_authority_unavailable");
+    const ctx = claimed(script(actions));
+    let opened = 0;
+    const unconfigured = new CuaExecutionAdapter(
+      ctx.store,
+      {
+        async open() {
+          opened += 1;
+          return new FakePage();
+        }
+      },
+      "browser",
+      () => T2
+    );
+    await expect(unconfigured.execute(ctx.dispatch)).resolves.toMatchObject({ outcome: "failed" });
+    expect(opened).toBe(0);
+  });
+
+  it("re-checks before every action: a revocation mid-script stops the next step", async () => {
+    let calls = 0;
+    const h = realGrant({
+      authority: (ledger) => ({
+        browserAuthorityVerdict: (input) => {
+          calls += 1;
+          return calls === 1 ? ledger.browserAuthorityVerdict(input) : { ok: false, reason: "cua_authority_revoked" };
+        }
+      })
+    });
+    h.state.now = h.iso(2_100);
+    const result = await h.adapter.execute(h.dispatch);
+    expect(JSON.stringify(result)).toContain("cua_authority_revoked");
+    expect(h.opens()).toBe(1);
+    expect(h.page.calls.filter((call) => call === "screenshot")).toEqual([]);
   });
 });

@@ -37,6 +37,11 @@ const exactOrigin = z
       return false;
     }
   }, "must be an exact http(s) origin");
+/** An exact application name: non-empty, no wildcard or glob characters (* ? [ ] { }) and no whitespace. */
+const exactApplication = id.refine(
+  (value) => !/[*?[\]{}\s]/u.test(value),
+  "must be an exact application name, not a wildcard or glob"
+);
 const uniqueList = <T extends z.ZodType<string>>(item: T, max: number) =>
   z
     .array(item)
@@ -59,7 +64,7 @@ export const browserToolClassSchema = z
     runtime: z.literal("browser"),
     toolName: z.literal("cua"),
     allowedOrigins: uniqueList(exactOrigin, 64),
-    allowedApplications: uniqueList(id, 64)
+    allowedApplications: uniqueList(exactApplication, 64)
   })
   .strict();
 export type AuthorityToolClass = z.infer<typeof commanderToolClassSchema> | z.infer<typeof browserToolClassSchema>;

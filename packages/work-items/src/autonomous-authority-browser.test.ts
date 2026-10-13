@@ -58,4 +58,23 @@ describe("R2: browser runtime in the authority schema", () => {
     );
     expect(parse({ runtime: "mcp", toolName: "x" })).toBe(false);
   });
+
+  it("rejects wildcard, glob-like, whitespace and empty application names", () => {
+    for (const application of [
+      "*",
+      "app*",
+      "a?p",
+      "[ab]",
+      "app]",
+      "{a,b}",
+      "a}",
+      " app",
+      "my app",
+      "app\t",
+      "app\n",
+      ""
+    ])
+      expect(parse({ ...browser, allowedApplications: [application] }), JSON.stringify(application)).toBe(false);
+    expect(parse({ ...browser, allowedApplications: ["browser", "browser-profile-2", "chrome.work"] })).toBe(true);
+  });
 });

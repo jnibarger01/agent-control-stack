@@ -129,7 +129,26 @@ export function secretBrokerCuaResolver(
   };
 }
 
+/**
+ * Re-reads the live authority for a CUA attempt from the store at the browser boundary. MissionAuthorityLedger
+ * implements it. It must never return a cached or caller-supplied verdict.
+ */
+export interface CuaAuthorityRecheck {
+  browserAuthorityVerdict(input: {
+    missionId: string;
+    unitId: string;
+    origins: readonly string[];
+    applications: readonly string[];
+    deadlineAt: string | undefined;
+  }): { ok: true } | { ok: false; reason: string };
+}
+
 export interface CuaExecutionOptions {
+  /**
+   * Live authority re-check, run before opening the browser and before every action. Required: without it every CUA
+   * script is refused before any browser call.
+   */
+  authority?: CuaAuthorityRecheck;
   /** Resolves `secretRef` type actions. Without it, a script that types a secret is refused before any action. */
   secrets?: CuaSecretResolver;
   /** Deadline for every single browser call (open, route setup, action, close). Default 30s. */
@@ -454,6 +473,31 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     return stored;
   }
 
+  /** The live authority verdict for this attempt, from the stored dispatch only. Any failure is a refusal code. */
+  private authorityRefusal(
+    stored: DispatchEnvelope,
+    origins: readonly string[],
+    applications: readonly string[]
+  ): string | undefined {
+    const checker = this.options.authority;
+    if (!checker) return "cua_authority_unavailable";
+    try {
+      const verdict = checker.browserAuthorityVerdict({
+        missionId: stored.missionId,
+        unitId: stored.unitId,
+        origins,
+        applications,
+        deadlineAt: stored.authority?.deadlineAt
+      });
+      if (verdict.ok === true) return undefined;
+      return typeof verdict.reason === "string" && verdict.reason.startsWith("cua_")
+        ? verdict.reason
+        : "cua_authority_unavailable";
+    } catch {
+      return "cua_authority_unavailable";
+    }
+  }
+
   private async executeLocked(
     dispatch: DispatchEnvelope,
     owner: string,
@@ -542,6 +586,18 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
             "policy_denied",
             "cua_origin_denied",
             "page origin is not allowlisted",
+            receipts
+          );
+        }
+        // Live authority re-check right before this browser step (the first one opens the browser): a grant revoked,
+        // expired, past its dispatch deadline or narrowed since dispatch stops the script here.
+        const authorityRefusal = this.authorityRefusal(stored, origins, applications);
+        if (authorityRefusal) {
+          return this.failed(
+            dispatch,
+            "policy_denied",
+            authorityRefusal,
+            "CUA authority no longer covers this attempt",
             receipts
           );
         }

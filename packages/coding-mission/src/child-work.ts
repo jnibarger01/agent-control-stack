@@ -145,6 +145,15 @@ export interface LedgerOptions {
   claimTtlMs?: number;
 }
 
+/** Why the browser-boundary authority re-check refused. */
+export type CuaAuthorityRefusal =
+  | "cua_authority_revoked"
+  | "cua_authority_expired"
+  | "cua_authority_deadline_passed"
+  | "cua_browser_grant_missing"
+  | "cua_browser_scope_not_covered"
+  | "cua_authority_unavailable";
+
 export const DEFAULT_CLAIM_TTL_MS = 300_000;
 
 /** How far ahead of ACS's clock a claim timestamp may be and still count as live. */
@@ -436,6 +445,54 @@ export class MissionAuthorityLedger {
     // recovered. A small skew is tolerated; anything further ahead of ACS's clock is not a live claim.
     const age = Date.parse(now) - Date.parse(parent.claimedAt);
     return age >= -MAX_CLAIM_CLOCK_SKEW_MS && age <= ttl;
+  }
+
+  /**
+   * Re-check, at the browser boundary, that the authority a CUA attempt runs under still covers it. Everything is
+   * re-read from the store on every call (no cached or caller-supplied grant): the mission or unit authority record,
+   * the live grant and its revocation. `deadlineAt` comes from the hash-verified stored dispatch. Any doubt, including
+   * a lookup that throws, is a refusal.
+   */
+  browserAuthorityVerdict(input: {
+    missionId: string;
+    unitId: string;
+    origins: readonly string[];
+    applications: readonly string[];
+    deadlineAt: string | undefined;
+  }): { ok: true } | { ok: false; reason: CuaAuthorityRefusal } {
+    const refuse = (reason: CuaAuthorityRefusal) => ({ ok: false as const, reason });
+    try {
+      const now = Date.parse(this.clock());
+      if (!Number.isFinite(now)) return refuse("cua_authority_unavailable");
+      const unit = this.store.workUnits(input.missionId).find((candidate) => candidate.unitId === input.unitId);
+      if (!unit) return refuse("cua_authority_unavailable");
+      const missionAuthority = this.missionAuthority(input.missionId);
+      if (!missionAuthority) return refuse("cua_authority_unavailable");
+      const record = unit.parentUnitId ? this.unitAuthority(input.missionId, input.unitId) : undefined;
+      if (unit.parentUnitId && !record) return refuse("cua_authority_unavailable");
+      const definition = record?.definition ?? missionAuthority.definition;
+      const grantId = record?.grantId ?? missionAuthority.grantId;
+      if (this.grantRevoked(grantId)) return refuse("cua_authority_revoked");
+      const grant = this.readGrant(grantId);
+      if (!grant) return refuse("cua_authority_unavailable");
+      for (const expiresAt of [definition.expiresAt, grant.definition.expiresAt]) {
+        const at = Date.parse(expiresAt);
+        if (!Number.isFinite(at) || !(now < at)) return refuse("cua_authority_expired");
+      }
+      const deadline = input.deadlineAt === undefined ? Number.NaN : Date.parse(input.deadlineAt);
+      if (!Number.isFinite(deadline) || !(now < deadline)) return refuse("cua_authority_deadline_passed");
+      const browserGrants = definition.toolClasses.filter((tool) => tool.runtime === "browser");
+      if (browserGrants.length === 0) return refuse("cua_browser_grant_missing");
+      if (input.origins.length === 0 || input.applications.length === 0) return refuse("cua_browser_scope_not_covered");
+      const covered = browserGrants.some(
+        (tool) =>
+          input.origins.every((origin) => tool.allowedOrigins.includes(origin)) &&
+          input.applications.every((application) => tool.allowedApplications.includes(application))
+      );
+      return covered ? { ok: true } : refuse("cua_browser_scope_not_covered");
+    } catch {
+      return refuse("cua_authority_unavailable");
+    }
   }
 
   /** Uses the canonical revocation reader, which checks the projection against its audit event. A mismatch counts as revoked. */
