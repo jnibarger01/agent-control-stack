@@ -194,7 +194,7 @@ export class OllamaProvider implements AdvisorProvider {
 }
 
 function matchesModel(installedName: string, wanted: string): boolean {
-  return installedName === wanted || installedName === `${wanted}:latest` || `${installedName}` === wanted;
+  return installedName === wanted || installedName === `${wanted}:latest`;
 }
 
 async function readInstalled(fetchImpl: typeof fetch, base: URL, signal: AbortSignal): Promise<InstalledOllamaModel[]> {
@@ -239,7 +239,6 @@ export async function listInstalledOllamaModels(
   const base = loopbackBase(options.baseUrl);
   return readInstalled(options.fetchImpl ?? fetch, base, options.signal ?? new AbortController().signal);
 }
-
 
 /**
  * Names selectable for a chat review.
