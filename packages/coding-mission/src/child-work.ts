@@ -161,8 +161,9 @@ const LANE_RUNTIME: Record<ExecutorLane, string | undefined> = {
   coder: "sandbox",
   // The authority schema has no MCP runtime, so no grant can authorize this lane. It is refused, not waved through.
   mcp: undefined,
-  // The authority schema has no browser runtime yet, so no grant can authorize the cua lane. It fails closed like mcp.
-  cua: undefined
+  // The cua lane drives a real browser. Only an explicit `browser` grant authorizes it, and only for the origins and
+  // applications that grant names (checked in verifyDispatch).
+  cua: "browser"
 };
 
 /** Lanes an authority grants a tool runtime for. The same mapping `verifyDispatch` enforces. */
@@ -1117,6 +1118,21 @@ export class MissionAuthorityLedger {
         return refuse("lane_not_permitted");
       }
       const payload = unit.payload;
+      if (input.lane === "cua") {
+        // A browser runtime grant alone is not enough: the unit's whole origin and application allowlist must sit inside
+        // one browser grant. A unit with no cua payload, or no origins or applications, is never authorized.
+        if (payload?.kind !== "cua") return refuse("browser_scope_not_permitted");
+        const origins = payload.allowedOrigins ?? [];
+        const applications = payload.allowedApplications ?? [];
+        if (origins.length === 0 || applications.length === 0) return refuse("browser_scope_not_permitted");
+        const covered = definition.toolClasses.some(
+          (tool) =>
+            tool.runtime === "browser" &&
+            origins.every((origin) => tool.allowedOrigins.includes(origin)) &&
+            applications.every((application) => tool.allowedApplications.includes(application))
+        );
+        if (!covered) return refuse("browser_scope_not_permitted");
+      }
       if (
         payload?.kind === "tool" &&
         !definition.toolClasses.some((tool) => tool.runtime === runtime && tool.toolName === payload.toolName)

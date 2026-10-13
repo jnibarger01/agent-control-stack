@@ -415,12 +415,56 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     }
   }
 
+  /**
+   * The dispatch persisted for this attempt, after recomputing its hash and requiring the caller's envelope to equal it
+   * canonically. Throws `cua_dispatch_missing`, `cua_dispatch_integrity` or `cua_dispatch_mismatch`.
+   */
+  private storedDispatch(dispatch: DispatchEnvelope): DispatchEnvelope {
+    const row = this.store.db
+      .prepare(
+        "SELECT executor_lane, dispatch_hash, dispatch_json FROM work_unit_execution_attempts WHERE attempt_id = ?"
+      )
+      .get(dispatch.attemptId) as { executor_lane: string; dispatch_hash: string; dispatch_json: string } | undefined;
+    if (!row || row.executor_lane !== this.lane || typeof row.dispatch_json !== "string") {
+      throw new ControlStackError("cua_dispatch_missing", "no stored CUA dispatch for this attempt");
+    }
+    let stored: DispatchEnvelope;
+    try {
+      stored = JSON.parse(row.dispatch_json) as DispatchEnvelope;
+    } catch {
+      throw new ControlStackError("cua_dispatch_integrity", "stored CUA dispatch is unreadable");
+    }
+    if (
+      !stored ||
+      typeof stored !== "object" ||
+      stableHash(stored) !== row.dispatch_hash ||
+      stored.attemptId !== dispatch.attemptId ||
+      stored.lane !== this.lane
+    ) {
+      throw new ControlStackError("cua_dispatch_integrity", "stored CUA dispatch does not match its recorded hash");
+    }
+    let suppliedHash: string;
+    try {
+      suppliedHash = stableHash(dispatch);
+    } catch {
+      suppliedHash = "";
+    }
+    if (suppliedHash !== row.dispatch_hash) {
+      throw new ControlStackError("cua_dispatch_mismatch", "supplied CUA dispatch differs from the stored dispatch");
+    }
+    return stored;
+  }
+
   private async executeLocked(
     dispatch: DispatchEnvelope,
     owner: string,
     signal?: AbortSignal
   ): Promise<ResultEnvelope> {
     this.lockOwner = owner;
+    // The script, origin allowlist and application come only from the dispatch ACS stored for this attempt, never from
+    // the caller's envelope. The stored dispatch must still hash to its recorded hash, and the caller's envelope must be
+    // that exact dispatch; anything else fails closed before any browser call.
+    const stored = this.storedDispatch(dispatch);
     // Resume uses persisted checkpoints only after verifying each against the persisted attempt and dispatch.
     const verified = verifyCuaCheckpoints(this.store.db, dispatch.attemptId, this.application);
     if (!verified.ok) {
@@ -441,7 +485,7 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
 
     let payload;
     try {
-      payload = parseWorkUnitPayload("cua", dispatch.payload ?? {});
+      payload = parseWorkUnitPayload("cua", stored.payload ?? {});
     } catch (error) {
       const message = error instanceof Error ? error.message : "cua payload is invalid";
       return this.failed(dispatch, "invalid_output", "cua_payload_invalid", message, []);

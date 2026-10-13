@@ -18,19 +18,57 @@ export const authorityResourceSchema = changeSetResourceSchema
     if (!filesystem && resource.coverage !== "exact")
       context.addIssue({ code: "custom", message: "only filesystem resources support descendant scope" });
   });
+/** An exact http(s) origin: scheme, host and optional port only, no path, credentials, wildcard or trailing slash. */
+const exactOrigin = z
+  .string()
+  .min(1)
+  .max(256)
+  .refine((value) => {
+    if (/[\s*\\]/u.test(value)) return false;
+    try {
+      const url = new URL(value);
+      return (
+        (url.protocol === "http:" || url.protocol === "https:") &&
+        url.username === "" &&
+        url.password === "" &&
+        url.origin === value
+      );
+    } catch {
+      return false;
+    }
+  }, "must be an exact http(s) origin");
+const uniqueList = <T extends z.ZodType<string>>(item: T, max: number) =>
+  z
+    .array(item)
+    .min(1)
+    .max(max)
+    .refine((values) => new Set(values).size === values.length, "must be unique");
+export const commanderToolClassSchema = z
+  .object({
+    runtime: z.enum(["desktop_commander", "jace_commander", "sandbox"]),
+    toolName: id
+  })
+  .strict();
+/**
+ * The browser runtime (the cua lane). A grant names the exact origins and applications it covers; a dispatch is only
+ * authorized when its whole origin and application allowlist is inside one browser grant. Nothing is implied by the
+ * runtime alone, so an empty or wildcard scope cannot be expressed.
+ */
+export const browserToolClassSchema = z
+  .object({
+    runtime: z.literal("browser"),
+    toolName: z.literal("cua"),
+    allowedOrigins: uniqueList(exactOrigin, 64),
+    allowedApplications: uniqueList(id, 64)
+  })
+  .strict();
+export type AuthorityToolClass = z.infer<typeof commanderToolClassSchema> | z.infer<typeof browserToolClassSchema>;
 export const autonomousAuthorityDefinitionSchema = z
   .object({
     executingActorId: id,
     scope: z.array(authorityResourceSchema).min(1).max(512),
     toolClasses: z
-      .array(
-        z
-          .object({
-            runtime: z.enum(["desktop_commander", "jace_commander", "sandbox"]),
-            toolName: id
-          })
-          .strict()
-      )
+      .array(z.union([commanderToolClassSchema, browserToolClassSchema]))
       .min(1)
       .max(512),
     maximumPrivileges: z.array(changeSetPrivilegeSchema).min(1).max(16),

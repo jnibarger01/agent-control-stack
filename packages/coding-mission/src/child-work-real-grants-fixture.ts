@@ -30,7 +30,22 @@ function realGrantReader(items: SqliteWorkItemStore): GrantReader {
   };
 }
 
-export function setupRealGrants() {
+export interface RealGrantOptions {
+  /** Extra tool classes on the human-issued grant, for example a `browser` grant. */
+  extraToolClasses?: AutonomousAuthorityDefinition["toolClasses"];
+  /** Replace the grant's tool classes entirely. */
+  toolClasses?: AutonomousAuthorityDefinition["toolClasses"];
+  /** Make the root unit a cua unit with this payload. */
+  cuaRootPayload?: {
+    kind: "cua";
+    objective: string;
+    allowedApplications?: string[];
+    allowedOrigins?: string[];
+    actions?: unknown[];
+  };
+}
+
+export function setupRealGrants(options: RealGrantOptions = {}) {
   const root = mkdtempSync(join(tmpdir(), "acs-real-grants-"));
   const dbPath = join(root, "control.db");
   const items = new SqliteWorkItemStore(dbPath);
@@ -48,9 +63,10 @@ export function setupRealGrants() {
   const definition: AutonomousAuthorityDefinition = {
     executingActorId: ACTOR,
     scope: [{ kind: "path", id: root, coverage: "descendants" }],
-    toolClasses: [
+    toolClasses: options.toolClasses ?? [
       { runtime: "desktop_commander", toolName: "read_file" },
-      { runtime: "sandbox", toolName: "code_edit" }
+      { runtime: "sandbox", toolName: "code_edit" },
+      ...(options.extraToolClasses ?? [])
     ],
     maximumPrivileges: ["fs.read", "fs.write"],
     expiresAt: iso(3_600_000),
@@ -76,7 +92,11 @@ export function setupRealGrants() {
   });
   missions.addWorkUnits(
     item.id,
-    [{ unitId: "root", kind: "agent", title: "root", payload: { role: "lead", prompt: "p" } }],
+    [
+      options.cuaRootPayload
+        ? { unitId: "root", kind: "cua", title: "root", payload: options.cuaRootPayload as never }
+        : { unitId: "root", kind: "agent", title: "root", payload: { role: "lead", prompt: "p" } }
+    ],
     iso(0)
   );
   const state = { now: iso(1_000) };
