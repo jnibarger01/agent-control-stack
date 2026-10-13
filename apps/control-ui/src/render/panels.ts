@@ -20,6 +20,8 @@ import {
   type MissionControlViewModel
 } from "../types.js";
 import { auditAttributesHtml } from "../visibility.js";
+import { normalizeIntentKey } from "../operator-insights.js";
+import { statusGlyph } from "../operator-ux.js";
 
 const OPERATOR_ATTENTION_STATUSES: ReadonlySet<WorkItem["status"]> = new Set([
   "blocked",
@@ -160,7 +162,7 @@ function agentCard(agent: MissionControlAgent): string {
   const error = agent.lastError
     ? `<span class="agent-card-error">${escapeHtml(redactSecrets(agent.lastError))}</span>`
     : "";
-  return `<button type="button" class="agent-card" data-agent="${escapeHtml(agent.id)}" data-agent-id="${escapeHtml(agent.id)}" aria-label="Open ${escapeHtml(agent.displayName)}">
+  return `<button type="button" class="agent-card" data-agent="${escapeHtml(agent.id)}" data-agent-id="${escapeHtml(agent.id)}"${agent.lastHeartbeatAt || agent.lastEventAt ? ` data-last-seen="${escapeHtml(agent.lastHeartbeatAt ?? agent.lastEventAt ?? "")}"` : ""} aria-label="Open ${escapeHtml(agent.displayName)}">
     <span class="agent-card-head">
       <span class="agent-avatar" aria-hidden="true">${escapeHtml(agentInitial(agent))}</span>
       <span class="agent-card-identity"><strong>${escapeHtml(agent.displayName)}</strong><small>${escapeHtml(agent.id)}</small></span>
@@ -244,7 +246,9 @@ export function workQueueItems(
       const attempts = executionAttemptsByWorkItem[item.id] ?? [];
       const leases = attemptLeasesByWorkItem[item.id] ?? [];
       const agentId = workItemAgentId(item, attempts, leases);
-      return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}" data-risk="${escapeHtml(item.risk)}" data-title="${escapeHtml(item.title)}" data-agent-id="${escapeHtml(agentId)}"><span>${pill(item.status)} ${pill(item.risk)} ${executionModeChip(item)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(redactSecrets(item.intent))}</small>${executionPlanBadge(plan, admission)}${executionSummary(attempts, leases)}${workItemError(item)}</button>`;
+      const intentNorm = escapeHtml(normalizeIntentKey(redactSecrets(item.intent)));
+      const glyph = escapeHtml(statusGlyph(item.status));
+      return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}" data-risk="${escapeHtml(item.risk)}" data-title="${escapeHtml(item.title)}" data-agent-id="${escapeHtml(agentId)}" data-created-at="${escapeHtml(item.createdAt)}" data-retry-sequence="${escapeHtml(String(item.retrySequence ?? 0))}" data-lineage="${escapeHtml(item.lineageType ?? "")}" data-lineage-source="${escapeHtml(item.sourceWorkItemId ?? "")}" data-intent-norm="${intentNorm}"><span>${pill(item.status)} ${pill(item.risk)} ${executionModeChip(item)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(redactSecrets(item.intent))}</small>${executionPlanBadge(plan, admission)}${executionSummary(attempts, leases)}${workItemError(item)}<span class="status-glyph" title="${escapeHtml(item.status)}">${glyph}</span><span class="relative-time" data-relative-time="${escapeHtml(item.createdAt)}"></span></button>`;
     })
     .join("");
 }
@@ -271,7 +275,7 @@ function executionSummary(attempts: ExecutionAttempt[], leases: MissionControlAt
   if (!attempt) return "";
   const lease = [...leases].reverse().find((candidate) => candidate.attemptId === attempt.attemptId);
   const worker = lease?.workerId ?? attempt.claimedByWorkerId;
-  return `<small class="execution-status">Attempt #${escapeHtml(String(attempt.attemptNumber))} &middot; ${escapeHtml(attempt.status)}${worker ? ` &middot; ${escapeHtml(worker)}` : ""}${lease ? ` &middot; lease ${escapeHtml(lease.status)}` : ""}</small>`;
+  return `<small class="execution-status"${lease ? ` data-lease-id="${escapeHtml(lease.leaseId)}" data-lease-expires="${escapeHtml(lease.expiresAt)}"` : ""}>Attempt #${escapeHtml(String(attempt.attemptNumber))} &middot; ${escapeHtml(attempt.status)}${worker ? ` &middot; ${escapeHtml(worker)}` : ""}${lease ? ` &middot; lease ${escapeHtml(lease.status)}` : ""}</small>`;
 }
 
 export function approvalOptionsByWorkItem(model: MissionControlViewModel): Record<string, ApprovalActionOption[]> {
@@ -436,12 +440,23 @@ export function connectorsPanel(): string {
   </div>`;
 }
 
+/** Structured policy decision (body.decision, else the policy.decision attribute), as visibility.ts reads it. */
+function policyDecisionAttr(event: StoredAuditEvent): string {
+  if (event.name !== "policy.decided") return "";
+  const body = event.body && typeof event.body === "object" ? (event.body as Record<string, unknown>) : {};
+  const attributes = (event.attributes ?? {}) as Record<string, unknown>;
+  const decision = body.decision ?? attributes["policy.decision"];
+  return decision === "allow" || decision === "require_approval" || decision === "deny"
+    ? ` data-policy-decision="${decision}"`
+    : "";
+}
+
 export function eventTimeline(events: StoredAuditEvent[]): string {
   if (!events.length) return `<p class="empty">No audit events recorded.</p>`;
   return `<ol class="timeline">${events
     .map(
       (event) =>
-        `<li${event.sequence === undefined ? "" : ` data-sequence="${escapeHtml(String(event.sequence))}"`}><time>${time(nanoToIso(event.timeUnixNano))}</time><strong>${escapeHtml(event.name)}</strong>${auditAttributesHtml(event.attributes)}</li>`
+        `<li${event.sequence === undefined ? "" : ` data-sequence="${escapeHtml(String(event.sequence))}"`}${policyDecisionAttr(event)}><time>${time(nanoToIso(event.timeUnixNano))}</time><strong>${escapeHtml(event.name)}</strong>${auditAttributesHtml(event.attributes)}</li>`
     )
     .join("")}</ol>`;
 }

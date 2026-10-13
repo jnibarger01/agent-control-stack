@@ -49,6 +49,122 @@ describe("dashboard fragments", () => {
 });
 
 describe("live dashboard client (#6, #7, #8, #9)", () => {
+  it("restores the server queue order and keeps copy available in the work drawer", async () => {
+    const app = bootLive({
+      workItems: [item("wrk_server_first", { status: "running" }), item("wrk_server_second")],
+      events: [],
+      now: NOW
+    });
+    await app.flush();
+    const queueIds = () =>
+      [...app.document.querySelectorAll<HTMLButtonElement>("#queue-list [data-work-item]")].map((row) =>
+        row.getAttribute("data-work-item")
+      );
+    expect(queueIds()).toEqual(["wrk_server_first", "wrk_server_second"]);
+
+    const sort = app.document.querySelector<HTMLSelectElement>("#operator-sort")!;
+    sort.value = "attention";
+    sort.dispatchEvent(new app.window.Event("change", { bubbles: true }));
+    expect(queueIds()).toEqual(["wrk_server_second", "wrk_server_first"]);
+    sort.value = "server";
+    sort.dispatchEvent(new app.window.Event("change", { bubbles: true }));
+    expect(queueIds()).toEqual(["wrk_server_first", "wrk_server_second"]);
+
+    app.document.querySelector<HTMLElement>('[data-work-item="wrk_server_first"]')!.click();
+    const drawer = app.document.querySelector<HTMLElement>("#work-drawer")!;
+    const copyButton = drawer.querySelector<HTMLButtonElement>("#operator-copy-id-drawer");
+    expect(drawer.hidden).toBe(false);
+    expect(copyButton).not.toBeNull();
+    expect(copyButton?.disabled).toBe(false);
+  });
+
+  it("pins from the modal work drawer and records recents from the shared selection path", async () => {
+    const app = bootLive({ workItems: [item("wrk_pin_me"), item("wrk_other")], events: [], now: NOW });
+    await app.flush();
+    app.document.querySelector<HTMLElement>('[data-work-item="wrk_pin_me"]')!.click();
+    const pinButton = app.document.querySelector<HTMLButtonElement>("#work-drawer #operator-pin-drawer");
+    expect(pinButton).not.toBeNull();
+    pinButton!.click();
+    expect(JSON.parse(app.window.localStorage.getItem("acs.mc.pins") ?? "[]")).toContain("wrk_pin_me");
+    // A non-click selection (as from inspect buttons, keyboard, or URLs) is recorded too.
+    (app.window as unknown as { selectWorkItem: (id: string) => void }).selectWorkItem("wrk_other");
+    const recents = [...app.document.querySelectorAll("#operator-recent a")].map((link) => link.textContent);
+    expect(recents).toEqual(["wrk_other", "wrk_pin_me"]);
+  });
+
+  it("keeps unknown ages visible, ignores lineage copies and survives prototype-named intents", async () => {
+    const app = bootLive({
+      workItems: [
+        item("wrk_src", { intent: "same intent" }),
+        item("wrk_retry", { intent: "same intent", lineageType: "retry", sourceWorkItemId: "wrk_src" } as Partial<Item>),
+        item("wrk_proto_a", { intent: "__proto__" }),
+        item("wrk_proto_b", { intent: "__proto__" }),
+        item("wrk_future", { createdAt: "2999-01-01T00:00:00.000Z" })
+      ],
+      events: [],
+      now: NOW
+    });
+    await app.flush();
+    expect(app.text("#insight-ages")).toContain("unknown 1");
+    expect(app.text("#insight-dupes")).toBe("1 duplicate intent group");
+  });
+
+  it("restores the saved view on a hashless reload instead of persisting the startup default", async () => {
+    const app = bootLive(
+      { workItems: [item("wrk_a")], events: [], now: NOW },
+      {},
+      { beforeParse: (w) => (w.localStorage as Storage).setItem("acs.mc.lastView", "audit") }
+    );
+    await app.advance(0);
+    expect(app.window.localStorage.getItem("acs.mc.lastView")).toBe("audit");
+    expect(app.document.body.dataset.activeView).toBe("audit");
+  });
+
+  it("groups duplicates by lineage root, not by lineage presence", async () => {
+    const app = bootLive({
+      workItems: [
+        item("wrk_src", { intent: "same intent" }),
+        item("wrk_src_retry", { intent: "same intent", lineageType: "retry", sourceWorkItemId: "wrk_src" } as Partial<Item>),
+        item("wrk_x", { intent: "clone intent" }),
+        item("wrk_x_clone", { intent: "clone intent", lineageType: "clone", sourceWorkItemId: "wrk_x" } as Partial<Item>),
+        item("wrk_y_clone", { intent: "clone intent", lineageType: "clone", sourceWorkItemId: "wrk_y" } as Partial<Item>)
+      ],
+      events: [],
+      now: NOW
+    });
+    await app.flush();
+    // "same intent" is one lineage (not a duplicate); "clone intent" spans roots wrk_x and wrk_y.
+    expect(app.text("#insight-dupes")).toBe("1 duplicate intent group");
+  });
+
+  it("computes the denial rate from the structured policy decision only", async () => {
+    const decided = (sequence: number, decision: string, workItemId: string) =>
+      ({
+        sequence,
+        id: `evt_${sequence}`,
+        name: "policy.decided",
+        timeUnixNano: String(BigInt(1_790_000_000_000 + sequence) * 1_000_000n),
+        attributes: { "work_item.id": workItemId, "policy.decision": decision },
+        body: { decision }
+      }) as unknown as MissionControlViewModel["events"][number];
+    const app = bootLive({
+      workItems: [item("wrk_a")],
+      events: [decided(1, "allow", "wrk_deny_cleanup"), decided(2, "deny", "wrk_b")],
+      now: NOW
+    });
+    await app.flush();
+    expect(app.text("#insight-denial")).toBe("50% denied in view");
+  });
+
+  it("does not label a missing or corrupt execution mode as strict", async () => {
+    const app = bootLive({ workItems: [item("wrk_a")], events: [], executionModeProblem: "corrupt", now: NOW });
+    await app.flush();
+    expect(app.text("#insight-execution")).toMatch(/missing or corrupt/);
+    const strict = bootLive({ workItems: [item("wrk_a")], events: [], executionMode: "strict", now: NOW });
+    await strict.flush();
+    expect(strict.text("#insight-execution")).toMatch(/^Strict mode/);
+  });
+
   it("does not pull server-only renderer code into the client graph (#21)", () => {
     const html = renderDashboard({ workItems: [item("wrk_a")], events: [], now: NOW });
     const match = /const pageMeta = (\{.*?\});/u.exec(html);
@@ -140,6 +256,8 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     expect(app.window.location.search).toBe("?status=running");
     expect(app.window.location.hash).toBe("#execution");
     expect(app.text("#queue-filter-count")).toBe("1 of 4 items");
+    expect(app.text("#operator-filter-summary")).toBe("Showing 1 of 4 work items");
+    expect(app.window.localStorage.getItem("acs.mc.lastView")).toBe("execution");
 
     (
       app.document.querySelector(
@@ -150,6 +268,7 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     expect(app.window.location.search).toBe("?status=failed&status=blocked");
     expect(app.window.location.hash).toBe("#queue");
     expect(app.text("#queue-filter-count")).toBe("2 of 4 items");
+    expect(app.text("#operator-filter-summary")).toBe("Showing 2 of 4 work items");
 
     (app.document.querySelector('#overview [data-dashboard-view="agents"]') as HTMLElement).click();
     expect(app.document.body.dataset.activeView).toBe("agents");

@@ -59,6 +59,7 @@ export const KEYBOARD_SHORTCUTS: readonly ShortcutHelp[] = [
   { keys: "g e", action: "Audit events" },
   { keys: "g p", action: "Policy" },
   { keys: "g s", action: "System" },
+  { keys: "r", action: "Refresh the dashboard" },
   { keys: "?", action: "Show or hide this help" },
   { keys: "Esc", action: "Close help" }
 ];
@@ -120,6 +121,9 @@ function selectWorkItem(id, options) {
   });
   openWorkDrawer();
   selectedWorkItemId = id;
+  // Shared selection path: every way of opening an item (queue rows, inspect
+  // buttons, keyboard, restored URLs, recents) records it as recently viewed.
+  if (typeof rememberOperatorWorkItem === 'function') rememberOperatorWorkItem(id);
   if (!fromLocation) writeSelectedItemToLocation(id);
   if (options && options.scroll) {
     const row = document.querySelector('[data-work-item="' + cssAttr(id) + '"]');
@@ -341,6 +345,11 @@ document.addEventListener('keydown', function (event) {
     event.preventDefault();
     showView('approvals');
     reason.focus();
+    return;
+  }
+  if (key === 'r' && typeof scheduleDashboardRefresh === 'function') {
+    event.preventDefault();
+    scheduleDashboardRefresh(0);
   }
 });
 `;
