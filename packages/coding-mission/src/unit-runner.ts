@@ -6,6 +6,7 @@ import {
   deadlineResult,
   type ApplyResult,
   type DispatchEnvelope,
+  type ExecutionClaim,
   type ExecutorLane,
   type ResultEnvelope,
   type WorkUnitExecutorAdapter
@@ -122,7 +123,7 @@ export class GovernedUnitRunner {
 
     let result: ResultEnvelope;
     try {
-      result = await this.executeWithinDeadline(adapter, dispatch, input.signal);
+      result = await this.executeWithinDeadline(adapter, dispatch, input.signal, token);
       // The ledger only checks that a result exists, and adapters can be remote or untyped, so a success that carries no
       // usable evidence is not allowed to drive the unit to `succeeded`.
       if (result.outcome === "succeeded" && !hasUsableEvidence(result)) {
@@ -169,13 +170,15 @@ export class GovernedUnitRunner {
   private async executeWithinDeadline(
     adapter: WorkUnitExecutorAdapter,
     dispatch: DispatchEnvelope,
-    callerSignal: AbortSignal | undefined
+    callerSignal: AbortSignal | undefined,
+    token: string
   ): Promise<ResultEnvelope> {
+    const claim: ExecutionClaim = { claimToken: token };
     const governed = dispatch.authority.grantId !== undefined;
     const deadlineAt = dispatch.authority.deadlineAt;
     if (deadlineAt === undefined) {
       if (governed) return deadlineResult(dispatch, this.now());
-      return adapter.execute(dispatch, callerSignal);
+      return adapter.execute(dispatch, callerSignal, claim);
     }
     const abort = new AbortController();
     const onCallerAbort = () => abort.abort();
@@ -189,7 +192,7 @@ export class GovernedUnitRunner {
         resolve("deadline");
       }, budgetMs);
     });
-    const execution = adapter.execute(dispatch, abort.signal);
+    const execution = adapter.execute(dispatch, abort.signal, claim);
     execution.catch(() => undefined); // an executor that fails after the deadline is not an unhandled rejection
     try {
       const winner = await Promise.race([execution, expired]);

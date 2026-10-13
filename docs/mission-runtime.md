@@ -208,11 +208,12 @@ production database.
 - Governed execution is implemented and tested end to end, but it is **off by default** and has not been enabled or deployed
   anywhere. Turning it on is an operational action (`ACS_CODING_MISSION_GOVERNED=1`, plus operator-bound worker actors and a
   grant per mission).
-- The generalized work-unit path and the `jc`, `dc` and `mcp` lanes have no production driver yet; only the `coder` lane runs.
-  `GovernedUnitRunner` (`unit-runner.ts`) runs one general-mission work unit end to end, but no worker, gateway route or CLI
-  constructs it yet.
+- The `jc`, `dc` and `mcp` lanes have no executor adapter that enforces its own authority yet, so they are not runnable. The
+  general-mission `coding` unit has an execution contract, a boundary adapter and a bounded driver (see "General-mission
+  coding units"), but no concrete `GeneralCodingExecutor` exists yet and no worker, gateway route or CLI constructs the
+  driver, so nothing runs a general mission in production.
 - Checkpoint/resume as worker adapters on the execution ledger, the CUA worker, and recovery policy.
-- A driver for the `general` mission kind. The legacy coding path has no budget row (uncapped).
+- The legacy coding path has no budget row (uncapped).
 - Delegating to a different executing actor (`authorityNarrowingViolations` refuses it deliberately and it needs its own decision).
 
 ## Unit runner
@@ -236,6 +237,33 @@ before it is persisted. A "succeeded" result without a non-empty result hash and
 failed `invalid_output` result, because the ledger itself only checks that a result object exists. Of two
 concurrent runs of one unit, one executes and the other reports `claim_conflict`. A crash between the claim and the dispatch
 leaves a running claim that existing stale-claim recovery handles; the runner adds no recovery of its own.
+
+## General-mission coding units
+
+A coding unit in a `general` mission is one explicit, repository-scoped task, not a coding mission. It does not inherit a
+mission branch, pull request or merge lifecycle; that stays with `CodingMissionController` and its governed path, which this
+section does not change. The task is the typed `coding` payload (`general-coding.ts`, `parseGeneralCodingTask`): a canonical
+absolute `repository`, an immutable 40-hex `baseSha` (a branch name is rejected), `instructions`, the declared `files`
+(normal repository-relative paths), `maxRuntimeMs` and `maxFiles`. The generic payload parser keeps these optional so legacy
+coding payloads still parse; the strict parser requires all of them and is what the driver and adapter use.
+
+`GeneralCodingExecutionAdapter` (`general-coding-adapter.ts`, coder lane) enforces authority where the work happens, not only
+at dispatch. `GovernedUnitRunner` hands every adapter the live claim, and the adapter checks, before the executor is called and
+failing closed: the claim token matches the dispatch and is still the unit's live claim for the same worker; the dispatch gate
+still passes on current durable state (so a revocation, expiry or changed grant between dispatch and execution is caught) over
+the same authority hash; the unit's stored payload is a complete task; the authority grants the `sandbox` runtime; the
+repository lies inside a scope resource (descendant containment, not a path prefix); and the task's runtime bound does not
+exceed the authority's. A refusal records a failed attempt with a `nativeCode` naming the reason and marks the external state
+certain (nothing ran). After the executor runs, a success is accepted only if it attests the same `baseSha`, a non-empty result
+hash, at most `maxFiles` normal relative paths, each equal to or under a declared path; otherwise the attempt is
+`invalid_output` with the state marked uncertain, because the work did run. The executor is stopped at the task's own bound,
+capped by the time left on the dispatch, and a timeout is `unknown`.
+
+`runGeneralCodingUnits` (`general-coding-driver.ts`) is the bounded driver: one sequential pass over active governed `general`
+missions, coder lane and coding units only, at most `maxUnits` (default 1, ceiling 10) units started per pass. A unit without a
+complete task contract is reported as skipped and never claimed. The driver and adapter take the executor as a port
+(`GeneralCodingExecutor`); symlink and filesystem containment inside the repository is that executor's responsibility. No
+executor, worker hook or gateway route is included.
 
 ## Composition root
 
