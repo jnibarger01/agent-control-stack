@@ -90,27 +90,71 @@
                         "maxItems": 512,
                         "type": "array",
                         "items": {
-                          "type": "object",
-                          "properties": {
-                            "runtime": {
-                              "type": "string",
-                              "enum": [
-                                "desktop_commander",
-                                "jace_commander",
-                                "sandbox"
-                              ]
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "runtime": {
+                                  "type": "string",
+                                  "enum": [
+                                    "desktop_commander",
+                                    "jace_commander",
+                                    "sandbox"
+                                  ]
+                                },
+                                "toolName": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 256
+                                }
+                              },
+                              "required": [
+                                "runtime",
+                                "toolName"
+                              ],
+                              "additionalProperties": false
                             },
-                            "toolName": {
-                              "type": "string",
-                              "minLength": 1,
-                              "maxLength": 256
+                            {
+                              "type": "object",
+                              "properties": {
+                                "runtime": {
+                                  "type": "string",
+                                  "const": "browser"
+                                },
+                                "toolName": {
+                                  "type": "string",
+                                  "const": "cua"
+                                },
+                                "allowedOrigins": {
+                                  "minItems": 1,
+                                  "maxItems": 64,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 256
+                                  }
+                                },
+                                "allowedApplications": {
+                                  "minItems": 1,
+                                  "maxItems": 64,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 256
+                                  }
+                                }
+                              },
+                              "required": [
+                                "runtime",
+                                "toolName",
+                                "allowedOrigins",
+                                "allowedApplications"
+                              ],
+                              "additionalProperties": false
                             }
-                          },
-                          "required": [
-                            "runtime",
-                            "toolName"
-                          ],
-                          "additionalProperties": false
+                          ]
                         }
                       },
                       "maximumPrivileges": {

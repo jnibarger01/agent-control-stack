@@ -5,6 +5,7 @@ import {
   CuaExecutionAdapter,
   PlaywrightCuaBrowser,
   secretBrokerCuaResolver,
+  type CuaAuthorityRecheck,
   type CuaBrowserContext,
   type CuaBrowserProvider,
   type CuaExecutionOptions,
@@ -14,7 +15,8 @@ import {
 import { parseWorkUnitPayload, type CuaAction } from "./mission-model.js";
 import { CodingMissionStore } from "./store.js";
 import { cuaActionHash, cuaCheckpointReceiptHash, cuaResultHash } from "./cua-evidence.js";
-import { WorkUnitExecutionLedger, resultBase } from "./worker-execution.js";
+import { WorkUnitExecutionLedger, resultBase, type DispatchEnvelope } from "./worker-execution.js";
+import { HUMAN, setupRealGrants } from "./child-work-real-grants-fixture.js";
 
 const T0 = "2026-10-10T00:00:00.000Z";
 const T1 = "2026-10-10T00:00:01.000Z";
@@ -22,6 +24,8 @@ const T2 = "2026-10-10T00:00:02.000Z";
 const ORIGIN = "https://app.example";
 const SECRET = "super-secret-phrase";
 const SHOT = Buffer.from("PNG-SECRET-BYTES");
+/** Stand-in live authority re-check for adapter tests that are not about authority; R2 tests use the real ledger. */
+const ALLOW: CuaAuthorityRecheck = { browserAuthorityVerdict: () => ({ ok: true }) };
 
 /** A Playwright-shaped context: a context-wide route, its page list, and the "page" event for popups. */
 class FakeContext implements CuaBrowserContext {
@@ -146,8 +150,8 @@ function claimed(payload: ReturnType<typeof script> | { kind: "cua"; objective: 
     claimedAt: T1
   };
   expect(store.claimUnit("m1", "u1", claim)).toMatchObject({ ok: true, attempt: 1 });
-  // CUA runs only in governed missions. The real grant schema has no browser runtime yet (R2), so these adapter tests
-  // bind the mission and stand in a verifier that admits this dispatch; the real verifier refuses cua today.
+  // CUA runs only in governed missions. These adapter tests bind the mission and stand in a verifier that admits this
+  // dispatch; the real browser-grant verifier is exercised in dispatch-authority.test.ts and the R2 end-to-end test.
   store.db
     .prepare(
       `INSERT INTO mission_authority (mission_id, envelope_json, envelope_hash, policy_json, policy_hash, approver_id,
@@ -195,7 +199,7 @@ function harness(
       return page;
     }
   };
-  const adapter = new CuaExecutionAdapter(ctx.store, browser, application, () => T2, options);
+  const adapter = new CuaExecutionAdapter(ctx.store, browser, application, () => T2, { authority: ALLOW, ...options });
   const checkpoints = () =>
     ctx.store.db
       .prepare(
@@ -795,7 +799,10 @@ describe("R3: browser boundary", () => {
   it("bounds browser open by the deadline", async () => {
     const ctx = claimed(script([{ type: "observe" }]));
     const browser: CuaBrowserProvider = { open: () => new Promise<CuaPage>(() => undefined) };
-    const adapter = new CuaExecutionAdapter(ctx.store, browser, "browser", () => T2, { actionTimeoutMs: 30 });
+    const adapter = new CuaExecutionAdapter(ctx.store, browser, "browser", () => T2, {
+      authority: ALLOW,
+      actionTimeoutMs: 30
+    });
     await expect(adapter.execute(ctx.dispatch)).resolves.toMatchObject({ outcome: "unknown" });
   });
 });
@@ -959,7 +966,7 @@ describe("R1: evidence-bound CUA acceptance", () => {
         return page;
       }
     };
-    const adapter = new CuaExecutionAdapter(store, browser, "browser", () => T2);
+    const adapter = new CuaExecutionAdapter(store, browser, "browser", () => T2, { authority: ALLOW });
     const first = adapter.execute(firstDispatch);
     await new Promise((resolve) => setTimeout(resolve, 20));
     // A second attempt runs to completion on the SAME adapter while the first is mid-action.
@@ -1083,5 +1090,292 @@ describe("R1: evidence-bound CUA acceptance", () => {
       code: "cua_checkpoint_integrity",
       message: expect.stringContaining("application_mismatch")
     });
+  });
+});
+
+describe("R2: the executor runs only the stored dispatch", () => {
+  const actions: CuaAction[] = [{ type: "navigate", url: `${ORIGIN}/` }, { type: "observe" }];
+  const tampered = (dispatch: DispatchEnvelope, edit: (payload: Record<string, unknown>) => void): DispatchEnvelope => {
+    const copy = JSON.parse(JSON.stringify(dispatch)) as DispatchEnvelope;
+    edit(copy.payload as unknown as Record<string, unknown>);
+    return copy;
+  };
+
+  it("rejects a tampered payload (actions, origins or application) before any browser call", async () => {
+    const edits: Array<(payload: Record<string, unknown>) => void> = [
+      (p) => {
+        p.actions = [{ type: "navigate", url: "https://evil.example/" }];
+      },
+      (p) => {
+        p.allowedOrigins = [ORIGIN, "https://evil.example"];
+      },
+      (p) => {
+        p.allowedApplications = ["browser", "other-app"];
+      },
+      (p) => {
+        (p.actions as CuaAction[]).push({ type: "click", selector: "#buy" });
+      }
+    ];
+    for (const edit of edits) {
+      const h = harness(script(actions));
+      await expect(h.adapter.execute(tampered(h.dispatch, edit))).rejects.toMatchObject({
+        code: "cua_dispatch_mismatch"
+      });
+      expect(h.opens()).toBe(0);
+      expect(h.page.calls).toEqual([]);
+      expect(h.checkpoints()).toEqual([]);
+    }
+  });
+
+  it("cannot widen the grant through the caller's payload, even when every other field matches", async () => {
+    const h = harness(script(actions, { origins: [ORIGIN] }));
+    const widened = tampered(h.dispatch, (p) => {
+      p.allowedOrigins = ["https://evil.example"];
+      p.actions = [{ type: "navigate", url: "https://evil.example/" }];
+    });
+    // Recomputing payloadHash on the caller side does not help: the stored dispatch hash is the authority.
+    await expect(h.adapter.execute(widened)).rejects.toMatchObject({ code: "cua_dispatch_mismatch" });
+    expect(h.opens()).toBe(0);
+  });
+
+  it("fails closed when the stored dispatch is missing", async () => {
+    const h = harness(script(actions));
+    // The attempt lock references the attempt row, so an unknown attempt is refused before the stored-dispatch load
+    // (FOREIGN KEY on cua_execution_locks); executeLocked's own cua_dispatch_missing check is the second line.
+    const unknown = { ...h.dispatch, attemptId: "attempt-never-stored" };
+    await expect(h.adapter.execute(unknown)).rejects.toThrow();
+    expect(h.opens()).toBe(0);
+  });
+
+  it("fails closed with cua_dispatch_missing when the stored attempt is not a cua dispatch", async () => {
+    const h = harness(script(actions));
+    h.store.db
+      .prepare("UPDATE work_unit_execution_attempts SET executor_lane = 'coder' WHERE attempt_id = ?")
+      .run(h.dispatch.attemptId);
+    await expect(h.adapter.execute(h.dispatch)).rejects.toMatchObject({ code: "cua_dispatch_missing" });
+    expect(h.opens()).toBe(0);
+  });
+
+  it("fails closed when the stored dispatch no longer matches its recorded hash", async () => {
+    const h = harness(script(actions));
+    const row = h.store.db
+      .prepare("SELECT dispatch_json FROM work_unit_execution_attempts WHERE attempt_id = ?")
+      .get(h.dispatch.attemptId) as { dispatch_json: string };
+    const stored = JSON.parse(row.dispatch_json) as DispatchEnvelope;
+    (stored.payload as unknown as { allowedOrigins: string[] }).allowedOrigins = ["https://evil.example"];
+    h.store.db
+      .prepare("UPDATE work_unit_execution_attempts SET dispatch_json = ? WHERE attempt_id = ?")
+      .run(JSON.stringify(stored), h.dispatch.attemptId);
+    await expect(h.adapter.execute(stored)).rejects.toMatchObject({ code: "cua_dispatch_integrity" });
+    await expect(h.adapter.execute(h.dispatch)).rejects.toMatchObject({ code: "cua_dispatch_integrity" });
+    expect(h.opens()).toBe(0);
+  });
+
+  it("fails closed when the stored hash itself is altered", async () => {
+    const h = harness(script(actions));
+    h.store.db
+      .prepare("UPDATE work_unit_execution_attempts SET dispatch_hash = ? WHERE attempt_id = ?")
+      .run("0".repeat(64), h.dispatch.attemptId);
+    await expect(h.adapter.execute(h.dispatch)).rejects.toMatchObject({ code: "cua_dispatch_integrity" });
+    expect(h.opens()).toBe(0);
+  });
+
+  it("runs the unmodified stored dispatch", async () => {
+    const h = harness(script(actions));
+    const result = await h.adapter.execute(JSON.parse(JSON.stringify(h.dispatch)) as DispatchEnvelope);
+    expect(result.outcome).toBe("succeeded");
+    expect(h.opens()).toBe(1);
+  });
+
+  it("runs end to end under a real human-issued browser grant and the real dispatch verifier", async () => {
+    const f = setupRealGrants({
+      cuaRootPayload: script(actions),
+      extraToolClasses: [
+        { runtime: "browser", toolName: "cua", allowedOrigins: [ORIGIN], allowedApplications: ["browser"] }
+      ]
+    });
+    f.ledger.grantMissionAuthority({ missionId: f.item.id, grantId: f.grant.grantId });
+    expect(f.missions.claimUnit(f.item.id, "root", f.claim)).toMatchObject({ ok: true });
+    const dispatcher = new WorkUnitExecutionLedger(f.missions, { authority: f.ledger });
+    const dispatch = dispatcher.beginDispatch({
+      missionId: f.item.id,
+      unitId: "root",
+      claimToken: f.claim.token,
+      workerId: f.claim.workerId,
+      lane: "cua",
+      now: f.iso(2_000)
+    });
+    const page = new FakePage();
+    let opens = 0;
+    const adapter = new CuaExecutionAdapter(
+      f.missions,
+      {
+        async open() {
+          opens += 1;
+          page.current = "about:blank";
+          return page;
+        }
+      },
+      "browser",
+      () => f.iso(2_100),
+      { authority: f.ledger }
+    );
+    const result = await adapter.execute(dispatch);
+    expect(result.outcome).toBe("succeeded");
+    expect(opens).toBe(1);
+  });
+});
+
+describe("R2: live authority re-check at the browser boundary", () => {
+  const actions: CuaAction[] = [{ type: "navigate", url: `${ORIGIN}/` }, { type: "observe" }];
+  const browserTool = {
+    runtime: "browser" as const,
+    toolName: "cua" as const,
+    allowedOrigins: [ORIGIN],
+    allowedApplications: ["browser"]
+  };
+
+  /** A governed cua attempt under a real human-issued browser grant, dispatched by the real verifier. */
+  function realGrant(options: { authority?: (ledger: CuaAuthorityRecheck) => CuaAuthorityRecheck } = {}) {
+    const f = setupRealGrants({ cuaRootPayload: script(actions), extraToolClasses: [browserTool] });
+    f.ledger.grantMissionAuthority({ missionId: f.item.id, grantId: f.grant.grantId });
+    expect(f.missions.claimUnit(f.item.id, "root", f.claim)).toMatchObject({ ok: true });
+    const dispatcher = new WorkUnitExecutionLedger(f.missions, { authority: f.ledger });
+    const dispatch = dispatcher.beginDispatch({
+      missionId: f.item.id,
+      unitId: "root",
+      claimToken: f.claim.token,
+      workerId: f.claim.workerId,
+      lane: "cua",
+      now: f.iso(2_000)
+    });
+    const page = new FakePage();
+    let opens = 0;
+    const authority = options.authority ? options.authority(f.ledger) : f.ledger;
+    const adapter = new CuaExecutionAdapter(
+      f.missions,
+      {
+        async open() {
+          opens += 1;
+          page.current = "about:blank";
+          return page;
+        }
+      },
+      "browser",
+      () => f.state.now,
+      { authority }
+    );
+    return { ...f, dispatch, adapter, page, opens: () => opens };
+  }
+  const refusedBeforeBrowser = async (h: ReturnType<typeof realGrant>, code: string) => {
+    const result = await h.adapter.execute(h.dispatch);
+    expect(result).toMatchObject({ outcome: "failed" });
+    expect(JSON.stringify(result)).toContain(code);
+    expect(h.opens()).toBe(0);
+    expect(h.page.calls).toEqual([]);
+  };
+
+  it("passes a still-valid grant and opens the browser", async () => {
+    const h = realGrant();
+    h.state.now = h.iso(2_100);
+    await expect(h.adapter.execute(h.dispatch)).resolves.toMatchObject({ outcome: "succeeded" });
+    expect(h.opens()).toBe(1);
+  });
+
+  it("refuses a grant revoked after dispatch before opening the browser", async () => {
+    const h = realGrant();
+    h.items.revokeAutonomousAuthority(h.grant.grantId, HUMAN, "stop", { via: "policy_gate", actorId: HUMAN });
+    await refusedBeforeBrowser(h, "cua_authority_revoked");
+  });
+
+  it("refuses an expired grant before opening the browser", async () => {
+    const h = realGrant();
+    h.state.now = h.iso(3_600_000);
+    await refusedBeforeBrowser(h, "cua_authority_expired");
+  });
+
+  it("refuses once now >= deadlineAt, before opening the browser", async () => {
+    const h = realGrant();
+    const deadline = h.dispatch.authority.deadlineAt!;
+    expect(Date.parse(deadline)).toBeLessThan(Date.parse(h.iso(3_600_000)));
+    h.state.now = deadline;
+    await refusedBeforeBrowser(h, "cua_authority_deadline_passed");
+  });
+
+  it("refuses when the live grant no longer covers the stored origins or applications", async () => {
+    // Grant definitions are immutable, so narrowing is modelled by the live verdict for a narrower scope.
+    for (const narrowed of [{ origins: ["https://other.example"] }, { applications: ["other-app"] }]) {
+      const h = realGrant({
+        authority: (ledger) => ({
+          browserAuthorityVerdict: (input) => ledger.browserAuthorityVerdict({ ...input, ...narrowed })
+        })
+      });
+      await refusedBeforeBrowser(h, "cua_browser_scope_not_covered");
+    }
+  });
+
+  it("refuses when the browser tool class is no longer present", async () => {
+    const h = realGrant({
+      authority: () => ({ browserAuthorityVerdict: () => ({ ok: false, reason: "cua_browser_grant_missing" }) })
+    });
+    await refusedBeforeBrowser(h, "cua_browser_grant_missing");
+    // And the real ledger reports it for a grant without one.
+    const f = setupRealGrants({ cuaRootPayload: script(actions) });
+    f.ledger.grantMissionAuthority({ missionId: f.item.id, grantId: f.grant.grantId });
+    expect(
+      f.ledger.browserAuthorityVerdict({
+        missionId: f.item.id,
+        unitId: "root",
+        origins: [ORIGIN],
+        applications: ["browser"],
+        deadlineAt: f.iso(10_000)
+      })
+    ).toEqual({ ok: false, reason: "cua_browser_grant_missing" });
+  });
+
+  it("fails closed when the grant lookup throws, or no re-check is configured", async () => {
+    const throwing = realGrant({
+      authority: () => ({
+        browserAuthorityVerdict: () => {
+          throw new Error("store unavailable");
+        }
+      })
+    });
+    await refusedBeforeBrowser(throwing, "cua_authority_unavailable");
+    const h = realGrant();
+    h.items.close();
+    await refusedBeforeBrowser(h, "cua_authority_unavailable");
+    const ctx = claimed(script(actions));
+    let opened = 0;
+    const unconfigured = new CuaExecutionAdapter(
+      ctx.store,
+      {
+        async open() {
+          opened += 1;
+          return new FakePage();
+        }
+      },
+      "browser",
+      () => T2
+    );
+    await expect(unconfigured.execute(ctx.dispatch)).resolves.toMatchObject({ outcome: "failed" });
+    expect(opened).toBe(0);
+  });
+
+  it("re-checks before every action: a revocation mid-script stops the next step", async () => {
+    let calls = 0;
+    const h = realGrant({
+      authority: (ledger) => ({
+        browserAuthorityVerdict: (input) => {
+          calls += 1;
+          return calls === 1 ? ledger.browserAuthorityVerdict(input) : { ok: false, reason: "cua_authority_revoked" };
+        }
+      })
+    });
+    h.state.now = h.iso(2_100);
+    const result = await h.adapter.execute(h.dispatch);
+    expect(JSON.stringify(result)).toContain("cua_authority_revoked");
+    expect(h.opens()).toBe(1);
+    expect(h.page.calls.filter((call) => call === "screenshot")).toEqual([]);
   });
 });
