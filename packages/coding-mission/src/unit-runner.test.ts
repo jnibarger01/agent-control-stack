@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ControlStackError } from "@agent-control-stack/shared";
 import { executionPlanSubjectInputHash } from "@agent-control-stack/work-items";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AutonomousAuthorityDefinition } from "./authority.js";
@@ -256,5 +257,78 @@ describe("governed unit runner deadline", () => {
     const w = world({ governed: false });
     const result = await w.runner([w.adapter(w.ok)]).runUnit(w.input);
     expect(result).toMatchObject({ status: "executed", applied: { applied: "completed" } });
+  });
+});
+
+describe("governed unit runner hardening", () => {
+  it("records an expired authority as authority_expired, distinct from a policy denial", async () => {
+    const w = world();
+    w.state.now = w.iso(3_700_000); // past the grant's expiry, judged on ACS's clock
+    const result = await w.runner([w.adapter(w.ok)]).runUnit(w.input);
+    expect(result).toMatchObject({ status: "denied" });
+    expect(w.unit()).toMatchObject({ status: "failed", failureCategory: "authority_expired" });
+    expect(w.calls).toHaveLength(0);
+  });
+
+  it("redacts secrets from a thrown adapter error before they are persisted", async () => {
+    const w = world();
+    const secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+    await w
+      .runner([
+        w.adapter(() => {
+          throw new Error(`upstream rejected ${secret}`);
+        })
+      ])
+      .runUnit(w.input);
+    const row = w.exec.missions.db.prepare("SELECT report_json FROM work_unit_execution_attempts LIMIT 1").get() as {
+      report_json: string;
+    };
+    expect(row.report_json).not.toContain(secret);
+    expect(JSON.parse(row.report_json).failure.nativeMessage).toBe("[redacted]");
+  });
+
+  it.each([
+    ["an empty result hash", { resultHash: "", files: [] }],
+    ["a non-string result hash", { resultHash: 7, files: [] }],
+    ["files that are not an array", { resultHash: "h", files: "a.ts" }],
+    ["a non-string file entry", { resultHash: "h", files: [1] }]
+  ])("will not mark a unit succeeded on %s", async (_name, result) => {
+    const w = world();
+    const bad = w.adapter((d) => ({ ...w.ok(d), result: result as never }));
+    const outcome = await w.runner([bad]).runUnit(w.input);
+    expect(outcome).toMatchObject({ status: "executed", applied: { applied: "failed" } });
+    expect(w.unit().status).toBe("failed");
+    expect(w.unit().failureCategory).toBe("invalid_output");
+  });
+
+  it("carries a deployment-chosen implementer identity into the claim route", async () => {
+    const w = world();
+    const run = new GovernedUnitRunner({
+      execution: w.exec,
+      adapters: [w.adapter(w.ok)],
+      now: () => w.state.now,
+      implementerEngineId: "engine:coder-a"
+    });
+    await run.runUnit(w.input);
+    expect(w.unit().route).toMatchObject({ lane: "dc", implementerEngineId: "engine:coder-a" });
+  });
+
+  it("releases the claim instead of stranding the unit when dispatch fails for a non-authority reason", async () => {
+    const w = world();
+    const real = w.exec.dispatcher;
+    const broken = {
+      beginDispatch: () => {
+        throw new ControlStackError("execution_implementer_identity_required", "needs an implementer");
+      },
+      applyResult: real.applyResult.bind(real)
+    };
+    const run = new GovernedUnitRunner({
+      execution: { missions: w.exec.missions, dispatcher: broken as never },
+      adapters: [w.adapter(w.ok)],
+      now: () => w.state.now
+    });
+    await expect(run.runUnit(w.input)).rejects.toMatchObject({ code: "execution_implementer_identity_required" });
+    expect(w.unit().status).toBe("pending");
+    expect(w.calls).toHaveLength(0);
   });
 });
