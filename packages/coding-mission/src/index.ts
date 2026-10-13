@@ -72,3 +72,6 @@ export * from "./unit-runner.js";
 export * from "./general-coding.js";
 export * from "./general-coding-adapter.js";
 export * from "./general-coding-driver.js";
+export * from "./execution-boundary.js";
+export * from "./dc-tool-call.js";
+export * from "./dc-lane-adapter.js";

@@ -208,9 +208,10 @@ production database.
 - Governed execution is implemented and tested end to end, but it is **off by default** and has not been enabled or deployed
   anywhere. Turning it on is an operational action (`ACS_CODING_MISSION_GOVERNED=1`, plus operator-bound worker actors and a
   grant per mission).
-- The `jc`, `dc` and `mcp` lanes have no executor adapter that enforces its own authority yet, so they are not runnable. The
-  general-mission `coding` unit has an execution contract, a boundary adapter and a bounded driver (see "General-mission
-  coding units"), but no concrete `GeneralCodingExecutor` exists yet and no worker, gateway route or CLI constructs the
+- The `jc` and `mcp` lanes have no executor adapter that enforces its own authority yet, so they are not runnable. The `dc`
+  lane has a boundary adapter for four read-only tools (see "Desktop Commander lane") and the general-mission `coding` unit
+  has an execution contract, a boundary adapter and a bounded driver (see "General-mission coding units"). Neither has a
+  concrete executor/invoker behind its port, there is no `dc` driver, and no worker, gateway route or CLI constructs a
   driver, so nothing runs a general mission in production.
 - Checkpoint/resume as worker adapters on the execution ledger, the CUA worker, and recovery policy.
 - The legacy coding path has no budget row (uncapped).
@@ -264,6 +265,30 @@ missions, coder lane and coding units only, at most `maxUnits` (default 1, ceili
 complete task contract is reported as skipped and never claimed. The driver and adapter take the executor as a port
 (`GeneralCodingExecutor`); symlink and filesystem containment inside the repository is that executor's responsibility. No
 executor, worker hook or gateway route is included.
+
+## Desktop Commander lane
+
+`DcLaneExecutionAdapter` (`dc-lane-adapter.ts`, `dc` lane) runs a `tool` unit under the same execution-boundary discipline as
+the coding adapter, with its own tool-name authority. The shared checks live in `execution-boundary.ts` and both adapters use
+them: the live claim (token hash, store row, worker, unit kind, status), the dispatch gate re-verified on current durable
+state over the same authority hash, containment on physical paths (symlinks resolved; a sibling sharing a prefix is outside),
+and a runtime budget that never starts the invoker when no time is left.
+
+The unit's input is the typed call in `dc-tool-call.ts`: `toolName`, complete `arguments`, `argsHash` (bound to the tool name,
+so arguments cannot be replayed under another tool) and `maxRuntimeMs`. The generic payload parser keeps the new fields
+optional so legacy tool payloads still parse. The adapter then requires, before the invoker is called: the tool is managed by
+`@agent-control-stack/dc-tool-manifest` and is on the lane's explicit allowlist (`read_file`, `read_multiple_files`,
+`get_file_info`, `list_directory`); the manifest marks it read-only with no approval requirement; the authority lists this
+exact `(desktop_commander, tool)` pair and grants the privilege the tool's manifest scope consumes; the arguments satisfy the
+tool's strict schema; every path argument is canonical and lies inside a `path`/`repository` scope resource; and the call's
+bound does not exceed the authority's. A refusal is a failed attempt with a `nativeCode` and the external state marked certain.
+A read-only tool that reports changed files, or a success without a result hash, is `invalid_output` with the state marked
+uncertain.
+
+Mutation and process tools (`write_file`, `edit_block`, `move_file`, `create_directory`, `start_process`) are refused as
+`tool_not_supported`: the Desktop Commander chain requires a recorded human approval per call, a work unit has none, and a
+grant is not one. Tools whose paths the lane cannot enumerate are refused rather than guessed at. The adapter does not mint a
+Desktop Commander capability; the `DcToolInvoker` is the existing transport and has no production binding yet.
 
 ## Composition root
 

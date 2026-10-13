@@ -188,7 +188,14 @@ export type WorkUnitPayload =
       maxFiles?: number;
     }
   | { kind: "shell"; argv: string[]; cwd?: string }
-  | { kind: "tool"; toolName: string; argsHash?: string }
+  | {
+      kind: "tool";
+      toolName: string;
+      argsHash?: string;
+      /** Desktop Commander call contract (see dc-tool-call.ts). Optional here so legacy tool payloads keep parsing. */
+      arguments?: Record<string, unknown>;
+      maxRuntimeMs?: number;
+    }
   | { kind: "desktop"; objective: string }
   | { kind: "cua"; objective: string; allowedApplications?: string[] }
   | { kind: "verification"; targetUnitId: string }
@@ -219,7 +226,7 @@ export function parseWorkUnitPayload(kind: WorkUnitKind, value: unknown): WorkUn
     planning: ["goal"],
     coding: ["instructions", "files", "repository", "baseSha", "maxRuntimeMs", "maxFiles"],
     shell: ["argv", "cwd"],
-    tool: ["toolName", "argsHash"],
+    tool: ["toolName", "argsHash", "arguments", "maxRuntimeMs"],
     desktop: ["objective"],
     cua: ["objective", "allowedApplications"],
     verification: ["targetUnitId"],
@@ -265,10 +272,26 @@ export function parseWorkUnitPayload(kind: WorkUnitKind, value: unknown): WorkUn
     case "tool":
       if (!isString(value.toolName, 128)) return invalid("requires toolName");
       if (value.argsHash !== undefined && !isString(value.argsHash, 128)) return invalid("has bad argsHash");
+      if (value.arguments !== undefined) {
+        // Plain JSON only, and bounded: the arguments are stored, hashed and replayed.
+        if (!isRecord(value.arguments)) return invalid("has bad arguments");
+        let encoded: string | undefined;
+        try {
+          encoded = JSON.stringify(value.arguments);
+        } catch {
+          encoded = undefined;
+        }
+        if (encoded === undefined || encoded.length > 32_768) return invalid("has bad arguments");
+      }
+      if (value.maxRuntimeMs !== undefined && !isBoundedInteger(value.maxRuntimeMs, 86_400_000)) {
+        return invalid("has bad maxRuntimeMs");
+      }
       return {
         kind,
         toolName: value.toolName,
-        ...(value.argsHash === undefined ? {} : { argsHash: value.argsHash as string })
+        ...(value.argsHash === undefined ? {} : { argsHash: value.argsHash as string }),
+        ...(value.arguments === undefined ? {} : { arguments: value.arguments }),
+        ...(value.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: value.maxRuntimeMs as number })
       };
     case "desktop":
       if (!isString(value.objective, 8192)) return invalid("requires objective");
