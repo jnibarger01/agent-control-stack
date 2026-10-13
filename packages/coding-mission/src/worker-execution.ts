@@ -201,7 +201,7 @@ export function failureCategoryForCode(code?: string, message?: string): Failure
   return "tool_failure";
 }
 
-function resultBase(dispatch: DispatchEnvelope, now: string): Omit<ResultEnvelope, "outcome" | "receipts" | "externalStateUncertain"> {
+export function resultBase(dispatch: DispatchEnvelope, now: string): Omit<ResultEnvelope, "outcome" | "receipts" | "externalStateUncertain"> {
   return {
     schemaVersion: "acs.work-unit-result.v1",
     attemptId: dispatch.attemptId,
@@ -230,9 +230,14 @@ export function deadlineResult(dispatch: DispatchEnvelope, now: string): ResultE
   };
 }
 
+/** The live claim a dispatch ran under. An adapter that fences at the execution boundary checks it against durable state. */
+export interface ExecutionClaim {
+  claimToken: string;
+}
+
 export interface WorkUnitExecutorAdapter {
   readonly lane: ExecutorLane;
-  execute(dispatch: DispatchEnvelope, signal?: AbortSignal): Promise<ResultEnvelope>;
+  execute(dispatch: DispatchEnvelope, signal?: AbortSignal, claim?: ExecutionClaim): Promise<ResultEnvelope>;
 }
 
 export class CoderExecutionAdapter implements WorkUnitExecutorAdapter {
