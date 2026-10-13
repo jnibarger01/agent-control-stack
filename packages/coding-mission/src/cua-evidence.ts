@@ -1,4 +1,4 @@
-import { stableHash } from "@agent-control-stack/shared";
+import { domainHash } from "@agent-control-stack/shared";
 import { parseWorkUnitPayload, type CuaAction, type CuaActionType } from "./mission-model.js";
 import type { ExecutionReceipt } from "./worker-execution.js";
 
@@ -26,6 +26,11 @@ export interface CuaCheckpointRow {
   application: string;
 }
 
+/** Hash domains (prefix outside the canonical JSON, as in packages/evidence execution receipts). */
+export const CUA_CHECKPOINT_HASH_DOMAIN = "acs.cua-checkpoint.v1";
+export const CUA_ACTION_HASH_DOMAIN = "acs.cua-action.v1";
+export const CUA_RESULT_HASH_DOMAIN = "acs.cua-result.v1";
+
 export function cuaReceiptKind(type: CuaActionType): string {
   return `cua_${type}`;
 }
@@ -41,8 +46,7 @@ export function cuaCheckpointReceiptHash(input: {
   origin: string | null;
   screenshotHash: string | null;
 }): string {
-  return stableHash({
-    domain: "acs.cua-checkpoint.v1",
+  return domainHash(CUA_CHECKPOINT_HASH_DOMAIN, {
     kind: cuaReceiptKind(input.actionType),
     attemptId: input.attemptId,
     sequence: input.sequence,
@@ -55,7 +59,7 @@ export function cuaCheckpointReceiptHash(input: {
 }
 
 export function cuaActionHash(action: CuaAction): string {
-  return stableHash(action);
+  return domainHash(CUA_ACTION_HASH_DOMAIN, action);
 }
 
 export function committedCuaReceipts(rows: readonly CuaCheckpointRow[]): ExecutionReceipt[] {
@@ -66,7 +70,7 @@ export function committedCuaReceipts(rows: readonly CuaCheckpointRow[]): Executi
 
 /** The result hash a fully committed CUA script reports. */
 export function cuaResultHash(receipts: readonly ExecutionReceipt[]): string {
-  return stableHash({ receipts });
+  return domainHash(CUA_RESULT_HASH_DOMAIN, { receipts });
 }
 
 interface AttemptBindingRow {

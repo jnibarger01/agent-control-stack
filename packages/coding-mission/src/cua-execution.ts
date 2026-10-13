@@ -366,12 +366,16 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     }
   }
 
-  private lockOwner: string | undefined;
-
   private get lockTtlMs(): number {
     return this.options.lockTtlMs ?? Math.max(5 * 60_000, 4 * this.timeoutMs);
   }
 
+  /**
+   * Single-host assumption (L2): lock expiry uses this process's clock. The store is embedded SQLite, whose `now` is
+   * the same local clock, so there is no shared DB clock to use. Executors sharing a store need clock skew well under
+   * lockTtlMs. Skew past that can only let a second host take the lock early, which the fence/owner checks turn into a
+   * fail-closed cua_execution_lock_lost for the first run. See docs/mission-runtime.md.
+   */
   private acquireLock(dispatch: DispatchEnvelope): string {
     const owner = randomUUID();
     const now = this.now();
@@ -393,26 +397,21 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
   }
 
   /** Inside a transaction: the caller must still own the attempt lock; extends its lease. */
-  private renewLockInTransaction(dispatch: DispatchEnvelope): void {
-    const owner = this.lockOwner;
+  private renewLockInTransaction(dispatch: DispatchEnvelope, owner: string): void {
     const changed = this.store.db
       .prepare("UPDATE cua_execution_locks SET expires_at = ? WHERE attempt_id = ? AND owner_id = ?")
-      .run(new Date(Date.parse(this.now()) + this.lockTtlMs).toISOString(), dispatch.attemptId, owner ?? "");
+      .run(new Date(Date.parse(this.now()) + this.lockTtlMs).toISOString(), dispatch.attemptId, owner);
     if (changed.changes !== 1) {
       throw new ControlStackError("cua_execution_lock_lost", "this executor no longer owns the CUA attempt");
     }
   }
 
   private releaseLock(dispatch: DispatchEnvelope, owner: string): void {
-    try {
-      this.store.transaction(() => {
-        this.store.db
-          .prepare("DELETE FROM cua_execution_locks WHERE attempt_id = ? AND owner_id = ?")
-          .run(dispatch.attemptId, owner);
-      });
-    } finally {
-      this.lockOwner = undefined;
-    }
+    this.store.transaction(() => {
+      this.store.db
+        .prepare("DELETE FROM cua_execution_locks WHERE attempt_id = ? AND owner_id = ?")
+        .run(dispatch.attemptId, owner);
+    });
   }
 
   /**
@@ -460,7 +459,6 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     owner: string,
     signal?: AbortSignal
   ): Promise<ResultEnvelope> {
-    this.lockOwner = owner;
     // The script, origin allowlist and application come only from the dispatch ACS stored for this attempt, never from
     // the caller's envelope. The stored dispatch must still hash to its recorded hash, and the caller's envelope must be
     // that exact dispatch; anything else fails closed before any browser call.
@@ -472,7 +470,7 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     }
     const prior = verified.rows;
     if (prior.some((row) => row.state === "uncertain" || row.state === "planned")) {
-      if (prior.some((row) => row.state === "planned")) this.settlePlanned(dispatch);
+      if (prior.some((row) => row.state === "planned")) this.settlePlanned(dispatch, owner);
       return this.unknownResult(dispatch, committedReceipts(this.checkpoints(dispatch.attemptId)));
     }
     if (prior.length > 0) {
@@ -547,8 +545,8 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
             receipts
           );
         }
-        if (this.plan(dispatch, action, sequence, hash) === "blocked") {
-          this.settlePlanned(dispatch);
+        if (this.plan(dispatch, owner, action, sequence, hash) === "blocked") {
+          this.settlePlanned(dispatch, owner);
           return this.unknownResult(dispatch, committedReceipts(this.checkpoints(dispatch.attemptId)));
         }
         if (!page) {
@@ -557,7 +555,7 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
             page = session.page;
           } catch (error) {
             if (isFenceError(error)) throw error;
-            this.finish(dispatch, sequence, action.type, hash, "uncertain", { uncertain: true, origin: null });
+            this.finish(dispatch, owner, sequence, action.type, hash, "uncertain", { uncertain: true, origin: null });
             if (error instanceof CuaInterrupted && error.reason === "aborted") {
               return this.cancelled(dispatch, true, receipts);
             }
@@ -571,10 +569,10 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
           const effect = await this.perform(dispatch, page, action, origins, requireAllowlisted, signal);
           if (session && this.contextEscaped(session)) effect.uncertain = true;
           if (effect.uncertain) {
-            this.finish(dispatch, sequence, action.type, hash, "uncertain", effect);
+            this.finish(dispatch, owner, sequence, action.type, hash, "uncertain", effect);
             return this.unknownResult(dispatch, receipts);
           }
-          const receiptHash = this.finish(dispatch, sequence, action.type, hash, "committed", effect);
+          const receiptHash = this.finish(dispatch, owner, sequence, action.type, hash, "committed", effect);
           receipts.push({ kind: receiptKind(action.type), hash: receiptHash });
           if (MUTATING.has(action.type)) {
             committedMutation = true;
@@ -588,7 +586,7 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
           } catch {
             origin = null;
           }
-          this.finish(dispatch, sequence, action.type, hash, "uncertain", { uncertain: true, origin });
+          this.finish(dispatch, owner, sequence, action.type, hash, "uncertain", { uncertain: true, origin });
           if (error instanceof CuaInterrupted && error.reason === "aborted") {
             return this.cancelled(dispatch, true, receipts);
           }
@@ -720,10 +718,16 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     }
   }
 
-  private plan(dispatch: DispatchEnvelope, action: CuaAction, sequence: number, hash: string): "inserted" | "blocked" {
+  private plan(
+    dispatch: DispatchEnvelope,
+    owner: string,
+    action: CuaAction,
+    sequence: number,
+    hash: string
+  ): "inserted" | "blocked" {
     return this.store.transaction(() => {
       this.assertFenceInTransaction(dispatch);
-      this.renewLockInTransaction(dispatch);
+      this.renewLockInTransaction(dispatch, owner);
       const existing = this.checkpoint(dispatch.attemptId, sequence);
       if (existing) return "blocked";
       if (sequence > 0) {
@@ -769,6 +773,7 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
 
   private finish(
     dispatch: DispatchEnvelope,
+    owner: string,
     sequence: number,
     actionType: CuaActionType,
     hash: string,
@@ -787,7 +792,7 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     });
     this.store.transaction(() => {
       this.assertFenceInTransaction(dispatch);
-      this.renewLockInTransaction(dispatch);
+      this.renewLockInTransaction(dispatch, owner);
       const changed = this.store.db
         .prepare(
           `UPDATE cua_action_checkpoints
@@ -802,11 +807,11 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     return receiptHash;
   }
 
-  private settlePlanned(dispatch: DispatchEnvelope): void {
+  private settlePlanned(dispatch: DispatchEnvelope, owner: string): void {
     this.store.transaction(() => {
       this.assertFenceInTransaction(dispatch);
       // Only the lock owner settles: a planned row left by an owner whose lock was released or expired.
-      this.renewLockInTransaction(dispatch);
+      this.renewLockInTransaction(dispatch, owner);
       const planned = this.checkpoints(dispatch.attemptId).filter((row) => row.state === "planned");
       for (const row of planned) {
         const receiptHash = cuaCheckpointReceiptHash({
