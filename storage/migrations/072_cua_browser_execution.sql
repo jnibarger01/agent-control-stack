@@ -4,7 +4,7 @@
 -- Foreign keys stay enabled: PRAGMA foreign_keys does not change inside the
 -- migration transaction, and this migration must not leave them off.
 
-CREATE TABLE work_unit_execution_attempts__061 (
+CREATE TABLE work_unit_execution_attempts__072 (
   attempt_id TEXT PRIMARY KEY CHECK (length(attempt_id) BETWEEN 8 AND 96),
   mission_id TEXT NOT NULL,
   unit_id TEXT NOT NULL,
@@ -28,7 +28,7 @@ CREATE TABLE work_unit_execution_attempts__061 (
   FOREIGN KEY (mission_id, unit_id) REFERENCES coding_operations (mission_id, operation_id)
 );
 
-INSERT INTO work_unit_execution_attempts__061 (
+INSERT INTO work_unit_execution_attempts__072 (
   attempt_id, mission_id, unit_id, unit_attempt, worker_id, executor_lane, claim_token_hash,
   dispatch_hash, dispatch_json, authority_json, state, started_at, finished_at, result_hash,
   failure_category, report_hash, report_json, implementer_engine_id
@@ -39,23 +39,23 @@ SELECT
   failure_category, report_hash, report_json, implementer_engine_id
 FROM work_unit_execution_attempts;
 
-CREATE TABLE work_unit_execution_receipts__061 (
+CREATE TABLE work_unit_execution_receipts__072 (
   attempt_id TEXT NOT NULL,
   receipt_index INTEGER NOT NULL CHECK (receipt_index >= 0),
   kind TEXT NOT NULL,
   hash TEXT NOT NULL,
   created_at TEXT NOT NULL,
   PRIMARY KEY (attempt_id, receipt_index),
-  FOREIGN KEY (attempt_id) REFERENCES work_unit_execution_attempts__061 (attempt_id) ON DELETE CASCADE
+  FOREIGN KEY (attempt_id) REFERENCES work_unit_execution_attempts__072 (attempt_id) ON DELETE CASCADE
 );
 
-INSERT INTO work_unit_execution_receipts__061 (attempt_id, receipt_index, kind, hash, created_at)
+INSERT INTO work_unit_execution_receipts__072 (attempt_id, receipt_index, kind, hash, created_at)
 SELECT attempt_id, receipt_index, kind, hash, created_at
 FROM work_unit_execution_receipts;
 
 DROP TABLE work_unit_execution_receipts;
 
-CREATE TABLE work_unit_verification_usage_reservations__061 (
+CREATE TABLE work_unit_verification_usage_reservations__072 (
   reservation_id TEXT PRIMARY KEY CHECK (length(reservation_id) BETWEEN 8 AND 128),
   run_id TEXT NOT NULL,
   mission_id TEXT NOT NULL,
@@ -68,10 +68,10 @@ CREATE TABLE work_unit_verification_usage_reservations__061 (
   created_at TEXT NOT NULL,
   settled_at TEXT,
   FOREIGN KEY (mission_id) REFERENCES coding_missions (mission_id),
-  FOREIGN KEY (execution_attempt_id) REFERENCES work_unit_execution_attempts__061 (attempt_id)
+  FOREIGN KEY (execution_attempt_id) REFERENCES work_unit_execution_attempts__072 (attempt_id)
 );
 
-INSERT INTO work_unit_verification_usage_reservations__061 (
+INSERT INTO work_unit_verification_usage_reservations__072 (
   reservation_id, run_id, mission_id, execution_attempt_id, verifier_engine_id,
   tool_calls, model_tokens, spend_micro_usd, state, created_at, settled_at
 )
@@ -82,7 +82,7 @@ FROM work_unit_verification_usage_reservations;
 
 DROP TABLE work_unit_verification_usage_reservations;
 
-CREATE TABLE work_unit_verification_decisions__061 (
+CREATE TABLE work_unit_verification_decisions__072 (
   decision_id TEXT PRIMARY KEY CHECK (length(decision_id) BETWEEN 8 AND 96),
   run_id TEXT NOT NULL UNIQUE CHECK (length(run_id) BETWEEN 8 AND 96),
   mission_id TEXT NOT NULL,
@@ -106,10 +106,10 @@ CREATE TABLE work_unit_verification_decisions__061 (
   evidence_json TEXT NOT NULL,
   created_at TEXT NOT NULL,
   FOREIGN KEY (mission_id, unit_id) REFERENCES coding_operations (mission_id, operation_id),
-  FOREIGN KEY (execution_attempt_id) REFERENCES work_unit_execution_attempts__061 (attempt_id)
+  FOREIGN KEY (execution_attempt_id) REFERENCES work_unit_execution_attempts__072 (attempt_id)
 );
 
-INSERT INTO work_unit_verification_decisions__061 (
+INSERT INTO work_unit_verification_decisions__072 (
   decision_id, run_id, mission_id, unit_id, unit_attempt, execution_attempt_id, execution_report_hash,
   result_hash, criteria_hash, verification_policy, outcome, verdict, implementer_worker_id,
   implementer_engine_id, verifier_engine_ids_json, evidence_hash, evidence_json, created_at
@@ -122,7 +122,7 @@ FROM work_unit_verification_decisions;
 
 DROP TABLE work_unit_verification_decisions;
 
-CREATE TABLE work_unit_verification_runs__061 (
+CREATE TABLE work_unit_verification_runs__072 (
   run_id TEXT PRIMARY KEY CHECK (length(run_id) BETWEEN 8 AND 96),
   execution_attempt_id TEXT NOT NULL,
   mission_id TEXT NOT NULL,
@@ -135,11 +135,11 @@ CREATE TABLE work_unit_verification_runs__061 (
   outcome TEXT CHECK (outcome IS NULL OR outcome IN ('succeeded', 'failed', 'retryable', 'inconclusive', 'rejected_stale')),
   started_at TEXT NOT NULL,
   settled_at TEXT,
-  FOREIGN KEY (execution_attempt_id) REFERENCES work_unit_execution_attempts__061 (attempt_id),
+  FOREIGN KEY (execution_attempt_id) REFERENCES work_unit_execution_attempts__072 (attempt_id),
   FOREIGN KEY (mission_id, unit_id) REFERENCES coding_operations (mission_id, operation_id)
 );
 
-INSERT INTO work_unit_verification_runs__061 (
+INSERT INTO work_unit_verification_runs__072 (
   run_id, execution_attempt_id, mission_id, unit_id, unit_attempt, owner_pid, owner_boot_id,
   owner_process_start_ticks, state, outcome, started_at, settled_at
 )
@@ -152,11 +152,11 @@ DROP TABLE work_unit_verification_runs;
 
 DROP TABLE work_unit_execution_attempts;
 
-ALTER TABLE work_unit_execution_attempts__061 RENAME TO work_unit_execution_attempts;
-ALTER TABLE work_unit_execution_receipts__061 RENAME TO work_unit_execution_receipts;
-ALTER TABLE work_unit_verification_usage_reservations__061 RENAME TO work_unit_verification_usage_reservations;
-ALTER TABLE work_unit_verification_decisions__061 RENAME TO work_unit_verification_decisions;
-ALTER TABLE work_unit_verification_runs__061 RENAME TO work_unit_verification_runs;
+ALTER TABLE work_unit_execution_attempts__072 RENAME TO work_unit_execution_attempts;
+ALTER TABLE work_unit_execution_receipts__072 RENAME TO work_unit_execution_receipts;
+ALTER TABLE work_unit_verification_usage_reservations__072 RENAME TO work_unit_verification_usage_reservations;
+ALTER TABLE work_unit_verification_decisions__072 RENAME TO work_unit_verification_decisions;
+ALTER TABLE work_unit_verification_runs__072 RENAME TO work_unit_verification_runs;
 
 CREATE INDEX work_unit_execution_attempts_mission_idx
   ON work_unit_execution_attempts (mission_id, unit_id, unit_attempt);

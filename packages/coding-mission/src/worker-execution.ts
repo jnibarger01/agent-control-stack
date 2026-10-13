@@ -14,11 +14,25 @@ export interface ExecutionAuthorityRefs {
   actionHash?: string;
   /** Hash of the unit's derived authority definition, set by ACS (never the caller) for governed missions. */
   unitAuthorityHash?: string;
+  /**
+   * The instant by which this dispatch must finish, set by ACS (never the caller) for governed missions: the earlier of
+   * the dispatch time plus the authority's `maxRuntimeMs` and the authority's own expiry.
+   */
+  deadlineAt?: string;
 }
 
 /** The outcome of checking a dispatch against the authority the mission was granted. */
 export type DispatchAuthorityVerdict =
-  { ok: true; grantId: string; unitAuthorityHash: string; executingActorId: string } | { ok: false; reason: string };
+  | {
+      ok: true;
+      grantId: string;
+      unitAuthorityHash: string;
+      executingActorId: string;
+      /** The authority's per-dispatch runtime limit and its expiry, from which ACS derives the deadline. */
+      maxRuntimeMs: number;
+      expiresAt: string;
+    }
+  | { ok: false; reason: string };
 
 /**
  * Decides whether a worker may run a unit on a lane right now. `MissionAuthorityLedger` implements it. It must read
@@ -170,6 +184,7 @@ function normalizedAuthority(authority: ExecutionAuthorityRefs | undefined): Exe
       : {}),
     ...(typeof authority.actionHash === "string" ? { actionHash: authority.actionHash } : {}),
     ...(typeof authority.unitAuthorityHash === "string" ? { unitAuthorityHash: authority.unitAuthorityHash } : {})
+    // deadlineAt is deliberately not copied: only ACS sets it, from the verified authority.
   };
 }
 
@@ -204,6 +219,20 @@ export function resultBase(
   };
 }
 
+/**
+ * The result ACS records when a dispatch ran out of time. The operation may have started and may still be running, so it is
+ * an uncertain outcome (never a failure that is safe to retry) and carries no result.
+ */
+export function deadlineResult(dispatch: DispatchEnvelope, now: string): ResultEnvelope {
+  return {
+    ...resultBase(dispatch, now),
+    outcome: "unknown",
+    receipts: [],
+    failure: { category: "timeout", retrySafe: false },
+    externalStateUncertain: true
+  };
+}
+
 export interface WorkUnitExecutorAdapter {
   readonly lane: ExecutorLane;
   execute(dispatch: DispatchEnvelope, signal?: AbortSignal): Promise<ResultEnvelope>;
@@ -215,7 +244,9 @@ export class CoderExecutionAdapter implements WorkUnitExecutorAdapter {
   constructor(
     private readonly store: CodingMissionStore,
     private readonly coder: CodingMissionPorts["coder"],
-    private readonly now: () => string = () => new Date().toISOString()
+    private readonly now: () => string = () => new Date().toISOString(),
+    /** The claim's fence, handed to the executor so a fencing executor can validate it. */
+    private readonly claimToken?: string
   ) {}
 
   async execute(dispatch: DispatchEnvelope, signal?: AbortSignal): Promise<ResultEnvelope> {
@@ -236,7 +267,9 @@ export class CoderExecutionAdapter implements WorkUnitExecutorAdapter {
       const outcome = await this.coder.execute({
         mission,
         operationId: dispatch.unitId,
-        workerId: dispatch.workerId
+        workerId: dispatch.workerId,
+        ...(this.claimToken ? { claimToken: this.claimToken } : {}),
+        ...(signal ? { signal } : {})
       });
       const finishedAt = this.now();
       if (outcome.status === "succeeded" && outcome.value) {
@@ -387,8 +420,13 @@ export class ToolLaneExecutionAdapter implements WorkUnitExecutorAdapter {
 export class WorkUnitExecutionLedger {
   constructor(
     private readonly store: CodingMissionStore,
-    private readonly options: { authority?: DispatchAuthorityVerifier } = {}
+    private readonly options: { authority?: DispatchAuthorityVerifier; clock?: () => string } = {}
   ) {}
+
+  /** ACS's own clock. A worker-reported time is never used to decide whether a deadline was met. */
+  private clock(): string {
+    return (this.options.clock ?? (() => new Date().toISOString()))();
+  }
 
   beginDispatch(input: {
     missionId: string;
@@ -448,11 +486,19 @@ export class WorkUnitExecutionLedger {
           } else if (input.authority?.grantId !== undefined && input.authority.grantId !== verdict.grantId) {
             refusal = "authority_ref_mismatch";
           } else {
-            governedAuthority = {
-              ...normalizedAuthority(input.authority),
-              grantId: verdict.grantId,
-              unitAuthorityHash: verdict.unitAuthorityHash
-            };
+            const issuedMs = Date.parse(input.now);
+            const deadlineMs = Math.min(issuedMs + verdict.maxRuntimeMs, Date.parse(verdict.expiresAt));
+            if (!Number.isFinite(deadlineMs) || deadlineMs <= issuedMs) {
+              // A deadline that is not strictly in the future is an authority that is already unusable.
+              refusal = "deadline_unavailable";
+            } else {
+              governedAuthority = {
+                ...normalizedAuthority(input.authority),
+                grantId: verdict.grantId,
+                unitAuthorityHash: verdict.unitAuthorityHash,
+                deadlineAt: new Date(deadlineMs).toISOString()
+              };
+            }
           }
         }
         if (refusal !== undefined) {
@@ -687,6 +733,22 @@ export class WorkUnitExecutionLedger {
         return { applied: "rejected_stale", reason: "live claim no longer matches this execution attempt" };
       }
 
+      // A governed dispatch carries a deadline set by ACS. A result that arrives after it, on ACS's clock, is not accepted
+      // as what it claims to be: the operation may have run, so it is recorded as an uncertain outcome instead. The
+      // worker-reported finish time is not trusted for this.
+      const deadlineAt = (JSON.parse(row.authority_json) as ExecutionAuthorityRefs).deadlineAt;
+      const receivedAt = this.clock();
+      const late = deadlineAt !== undefined && !(Date.parse(receivedAt) <= Date.parse(deadlineAt));
+      const outcome: ExecutionOutcome = late ? "unknown" : input.result.outcome;
+      if (late) {
+        this.store.recordMissionEvent(
+          row.mission_id,
+          "work_unit.deadline_exceeded",
+          { unitId: row.unit_id, attemptId: row.attempt_id, deadlineAt, receivedAt, reported: input.result.outcome },
+          receivedAt
+        );
+      }
+
       for (const [index, receipt] of input.result.receipts.entries()) {
         this.store.db
           .prepare(
@@ -697,7 +759,7 @@ export class WorkUnitExecutionLedger {
       }
 
       let applied: ApplyResult;
-      switch (input.result.outcome) {
+      switch (outcome) {
         case "succeeded": {
           if (!input.result.result) {
             const next = this.store.failUnit(row.mission_id, row.unit_id, input.claimToken, {
@@ -798,11 +860,11 @@ export class WorkUnitExecutionLedger {
           break;
         }
       }
-      this.persistReport(row, input.result, reportHash, input.result.outcome);
+      this.persistReport(row, input.result, reportHash, outcome);
       this.store.putEvidence(
         row.mission_id,
         `execution_result:${row.attempt_id}`,
-        { attemptId: row.attempt_id, reportHash, outcome: input.result.outcome, applied: applied.applied },
+        { attemptId: row.attempt_id, reportHash, outcome, applied: applied.applied, ...(late ? { late: true } : {}) },
         input.result.finishedAt
       );
       return applied;

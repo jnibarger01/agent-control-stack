@@ -3,7 +3,8 @@
  * Jace Commander auth/reliability hardening regressions:
  *  A. FileNonceStore lazy expiry (O(1) replay check, amortized sweep, cap)
  *  B. single-flight token refresh (mcp-auth + device-login)
- *  C. McpHttpClient bounded retry on transient 5xx + session re-init on 404
+ *  C. McpHttpClient retry safety: only idempotent methods retry on 5xx/timeout;
+ *     tools/call is resent only on provable non-delivery or a confirmed stale-session 404
  *  D. OAuth discovery fetches carry an abort signal (bounded)
  */
 import assert from 'node:assert/strict';
@@ -11,7 +12,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { FileNonceStore, JcAuthorizationError } from '../dist/jace-commander/contract.js';
-import { McpHttpClient } from '../dist/jace-commander/mcp-http-client.js';
+import { JC_EXIT, McpHttpClient } from '../dist/jace-commander/mcp-http-client.js';
+import { outcomeJson } from '../dist/jace-commander/cli.js';
 import { discover, mcpAccessToken, mcpTokenPath } from '../dist/jace-commander/mcp-auth.js';
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'jc-resilience-'));
@@ -83,44 +85,186 @@ await test('refresh: concurrent mcpAccessToken calls share one token request', a
 // ---------------------------------------------------------------------------
 // C. McpHttpClient retry + session re-init
 // ---------------------------------------------------------------------------
-await test('client: a transient 5xx is retried and the call still succeeds', async () => {
-  let calls = 0;
-  const fake = async (_url, init) => {
+const INIT_OK = (msg) => json({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-03-26', capabilities: {}, serverInfo: { name: 'fake', version: '1' } } });
+const TOOL_OK = (msg) => json({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'ok' }] } });
+const connError = (code) => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error(`connect ${code}`), { code }) });
+/** Fake edge: counts sends per method; `onToolCall(n, msg)` decides each tools/call answer. */
+function fakeEdge({ onToolCall, onList, onInit, sessions = false } = {}) {
+  const sends = { initialize: 0, 'notifications/initialized': 0, 'tools/list': 0, 'tools/call': 0 };
+  const toolCallSessions = [];
+  const fetchImpl = async (_url, init) => {
     const msg = JSON.parse(init.body);
-    if (msg.method === 'initialize') return json({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-03-26', capabilities: {}, serverInfo: { name: 'fake', version: '1' } } });
-    if (msg.method === 'notifications/initialized') return new Response('', { status: 202 });
-    if (msg.method === 'tools/call') {
-      calls += 1;
-      if (calls < 3) return json({ error: 'server' }, 503);
-      return json({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'ok' }] } });
+    sends[msg.method] = (sends[msg.method] ?? 0) + 1;
+    if (msg.method === 'tools/call') toolCallSessions.push(init.headers['mcp-session-id']);
+    if (msg.method === 'initialize') {
+      const res = onInit ? onInit(sends.initialize, msg) : INIT_OK(msg);
+      if (sessions) res.headers.set('mcp-session-id', `s${sends.initialize}`);
+      return res;
     }
+    if (msg.method === 'notifications/initialized') return new Response('', { status: 202 });
+    if (msg.method === 'tools/list') return onList ? onList(sends['tools/list'], msg) : json({ jsonrpc: '2.0', id: msg.id, result: { tools: [] } });
+    if (msg.method === 'tools/call') return onToolCall(sends['tools/call'], msg);
     return new Response('', { status: 200 });
   };
-  const client = new McpHttpClient({ url: 'http://edge.test/jc/mcp', token: async () => 't', fetchImpl: fake });
-  const result = await client.callTool('read_file', { path: '/x' });
-  assert.equal(result.kind, 'ok');
-  assert.equal(calls, 3, 'transient 5xx must be retried up to the attempt bound');
+  return { sends, toolCallSessions, client: new McpHttpClient({ url: 'http://edge.test/jc/mcp', token: async () => 't', fetchImpl }) };
+}
+
+await test('client: tools/call is NOT retried on a 503 (may already have executed)', async () => {
+  const { sends, client } = fakeEdge({ onToolCall: (n, msg) => (n < 3 ? json({ error: 'server' }, 503) : TOOL_OK(msg)) });
+  const result = await client.callTool('start_process', { command: 'x' });
+  assert.equal(sends['tools/call'], 1, 'a 5xx tools/call must be sent exactly once');
+  assert.equal(result.kind, 'execution_unknown', 'a bare 503 may follow execution: never "nothing ran"');
+  assert.equal(result.exitCode, JC_EXIT.executionUnknown);
+  assert.equal(result.retryable, false, 'a bare 503 on tools/call must not be marked retryable');
+  assert.match(result.message, /may have executed.*HTTP 503/u);
 });
 
-await test('client: a stale 404 triggers exactly one session re-init then succeeds', async () => {
-  let inits = 0;
-  let calls = 0;
-  const fake = async (_url, init) => {
-    const msg = JSON.parse(init.body);
-    if (msg.method === 'initialize') { inits += 1; return json({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-03-26', capabilities: {}, serverInfo: { name: 'fake', version: '1' } } }); }
-    if (msg.method === 'notifications/initialized') return new Response('', { status: 202 });
-    if (msg.method === 'tools/call') {
-      calls += 1;
-      if (calls === 1) return json({ error: 'not found' }, 404);
-      return json({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'ok' }] } });
+await test('client: a managed_authorization_* refusal body on a 503 stays unavailable + retryable', async () => {
+  const { sends, client } = fakeEdge({ onToolCall: () => json({ error: 'managed_authorization_unavailable', code: 'managed_fail_closed', detail: 'ACS down' }, 503) });
+  const result = await client.callTool('start_process', { command: 'x' });
+  assert.equal(sends['tools/call'], 1);
+  assert.equal(result.kind, 'managed_authorization_unavailable', 'an edge refusal provably did not run');
+  assert.equal(result.code, 'managed_fail_closed');
+  assert.equal(result.retryable, true);
+});
+
+await test('client: tools/call is NOT retried on a 502/504', async () => {
+  for (const status of [502, 504]) {
+    const { sends, client } = fakeEdge({ onToolCall: () => json({ error: 'gw' }, status) });
+    const result = await client.callTool('write_file', { path: '/x', content: 'y' });
+    assert.equal(sends['tools/call'], 1, `HTTP ${status} tools/call must be sent exactly once`);
+    assert.equal(result.kind, 'execution_unknown');
+    assert.equal(result.retryable, false);
+  }
+});
+
+await test('client: tools/call is NOT retried on a timeout', async () => {
+  const { sends, client } = fakeEdge({ onToolCall: () => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); } });
+  const result = await client.callTool('start_process', { command: 'x' });
+  assert.equal(sends['tools/call'], 1, 'a timed-out tools/call must be sent exactly once');
+  assert.equal(result.kind, 'execution_unknown', 'a timeout after send must not claim nothing ran');
+  assert.equal(result.code, 'execution_unknown');
+  assert.equal(result.exitCode, JC_EXIT.executionUnknown);
+  assert.equal(result.retryable, false, 'execution-unknown must not be marked retryable');
+  assert.match(result.message, /may have executed/u);
+  const j = outcomeJson(result);
+  assert.equal(j.kind, 'execution_unknown');
+  assert.equal(j.retryable, false, 'CLI JSON output must not say retryable');
+});
+
+await test('client: tools/call is NOT retried on a reset after send / ambiguous network error', async () => {
+  for (const err of [connError('ECONNRESET'), connError('UND_ERR_SOCKET'), connError('UND_ERR_CONNECT_TIMEOUT'), new TypeError('fetch failed'), new Error('other side closed')]) {
+    const { sends, client } = fakeEdge({ onToolCall: () => { throw err; } });
+    const result = await client.callTool('privileged_exec', { command: 'x' });
+    assert.equal(sends['tools/call'], 1, `ambiguous failure (${err.cause?.code ?? err.message}) must be sent exactly once`);
+    assert.equal(result.kind, 'execution_unknown', 'a reset/ambiguous failure after send must report execution unknown');
+    assert.equal(result.retryable, false);
+  }
+});
+
+await test('client: tools/call IS retried on provable non-delivery (connection refused / DNS)', async () => {
+  for (const code of ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']) {
+    const { sends, client } = fakeEdge({ onToolCall: (n, msg) => { if (n < 3) throw connError(code); return TOOL_OK(msg); } });
+    const result = await client.callTool('read_file', { path: '/x' });
+    assert.equal(result.kind, 'ok', `${code} before send is safe to resend`);
+    assert.equal(sends['tools/call'], 3, `${code}: bounded to 3 sends`);
+  }
+  const { sends, client } = fakeEdge({ onToolCall: () => { throw connError('ECONNREFUSED'); } });
+  const result = await client.callTool('read_file', { path: '/x' });
+  assert.equal(sends['tools/call'], 3, 'persistent ECONNREFUSED is bounded to 3 sends');
+  assert.equal(result.code, 'edge_unreachable');
+  assert.equal(result.kind, 'managed_authorization_unavailable', 'provable non-delivery really means nothing ran');
+  assert.equal(result.retryable, true);
+});
+
+await test('client: EHOSTUNREACH/ENETUNREACH after send (no connect syscall) does NOT retry tools/call', async () => {
+  for (const code of ['EHOSTUNREACH', 'ENETUNREACH']) {
+    for (const syscall of [undefined, 'read', 'write']) {
+      const err = connError(code);
+      if (syscall) err.cause.syscall = syscall;
+      const { sends, client } = fakeEdge({ onToolCall: () => { throw err; } });
+      const result = await client.callTool('start_process', { command: 'x' });
+      assert.equal(sends['tools/call'], 1, `${code} (syscall=${syscall}) may be post-send and must be sent exactly once`);
+      assert.equal(result.kind, 'execution_unknown');
     }
-    return new Response('', { status: 200 });
-  };
-  const client = new McpHttpClient({ url: 'http://edge.test/jc/mcp', token: async () => 't', fetchImpl: fake });
+  }
+});
+
+await test('client: EHOSTUNREACH/ENETUNREACH from connect() IS retried (never sent)', async () => {
+  for (const code of ['EHOSTUNREACH', 'ENETUNREACH']) {
+    const { sends, client } = fakeEdge({ onToolCall: (n, msg) => { if (n < 2) { const e = connError(code); e.cause.syscall = 'connect'; throw e; } return TOOL_OK(msg); } });
+    const result = await client.callTool('read_file', { path: '/x' });
+    assert.equal(result.kind, 'ok');
+    assert.equal(sends['tools/call'], 2, `${code} during connect() is safe to resend`);
+  }
+});
+
+await test('client: a 404 on a session-bearing tools/call re-inits once and resends once (status alone, empty body)', async () => {
+  const { sends, toolCallSessions, client } = fakeEdge({ sessions: true, onToolCall: (n, msg) => (n === 1 ? new Response('', { status: 404 }) : TOOL_OK(msg)) });
+  const result = await client.callTool('read_file', { path: '/x' });
+  assert.equal(result.kind, 'ok', 'MCP session contract: a 404 for a request with a session id means start a new session');
+  assert.equal(sends.initialize, 2, 'exactly one re-init');
+  assert.equal(sends['tools/call'], 2, 'resent exactly once');
+  assert.deepEqual(toolCallSessions, ['s1', 's2'], 'the resend uses the new session');
+});
+
+await test('client: a 404 with a JSON-RPC session error body also re-inits (session-bearing)', async () => {
+  const { sends, client } = fakeEdge({ sessions: true, onToolCall: (n, msg) => (n === 1 ? json({ jsonrpc: '2.0', id: null, error: { code: -32001, message: 'Session not found' } }, 404) : TOOL_OK(msg)) });
   const result = await client.callTool('read_file', { path: '/x' });
   assert.equal(result.kind, 'ok');
-  assert.equal(inits, 2, 'a stale session must be re-initialized exactly once');
-  assert.equal(calls, 2, 'the tool call must be retried once after re-init');
+  assert.equal(sends['tools/call'], 2);
+});
+
+await test('client: a 404 on a request WITHOUT a session id is NOT resent', async () => {
+  for (const body of [() => json({ error: 'not found' }, 404), () => json({ jsonrpc: '2.0', id: null, error: { code: -32001, message: 'Session not found' } }, 404)]) {
+    const { sends, client } = fakeEdge({ sessions: false, onToolCall: (n, msg) => (n === 1 ? body() : TOOL_OK(msg)) });
+    const result = await client.callTool('write_file', { path: '/x', content: 'y' });
+    assert.equal(sends['tools/call'], 1, 'no session id was sent, so a 404 is not a session signal');
+    assert.equal(sends.initialize, 1);
+    assert.equal(result.code, 'edge_http_404');
+  }
+});
+
+await test('client: 404-then-5xx and 404-then-404 send tools/call at most twice (was up to 6)', async () => {
+  for (const second of [() => json({ error: 'server' }, 503), () => new Response('', { status: 404 })]) {
+    const { sends, client } = fakeEdge({ sessions: true, onToolCall: (n) => (n === 1 ? new Response('', { status: 404 }) : second()) });
+    const result = await client.callTool('start_process', { command: 'x' });
+    assert.equal(sends['tools/call'], 2, 'one re-init, and the resend never retries');
+    assert.equal(sends.initialize, 2);
+    assert.ok(result.kind === 'execution_unknown' || result.code === 'edge_http_404', `unexpected ${result.kind}/${result.code}`);
+  }
+});
+
+await test('client: 404 then 503 on tools/call is execution_unknown (2 sends)', async () => {
+  const { sends, client } = fakeEdge({ sessions: true, onToolCall: (n) => (n === 1 ? new Response('', { status: 404 }) : json({ error: 'server' }, 503)) });
+  const result = await client.callTool('start_process', { command: 'x' });
+  assert.equal(sends['tools/call'], 2);
+  assert.equal(result.kind, 'execution_unknown', 'the post-reinit 503 may follow execution');
+  assert.equal(result.retryable, false);
+  assert.equal(result.exitCode, JC_EXIT.executionUnknown);
+});
+
+await test('client: tools/list re-inits on a session-bearing 404 (status alone)', async () => {
+  const { sends, client } = fakeEdge({ sessions: true, onList: (n, msg) => (n === 1 ? new Response('', { status: 404 }) : json({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'a' }] } })) });
+  const tools = await client.listTools();
+  assert.equal(tools.length, 1);
+  assert.equal(sends.initialize, 2);
+});
+
+await test('client: idempotent initialize / tools/list still retry on 5xx and network errors', async () => {
+  {
+    const { sends, client } = fakeEdge({ onInit: (n, msg) => (n < 3 ? json({ error: 'server' }, 503) : INIT_OK(msg)), onList: (n, msg) => (n < 3 ? json({ error: 'server' }, 503) : json({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'a' }] } })) });
+    const tools = await client.listTools();
+    assert.equal(tools.length, 1);
+    assert.equal(sends.initialize, 3, 'initialize is retried on 5xx');
+    assert.equal(sends['tools/list'], 3, 'tools/list is retried on 5xx');
+  }
+  {
+    const { sends, client } = fakeEdge({ onInit: (n, msg) => { if (n < 2) throw new DOMException('timeout', 'TimeoutError'); return INIT_OK(msg); }, onList: (n, msg) => { if (n < 2) throw connError('ECONNRESET'); return json({ jsonrpc: '2.0', id: msg.id, result: { tools: [] } }); } });
+    await client.listTools();
+    assert.equal(sends.initialize, 2, 'initialize is retried on timeout');
+    assert.equal(sends['tools/list'], 2, 'tools/list is retried on an ambiguous network error');
+  }
 });
 
 // ---------------------------------------------------------------------------

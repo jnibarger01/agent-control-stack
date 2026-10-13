@@ -15,8 +15,8 @@ function applyThrough(last: number): DatabaseSync {
   return db;
 }
 
-describe("migration 061: cua executor lane", () => {
-  it("applies after migration 062 when an existing database receives the late 061 slice", () => {
+describe("migration 072: cua executor lane", () => {
+  it("applies on an existing database that already recorded every earlier migration", () => {
     const db = new DatabaseSync(":memory:");
     db.exec("PRAGMA foreign_keys = ON");
     const migrations = controlPlaneMigrations();
@@ -31,27 +31,18 @@ describe("migration 061: cua executor lane", () => {
       checksum TEXT NOT NULL DEFAULT '',
       applied_at TEXT NOT NULL
     )`);
-    for (const migration of migrations.filter((entry) => entry.version <= 60)) {
+    for (const migration of migrations.filter((entry) => entry.version < 72)) {
       db.exec(migration.sql);
       insert().run(migration.version, migration.name, migration.filename, migration.checksum, "2026-10-11T00:00:00Z");
     }
-    const flightRecorder = migrations.find((entry) => entry.version === 62)!;
-    db.exec(flightRecorder.sql);
-    insert().run(
-      flightRecorder.version,
-      flightRecorder.name,
-      flightRecorder.filename,
-      flightRecorder.checksum,
-      "2026-10-11T00:00:00Z"
-    );
 
     applyControlPlaneMigrations(db);
 
-    // The late 061 slice is applied alongside the already-recorded 062 and any later migrations.
-    expect(db.prepare("SELECT version FROM schema_migrations WHERE version >= 61 ORDER BY version ASC").all()).toEqual(
-      migrations.filter((entry) => entry.version >= 61).map((entry) => ({ version: entry.version }))
+    // 072 is applied on top of the already-recorded 060-064 slices.
+    expect(db.prepare("SELECT version FROM schema_migrations WHERE version >= 60 ORDER BY version ASC").all()).toEqual(
+      migrations.filter((entry) => entry.version >= 60).map((entry) => ({ version: entry.version }))
     );
-    expect(db.prepare("SELECT version FROM schema_migrations WHERE version = 61").get()).toEqual({ version: 61 });
+    expect(db.prepare("SELECT version FROM schema_migrations WHERE version = 72").get()).toEqual({ version: 72 });
     expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(
       db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mission_flight_records'").get()
@@ -62,7 +53,7 @@ describe("migration 061: cua executor lane", () => {
   });
 
   it("accepts executor_lane cua on a fresh database", () => {
-    const db = applyThrough(61);
+    const db = applyThrough(72);
     expect(db.prepare("PRAGMA foreign_keys").get()).toEqual({ foreign_keys: 1 });
     db.exec(`
       INSERT INTO coding_missions (
@@ -158,8 +149,8 @@ describe("migration 061: cua executor lane", () => {
         'succeeded', 'pass', 'worker-1', 'codex', '[]', 'eh', '{}', 't'
       );
     `);
-    const migration = controlPlaneMigrations().find((entry) => entry.version === 61);
-    if (!migration) throw new Error("migration 061 is not registered");
+    const migration = controlPlaneMigrations().find((entry) => entry.version === 72);
+    if (!migration) throw new Error("migration 072 is not registered");
     db.exec("BEGIN IMMEDIATE");
     db.exec(migration.sql);
     db.exec("COMMIT");
@@ -179,7 +170,7 @@ describe("migration 061: cua executor lane", () => {
       tool_calls: 1
     });
     expect(db.prepare("SELECT outcome FROM work_unit_verification_decisions").get()).toEqual({ outcome: "succeeded" });
-    expect(db.prepare("SELECT name FROM sqlite_master WHERE name LIKE '%__061'").all()).toEqual([]);
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE name LIKE '%__072'").all()).toEqual([]);
     db.exec(`
       INSERT INTO work_unit_execution_attempts (
         attempt_id, mission_id, unit_id, unit_attempt, worker_id, executor_lane,

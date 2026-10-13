@@ -186,6 +186,7 @@ import {
   changeSetRevocationBodySchema,
   codingMissionCreateBodySchema,
   codingMissionApprovalBodySchema,
+  codingMissionAuthorityBodySchema,
   flightRecordQuerySchema,
   changeSetQuerySchema,
   cancelBodySchema,
@@ -2667,6 +2668,59 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       }
     }
   );
+
+  app.get<{ Params: { id: string } }>("/coding-missions/:id/authority-graph", async (request, reply) => {
+    try {
+      const credential = gatewayCredentialForRequest(request, auth);
+      if (!credential?.scopes.includes("acs:read")) return reply.code(401).send({ error: "unauthorized" });
+      if (!codingMissions) {
+        return reply
+          .code(503)
+          .send({ error: "coding mission ports are not configured", code: "coding_mission_unconfigured" });
+      }
+      if (!codingMissions.store.exists(request.params.id)) {
+        return reply.code(404).send({ error: "coding mission does not exist", code: "coding_mission_not_found" });
+      }
+      return codingMissions.authorityGraph(request.params.id);
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  // Binding authority is a human act: the grant it names was issued by a human, and the binder must be one too. Binding
+  // is write-once and verified by the authority ledger; afterwards the mission is driven forward here, because nothing
+  // else advances a mission that was waiting for authority.
+  app.post<{ Params: { id: string } }>("/coding-missions/:id/authority", async (request, reply) => {
+    try {
+      const actor = requireMutationActor(request, reply, auth, "acs:approve");
+      if (!actor) return;
+      if (!codingMissions) {
+        return reply
+          .code(503)
+          .send({ error: "coding mission ports are not configured", code: "coding_mission_unconfigured" });
+      }
+      if (!workItems.isHumanOperator(actor)) {
+        return reply.code(403).send({ error: "a human operator is required", code: "operator_required" });
+      }
+      const body = codingMissionAuthorityBodySchema.parse(request.body);
+      const binding = codingMissions.bindAuthority(request.params.id, body.grantId);
+      await codingMissions.runUntilStable(request.params.id);
+      return {
+        authority: {
+          missionId: binding.missionId,
+          grantId: binding.grantId,
+          approverId: binding.approverId,
+          executingActorId: binding.definition.executingActorId,
+          expiresAt: binding.definition.expiresAt,
+          definitionHash: binding.definitionHash,
+          createdAt: binding.createdAt
+        },
+        mission: codingMissions.approvalView(request.params.id)
+      };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
 
   app.post<{ Params: { id: string } }>("/coding-missions/:id/approve", async (request, reply) => {
     try {
