@@ -13,6 +13,8 @@ import { systemProbesClientSource } from "./system-probes.js";
 import { ADMIN_MODE_BANNER_TEXT } from "./types.js";
 import { auditRowsClientSource, metricsClientSource, themeClientSource } from "./visibility.js";
 import { workItemControlsClientSource } from "./work-item-controls.js";
+import { operatorThirtyClientSource } from "./operator-thirty-ui.js";
+import { LAST_VIEW_STORAGE_KEY } from "./operator-impact.js";
 
 export function clientScript(): string {
   return `
@@ -198,11 +200,13 @@ ${auditRowsClientSource()}
 ${metricsClientSource()}
 ${themeClientSource()}
 ${operationsClientSource()}
+${operatorThirtyClientSource()}
 function onDashboardFragmentsApplied() {
   applyOperationFilters();
   updateTitleBadge();
   refreshWaitBadges();
   if (document.body.dataset.activeView === 'connectors') refreshConnectorRoster();
+  if (typeof applyOperatorThirty === 'function') applyOperatorThirty();
 }
 function onWorkItemControlSucceeded(control, id, body) {
   const created = body && body.workItem && body.workItem.id;
@@ -332,7 +336,9 @@ function agentCardsMarkup(agents) {
     const heartbeat = agent.lastHeartbeatAt ? ('Heartbeat ' + formatClientTime(agent.lastHeartbeatAt)) : 'No heartbeat observed';
     const capabilityCount = Array.isArray(agent.capabilities) ? agent.capabilities.length : 0;
     const error = agent.lastError ? '<span class="agent-card-error">' + escapeClient(redactClient(agent.lastError)) + '</span>' : '';
-    return '<button type="button" class="agent-card" data-agent="' + id + '" data-agent-id="' + id + '" aria-label="Open ' + name + '">' +
+    const lastSeen = agent.lastHeartbeatAt || agent.lastEventAt || '';
+    const lastSeenAttr = lastSeen ? ' data-last-seen="' + escapeClient(lastSeen) + '"' : '';
+    return '<button type="button" class="agent-card" data-agent="' + id + '" data-agent-id="' + id + '"' + lastSeenAttr + ' aria-label="Open ' + name + '">' +
       '<span class="agent-card-head">' +
         '<span class="agent-avatar" aria-hidden="true">' + initial + '</span>' +
         '<span class="agent-card-identity"><strong>' + name + '</strong><small>' + id + '</small></span>' +
@@ -1080,6 +1086,7 @@ function applyQueueFilterClient(filter) {
       ? ('Showing all ' + buttons.length + ' work items')
       : ('Showing ' + visible + ' of ' + buttons.length + ' work items');
   }
+  if (typeof renderOperatorFilterSummary === 'function') renderOperatorFilterSummary();
   return visible;
 }
 
@@ -1193,6 +1200,7 @@ function applyConfirmedExecutionMode(mode, problem) {
   const issue = document.querySelector('#execution-mode-problem');
   if (admin) { admin.hidden = mode !== 'admin'; admin.textContent = mode === 'admin' ? ${JSON.stringify(ADMIN_MODE_BANNER_TEXT)} : ''; }
   if (issue) { issue.hidden = !problem; issue.textContent = problem ? 'ACS execution mode ' + problem + ' -- fail closed' : ''; }
+  if (typeof renderOperatorInsights === 'function') renderOperatorInsights();
 }
 function requestAdminModeConfirm() {
   return new Promise(function (resolve) {
@@ -1336,10 +1344,13 @@ const viewAliases = {
   dispatch: 'dispatch',
   'create-task': 'overview'
 };
-function showView(name) {
+function showView(name, options) {
   const view = viewAliases[name] || 'overview';
   syncPageHeading(view);
   document.body.dataset.activeView = view;
+  // The hashless startup default must not overwrite the saved view before
+  // bindOperatorThirty restores it.
+  if (!(options && options.persist === false)) try { localStorage.setItem(${JSON.stringify(LAST_VIEW_STORAGE_KEY)}, view); } catch {}
   document.querySelectorAll('nav a[data-nav]').forEach((link) => {
     link.classList.toggle('active', link.dataset.nav === view);
   });
@@ -1392,7 +1403,7 @@ document.querySelector('aside nav')?.addEventListener('click', (event) => {
   const href = link.getAttribute('href') || '#overview';
   history.pushState(null, '', href);
 });
-showView((location.hash || '#overview').replace('#', ''));
+showView((location.hash || '#overview').replace('#', ''), { persist: !!location.hash });
 openWorkItemFromLocation();
 ${codingMissionPanelSource()}`;
 }

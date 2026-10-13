@@ -9,6 +9,7 @@ import { escapeHtml } from "../html.js";
 import { styles } from "../styles.js";
 import { ADMIN_MODE_BANNER_TEXT, type MissionControlViewModel } from "../types.js";
 import { themeBootScript } from "../visibility.js";
+import { operatorInsightsHtml, operatorToolbarHtml } from "../operator-thirty-ui.js";
 import { dashboardAgents, dashboardModel, renderDashboardFragments } from "./fragments.js";
 import { agentDetailPanel, agentTable, executorPanel, queueFilterStrip, workDetailPanel } from "./panels.js";
 
@@ -29,12 +30,14 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
   </head>
   <body data-active-view="overview">
     <a class="skip-link" href="#main-content">Skip to main content</a>
+    <a class="skip-link" href="#approvals">Skip to approvals</a>
+    <a class="skip-link" href="#queue">Skip to work queue</a>
     <aside aria-label="Mission control navigation">
       <div class="brand"><svg viewBox="0 0 40 42" width="36" height="38" aria-hidden="true"><path fill="#3da4ff" d="M18 3a3 3 0 0 1 5 0l7 12H11z"/><path fill="#257cff" d="M9 19h12L10 38H0z"/><path fill="#70cfff" d="M24 19h8l8 19H30z"/></svg><div>ACS<span>Mission Control</span></div></div>
       <nav aria-label="Primary">${Object.entries(PAGE_META)
         .map(
           ([view, meta]) =>
-            `<a href="#${view}"${view === "overview" ? ' class="active" aria-current="page"' : ""} data-nav="${view}"><span class="nav-icon" aria-hidden="true">${icon(view)}</span>${view === "overview" ? "Overview" : meta.title}</a>`
+            `<a href="#${view}"${view === "overview" ? ' class="active" aria-current="page"' : ""} data-nav="${view}"><span class="nav-icon" aria-hidden="true">${icon(view)}</span>${view === "overview" ? "Overview" : meta.title}<span class="nav-count" data-nav-count="${view}" hidden></span></a>`
         )
         .join("")}</nav>
       <p class="rail-note">Local-first control plane. Live state comes from the registry, work-item store, and audit stream. Press <kbd>?</kbd> for keyboard shortcuts.</p>
@@ -59,6 +62,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
       ${mcpClientAlertHtml()}
       <div id="command-results" class="command-results" hidden role="region" aria-label="Search results"></div>
       <div class="page-actions"><button type="button" data-create-task class="primary-button">＋ Create Task</button><button type="button" data-refresh-dashboard>↻ Refresh</button><span class="muted">Governed by ACS</span></div>
+      ${operatorToolbarHtml()}
       <section id="overview-operations" data-view-panel="overview">${fragments.overviewOperations}</section>
       <section id="execution-operations" data-view-panel="execution">${fragments.executionOperations}</section>
       <section id="approval-summary" data-view-panel="approvals">${fragments.approvalSummary}</section>
@@ -66,13 +70,14 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
       <section id="agent-operations" data-view-panel="agents">${fragments.agentOperations}</section>
       ${agentDispatchPanelHtml()}
       <section id="overview" class="cards" data-view-panel="overview">${fragments.cards}</section>
+      ${operatorInsightsHtml()}
       <section class="grid">
         <article id="agents" class="panel wide roster-panel" data-view-panel="agents"><div class="panel-head"><div><h2>Agent Roster</h2><p>Identity, role, activity, and runtime presence</p></div><span id="agent-count">${agents.length} observed identities</span></div><div class="agent-layout">${agentTable(agents)}${agentDetailPanel()}</div></article>
         <article id="executors" class="panel wide roster-panel" data-view-panel="executors"><div class="panel-head"><div><h2>Executors</h2><p>Managed execution bridges, runtime state, and tool capabilities</p></div><span id="executor-count">loading</span></div>${executorPanel()}</article>
-        <article id="queue" class="panel queue-panel" data-view-panel="queue"><div class="panel-head"><h2>Work Queue</h2><span id="queue-filter-count">${escapeHtml(String(model.workItems.length))} items</span></div>${queueFilterStrip()}<div class="queue" id="queue-list">${fragments.queueList}</div><div id="queue-footer" class="queue-footer">${fragments.queueFooter}</div></article>
+        <article id="queue" class="panel queue-panel" tabindex="-1" data-view-panel="queue"><div class="panel-head"><h2>Work Queue</h2><span id="queue-filter-count">${escapeHtml(String(model.workItems.length))} items</span></div>${queueFilterStrip()}<div class="queue" id="queue-list">${fragments.queueList}</div><div id="queue-footer" class="queue-footer">${fragments.queueFooter}</div></article>
       </section>
       <section class="grid approvals-grid">
-        <article id="approvals" class="panel wide" data-view-panel="approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">${fragments.approvalsCount}</span></div><div id="approvals-list">${fragments.approvalsList}</div></article>
+        <article id="approvals" class="panel wide" tabindex="-1" data-view-panel="approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">${fragments.approvalsCount}</span></div><div id="approvals-list">${fragments.approvalsList}</div></article>
         <article id="coding-missions" class="panel wide" data-view-panel="approvals"><div class="panel-head"><h2>Coding missions</h2><span>change-set approval</span></div><div id="coding-mission-list"><p class="empty">No coding missions are waiting for approval.</p></div></article>
       </section>
       <section class="grid lower">
