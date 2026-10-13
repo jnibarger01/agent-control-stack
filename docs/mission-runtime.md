@@ -164,15 +164,51 @@ is where authority is enforced. A mission with a persisted `mission_authority` b
   (`operation: "dispatch"`) and writes no execution attempt.
 - A mission with no authority binding dispatches exactly as before.
 
-Limits: the `coder` and `mcp` lanes have no single tool runtime, so their tool classes are checked where each tool is
-invoked, not at dispatch. `maxRuntimeMs` is not yet turned into a deadline on the envelope. `claimUnit` itself does not
-consult authority; the gate is at dispatch. No production composition root constructs the dispatch ledger with a
-verifier yet, and the real grant reader is only wired in tests.
+Lane and tool authorization is exact. Every lane maps to a runtime the authority can grant: `dc` to `desktop_commander`,
+`jc` to `jace_commander`, `coder` to `sandbox`. The `mcp` lane maps to none, because the authority schema cannot express an
+MCP tool, so it is never authorized for a governed mission. A unit whose payload names a specific tool (`kind: "tool"`) may
+only run it if that exact runtime and tool pair is granted; a broad runtime grant does not cover a tool nobody listed.
+
+A governed dispatch carries a **deadline** set by ACS: the earlier of the dispatch time plus the authority's `maxRuntimeMs`
+and the authority's expiry. A caller-supplied deadline is ignored. The controller races the executor against it, aborts the
+executor's `AbortSignal`, and records the outcome as uncertain (never as a retry-safe failure). Independently,
+`applyResult` judges a result against the deadline on ACS's own clock: one that arrives late is recorded as `unknown`
+whatever finish time the worker reports. `claimUnit` itself does not consult authority; the gate is at dispatch.
+
+## Production entry point
+
+`CodingMissionController` is the production caller of `createGovernedExecution`. With `ports.governance = { mode: "enforce" }`
+(the gateway sets this when `ACS_CODING_MISSION_GOVERNED=1`; it is off by default) the controller:
+
+- **Takes identity from the control plane, never from the worker.** An operator is a registered `HUMAN` actor
+  (`isHumanOperator`). A worker acts as the actor `resolveVerifiedWorkerActor` returns: exactly one `AGENT` or `SERVICE`
+  actor with `externalRef` `worker:<workerId>`, whose latest `actor.registered` audit event matches its row and names a
+  `HUMAN` registrar. `POST /actors` is open to any mutation credential and overwrites an existing actor, so a row in `actors`
+  alone proves nothing; a binding made by, or overwritten by, a non-human does not resolve. The grant's executing actor must
+  equal the resolved actor: delegating to a different actor stays refused.
+- **Does not start a mission nobody gave authority to.** With no binding it waits (`authority_required`): nothing is claimed,
+  nothing runs, nothing is degraded. An operator binds a grant with `POST /coding-missions/:id/authority`.
+- **Verifies audit integrity before opening the dispatch transaction**, so a full-chain verification does not hold the write
+  lock; a chain that does not verify refuses the dispatch (`audit_integrity_failed`).
+- **Runs the gate between claim and execute.** A denial returns the unit to `pending` (it never ran), records
+  `authority.denied`, and degrades the mission with `dispatch_authority_denied`. Binding is write-once, so a mission whose
+  grant was revoked or expired stays stopped; it needs a new mission.
+- **Completes through the ledger.** Success completes the unit; a failure or retryable outcome degrades the mission for an
+  operator (`reconciliation_required` if the environment changed, else `operation_failed`); an uncertain outcome is handled
+  by the existing recovery path, which escalates unless the executor can fence the old run or declares itself idempotent.
+
+Grants must be issued under the same id as the coding mission, and the work item with that id must be non-terminal.
+
+Cost note: `assertAuditChainIntegrity` re-verifies the whole audit chain when another connection has written (or every 30s).
+Each governed dispatch therefore costs a chain verification in the worst case. This has not been measured on a large
+production database.
 
 ## Not yet in this runtime
 
-- A caller of the composition root. `createGovernedExecution` exists and is tested, but no controller, gateway route
-  or CLI constructs it yet, so nothing in production dispatches through it today.
+- Governed execution is implemented and tested end to end, but it is **off by default** and has not been enabled or deployed
+  anywhere. Turning it on is an operational action (`ACS_CODING_MISSION_GOVERNED=1`, plus operator-bound worker actors and a
+  grant per mission).
+- The generalized work-unit path and the `jc`, `dc` and `mcp` lanes have no production driver yet; only the `coder` lane runs.
 - Checkpoint/resume as worker adapters on the execution ledger, the CUA worker, and recovery policy.
 - A driver for the `general` mission kind. The legacy coding path has no budget row (uncapped).
 - Delegating to a different executing actor (`authorityNarrowingViolations` refuses it deliberately and it needs its own decision).

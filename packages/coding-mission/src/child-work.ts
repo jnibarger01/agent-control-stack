@@ -154,7 +154,22 @@ const MAX_CLAIM_CLOCK_SKEW_MS = 5_000;
  * The tool runtime an executor lane drives. The coder and mcp lanes have no single runtime, so their tool classes are
  * enforced where each tool is invoked, not at dispatch.
  */
-const LANE_RUNTIME: Partial<Record<ExecutorLane, string>> = { jc: "jace_commander", dc: "desktop_commander" };
+const LANE_RUNTIME: Record<ExecutorLane, string | undefined> = {
+  jc: "jace_commander",
+  dc: "desktop_commander",
+  // The coder lane runs the repository edit, which the authority schema names `sandbox`.
+  coder: "sandbox",
+  // The authority schema has no MCP runtime, so no grant can authorize this lane. It is refused, not waved through.
+  mcp: undefined
+};
+
+/** Lanes an authority grants a tool runtime for. The same mapping `verifyDispatch` enforces. */
+export function permittedLanes(definition: AutonomousAuthorityDefinition): ExecutorLane[] {
+  return (Object.keys(LANE_RUNTIME) as ExecutorLane[]).filter((lane) => {
+    const runtime = LANE_RUNTIME[lane];
+    return runtime !== undefined && definition.toolClasses.some((tool) => tool.runtime === runtime);
+  });
+}
 
 const MAX_CHILD_TTL_MS = 86_400_000;
 const KNOWN_PRIVILEGES = new Set<string>(changeSetPrivilegeSchema.options);
@@ -624,7 +639,13 @@ export class MissionAuthorityLedger {
         depth: unit.depth,
         unitStatus: unit.status
       };
-      const empty = { grantId: null, definitionHash: null, derivedFromHash: null, executingActorId: null } as const;
+      const empty = {
+        grantId: null,
+        definitionHash: null,
+        derivedFromHash: null,
+        executingActorId: null,
+        permittedLanes: [] as ExecutorLane[]
+      } as const;
       try {
         if (!unit.parentUnitId) {
           if (!missionAuthority) {
@@ -648,6 +669,7 @@ export class MissionAuthorityLedger {
             definitionHash: missionAuthority.definitionHash,
             derivedFromHash: null,
             executingActorId: definition.executingActorId,
+            permittedLanes: permittedLanes(definition),
             expiresAt: definition.expiresAt,
             purpose: null,
             createdAt: missionAuthority.createdAt,
@@ -678,6 +700,7 @@ export class MissionAuthorityLedger {
           definitionHash: record.definitionHash,
           derivedFromHash: record.derivedFromHash,
           executingActorId: record.definition.executingActorId,
+          permittedLanes: permittedLanes(record.definition),
           expiresAt: record.definition.expiresAt,
           purpose: record.purpose ?? null,
           createdAt: record.createdAt,
@@ -1084,15 +1107,27 @@ export class MissionAuthorityLedger {
       const actor = (this.options.resolveActor ?? ((workerId: string) => workerId))(input.workerId);
       if (actor !== definition.executingActorId) return refuse("worker_not_authorized_for_authority");
       if (!(input.attempt <= definition.limits.maxAttemptsPerOperation)) return refuse("attempt_limit_exceeded");
+      // Lane authorization is exact. Every lane must map to a runtime the authority can grant (the mcp lane maps to none, so
+      // it is never authorized), and a unit that names a specific tool may only run it if that exact runtime and tool pair
+      // is granted: a broad runtime grant does not cover a tool nobody listed.
       const runtime = LANE_RUNTIME[input.lane];
-      if (runtime && !definition.toolClasses.some((tool) => tool.runtime === runtime)) {
+      if (runtime === undefined || !definition.toolClasses.some((tool) => tool.runtime === runtime)) {
         return refuse("lane_not_permitted");
+      }
+      const payload = unit.payload;
+      if (
+        payload?.kind === "tool" &&
+        !definition.toolClasses.some((tool) => tool.runtime === runtime && tool.toolName === payload.toolName)
+      ) {
+        return refuse("tool_not_permitted");
       }
       return {
         ok: true,
         grantId,
         unitAuthorityHash: definitionHashValue,
-        executingActorId: definition.executingActorId
+        executingActorId: definition.executingActorId,
+        maxRuntimeMs: definition.limits.maxRuntimeMs,
+        expiresAt: definition.expiresAt
       };
     } catch (error) {
       if (error instanceof ControlStackError && error.code === "authority_integrity") {

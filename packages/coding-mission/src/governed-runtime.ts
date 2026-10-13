@@ -6,13 +6,17 @@ import { WorkUnitExecutionLedger } from "./worker-execution.js";
 export interface GovernedExecutionOptions {
   /** The control-plane database. Work items, grants, the audit chain and mission runtime tables share this file. */
   dbPath: string;
-  /** True only for an authenticated operator. Required: there is no default that trusts a caller-supplied identity. */
-  verifyOperator(operatorId: string): boolean;
+  /**
+   * True only for an authenticated operator. Required: there is no default that trusts a caller-supplied identity.
+   * `"control-plane"` uses the work-item store's actor registry: only a registered HUMAN actor is an operator.
+   */
+  verifyOperator: ((operatorId: string) => boolean) | "control-plane";
   /**
    * Maps a worker id to the actor its authority was issued to. Required, so a deployment states its worker identity
-   * model instead of inheriting an identity mapping that would let any worker id name any actor.
+   * model instead of inheriting an identity mapping that would let any worker id name any actor. `"control-plane"` uses
+   * `SqliteWorkItemStore.resolveVerifiedWorkerActor`: only a worker an operator bound to a non-human actor resolves.
    */
-  resolveActor(workerId: string): string | undefined;
+  resolveActor: ((workerId: string) => string | undefined) | "control-plane";
   clock?: () => string;
   claimTtlMs?: number;
 }
@@ -65,19 +69,36 @@ export function createGovernedExecution(options: GovernedExecutionOptions): Gove
   // The types require these, but an untyped caller could omit them, and the ledger would then fall back to treating a
   // worker id as the actor id. Omission must fail closed.
   for (const callback of ["verifyOperator", "resolveActor"] as const)
-    if (typeof options[callback] !== "function") throw new Error(`governed execution requires ${callback}`);
+    if (typeof options[callback] !== "function" && options[callback] !== "control-plane") {
+      throw new Error(`governed execution requires ${callback}`);
+    }
   const items = new SqliteWorkItemStore(options.dbPath);
   let missions: CodingMissionStore | undefined;
   try {
     missions = new CodingMissionStore(options.dbPath);
+    const verifyOperator =
+      options.verifyOperator === "control-plane" ? (id: string) => items.isHumanOperator(id) : options.verifyOperator;
+    const resolveActor =
+      options.resolveActor === "control-plane"
+        ? (workerId: string) => {
+            try {
+              return items.resolveVerifiedWorkerActor(workerId);
+            } catch {
+              return undefined;
+            }
+          }
+        : options.resolveActor;
     const authority = new MissionAuthorityLedger(missions, {
       grants: controlPlaneGrantReader(items),
-      verifyOperator: options.verifyOperator,
-      resolveActor: options.resolveActor,
+      verifyOperator,
+      resolveActor,
       ...(options.clock ? { clock: options.clock } : {}),
       ...(options.claimTtlMs !== undefined ? { claimTtlMs: options.claimTtlMs } : {})
     });
-    const dispatcher = new WorkUnitExecutionLedger(missions, { authority });
+    const dispatcher = new WorkUnitExecutionLedger(missions, {
+      authority,
+      ...(options.clock ? { clock: options.clock } : {})
+    });
     const opened = missions;
     return {
       missions: opened,
