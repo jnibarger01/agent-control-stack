@@ -2796,6 +2796,103 @@
         }
       }
     },
+    "/coding-missions/{id}/authority": {
+      "post": {
+        "operationId": "bindCodingMissionAuthority",
+        "summary": "Bind a coding mission to a human-issued authority grant. Write-once; verified; a human operator is required. Drives the mission forward.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "grantId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9._:-]+$"
+                  }
+                },
+                "required": [
+                  "grantId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "A human operator is required."
+          },
+          "409": {
+            "description": "The grant is missing, revoked, expired, for another mission, or governed execution is disabled."
+          }
+        }
+      }
+    },
+    "/coding-missions/{id}/authority-graph": {
+      "get": {
+        "operationId": "getCodingMissionAuthorityGraph",
+        "summary": "Read the mission's delegated authority: the grant, each unit's narrowing, permitted lanes, state and history.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "404": {
+            "description": "Coding mission does not exist."
+          },
+          "409": {
+            "description": "Governed execution is disabled."
+          },
+          "503": {
+            "description": "Coding mission ports are not configured."
+          }
+        }
+      }
+    },
     "/coding-missions/{id}/flight-record": {
       "get": {
         "operationId": "getCodingMissionFlightRecord",

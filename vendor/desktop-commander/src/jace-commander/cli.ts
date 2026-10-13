@@ -54,6 +54,7 @@ function renderRefusal(outcome: JcCallOutcome): string {
     managed_authorization_denied: 'DENIED by ACS',
     managed_authorization_unavailable: 'AUTHORIZATION UNAVAILABLE (nothing ran)',
     not_connected: 'NOT CONNECTED',
+    execution_unknown: 'EXECUTION UNKNOWN (the call may have run; verify before re-running)',
     invalid_arguments: 'INVALID ARGUMENTS',
     tool_error: 'FAILED',
     ok: 'OK',

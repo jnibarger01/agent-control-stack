@@ -21,6 +21,8 @@ export const JC_EXIT = Object.freeze({
   approvalRequired: 4,
   authorityUnavailable: 5,
   notConnected: 6,
+  /** A non-idempotent call failed ambiguously after send: it may have executed. */
+  executionUnknown: 7,
 });
 
 export type JcOutcomeKind =
@@ -30,7 +32,8 @@ export type JcOutcomeKind =
   | 'managed_authorization_denied'
   | 'managed_authorization_required'
   | 'managed_authorization_unavailable'
-  | 'not_connected';
+  | 'not_connected'
+  | 'execution_unknown';
 
 export interface JcCallOutcome {
   kind: JcOutcomeKind;
@@ -48,9 +51,55 @@ export interface JcCallOutcome {
 }
 
 export class McpTransportError extends Error {
-  constructor(message: string, readonly outcome: JcCallOutcome) {
+  /**
+   * @param undelivered true only when the request provably never reached the
+   *   server (no request bytes were sent), so resending cannot double-execute.
+   */
+  constructor(message: string, readonly outcome: JcCallOutcome, readonly undelivered = false) {
     super(message);
   }
+}
+
+/**
+ * Methods that are safe to resend after an ambiguous failure (5xx, timeout,
+ * reset after send): they have no side effects on the server beyond session
+ * setup. tools/call is deliberately NOT here: it can execute write_file,
+ * start_process, privileged_exec, mission submit, ...
+ */
+const IDEMPOTENT_METHODS = new Set(['initialize', 'notifications/initialized', 'tools/list']);
+
+/**
+ * Connect-phase error codes: the TCP connection (or DNS lookup) failed, so no
+ * HTTP request bytes were written. Timeouts (including connect timeouts),
+ * aborts, resets and "socket closed" are NOT here: they are ambiguous.
+ */
+const PRE_SEND_ERROR_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']);
+/**
+ * EHOSTUNREACH/ENETUNREACH can also arrive via ICMP on an already-established
+ * keep-alive socket AFTER the request was written, so they count as never-sent
+ * only when raised by the connect/DNS syscall itself.
+ */
+const PRE_SEND_IF_CONNECT_CODES = new Set(['EHOSTUNREACH', 'ENETUNREACH']);
+const PRE_SEND_SYSCALLS = new Set(['connect', 'getaddrinfo']);
+
+/** True only when a fetch failure provably happened before any request bytes were sent. */
+export function isProvablyUndelivered(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const name = (error as { name?: unknown }).name;
+  if (name === 'AbortError' || name === 'TimeoutError') return false;
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === 'string') {
+      if (PRE_SEND_ERROR_CODES.has(code)) return true;
+      const syscall = (current as { syscall?: unknown }).syscall;
+      return PRE_SEND_IF_CONNECT_CODES.has(code) && typeof syscall === 'string' && PRE_SEND_SYSCALLS.has(syscall);
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 const PROTOCOL_VERSION = '2025-06-18';
@@ -72,6 +121,7 @@ function outcome(kind: JcOutcomeKind, fields: Partial<JcCallOutcome> = {}): JcCa
     managed_authorization_required: JC_EXIT.approvalRequired,
     managed_authorization_unavailable: JC_EXIT.authorityUnavailable,
     not_connected: JC_EXIT.notConnected,
+    execution_unknown: JC_EXIT.executionUnknown,
   }[kind];
   return { kind, exitCode, ...fields };
 }
@@ -161,6 +211,13 @@ export interface McpHttpClientOptions {
   timeoutMs?: number;
 }
 
+interface PostResult {
+  status: number;
+  body: Record<string, unknown> | undefined;
+  /** Whether this request carried an mcp-session-id header. */
+  sentSession: boolean;
+}
+
 export class McpHttpClient {
   private sessionId: string | undefined;
   private nextId = 1;
@@ -171,7 +228,7 @@ export class McpHttpClient {
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
-  private async post(message: Record<string, unknown>): Promise<{ status: number; body: Record<string, unknown> | undefined }> {
+  private async post(message: Record<string, unknown>): Promise<PostResult> {
     const token = await this.options.token();
     if (!token) {
       throw new McpTransportError('not connected', outcome('not_connected', {
@@ -179,6 +236,7 @@ export class McpHttpClient {
         message: 'no /jc/mcp credential: run `jace-commander connect` (or set JC_MCP_TOKEN)',
       }));
     }
+    const sentSession = this.sessionId !== undefined;
     let response: Response;
     try {
       response = await this.fetchImpl(this.options.url, {
@@ -198,7 +256,7 @@ export class McpHttpClient {
         code: 'edge_unreachable',
         message: `cannot reach ${this.options.url}: ${(error as Error).message}`,
         retryable: true,
-      }));
+      }), isProvablyUndelivered(error));
     }
     const session = response.headers.get('mcp-session-id');
     if (session) this.sessionId = session;
@@ -213,16 +271,21 @@ export class McpHttpClient {
     } else if (text.includes('data:')) {
       body = parseSse(text);
     }
-    return { status: response.status, body };
+    return { status: response.status, body, sentSession };
   }
 
   /**
-   * Posts `message`, retrying transient failures: an unreachable edge (network
-   * error) and 5xx server errors are retried with short bounded backoff. A 4xx
-   * refusal, a `not_connected` result, or a non-retryable transport error is
-   * returned/raised immediately without retry.
+   * Posts `message` with bounded backoff retry.
+   *
+   * Idempotent methods (initialize, notifications/initialized, tools/list) are
+   * retried on 5xx and on any retryable transport error. Every other method
+   * (tools/call) is retried ONLY on provable non-delivery: a connect/DNS error
+   * raised before any request bytes were sent. A 5xx, timeout, reset after
+   * send, or any other ambiguous failure is returned/raised to the caller
+   * immediately, because the server may already have executed the call.
    */
-  private async postWithRetry(message: Record<string, unknown>, attempts = 3): Promise<{ status: number; body: Record<string, unknown> | undefined }> {
+  private async postWithRetry(message: Record<string, unknown>, attempts = 3): Promise<PostResult> {
+    const idempotent = typeof message.method === 'string' && IDEMPOTENT_METHODS.has(message.method);
     let lastError: McpTransportError | undefined;
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (attempt > 0) {
@@ -230,11 +293,20 @@ export class McpHttpClient {
       }
       try {
         const result = await this.post(message);
-        // A 5xx is a transient server-side failure; retry unless this was the last attempt.
-        if (result.status >= 500 && attempt < attempts - 1) continue;
+        // A 5xx is a transient server-side failure; only idempotent methods may be resent.
+        if (idempotent && result.status >= 500 && attempt < attempts - 1) continue;
         return result;
       } catch (error) {
         if (!(error instanceof McpTransportError) || error.outcome.retryable !== true) throw error;
+        if (!idempotent && !error.undelivered) {
+          // Sent (or possibly sent) and then failed: the server may have run it.
+          // Never report "nothing ran" or retryable here.
+          throw new McpTransportError('execution unknown', outcome('execution_unknown', {
+            code: 'execution_unknown',
+            message: `${String(message.method)} may have executed: the request was sent but no response arrived (${error.outcome.message ?? 'transport error'}). Verify its effects before re-running it.`,
+            retryable: false,
+          }));
+        }
         lastError = error;
       }
     }
@@ -250,7 +322,7 @@ export class McpHttpClient {
     await this.initialize();
   }
 
-  private refusal(status: number, body: Record<string, unknown> | undefined): McpTransportError {
+  private refusal(status: number, body: Record<string, unknown> | undefined, method?: string): McpTransportError {
     if (status === 401) {
       return new McpTransportError('unauthorized', outcome('not_connected', {
         code: 'unauthorized',
@@ -259,6 +331,16 @@ export class McpHttpClient {
     }
     if (body && typeof body.error === 'string' && body.error.startsWith('managed_authorization_')) {
       return new McpTransportError('refused', classifyEdgeRefusalBody(body));
+    }
+    // A non-managed 5xx on a non-idempotent call: the upstream may have run it
+    // before failing (502/503/504 from a proxy or the server itself). Only an
+    // edge refusal body (managed_authorization_*, handled above) proves it did not.
+    if (status >= 500 && method !== undefined && !IDEMPOTENT_METHODS.has(method)) {
+      return new McpTransportError('execution unknown', outcome('execution_unknown', {
+        code: 'execution_unknown',
+        message: `${method} may have executed: the edge answered HTTP ${status}${body ? ` ${JSON.stringify(body).slice(0, 300)}` : ''}. Verify its effects before re-running it.`,
+        retryable: false,
+      }));
     }
     return new McpTransportError(`HTTP ${status}`, outcome('managed_authorization_unavailable', {
       code: `edge_http_${status}`,
@@ -287,8 +369,8 @@ export class McpHttpClient {
 
   async listTools(): Promise<Array<Record<string, unknown>>> {
     await this.initialize();
-    let { status, body } = await this.postWithRetry({ jsonrpc: '2.0', id: this.nextId++, method: 'tools/list', params: {} });
-    if (status === 404) {
+    let { status, body, sentSession } = await this.postWithRetry({ jsonrpc: '2.0', id: this.nextId++, method: 'tools/list', params: {} });
+    if (status === 404 && sentSession) {
       await this.reinitialize();
       ({ status, body } = await this.postWithRetry({ jsonrpc: '2.0', id: this.nextId++, method: 'tools/list', params: {} }));
     }
@@ -301,13 +383,18 @@ export class McpHttpClient {
   async callTool(name: string, args: Record<string, unknown>): Promise<JcCallOutcome> {
     try {
       await this.initialize();
-      let { status, body } = await this.postWithRetry({
+      let { status, body, sentSession } = await this.postWithRetry({
         jsonrpc: '2.0',
         id: this.nextId++,
         method: 'tools/call',
         params: { name, arguments: args },
       });
-      if (status === 404) {
+      // MCP Streamable HTTP session contract: a 404 for a request that carried
+      // an mcp-session-id means the session is terminated/unknown and was
+      // rejected before dispatch; start a new session and resend ONCE. A 404
+      // without a session id is not a session signal and is never resent. The
+      // resend has no 404 branch and never retries on 5xx (worst case 2 sends).
+      if (status === 404 && sentSession) {
         await this.reinitialize();
         ({ status, body } = await this.postWithRetry({
           jsonrpc: '2.0',
@@ -316,7 +403,7 @@ export class McpHttpClient {
           params: { name, arguments: args },
         }));
       }
-      if (status !== 200 || !body) throw this.refusal(status, body);
+      if (status !== 200 || !body) throw this.refusal(status, body, 'tools/call');
       if ('error' in body) return classifyJsonRpcError(body.error as Record<string, unknown>);
       return classifyToolResult((body.result ?? {}) as Record<string, unknown>);
     } catch (error) {
