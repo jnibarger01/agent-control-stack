@@ -3,14 +3,14 @@ import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "n
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
-import { signGrant, type GrantPayload } from "./authz.js";
-import { correlate } from "./correlate.js";
+import { signGrant, type GrantPayload } from "../src/authz.js";
+import { correlate } from "../src/correlate.js";
 import { createFixture, at, seedScenario, sha, T0, type Fixture, type ScenarioOptions } from "./fixture.js";
-import { AcsReadStore } from "./sources/acs-store.js";
-import { LoopTraceQueryService } from "./service.js";
-import { QueryError, type QueryConfig } from "./types.js";
-import { sanitizeUntrusted } from "./sanitize.js";
-import { EVIDENCE_SCHEMA_VERSION, type EvidenceEvent } from "./model.js";
+import { AcsReadStore } from "../src/sources/acs-store.js";
+import { LoopTraceQueryService } from "../src/service.js";
+import { QueryError, type QueryConfig } from "../src/types.js";
+import { sanitizeUntrusted } from "../src/sanitize.js";
+import { EVIDENCE_SCHEMA_VERSION, type EvidenceEvent } from "../src/model.js";
 
 const KEY = Buffer.alloc(32, 7);
 const NOW = new Date(at(100));
@@ -313,8 +313,9 @@ describe("looptrace_verify: did the operation achieve its intended outcome", () 
       { type: "expected_state_observed", key: "publication_recorded", expected: true }
     ]);
     expect(v.assertions.map((a: Json) => a.verdict)).toEqual(["PASS", "INCONCLUSIVE", "PASS", "PASS", "INCONCLUSIVE"]);
+    // A tampered manifest is broken evidence: the integrity gate fails every stored-evidence assertion closed.
     const t = await verify(setup([{ manifest: "tampered" }]), [{ type: "artifact_exists", manifest_hash: sha("x") }]);
-    expect(t.verdict).toBe("INCONCLUSIVE");
+    expect(t.verdict).toBe("ERROR");
   });
 
   it("release_matches: ACS producer identity and installed releases (installed is not running)", async () => {
@@ -536,3 +537,76 @@ function createFixtureRoot(): string {
   fixtures.push(f);
   return f.dir;
 }
+
+describe("looptrace_verify: audit/trace chain integrity gates every assertion (fail closed)", () => {
+  const STORED = (mh: string): unknown[] => [
+    { type: "operation_completed" },
+    { type: "approval_valid" },
+    { type: "expected_state_observed", key: "work_item_status", expected: "succeeded" },
+    { type: "artifact_exists", manifest_hash: mh },
+    { type: "release_matches", scope: "acs_producer", expected_sha: "a".repeat(40) }
+  ];
+  const itemAudit = (db: DatabaseSync, id: string): Array<{ sequence: number }> =>
+    db.prepare(`SELECT sequence FROM audit_events WHERE json_extract(attributes, '$."work_item.id"') = ? ORDER BY sequence`).all(id) as Array<{ sequence: number }>;
+  const seeded = (mutate: (db: DatabaseSync, id: string) => void) => (db: DatabaseSync, id: string): void => {
+    seedScenario(db, id, {});
+    mutate(db, id);
+  };
+  const manifestHash = async (s: Setup): Promise<string> =>
+    ((await s.svc.trace({ work_item_id: s.ids[0] }, grant())) as Json).events.find((e: Json) => e.event_type === "observation.evidence_manifest").facts.manifest_hash;
+
+  it("untampered baseline: the stored-evidence assertions PASS", async () => {
+    const s = setup([{}]);
+    const v = await verify(s, STORED(await manifestHash(s)));
+    expect(v.assertions.map((a: Json) => a.verdict)).toEqual(["PASS", "PASS", "PASS", "PASS", "PASS"]);
+  });
+
+  const TAMPER: Array<[string, (db: DatabaseSync, id: string) => void]> = [
+    ["edited attributes", (db, id) => {
+      const r = itemAudit(db, id)[0]!;
+      db.prepare("UPDATE audit_events SET attributes = json_set(attributes, '$.tampered', 1) WHERE sequence = ?").run(r.sequence);
+    }],
+    ["edited body", (db, id) => db.prepare("UPDATE audit_events SET body = '{\"x\":1}' WHERE sequence = ?").run(itemAudit(db, id)[1]!.sequence)],
+    ["deleted middle row", (db, id) => { const rs = itemAudit(db, id); db.prepare("DELETE FROM audit_events WHERE sequence = ?").run(rs[Math.floor(rs.length / 2)]!.sequence); }],
+    ["altered previous_hash", (db, id) => db.prepare("UPDATE audit_events SET previous_hash = ? WHERE sequence = ?").run("f".repeat(64), itemAudit(db, id)[1]!.sequence)],
+    ["removed genesis row", (db) => db.prepare("DELETE FROM audit_events WHERE sequence = (SELECT MIN(sequence) FROM audit_events)").run()],
+    ["truncated tail", (db) => db.prepare("DELETE FROM audit_events WHERE sequence = (SELECT MAX(sequence) FROM audit_events)").run()],
+    ["truncated trace outbox tail", (db) => db.prepare("DELETE FROM trace_outbox WHERE seq = (SELECT MAX(seq) FROM trace_outbox)").run()]
+  ];
+  for (const [name, mutate] of TAMPER) {
+    it(`${name}: every stored-evidence assertion is ERROR, never PASS`, async () => {
+      const clean = setup([{}]);
+      const mh = await manifestHash(clean);
+      const s = setup([seeded(mutate)]);
+      const v = await verify(s, STORED(mh));
+      expect(v.assertions.map((a: Json) => a.verdict)).toEqual(["ERROR", "ERROR", "ERROR", "ERROR", "ERROR"]);
+      expect(v.verdict).toBe("ERROR");
+    });
+  }
+
+  it("a truncated audit tail is detected against SQLite's own sequence high-water mark", async () => {
+    const s = setup([seeded((db) => db.prepare("DELETE FROM audit_events WHERE sequence = (SELECT MAX(sequence) FROM audit_events)").run())]);
+    const t = (await s.svc.trace({ work_item_id: s.ids[0] }, grant())) as Json;
+    expect(t.events.find((e: Json) => e.event_type === "lifecycle.state").facts).toMatchObject({ audit_tail_truncated: true, audit_chain_broken: 0 });
+  });
+
+  it("no stored audit head: completeness is reported unproven and PASS becomes INCONCLUSIVE", async () => {
+    const s = setup([seeded((db) => db.prepare("DELETE FROM sqlite_sequence WHERE name = 'audit_events'").run())]);
+    const v = await verify(s, [{ type: "operation_completed" }, { type: "approval_valid" }]);
+    expect(v.assertions.map((a: Json) => a.verdict)).toEqual(["INCONCLUSIVE", "INCONCLUSIVE"]);
+    expect(v.assertions[0].reason).toMatch(/^completeness unproven: the ACS audit chain has no stored head/u);
+  });
+
+  it("no stored trace chain head: completeness is reported unproven", async () => {
+    const s = setup([seeded((db) => db.prepare("DELETE FROM trace_chain_state").run())]);
+    expect((await verify(s, [{ type: "operation_completed" }])).verdict).toBe("INCONCLUSIVE");
+  });
+
+  it("live observers are not gated by stored-evidence integrity", async () => {
+    const s = setup([seeded((db, id) => db.prepare("UPDATE audit_events SET attributes = json_set(attributes, '$.tampered', 1) WHERE sequence = ?").run(itemAudit(db, id)[0]!.sequence))], {
+      healthTargets: [{ name: "svc", url: "http://127.0.0.1:9/h" }]
+    }, { fetchImpl: async () => ({ status: 200, text: async () => "ok" }) });
+    const v = await verify(s, [{ type: "service_healthy", target: "svc" }, { type: "approval_valid" }]);
+    expect(v.assertions.map((a: Json) => a.verdict)).toEqual(["PASS", "ERROR"]);
+  });
+});

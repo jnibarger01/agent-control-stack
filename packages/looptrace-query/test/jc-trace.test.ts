@@ -8,11 +8,11 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { verifyJcLocalTrace } from "@agent-control-stack/desktop-commander-adapter";
 import { canonicalTraceJson, traceSha256, CANONICAL_TRACE_GENESIS_HASH } from "@agent-control-stack/work-items";
-import { signGrant } from "./authz.js";
+import { signGrant } from "../src/authz.js";
 import { at, createFixture, seedScenario, T0, type Fixture, type ScenarioOptions } from "./fixture.js";
-import { JC_LIMITS, JcTraceReader } from "./sources/jc-trace.js";
-import { LoopTraceQueryService } from "./service.js";
-import type { QueryConfig } from "./types.js";
+import { JC_LIMITS, JcTraceReader } from "../src/sources/jc-trace.js";
+import { LoopTraceQueryService } from "../src/service.js";
+import type { QueryConfig } from "../src/types.js";
 
 const KEY = Buffer.alloc(32, 7);
 const NOW = new Date(at(100));
@@ -129,9 +129,11 @@ describe("JC reader on a trace written by JC's own JsonlTraceChain", () => {
     expect(reader.collect(W2).events.filter((e) => e.event_type === "jc.tool.finished")).toHaveLength(1);
   });
 
-  it("a work item that no session names yields nothing", () => {
+  it("a work item that no session names yields no JC evidence, only the unsealed-session completeness report", () => {
     const r = reader.collect("wrk_00000000-0000-4000-8000-0000000000ff");
-    expect(r).toMatchObject({ events: [], status: "ok", runs: 0 });
+    expect(r).toMatchObject({ status: "ok", runs: 0 });
+    expect(r.events.map((e) => [e.event_type, e.status])).toEqual([["jc.coverage", "completeness_unproven"]]);
+    expect(r.events[0]!.facts).toEqual({ jc_sessions_scanned: 1, jc_sessions_unsealed: 1 });
   });
 });
 
@@ -141,16 +143,16 @@ describe("Jace Commander local-trace correlation (real-shaped fixtures)", () => 
     const s = setup({ validation: null, verification: null, manifest: null, verificationRequired: false }, (wid) => ({ [FILE]: jsonl(chain(SESSION, [finished(wid, true)])) }));
     const t = (await s.svc.trace({ work_item_id: s.id }, token())) as Json;
     const jc = jcEvents(t);
-    expect(jc.map((e) => e.event_type).sort()).toEqual(["jc.session", "jc.tool.finished"]);
+    expect(jc.map((e) => `${e.event_type}:${e.status}`).sort()).toEqual(["jc.coverage:completeness_unproven", "jc.session:verified", "jc.tool.finished:succeeded"]);
     for (const e of jc) {
       expect(e.integrity.trust).toBe("asserted");
       expect(e.stage).toBe("lifecycle");
-      expect(e.evidence_ref).toMatch(/^jc:\/\/session\//);
+      expect(e.evidence_ref).toMatch(e.status === "completeness_unproven" ? /^jc:\/\/completeness$/ : /^jc:\/\/session\//);
     }
     expect(JSON.stringify(t)).not.toContain(s.f.dir);
     expect(t.sources.find((x: Json) => x.source === "jace_commander_chain")).toMatchObject({ status: "ok" });
     const g = (await s.svc.gaps({ work_item_id: s.id }, token())) as Json;
-    expect(jcCodes(g)).toEqual([]);
+    expect(jcCodes(g)).toEqual(["JC_COMPLETENESS_UNPROVEN"]); // the session is unsealed; the successful call itself raises no gap
     const gb = (await baseline.svc.gaps({ work_item_id: baseline.id }, token())) as Json;
     expect(g.reports[0].observed_stages).toEqual(gb.reports[0].observed_stages); // JC did not add an observed stage
     expect((await verifyOp(s)).verdict).toBe("INCONCLUSIVE"); // a successful tool call is not mission success
@@ -164,7 +166,7 @@ describe("Jace Commander local-trace correlation (real-shaped fixtures)", () => 
     const failed = jcEvents(t).find((e) => e.event_type === "jc.tool.finished" && e.status === "failed")!;
     expect(failed.facts).toMatchObject({ jc_ok: false, jc_code: "JC_CAPABILITY_MISSING", jc_seq: 0 });
     const g = (await s.svc.gaps({ work_item_id: s.id }, token())) as Json;
-    expect(jcCodes(g)).toEqual(["JC_TOOL_CALL_FAILED"]);
+    expect(jcCodes(g)).toEqual(["JC_COMPLETENESS_UNPROVEN", "JC_TOOL_CALL_FAILED"]);
     expect(g.reports[0].gaps.find((x: Json) => x.code === "JC_TOOL_CALL_FAILED").severity).toBe("low");
   });
 
@@ -213,7 +215,7 @@ describe("Jace Commander local-trace correlation (real-shaped fixtures)", () => 
   it("a session that only has the legacy snake_case key adds no JC evidence at all", async () => {
     const s = setup({}, (wid) => ({ [FILE]: jsonl(chain(SESSION, [finished(undefined, true, { work_item_id: wid })])) }));
     const t = (await s.svc.trace({ work_item_id: s.id }, token())) as Json;
-    expect(jcEvents(t)).toEqual([]);
+    expect(jcEvents(t).map((e) => `${e.event_type}:${e.status}`)).toEqual(["jc.coverage:completeness_unproven"]);
   });
 
   it("a cross-work-item session exposes only this work item's calls and none of the others'", async () => {
@@ -274,10 +276,13 @@ describe("Jace Commander local-trace correlation (real-shaped fixtures)", () => 
     expect(session.flags).toContain("jc_unmatched_tool_starts");
   });
 
-  it("run_completed / run_failed / trace_sealed are not required: their absence raises no gap", async () => {
+  it("run_completed / run_failed are not required; only a missing trace seal is reported, as unproven completeness", async () => {
     const s = setup({}, (wid) => ({ [FILE]: jsonl(chain(SESSION, [finished(wid, true)])) }));
     const g = (await s.svc.gaps({ work_item_id: s.id }, token())) as Json;
-    expect(jcCodes(g)).toEqual([]);
+    expect(jcCodes(g)).toEqual(["JC_COMPLETENESS_UNPROVEN"]);
+    expect(g.reports[0].gaps.find((x: Json) => x.code === "JC_COMPLETENESS_UNPROVEN").severity).toBe("low");
+    const sealed = setup({}, (wid) => ({ [FILE]: jsonl(chain(SESSION, [finished(wid, true), { type: "trace_sealed", payload: {} }])) }));
+    expect(jcCodes((await sealed.svc.gaps({ work_item_id: sealed.id }, token())) as Json)).toEqual([]);
   });
 
   it("secrets and injection text in payloads stay inert; other work items, files and symlinks are ignored", async () => {
@@ -301,7 +306,7 @@ describe("Jace Commander local-trace correlation (real-shaped fixtures)", () => 
     }));
     const svc = new LoopTraceQueryService({ acsDbPath: s.f.dbPath, jcTraceRoots: [join(s.f.dir, "missing"), s.jcDir], hermesStateDb: null, releaseRoots: [], healthTargets: [], grantKey: KEY, now: () => NOW });
     const t = (await svc.trace({ work_item_id: s.id }, token())) as Json;
-    const cov = jcEvents(t).find((e) => e.event_type === "jc.coverage")!;
+    const cov = jcEvents(t).find((e) => e.event_type === "jc.coverage" && e.status === "incomplete")!;
     expect(cov.facts).toMatchObject({ jc_roots_unreadable: 1, jc_files_skipped: 1 });
     expect(jcEvents(t).some((e) => e.event_type === "jc.tool.finished")).toBe(true); // readable evidence still used
     const g = (await svc.gaps({ work_item_id: s.id }, token())) as Json;
@@ -318,5 +323,43 @@ describe("Jace Commander local-trace correlation (real-shaped fixtures)", () => 
     const none = setup({}, () => ({}), false);
     const t = (await none.svc.trace({ work_item_id: none.id }, token())) as Json;
     expect(t.sources.find((x: Json) => x.source === "jace_commander_chain").status).toBe("not_configured");
+  });
+});
+
+describe("JC trace head anchoring (truncation cannot turn a conflict into PASS)", () => {
+  const conflict = (wid: string) => [finished("wrk_other", true), finished(wid, false, { code: "EFAIL" }), finished(wid, false, { code: "EFAIL" }), finished("wrk_other", true)];
+
+  it("baseline: ACS success + JC reporting only failures is INCONCLUSIVE", async () => {
+    const s = setup({}, (wid) => ({ [FILE]: jsonl(chain(SESSION, conflict(wid))) }));
+    expect((await verifyOp(s)).verdict).toBe("INCONCLUSIVE");
+  });
+
+  it("truncating the JC tail to drop every failure for the item does not flip the verdict to PASS", async () => {
+    const s = setup({}, (wid) => ({ [FILE]: jsonl(chain(SESSION, conflict(wid)).slice(0, 1)) }));
+    const op = await verifyOp(s);
+    expect(op.verdict).toBe("INCONCLUSIVE");
+    expect(op.reason).toMatch(/^completeness unproven: .*Jace Commander/u);
+    expect(op.evidence_refs).toContain("jc://completeness");
+  });
+
+  it("a sealed session proves its own end: with no conflict the ACS evidence can PASS, and removing the seal cannot", async () => {
+    const rows = chain(SESSION, [finished("wrk_other", true), { type: "trace_sealed", payload: {} }]);
+    const sealed = setup({}, () => ({ [FILE]: jsonl(rows) }));
+    expect((await verifyOp(sealed)).verdict).toBe("PASS");
+    const unsealed = setup({}, () => ({ [FILE]: jsonl(rows.slice(0, 1)) }));
+    expect((await verifyOp(unsealed)).verdict).toBe("INCONCLUSIVE");
+  });
+
+  it("a forged seal on a broken chain is not an anchor", async () => {
+    const rows = chain(SESSION, [finished("wrk_other", true), { type: "trace_sealed", payload: {} }]);
+    (rows[0]!.payload as Record<string, unknown>).ok = false;
+    const s = setup({}, () => ({ [FILE]: jsonl(rows) }));
+    expect((await verifyOp(s)).verdict).toBe("INCONCLUSIVE");
+  });
+
+  it("other assertions do not read JC evidence and are not downgraded by it", async () => {
+    const s = setup({}, (wid) => ({ [FILE]: jsonl(chain(SESSION, conflict(wid)).slice(0, 1)) }));
+    const v = (await s.svc.verify({ work_item_id: s.id, assertions: [{ type: "expected_state_observed", key: "work_item_status", expected: "succeeded" }] }, token())) as Json;
+    expect(v.assertions[0].verdict).toBe("PASS");
   });
 });

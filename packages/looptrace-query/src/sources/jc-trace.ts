@@ -112,6 +112,11 @@ interface Coverage {
   filesUnreadable: number;
 }
 
+function isSealed(p: Parsed): boolean {
+  if (p.kind !== "ok" || p.events.length === 0) return false;
+  return p.events[p.events.length - 1]!.type === "trace_sealed" && verifyJcLocalTrace(p.events);
+}
+
 export class JcTraceReader {
   constructor(
     private readonly roots: readonly string[],
@@ -123,6 +128,12 @@ export class JcTraceReader {
     const out: EvidenceEvent[] = [];
     const cov: Coverage = { rootsUnreadable: 0, rootsTotal: this.roots.length, filesBeyondBound: 0, filesSkipped: 0, filesUnreadable: 0 };
     let sessions = 0;
+    // Head anchoring: JC writes no chain head or event count, so a session file truncated from the tail still verifies.
+    // Only a session whose verified chain ends in a `trace_sealed` record proves its own end. Every other non-empty
+    // session in the roots (including ones that no longer name this work item: truncation can remove exactly those
+    // records) leaves JC completeness unproven.
+    let scanned = 0;
+    let unsealed = 0;
     for (const root of this.roots) {
       let names: string[];
       try {
@@ -149,9 +160,14 @@ export class JcTraceReader {
           cov.filesUnreadable += 1;
           continue;
         }
-        if (!text.includes(workItemId)) continue; // cheap pre-filter before parsing
+        const names = text.includes(workItemId);
+        const parsed = names || text.includes("trace_sealed") ? parseSession(text) : null;
+        if (text.trim().length > 0) {
+          scanned += 1;
+          if (!parsed || !isSealed(parsed)) unsealed += 1;
+        }
+        if (!names || !parsed) continue; // cheap pre-filter: only sessions naming the work item are converted
         const stem = name.slice(0, -".jsonl".length);
-        const parsed = parseSession(text);
         if (parsed.kind === "malformed") {
           // The file names the work item but cannot be used: surface it as unverifiable evidence.
           sessions += 1;
@@ -170,6 +186,7 @@ export class JcTraceReader {
     }
     const incomplete = cov.rootsUnreadable + cov.filesBeyondBound + cov.filesSkipped + cov.filesUnreadable > 0;
     if (incomplete) out.push(this.coverageEvent(workItemId, cov));
+    if (unsealed > 0) out.push(this.completenessEvent(workItemId, scanned, unsealed));
     const notes: string[] = [];
     if (cov.rootsUnreadable > 0) notes.push(`${cov.rootsUnreadable}/${cov.rootsTotal} JC root(s) unreadable`);
     if (cov.filesBeyondBound > 0) notes.push(`${cov.filesBeyondBound} trace file(s) beyond the scan bound not read`);
@@ -218,6 +235,22 @@ export class JcTraceReader {
       integrity: { trust: "asserted" as const, basis: "jc_local_trace_unparseable", hash_verified: false, chain: "broken" as const, content_hash: "" },
       facts: { jc_session_id: safe, jc_session_ok: false, jc_parse_ok: false, jc_problem: str(reason, 60) } as Record<string, string | number | boolean | null>,
       flags: ["jc_trace_malformed"]
+    });
+  }
+
+  /** JC sessions without a verifiable end: absence of a JC record for this work item is not proof there was none. */
+  private completenessEvent(workItemId: string, scanned: number, unsealed: number): EvidenceEvent {
+    return this.seal({
+      ...this.base(workItemId),
+      event_id: eventId("jc", `completeness.${workItemId}`),
+      timestamp: null,
+      event_type: "jc.coverage" as EventType,
+      stage: stageOf("jc.coverage"),
+      status: "completeness_unproven",
+      evidence_ref: "jc://completeness",
+      integrity: { trust: "asserted" as const, basis: "jc_trace_head_anchor_scan", hash_verified: null, chain: "not_chained" as const, content_hash: "" },
+      facts: { jc_sessions_scanned: scanned, jc_sessions_unsealed: unsealed } as Record<string, string | number | boolean | null>,
+      flags: ["jc_completeness_unproven"]
     });
   }
 

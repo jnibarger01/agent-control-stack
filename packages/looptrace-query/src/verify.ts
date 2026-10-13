@@ -121,7 +121,18 @@ export async function verifyAssertions(
   const out: AssertionResult[] = [];
   for (const a of assertions) {
     try {
-      out.push(await evaluate(a, v, c, reports, env));
+      const gated = integrityGate(a, v, reports);
+      if (gated) {
+        out.push(gated);
+        continue;
+      }
+      const r = await evaluate(a, v, c, reports, env);
+      const unproven = r.verdict === "PASS" ? completenessUnproven(a, v) : { reasons: [], basis: [] };
+      out.push(
+        unproven.reasons.length > 0
+          ? result(a.type, "INCONCLUSIVE", `completeness unproven: ${unproven.reasons.join("; ")} (would otherwise be PASS: ${r.reason})`.slice(0, 1000), [...r.evidence_refs, ...refs(...unproven.basis)], "none")
+          : r
+      );
     } catch (error) {
       out.push(result(a.type, "ERROR", `assertion could not be evaluated: ${error instanceof Error ? error.name : "error"}`, [], "none"));
     }
@@ -158,23 +169,63 @@ async function evaluate(a: Assertion, v: View, c: Correlated, reports: SourceRep
 }
 
 function integrityViolations(v: View): EvidenceEvent[] {
+  const f = v.state?.facts;
+  const stateBroken =
+    !!f &&
+    ((f.audit_chain_broken as number) > 0 ||
+      (f.trace_chain_broken as number) > 0 ||
+      f.audit_tail_truncated === true ||
+      f.trace_tail_truncated === true);
   return [
     ...v.events.filter((e) => e.integrity.chain === "broken" || e.integrity.hash_verified === false),
-    ...(v.state && ((v.state.facts.audit_chain_broken as number) > 0 || (v.state.facts.trace_chain_broken as number) > 0) ? [v.state] : [])
+    ...(stateBroken && v.state ? [v.state] : [])
   ];
+}
+
+/**
+ * Evidence whose completeness cannot be proven against a reliable head anchor: an ACS audit/trace tail with no stored
+ * high-water mark, or Jace Commander sessions that end without a seal record (JC writes no head anchor, so a truncated
+ * JC file is indistinguishable from a complete one). Absence of contradicting evidence is then not proof, so a PASS
+ * is downgraded to INCONCLUSIVE.
+ */
+function completenessUnproven(a: Assertion, v: View): { reasons: string[]; basis: EvidenceEvent[] } {
+  const reasons: string[] = [];
+  const basis: EvidenceEvent[] = [];
+  if (a.type === "service_healthy" || (a.type === "release_matches" && a.scope === "installed")) return { reasons, basis };
+  const f = v.state?.facts;
+  if (f?.audit_head_unproven === true) reasons.push("the ACS audit chain has no stored head (sequence high-water mark), so a truncated audit tail cannot be ruled out");
+  if (f?.trace_head_unproven === true) reasons.push("the ACS trace projection has no stored chain head, so a truncated trace tail cannot be ruled out");
+  if (reasons.length > 0 && v.state) basis.push(v.state);
+  // JC evidence only ever moves operation_completed (jcConflicts); other assertions do not read it.
+  const jc = a.type !== "operation_completed" ? [] : v.of("jc.coverage").filter((e) => e.status === "completeness_unproven");
+  if (jc.length > 0) {
+    reasons.push("Jace Commander trace sessions in the configured roots carry no head anchor (no trace seal), so a truncated JC trace that hid a conflicting outcome cannot be ruled out");
+    basis.push(...jc);
+  }
+  return { reasons, basis };
+}
+
+/**
+ * Fail-closed gate applied once, before ANY assertion is evaluated: evidence whose hash chain is broken or whose tail
+ * was truncated below its stored head cannot support any verdict. The ACS source being unreadable is likewise ERROR.
+ */
+function integrityGate(a: Assertion, v: View, reports: SourceReport[]): AssertionResult | null {
+  if (a.type === "service_healthy" || (a.type === "release_matches" && a.scope === "installed")) return null; // live observers, not stored evidence
+  if (reports.some((r) => r.source === "acs" && r.status !== "ok")) {
+    return result(a.type, "ERROR", "the authoritative ACS source is not readable", [], "none");
+  }
+  const violations = integrityViolations(v);
+  if (violations.length > 0) {
+    return result(a.type, "ERROR", "evidence integrity check failed (hash/chain mismatch or audit/trace tail truncated below its stored head); no verdict can be drawn from this evidence", refs(...violations), "none");
+  }
+  return null;
 }
 
 function operationCompleted(v: View, c: Correlated, reports: SourceReport[], now: Date): AssertionResult {
   const T = "operation_completed" as const;
   const state = v.state;
   if (!state) return result(T, "INCONCLUSIVE", "no authoritative work item state is available", [], "none");
-  if (reports.some((r) => r.source === "acs" && r.status !== "ok")) {
-    return result(T, "ERROR", "the authoritative ACS source is not readable", [], "none");
-  }
-  const violations = integrityViolations(v);
-  if (violations.length > 0) {
-    return result(T, "ERROR", "evidence integrity check failed (hash/chain mismatch); the outcome cannot be verified from this evidence", refs(...violations), "none");
-  }
+  // ACS readability and evidence integrity are enforced for every assertion by integrityGate (verifyAssertions).
   const status = v.status ?? "unknown";
   const validations = v.of("observation.validation_run");
   const decisions = v.of("verification.decided");

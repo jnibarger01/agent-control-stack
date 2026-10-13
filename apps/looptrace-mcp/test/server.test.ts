@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import { LoopTraceQueryService, signGrant } from "@agent-control-stack/looptrace-query";
-import { createFixture, seedScenario, at, T0, type Fixture } from "../../../packages/looptrace-query/src/fixture.js";
-import { configFromEnv } from "./config.js";
-import { LoopTraceMcpServer, TOOL_DEFINITIONS } from "./server.js";
+import { createFixture, seedScenario, at, T0, type Fixture } from "../../../packages/looptrace-query/test/fixture.js";
+import { configFromEnv } from "../src/config.js";
+import { LoopTraceMcpServer, TOOL_DEFINITIONS } from "../src/server.js";
 
 const KEY = Buffer.alloc(32, 3);
 const fixtures: Fixture[] = [];

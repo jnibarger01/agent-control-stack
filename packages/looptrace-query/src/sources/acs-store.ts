@@ -23,6 +23,9 @@ import { sanitizeUntrusted } from "../sanitize.js";
 import { LIMITS, type Lookup } from "../types.js";
 import type { WorkItemRef } from "../authz.js";
 
+/** Mirrors TRACE_CHAIN_PRODUCER_KEY in packages/work-items/src/trace-outbox.ts (not re-exported from the package). */
+const TRACE_CHAIN_PRODUCER_KEY = "acs";
+
 type Row = Record<string, unknown>;
 type Fact = string | number | boolean | null;
 
@@ -127,6 +130,51 @@ export class AcsReadStore {
 
   private one(sql: string, ...params: Array<string | number>): Row | null {
     return this.all(sql, ...params)[0] ?? null;
+  }
+
+  /** Head-anchor probe: a missing table/column means "no anchor available", not a missing evidence table. */
+  private probe(sql: string, ...params: Array<string | number>): Row | null {
+    try {
+      return (this.db.prepare(sql).get(...params) as Row | undefined) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Completeness of the GLOBAL audit chain. Per-row hash/link checks cannot see rows deleted from the tail, so the
+   * observed tail is compared with the high-water mark SQLite itself keeps for the AUTOINCREMENT `sequence` column
+   * (`sqlite_sequence`). That counter is maintained by the engine on insert and is never lowered by DELETE, so a
+   * truncated tail leaves max(sequence) below it. With no such counter the tail is reported as unproven, never as
+   * complete. (A writer able to edit sqlite_sequence too can still forge it; that is reported in the docs.)
+   */
+  private auditHead(): { truncated: boolean; unproven: boolean; head: number | null } {
+    const hw = this.probe("SELECT seq FROM sqlite_sequence WHERE name = 'audit_events'");
+    const tail = this.probe("SELECT MAX(sequence) AS m, COUNT(*) AS c FROM audit_events");
+    const head = hw && typeof hw.seq === "number" ? hw.seq : null;
+    const max = tail && typeof tail.m === "number" ? tail.m : null;
+    if (head === null) return { truncated: false, unproven: max !== null, head: null };
+    if (max === null) return { truncated: head > 0, unproven: false, head };
+    return { truncated: max !== head, unproven: false, head };
+  }
+
+  /**
+   * Completeness of the trace projection chain, against the producer's stored chain head (`trace_chain_state`,
+   * written in the same transaction as each appended outbox row): the newest outbox row must sit at the stored seq
+   * and hash to the stored head hash.
+   */
+  private traceHead(): { truncated: boolean; unproven: boolean } {
+    const st = this.probe("SELECT seq, head_hash FROM trace_chain_state WHERE producer_key = ?", TRACE_CHAIN_PRODUCER_KEY);
+    const last = this.probe("SELECT seq, canonical_json FROM trace_outbox ORDER BY seq DESC LIMIT 1");
+    if (!st || typeof st.seq !== "number") return { truncated: false, unproven: last !== null };
+    if (!last) return { truncated: st.seq > 0, unproven: false };
+    if (last.seq !== st.seq) return { truncated: true, unproven: false };
+    try {
+      const ev = parseJson(last.canonical_json) as CanonicalTraceEvent | null;
+      return { truncated: !ev || canonicalTraceEventHash(ev) !== st.head_hash, unproven: false };
+    } catch {
+      return { truncated: true, unproven: false };
+    }
   }
 
   // ---------------------------------------------------------------- resolve
@@ -599,6 +647,8 @@ export class AcsReadStore {
       if (typeof ev.source?.instance === "string") instance = ev.source.instance;
       lastOutboxTs = normalizeTimestamp(ev.ts) ?? lastOutboxTs;
     }
+    const auditHead = this.auditHead();
+    const traceHead = this.traceHead();
     drafts.push({
       type: "lifecycle.state",
       table: "work_items",
@@ -613,6 +663,10 @@ export class AcsReadStore {
         audit_chain_broken: auditBroken,
         trace_events: outbox.length,
         trace_chain_broken: traceBroken,
+        audit_tail_truncated: auditHead.truncated,
+        audit_head_unproven: auditHead.unproven,
+        trace_tail_truncated: traceHead.truncated,
+        trace_head_unproven: traceHead.unproven,
         has_trace_identity: traceId !== null
       },
       raw: { id: workItemId, status, u: w.updated_at }

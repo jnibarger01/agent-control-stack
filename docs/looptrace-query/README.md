@@ -96,7 +96,7 @@ mcp_servers:
 "success is recorded, but only the worker's own report supports it; no independent observation exists".
 `looptrace_gaps` -> `MISSING_OUTCOME_EVIDENCE (medium)`, `MISSING_RELEASE_IDENTITY (low)`, completeness `partial`.
 `release_matches acs_producer` -> `INCONCLUSIVE` ("ACS producer ran an unpinned build 'unreleased'").
-Tests use clearly synthetic fixtures (`src/fixture.ts`) to stage tamper/contradiction states ACS triggers normally prevent.
+Tests use clearly synthetic fixtures (`test/fixture.ts`, outside `src/` so it is never compiled into the shipped build) to stage tamper/contradiction states ACS triggers normally prevent.
 
 ## Known limitations
 
@@ -113,11 +113,26 @@ Tests use clearly synthetic fixtures (`src/fixture.ts`) to stage tamper/contradi
     never create one. Gaps: `JC_CHAIN_BROKEN` (contents then unused), `JC_TRACE_MALFORMED`, `JC_COVERAGE_INCOMPLETE` (unreadable
     root, oversize/non-regular file, files beyond the scan bound), `JC_OUTCOME_MALFORMED`, `JC_TOOL_CALL_FAILED` (low, per call) and
     `JC_ACS_OUTCOME_CONFLICT` (ACS says succeeded while the only JC outcomes for it are failures; `operation_completed` is then INCONCLUSIVE).
-  - `run_completed` / `run_failed` / `trace_sealed` are **not required**: JC never writes them.
+  - `run_completed` / `run_failed` are **not required**. JC writes no head anchor (no chain head, no event count, and in practice
+    no `trace_sealed`), so a JC trace truncated from the tail still verifies. Only a session whose verified chain ends in
+    `trace_sealed` proves its own end; any other non-empty session in the configured roots (including one that no longer names the
+    work item, since truncation can remove exactly those records) is reported as `jc.coverage` with status
+    `completeness_unproven` / gap `JC_COMPLETENESS_UNPROVEN` (low), and an `operation_completed` that would otherwise PASS returns
+    INCONCLUSIVE with a reason starting `completeness unproven:`. Deleting a whole JC session file remains undetectable.
   - Remaining gaps: JC's `tool_call_started` carries no work item id, so a crash mid-call cannot be attributed to a work item (only the
     session-level `jc_unmatched_starts` fact); JC records neither attempt nor lease ids, so JC evidence cannot be tied to a specific ACS
     attempt; a valid chain shows no edit but not completeness (a truncated tail is undetectable) nor that effects occurred; the
     work item ids in the real traces were not present in any ACS database on the build host, so ACS-side correlation is untested live.
+- Integrity gate: before any stored-evidence assertion is evaluated (everything except the live `service_healthy` and
+  `release_matches` scope `installed` observers), `looptrace_verify` fails closed with ERROR if the ACS source is unreadable, any
+  evidence event has a broken chain or hash mismatch, any audit/trace-projection row for the work item failed verification, or a
+  chain tail was truncated below its stored head.
+- Head anchors: the global audit chain's newest `sequence` must equal SQLite's own AUTOINCREMENT high-water mark
+  (`sqlite_sequence`, never lowered by DELETE), and the newest `trace_outbox` row must sit at `trace_chain_state.seq` and hash to
+  its `head_hash`. A shortfall is `audit_tail_truncated` / `trace_tail_truncated` (ERROR). When no stored head exists the state
+  carries `audit_head_unproven` / `trace_head_unproven` and a would-be PASS becomes INCONCLUSIVE (`completeness unproven: ...`).
+  These anchors live in the same database: a writer able to rewrite rows, re-hash the chain and also lower `sqlite_sequence` /
+  rewrite `trace_chain_state` can still forge a consistent shorter history. Only an external anchor would close that.
 - ACS does not record the executor's release identity (`MISSING_RELEASE_IDENTITY`); `installed` != running.
 - `installed` release observation expects `RELEASE.json` under configured roots; the live `~/releases/acs/<sha>-name`
   layout was not matched (reports INCONCLUSIVE, not a false PASS).

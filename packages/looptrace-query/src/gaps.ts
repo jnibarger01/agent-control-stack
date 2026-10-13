@@ -466,8 +466,19 @@ export function analyzeJc(v: View): Gap[] {
   const gaps: Gap[] = [];
   const sessions = v.of("jc.session");
   const calls = v.of("jc.tool.finished");
-  const coverage = v.of("jc.coverage");
-  if (sessions.length === 0 && calls.length === 0 && coverage.length === 0) return gaps;
+  const coverage = v.of("jc.coverage").filter((e) => e.status !== "completeness_unproven");
+  const unanchored = v.of("jc.coverage").filter((e) => e.status === "completeness_unproven");
+  if (sessions.length === 0 && calls.length === 0 && coverage.length === 0 && unanchored.length === 0) return gaps;
+  if (unanchored.length > 0) {
+    gaps.push({
+      code: "JC_COMPLETENESS_UNPROVEN",
+      severity: "low",
+      affected_stage: "sources",
+      description: "Jace Commander trace sessions in the configured roots end without a trace seal; JC writes no head anchor, so a truncated JC trace cannot be told apart from a complete one and JC evidence for this work item may be missing.",
+      required_evidence: "JC sessions whose verified chain ends in a trace_sealed record",
+      evidence_refs: v.refs(...unanchored)
+    });
+  }
 
   const broken = sessions.filter((e) => e.status === "broken");
   if (broken.length > 0) {
