@@ -499,6 +499,13 @@ issuance, result acceptance, machine evidence, independent review and completion
 can be inspected in one timeline. This is a read-only projection of existing
 records, not a new lifecycle, authority source or audit database.
 
+An optional `asOfSequence` query parameter limits permits and events to that
+audit sequence. Trace IDs and JEV observations are current-state projections
+without historical audit anchors, so as-of responses omit them rather than
+presenting current values as historical facts. The observation resource bound
+applies to current reads; unreturned current observations do not affect an
+as-of response.
+
 Events are returned oldest-first; `nextAfterSequence` requests the next page.
 Limits are 1–200 events per page and 2,048 historical links/revisions/observations;
 exceeding a resource bound returns an explicit error, never silent truncation.

@@ -1118,6 +1118,11 @@ export interface PrivilegedTransitionOptions {
   actorId?: string;
   /** Lease bearer proof required for non-terminal transitions away from running. */
   leaseToken?: string;
+  /**
+   * Server-derived verifier engine identity for review findings. The gateway sets it from the authenticated
+   * reviewer credential; it is never read from a request body. Recorded on review_findings.verifier_engine_id.
+   */
+  verifierEngineId?: string;
 }
 
 /**
@@ -1158,6 +1163,11 @@ function validateAdminModeTtl(value: number): number {
 }
 
 export interface SqliteWorkItemStoreOptions {
+  /**
+   * Resolves a reviewer credential id (the `<id>` in `acs-credential:<id>`) to a configured credential. Review
+   * findings may only record a verifier engine that resolves; without a resolver no engine can be recorded.
+   */
+  reviewerCredentialExists?: (credentialId: string) => boolean;
   leaseMs?: number;
   heartbeatTtlMs?: number;
   /**
@@ -1653,6 +1663,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
   /** Memoized lazy validation result: undefined = not checked yet, null = valid. */
   private traceConfigError: ControlStackError | null | undefined;
 
+  private readonly reviewerCredentialExists: ((credentialId: string) => boolean) | undefined;
+
   constructor(dbPath: string, options: SqliteWorkItemStoreOptions = {}) {
     // Trace producer identity: validated lazily at trace time by default (a bad value
     // never stops the store from opening, and never fails an approval); "eager" refuses
@@ -1664,6 +1676,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     this.leaseMs = options.leaseMs ?? 5 * 60 * 1000;
+    this.reviewerCredentialExists = options.reviewerCredentialExists;
     this.heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
     // No implicit expiry: admin mode is sticky unless a caller explicitly asks
     // for a bounded elevation.
@@ -4632,12 +4645,16 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const existing = this.readReviewFinding(parsed.findingHash);
       if (existing) return { value: existing, events: [] };
       const createdAt = (parsed.now ?? new Date()).toISOString();
+      const verifierEngineId =
+        options.verifierEngineId === undefined
+          ? null
+          : resolveReviewEngineId(options.verifierEngineId, this.reviewerCredentialExists);
       this.db
         .prepare(
           `INSERT INTO review_findings
            (finding_hash, finding_id, work_item_id, attempt_id, reviewer_principal_id, reviewer_provider,
-            evidence_manifest_hash, verdict, finding_json, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            verifier_engine_id, evidence_manifest_hash, verdict, finding_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           parsed.findingHash,
@@ -4646,6 +4663,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           parsed.attemptId,
           parsed.reviewerPrincipalId,
           parsed.reviewerProvider,
+          verifierEngineId,
           parsed.evidenceManifestHash,
           parsed.verdict,
           JSON.stringify(parsed.finding),
@@ -4660,6 +4678,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
             attemptId: parsed.attemptId,
             workItemId: parsed.workItemId,
             reviewerPrincipalId: parsed.reviewerPrincipalId,
+            verifierEngineId,
             verdict: parsed.verdict,
             evidenceManifestHash: parsed.evidenceManifestHash
           },
@@ -4668,6 +4687,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
             "attempt.id": parsed.attemptId,
             ...(options.actorId ? { "actor.id": options.actorId } : {}),
             "review.reviewer_principal_id": parsed.reviewerPrincipalId,
+            ...(verifierEngineId ? { "review.verifier_engine_id": verifierEngineId } : {}),
             "review.verdict": parsed.verdict,
             "review.evidence_manifest_hash": parsed.evidenceManifestHash,
             "advisory.role": "ADVISORY_REASONER"
@@ -4693,6 +4713,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           work_item_id: string;
           reviewer_principal_id: string;
           reviewer_provider: string;
+          verifier_engine_id: string | null;
           evidence_manifest_hash: string;
           verdict: ReviewFindingProjection["verdict"];
           finding_json: string;
@@ -4706,6 +4727,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           workItemId: row.work_item_id,
           reviewerPrincipalId: row.reviewer_principal_id,
           reviewerProvider: row.reviewer_provider,
+          verifierEngineId: row.verifier_engine_id ?? null,
           evidenceManifestHash: row.evidence_manifest_hash,
           verdict: row.verdict,
           finding: JSON.parse(row.finding_json) as Record<string, unknown>,
@@ -9894,6 +9916,49 @@ const TERMINAL_WORK_ITEM_STATUSES: readonly WorkItemStatus[] = ["succeeded", "fa
 
 function isTerminalStatus(status: WorkItemStatus): boolean {
   return TERMINAL_WORK_ITEM_STATUSES.includes(status);
+}
+
+const REVIEWER_CREDENTIAL_ENGINE = /^acs-credential:([A-Za-z0-9][A-Za-z0-9._:@/-]{0,255})$/u;
+
+/**
+ * The credential id inside a server-written verifier engine id (`acs-credential:<credential id>`), or undefined when
+ * the value is not in that exact format. Callers must still resolve the id to a configured credential.
+ */
+export function reviewerCredentialIdFromEngineId(value: string): string | undefined {
+  return REVIEWER_CREDENTIAL_ENGINE.exec(value)?.[1];
+}
+
+function resolveReviewEngineId(value: string, exists: ((credentialId: string) => boolean) | undefined): string {
+  const credentialId = reviewerCredentialIdFromEngineId(value);
+  if (credentialId === undefined || !exists || !exists(credentialId))
+    throw new ControlStackError("review_engine_unknown", "verifier engine does not resolve to a known credential");
+  return value;
+}
+
+/**
+ * Recompute a stored execution result's payload hash from its canonical fields, with the same function the
+ * store used at ingest. A receipt binds this recomputed value, never the stored `payloadHash` column alone.
+ */
+export function storedExecutionResultPayloadHash(result: StoredExecutionResult): string {
+  return resultPayloadHash({
+    workItemId: result.workItemId,
+    leaseId: result.leaseId,
+    workerId: result.workerId,
+    actionHash: result.actionHash,
+    idempotencyKey: result.idempotencyKey,
+    outcome: result.outcome,
+    startedAt: result.startedAt,
+    finishedAt: result.finishedAt,
+    exitCode: result.exitCode ?? null,
+    summary: result.summary,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    structuredOutput: result.structuredOutput,
+    artifacts: result.artifacts,
+    error: result.error,
+    resourceUsage: result.resourceUsage,
+    simulationMetadata: result.simulationMetadata
+  } as PersistedResultInput);
 }
 
 function resultPayloadHash(input: PersistedResultInput): string {

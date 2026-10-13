@@ -103,3 +103,54 @@ export {
   KEYBOARD_SHORTCUTS,
   sortApprovalItems
 } from "./operator-workflow.js";
+export {
+  RISK_WEIGHT,
+  riskWeightedQueueScore,
+  classifyApprovalSla,
+  detectStaleLeases,
+  detectAuditSequenceGaps,
+  bucketWorkItemAge,
+  bucketWorkItemAges,
+  classifyAgentActivity,
+  normalizeIntentKey,
+  detectDuplicateIntents,
+  policyDenialRate,
+  detectRetryStorms,
+  executionModeDisplayWarning
+} from "./operator-insights.js";
+export {
+  LAST_VIEW_STORAGE_KEY,
+  FOCUS_RING_TOKEN,
+  REDUCED_MOTION_QUERY,
+  KNOWN_VIEWS,
+  relativeTime,
+  clipboardPayload,
+  emptyQueueMessage,
+  shouldHandleRefreshShortcut,
+  parseStoredView,
+  focusRingToken,
+  reducedMotionQuery,
+  navBadgeCounts,
+  filterChipSummary,
+  adminModeMustConfirm
+} from "./operator-impact.js";
+export {
+  DENSITY_STORAGE_KEY,
+  SORT_STORAGE_KEY,
+  PINS_STORAGE_KEY,
+  RECENT_STORAGE_KEY,
+  FOCUS_STORAGE_KEY,
+  densityClass,
+  sortQueueItems,
+  parseQueueSort,
+  togglePinnedId,
+  pushRecentId,
+  rankCommandResults,
+  SKIP_LINK_TARGETS,
+  filterCountAnnouncement,
+  statusGlyph,
+  statusGlyphLabel,
+  printAuditCss,
+  timezoneLabel
+} from "./operator-ux.js";
+export { OPERATOR_THIRTY, operatorToolbarHtml, operatorInsightsHtml } from "./operator-thirty-ui.js";
