@@ -12,7 +12,8 @@ import {
 } from "./cua-execution.js";
 import { parseWorkUnitPayload, type CuaAction } from "./mission-model.js";
 import { CodingMissionStore } from "./store.js";
-import { WorkUnitExecutionLedger } from "./worker-execution.js";
+import { cuaCheckpointReceiptHash, cuaResultHash } from "./cua-evidence.js";
+import { WorkUnitExecutionLedger, resultBase } from "./worker-execution.js";
 
 const T0 = "2026-10-10T00:00:00.000Z";
 const T1 = "2026-10-10T00:00:01.000Z";
@@ -197,7 +198,7 @@ function harness(
   const checkpoints = () =>
     ctx.store.db
       .prepare(
-        `SELECT sequence, action_type, state, screenshot_hash, receipt_hash, origin, action_hash, claim_token_hash
+        `SELECT sequence, action_type, state, screenshot_hash, receipt_hash, origin, action_hash, claim_token_hash, application
          FROM cua_action_checkpoints ORDER BY sequence`
       )
       .all() as Array<Record<string, unknown>>;
@@ -795,5 +796,196 @@ describe("R3: browser boundary", () => {
     const browser: CuaBrowserProvider = { open: () => new Promise<CuaPage>(() => undefined) };
     const adapter = new CuaExecutionAdapter(ctx.store, browser, "browser", () => T2, { actionTimeoutMs: 30 });
     await expect(adapter.execute(ctx.dispatch)).resolves.toMatchObject({ outcome: "unknown" });
+  });
+});
+
+describe("R1: evidence-bound CUA acceptance", () => {
+  const twoStep = () =>
+    script(
+      [
+        { type: "navigate", url: `${ORIGIN}/inbox` },
+        { type: "click", selector: "#go" }
+      ],
+      {
+        applications: ["browser", "browser-profile-2"]
+      }
+    );
+
+  it("accepts a result whose receipts are rebuilt from the committed checkpoints", async () => {
+    const { adapter, dispatch, ledger, claim } = harness(twoStep());
+    const result = await adapter.execute(dispatch);
+    expect(result.outcome).toBe("succeeded");
+    expect(ledger.applyResult({ claimToken: claim.token, result })).toEqual({ applied: "completed" });
+  });
+
+  it("refuses a success submitted without running the adapter (no checkpoints)", () => {
+    const { dispatch, ledger, claim } = harness(twoStep());
+    const forged = {
+      ...resultBase(dispatch, T2),
+      outcome: "succeeded" as const,
+      receipts: [],
+      result: { resultHash: "f".repeat(64), files: [] },
+      externalStateUncertain: false
+    };
+    expect(ledger.applyResult({ claimToken: claim.token, result: forged })).toMatchObject({
+      applied: "rejected_invalid",
+      reason: "cua success requires every action to be committed"
+    });
+  });
+
+  it("refuses receipts that differ from the committed checkpoints", async () => {
+    const { adapter, dispatch, ledger, claim } = harness(twoStep());
+    const result = await adapter.execute(dispatch);
+    const forged = { ...result, receipts: [...result.receipts, { kind: "cua_click", hash: "e".repeat(64) }] };
+    expect(ledger.applyResult({ claimToken: claim.token, result: forged })).toMatchObject({
+      applied: "rejected_invalid",
+      reason: "cua receipts do not match committed checkpoints"
+    });
+  });
+
+  it("refuses a success whose script did not fully commit", async () => {
+    const controller = new AbortController();
+    const { adapter, dispatch, ledger, claim, page } = harness(twoStep());
+    const original = page.goto.bind(page);
+    page.goto = async (url: string) => {
+      await original(url);
+      controller.abort();
+    };
+    const partial = await adapter.execute(dispatch, controller.signal);
+    const forged = {
+      ...partial,
+      outcome: "succeeded" as const,
+      failure: undefined,
+      result: { resultHash: cuaResultHash(partial.receipts), files: [] },
+      externalStateUncertain: false
+    };
+    expect(ledger.applyResult({ claimToken: claim.token, result: forged })).toMatchObject({
+      applied: "rejected_invalid",
+      reason: "cua success requires every action to be committed"
+    });
+  });
+
+  it("rejects a cua unit with no actions instead of reporting success", async () => {
+    const { adapter, dispatch, ledger, claim, opens } = harness(script([]));
+    const result = await adapter.execute(dispatch);
+    expect(result).toMatchObject({
+      outcome: "failed",
+      failure: { category: "invalid_output", nativeCode: "cua_payload_invalid" }
+    });
+    expect(opens()).toBe(0);
+    const forged = {
+      ...resultBase(dispatch, T2),
+      outcome: "succeeded" as const,
+      receipts: [],
+      result: { resultHash: cuaResultHash([]), files: [] },
+      externalStateUncertain: false
+    };
+    expect(ledger.applyResult({ claimToken: claim.token, result: forged })).toMatchObject({
+      applied: "rejected_invalid",
+      reason: "cua success requires a non-empty action script"
+    });
+  });
+
+  it("serializes executions: a second run cannot settle a live run's planned checkpoint", async () => {
+    const { adapter, dispatch, page, checkpoints } = harness(twoStep());
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const original = page.goto.bind(page);
+    page.goto = async (url: string) => {
+      await gate;
+      await original(url);
+    };
+    const first = adapter.execute(dispatch);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(checkpoints().map((row) => row.state)).toEqual(["planned"]);
+    await expect(adapter.execute(dispatch)).rejects.toMatchObject({ code: "cua_execution_in_progress" });
+    expect(checkpoints().map((row) => row.state)).toEqual(["planned"]);
+    release();
+    await expect(first).resolves.toMatchObject({ outcome: "succeeded" });
+    expect(checkpoints().map((row) => row.state)).toEqual(["committed", "committed"]);
+  });
+
+  it("recovers a planned checkpoint only after the previous owner's lock expired", async () => {
+    const { adapter, dispatch, store, checkpoints } = harness(twoStep());
+    const first = await adapter.execute(dispatch);
+    expect(first.outcome).toBe("succeeded");
+    // Simulate a crashed owner: a planned row past the end of the script cannot exist, so plant a stale lock instead.
+    store.db
+      .prepare("INSERT INTO cua_execution_locks (attempt_id, owner_id, expires_at) VALUES (?, 'crashed', ?)")
+      .run(dispatch.attemptId, "2099-01-01T00:00:00.000Z");
+    await expect(adapter.execute(dispatch)).rejects.toMatchObject({ code: "cua_execution_in_progress" });
+    store.db
+      .prepare("UPDATE cua_execution_locks SET expires_at = ? WHERE attempt_id = ?")
+      .run("2000-01-01T00:00:00.000Z", dispatch.attemptId);
+    await expect(adapter.execute(dispatch)).resolves.toMatchObject({ outcome: "unknown" });
+    expect(checkpoints().map((row) => row.state)).toEqual(["committed", "committed"]);
+  });
+
+  it.each([
+    ["a recomputed receipt hash mismatch", "UPDATE cua_action_checkpoints SET receipt_hash = 'x' WHERE sequence = 0"],
+    [
+      "an action hash that is not the dispatched action",
+      "UPDATE cua_action_checkpoints SET action_hash = 'x' WHERE sequence = 0"
+    ],
+    [
+      "a checkpoint bound to another worker",
+      "UPDATE cua_action_checkpoints SET worker_id = 'worker-9' WHERE sequence = 0"
+    ],
+    [
+      "a checkpoint for an application the payload does not allow",
+      "UPDATE cua_action_checkpoints SET application = 'other' WHERE sequence = 0"
+    ]
+  ])("verifies persisted checkpoints on resume: %s is an integrity failure", async (_name, tamper) => {
+    const controller = new AbortController();
+    const { adapter, dispatch, page, store, ledger, claim } = harness(twoStep());
+    const original = page.goto.bind(page);
+    page.goto = async (url: string) => {
+      await original(url);
+      controller.abort();
+    };
+    const partial = await adapter.execute(dispatch, controller.signal);
+    store.db.exec(tamper);
+    await expect(adapter.execute(dispatch)).rejects.toMatchObject({ code: "cua_checkpoint_integrity" });
+    expect(ledger.applyResult({ claimToken: claim.token, result: partial })).toMatchObject({
+      applied: "rejected_invalid",
+      reason: expect.stringContaining("cua checkpoint integrity failure")
+    });
+  });
+
+  it("binds the selected application into every checkpoint and receipt hash", async () => {
+    const { adapter, dispatch, checkpoints } = harness(twoStep());
+    await adapter.execute(dispatch);
+    const rows = checkpoints();
+    expect(rows.map((row) => row.application)).toEqual(["browser", "browser"]);
+    const row = rows[0]!;
+    const hashFor = (application: string) =>
+      cuaCheckpointReceiptHash({
+        attemptId: dispatch.attemptId,
+        sequence: 0,
+        application,
+        actionType: "navigate",
+        actionHash: row.action_hash as string,
+        state: "committed",
+        origin: row.origin as string,
+        screenshotHash: null
+      });
+    expect(row.receipt_hash).toBe(hashFor("browser"));
+    expect(hashFor("browser-profile-2")).not.toBe(row.receipt_hash);
+  });
+
+  it("refuses to resume an attempt with a different selected application", async () => {
+    const controller = new AbortController();
+    const ctx = harness(twoStep());
+    const original = ctx.page.goto.bind(ctx.page);
+    ctx.page.goto = async (url: string) => {
+      await original(url);
+      controller.abort();
+    };
+    await ctx.adapter.execute(ctx.dispatch, controller.signal);
+    const other = new CuaExecutionAdapter(ctx.store, { open: async () => ctx.page }, "browser-profile-2", () => T2);
+    await expect(other.execute(ctx.dispatch)).rejects.toMatchObject({
+      code: "cua_checkpoint_integrity",
+      message: expect.stringContaining("application_mismatch")
+    });
   });
 });

@@ -1,5 +1,14 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { ControlStackError, stableHash } from "@agent-control-stack/shared";
+import {
+  committedCuaReceipts,
+  cuaActionHash,
+  cuaCheckpointReceiptHash,
+  cuaReceiptKind,
+  cuaResultHash,
+  verifyCuaCheckpoints,
+  type CuaCheckpointRow
+} from "./cua-evidence.js";
 import type { CuaAction, CuaActionType } from "./mission-model.js";
 import { parseWorkUnitPayload } from "./mission-model.js";
 import type { CodingMissionStore } from "./store.js";
@@ -125,6 +134,8 @@ export interface CuaExecutionOptions {
   secrets?: CuaSecretResolver;
   /** Deadline for every single browser call (open, route setup, action, close). Default 30s. */
   actionTimeoutMs?: number;
+  /** Lease on the per-attempt execution lock, renewed at every checkpoint. Default max(5 min, 4 x actionTimeoutMs). */
+  lockTtlMs?: number;
 }
 
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
@@ -173,15 +184,9 @@ export class PlaywrightCuaBrowser implements CuaBrowserProvider {
 
 const MUTATING: ReadonlySet<CuaActionType> = new Set(["click", "type", "scroll", "navigate"]);
 
-interface CheckpointRow {
-  sequence: number;
-  action_type: CuaActionType;
-  action_hash: string;
-  state: "planned" | "committed" | "uncertain";
-  screenshot_hash: string | null;
-  receipt_hash: string;
-  origin: string | null;
-}
+type CheckpointRow = CuaCheckpointRow;
+const CHECKPOINT_COLUMNS = `attempt_id, mission_id, unit_id, unit_attempt, worker_id, claim_token_hash, fencing_token,
+  sequence, action_type, action_hash, state, screenshot_hash, receipt_hash, origin, application`;
 
 interface ActionEffect {
   origin: string | null;
@@ -189,9 +194,7 @@ interface ActionEffect {
   uncertain: boolean;
 }
 
-function receiptKind(type: CuaActionType): string {
-  return `cua_${type}`;
-}
+const receiptKind = cuaReceiptKind;
 
 function sha256Bytes(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -237,7 +240,9 @@ function landingUncertain(
 function isFenceError(error: unknown): boolean {
   return (
     error instanceof ControlStackError &&
-    (error.code === "coding_mission_claim_conflict" || error.code === "execution_attempt_conflict")
+    (error.code === "coding_mission_claim_conflict" ||
+      error.code === "execution_attempt_conflict" ||
+      error.code === "cua_execution_lock_lost")
   );
 }
 
@@ -352,7 +357,76 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     if (dispatch.lane !== this.lane) {
       throw new ControlStackError("execution_lane_mismatch", `cua adapter cannot execute ${dispatch.lane}`);
     }
-    const prior = this.checkpoints(dispatch.attemptId);
+    // One live executor per attempt: a second run cannot observe, settle or extend the first one's checkpoints.
+    const owner = this.acquireLock(dispatch);
+    try {
+      return await this.executeLocked(dispatch, owner, signal);
+    } finally {
+      this.releaseLock(dispatch, owner);
+    }
+  }
+
+  private lockOwner: string | undefined;
+
+  private get lockTtlMs(): number {
+    return this.options.lockTtlMs ?? Math.max(5 * 60_000, 4 * this.timeoutMs);
+  }
+
+  private acquireLock(dispatch: DispatchEnvelope): string {
+    const owner = randomUUID();
+    const now = this.now();
+    this.store.transaction(() => {
+      const held = this.store.db
+        .prepare("SELECT owner_id, expires_at FROM cua_execution_locks WHERE attempt_id = ?")
+        .get(dispatch.attemptId) as { owner_id: string; expires_at: string } | undefined;
+      if (held && Date.parse(held.expires_at) > Date.parse(now)) {
+        throw new ControlStackError("cua_execution_in_progress", "another executor holds this CUA attempt");
+      }
+      this.store.db
+        .prepare(
+          `INSERT INTO cua_execution_locks (attempt_id, owner_id, expires_at) VALUES (?, ?, ?)
+           ON CONFLICT (attempt_id) DO UPDATE SET owner_id = excluded.owner_id, expires_at = excluded.expires_at`
+        )
+        .run(dispatch.attemptId, owner, new Date(Date.parse(now) + this.lockTtlMs).toISOString());
+    });
+    return owner;
+  }
+
+  /** Inside a transaction: the caller must still own the attempt lock; extends its lease. */
+  private renewLockInTransaction(dispatch: DispatchEnvelope): void {
+    const owner = this.lockOwner;
+    const changed = this.store.db
+      .prepare("UPDATE cua_execution_locks SET expires_at = ? WHERE attempt_id = ? AND owner_id = ?")
+      .run(new Date(Date.parse(this.now()) + this.lockTtlMs).toISOString(), dispatch.attemptId, owner ?? "");
+    if (changed.changes !== 1) {
+      throw new ControlStackError("cua_execution_lock_lost", "this executor no longer owns the CUA attempt");
+    }
+  }
+
+  private releaseLock(dispatch: DispatchEnvelope, owner: string): void {
+    try {
+      this.store.transaction(() => {
+        this.store.db
+          .prepare("DELETE FROM cua_execution_locks WHERE attempt_id = ? AND owner_id = ?")
+          .run(dispatch.attemptId, owner);
+      });
+    } finally {
+      this.lockOwner = undefined;
+    }
+  }
+
+  private async executeLocked(
+    dispatch: DispatchEnvelope,
+    owner: string,
+    signal?: AbortSignal
+  ): Promise<ResultEnvelope> {
+    this.lockOwner = owner;
+    // Resume uses persisted checkpoints only after verifying each against the persisted attempt and dispatch.
+    const verified = verifyCuaCheckpoints(this.store.db, dispatch.attemptId, this.application);
+    if (!verified.ok) {
+      throw new ControlStackError("cua_checkpoint_integrity", `CUA checkpoint integrity failure: ${verified.defect}`);
+    }
+    const prior = verified.rows;
     if (prior.some((row) => row.state === "uncertain" || row.state === "planned")) {
       if (prior.some((row) => row.state === "planned")) this.settlePlanned(dispatch);
       return this.unknownResult(dispatch, committedReceipts(this.checkpoints(dispatch.attemptId)));
@@ -381,7 +455,10 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     }
     const origins = payload.allowedOrigins ?? [];
     const actions = payload.actions ?? [];
-    if (actions.length === 0) return this.succeeded(dispatch, []);
+    if (actions.length === 0) {
+      // No script is not success: the objective was not performed.
+      return this.failed(dispatch, "invalid_output", "cua_payload_invalid", "cua script has no actions", []);
+    }
     if (!this.options.secrets && actions.some((action) => action.type === "type" && "secretRef" in action)) {
       return this.failed(dispatch, "policy_denied", "cua_secret_unavailable", "no secret resolver is configured", []);
     }
@@ -395,7 +472,7 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     try {
       for (const [sequence, action] of actions.entries()) {
         if (signal?.aborted) return this.cancelled(dispatch, committedMutation, receipts);
-        const hash = stableHash(action);
+        const hash = cuaActionHash(action);
         if (page) {
           let liveUrl: string;
           try {
@@ -602,6 +679,7 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
   private plan(dispatch: DispatchEnvelope, action: CuaAction, sequence: number, hash: string): "inserted" | "blocked" {
     return this.store.transaction(() => {
       this.assertFenceInTransaction(dispatch);
+      this.renewLockInTransaction(dispatch);
       const existing = this.checkpoint(dispatch.attemptId, sequence);
       if (existing) return "blocked";
       if (sequence > 0) {
@@ -614,8 +692,8 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
         .prepare(
           `INSERT INTO cua_action_checkpoints (
              attempt_id, mission_id, unit_id, unit_attempt, worker_id, claim_token_hash, fencing_token,
-             sequence, action_type, action_hash, state, screenshot_hash, receipt_hash, origin, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', NULL, ?, NULL, ?)`
+             sequence, action_type, action_hash, state, screenshot_hash, receipt_hash, origin, application, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', NULL, ?, NULL, ?, ?)`
         )
         .run(
           dispatch.attemptId,
@@ -628,7 +706,17 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
           sequence,
           action.type,
           hash,
-          stableHash({ actionHash: hash, state: "planned" }),
+          cuaCheckpointReceiptHash({
+            attemptId: dispatch.attemptId,
+            sequence,
+            application: this.application,
+            actionType: action.type,
+            actionHash: hash,
+            state: "planned",
+            origin: null,
+            screenshotHash: null
+          }),
+          this.application,
           this.now()
         );
       return "inserted";
@@ -643,15 +731,19 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     state: "committed" | "uncertain",
     effect: ActionEffect
   ): string {
-    const receiptHash = stableHash({
-      kind: receiptKind(actionType),
+    const receiptHash = cuaCheckpointReceiptHash({
+      attemptId: dispatch.attemptId,
+      sequence,
+      application: this.application,
+      actionType,
       actionHash: hash,
       state,
       origin: effect.origin,
-      ...(effect.screenshotHash ? { screenshotHash: effect.screenshotHash } : {})
+      screenshotHash: effect.screenshotHash ?? null
     });
     this.store.transaction(() => {
       this.assertFenceInTransaction(dispatch);
+      this.renewLockInTransaction(dispatch);
       const changed = this.store.db
         .prepare(
           `UPDATE cua_action_checkpoints
@@ -669,9 +761,20 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
   private settlePlanned(dispatch: DispatchEnvelope): void {
     this.store.transaction(() => {
       this.assertFenceInTransaction(dispatch);
+      // Only the lock owner settles: a planned row left by an owner whose lock was released or expired.
+      this.renewLockInTransaction(dispatch);
       const planned = this.checkpoints(dispatch.attemptId).filter((row) => row.state === "planned");
       for (const row of planned) {
-        const receiptHash = stableHash({ actionHash: row.action_hash, state: "uncertain", origin: row.origin });
+        const receiptHash = cuaCheckpointReceiptHash({
+          attemptId: row.attempt_id,
+          sequence: row.sequence,
+          application: row.application,
+          actionType: row.action_type,
+          actionHash: row.action_hash,
+          state: "uncertain",
+          origin: row.origin ?? null,
+          screenshotHash: null
+        });
         const changed = this.store.db
           .prepare(
             `UPDATE cua_action_checkpoints
@@ -688,19 +791,13 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
 
   private checkpoints(attemptId: string): CheckpointRow[] {
     return this.store.db
-      .prepare(
-        `SELECT sequence, action_type, action_hash, state, screenshot_hash, receipt_hash, origin
-         FROM cua_action_checkpoints WHERE attempt_id = ? ORDER BY sequence`
-      )
+      .prepare(`SELECT ${CHECKPOINT_COLUMNS} FROM cua_action_checkpoints WHERE attempt_id = ? ORDER BY sequence`)
       .all(attemptId) as unknown as CheckpointRow[];
   }
 
   private checkpoint(attemptId: string, sequence: number): CheckpointRow | undefined {
     return this.store.db
-      .prepare(
-        `SELECT sequence, action_type, action_hash, state, screenshot_hash, receipt_hash, origin
-         FROM cua_action_checkpoints WHERE attempt_id = ? AND sequence = ?`
-      )
+      .prepare(`SELECT ${CHECKPOINT_COLUMNS} FROM cua_action_checkpoints WHERE attempt_id = ? AND sequence = ?`)
       .get(attemptId, sequence) as CheckpointRow | undefined;
   }
 
@@ -709,7 +806,7 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
       ...resultBase(dispatch, this.now()),
       outcome: "succeeded",
       receipts,
-      result: { resultHash: stableHash({ receipts }), files: [] },
+      result: { resultHash: cuaResultHash(receipts), files: [] },
       externalStateUncertain: false
     };
   }
@@ -764,8 +861,4 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
   }
 }
 
-function committedReceipts(rows: CheckpointRow[]): ExecutionReceipt[] {
-  return rows
-    .filter((row) => row.state === "committed")
-    .map((row) => ({ kind: receiptKind(row.action_type), hash: row.receipt_hash }));
-}
+const committedReceipts = committedCuaReceipts;

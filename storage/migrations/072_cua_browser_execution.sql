@@ -195,7 +195,18 @@ CREATE TABLE cua_action_checkpoints (
   screenshot_hash TEXT,
   receipt_hash TEXT NOT NULL,
   origin TEXT,
+  -- The browser application the adapter selected from allowedApplications; bound into every receipt hash.
+  application TEXT NOT NULL CHECK (length(application) BETWEEN 1 AND 4096),
   created_at TEXT NOT NULL,
   PRIMARY KEY (attempt_id, sequence),
+  FOREIGN KEY (attempt_id) REFERENCES work_unit_execution_attempts (attempt_id) ON DELETE CASCADE
+);
+
+-- One live executor per CUA attempt. A second execute cannot settle or touch the first one's checkpoints until the
+-- owner releases the lock or its lease expires (then its planned rows are recovered as uncertain).
+CREATE TABLE cua_execution_locks (
+  attempt_id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL CHECK (length(owner_id) BETWEEN 1 AND 128),
+  expires_at TEXT NOT NULL CHECK (julianday(expires_at) IS NOT NULL),
   FOREIGN KEY (attempt_id) REFERENCES work_unit_execution_attempts (attempt_id) ON DELETE CASCADE
 );

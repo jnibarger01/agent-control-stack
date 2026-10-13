@@ -1,4 +1,5 @@
 import { ControlStackError, stableHash } from "@agent-control-stack/shared";
+import { cuaAcceptanceDefect } from "./cua-evidence.js";
 import type { CodingMissionPorts } from "./controller.js";
 import type { FailureCategory, WorkUnitKind, WorkUnitPayload, VerificationPolicy } from "./mission-model.js";
 import type { CodingMissionStore } from "./store.js";
@@ -919,6 +920,9 @@ export class WorkUnitExecutionLedger {
       return "result receipts are malformed";
     }
     if (result.outcome === "succeeded" && !result.result) return "successful result is missing result evidence";
+    // CUA results are evidence-bound: receipts are rebuilt from the committed, verified checkpoints in this same
+    // transaction, and a worker-reported receipt list or success that does not match them is refused.
+    if (row.executor_lane === "cua") return cuaAcceptanceDefect(this.store.db, row.attempt_id, result);
     return undefined;
   }
 
