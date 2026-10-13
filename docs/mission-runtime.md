@@ -164,18 +164,78 @@ is where authority is enforced. A mission with a persisted `mission_authority` b
   (`operation: "dispatch"`) and writes no execution attempt.
 - A mission with no authority binding dispatches exactly as before.
 
-Limits: the `coder` and `mcp` lanes have no single tool runtime, so their tool classes are checked where each tool is
-invoked, not at dispatch. `maxRuntimeMs` is not yet turned into a deadline on the envelope. `claimUnit` itself does not
-consult authority; the gate is at dispatch. No production composition root constructs the dispatch ledger with a
-verifier yet, and the real grant reader is only wired in tests.
+Lane and tool authorization is exact. Every lane maps to a runtime the authority can grant: `dc` to `desktop_commander`,
+`jc` to `jace_commander`, `coder` to `sandbox`. The `mcp` lane maps to none, because the authority schema cannot express an
+MCP tool, so it is never authorized for a governed mission. A unit whose payload names a specific tool (`kind: "tool"`) may
+only run it if that exact runtime and tool pair is granted; a broad runtime grant does not cover a tool nobody listed.
+
+A governed dispatch carries a **deadline** set by ACS: the earlier of the dispatch time plus the authority's `maxRuntimeMs`
+and the authority's expiry. A caller-supplied deadline is ignored. The controller races the executor against it, aborts the
+executor's `AbortSignal`, and records the outcome as uncertain (never as a retry-safe failure). Independently,
+`applyResult` judges a result against the deadline on ACS's own clock: one that arrives late is recorded as `unknown`
+whatever finish time the worker reports. `claimUnit` itself does not consult authority; the gate is at dispatch.
+
+## Production entry point
+
+`CodingMissionController` is the production caller of `createGovernedExecution`. With `ports.governance = { mode: "enforce" }`
+(the gateway sets this when `ACS_CODING_MISSION_GOVERNED=1`; it is off by default) the controller:
+
+- **Takes identity from the control plane, never from the worker.** An operator is a registered `HUMAN` actor
+  (`isHumanOperator`). A worker acts as the actor `resolveVerifiedWorkerActor` returns: exactly one `AGENT` or `SERVICE`
+  actor with `externalRef` `worker:<workerId>`, whose latest `actor.registered` audit event matches its row and names a
+  `HUMAN` registrar. `POST /actors` is open to any mutation credential and overwrites an existing actor, so a row in `actors`
+  alone proves nothing; a binding made by, or overwritten by, a non-human does not resolve. The grant's executing actor must
+  equal the resolved actor: delegating to a different actor stays refused.
+- **Does not start a mission nobody gave authority to.** With no binding it waits (`authority_required`): nothing is claimed,
+  nothing runs, nothing is degraded. An operator binds a grant with `POST /coding-missions/:id/authority`.
+- **Verifies audit integrity before opening the dispatch transaction**, so a full-chain verification does not hold the write
+  lock; a chain that does not verify refuses the dispatch (`audit_integrity_failed`).
+- **Runs the gate between claim and execute.** A denial returns the unit to `pending` (it never ran), records
+  `authority.denied`, and degrades the mission with `dispatch_authority_denied`. Binding is write-once, so a mission whose
+  grant was revoked or expired stays stopped; it needs a new mission.
+- **Completes through the ledger.** Success completes the unit; a failure or retryable outcome degrades the mission for an
+  operator (`reconciliation_required` if the environment changed, else `operation_failed`); an uncertain outcome is handled
+  by the existing recovery path, which escalates unless the executor can fence the old run or declares itself idempotent.
+
+Grants must be issued under the same id as the coding mission, and the work item with that id must be non-terminal.
+
+Cost note: `assertAuditChainIntegrity` re-verifies the whole audit chain when another connection has written (or every 30s).
+Each governed dispatch therefore costs a chain verification in the worst case. This has not been measured on a large
+production database.
 
 ## Not yet in this runtime
 
-- A caller of the composition root. `createGovernedExecution` exists and is tested, but no controller, gateway route
-  or CLI constructs it yet, so nothing in production dispatches through it today.
+- Governed execution is implemented and tested end to end, but it is **off by default** and has not been enabled or deployed
+  anywhere. Turning it on is an operational action (`ACS_CODING_MISSION_GOVERNED=1`, plus operator-bound worker actors and a
+  grant per mission).
+- The generalized work-unit path and the `jc`, `dc` and `mcp` lanes have no production driver yet; only the `coder` lane runs.
+  `GovernedUnitRunner` (`unit-runner.ts`) runs one general-mission work unit end to end, but no worker, gateway route or CLI
+  constructs it yet.
 - Checkpoint/resume as worker adapters on the execution ledger, the CUA worker, and recovery policy.
 - A driver for the `general` mission kind. The legacy coding path has no budget row (uncapped).
 - Delegating to a different executing actor (`authorityNarrowingViolations` refuses it deliberately and it needs its own decision).
+
+## Unit runner
+
+`GovernedUnitRunner.runUnit({ missionId, unitId, workerId, lane })` (`unit-runner.ts`) runs one **general-mission** work unit
+end to end: it claims the unit, dispatches it through the governed root, runs the lane's `WorkUnitExecutorAdapter` and applies
+the result. (The coding-mission controller has its own governed path; see "Production entry point" above.) A lane with no
+adapter is refused before anything is claimed. If authority refuses the dispatch, the refusal is already durable, no attempt
+exists, no adapter runs, and the claimed unit is failed as `policy_denied` (non-retryable) instead of being left running;
+reopening it takes an explicit retry. An expired authority is recorded as `authority_expired` and any other refusal as
+`policy_denied`. This differs from the controller, which returns the unit to `pending` and degrades the mission. Any other
+failure of the dispatch (for example a verified unit with no implementer identity) happens before anything ran, so the claim
+is released and the error rethrown instead of leaving the unit in `running`. A unit with a verification policy needs
+`implementerEngineId` in the runner options; the runner never invents one.
+
+The executor is raced against the deadline ACS set on the dispatch. At the deadline it is signalled to stop, ACS stops waiting,
+and the outcome is recorded as `unknown` with the external state marked uncertain, as in the controller. A governed dispatch
+(one that names a grant) with no deadline fails closed and never calls the executor; a mission with no authority binding has no
+deadline and runs as before. An adapter that throws becomes a failed result with the external state marked uncertain, and its message is redacted
+before it is persisted. A "succeeded" result without a non-empty result hash and a list of string files is converted to a
+failed `invalid_output` result, because the ledger itself only checks that a result object exists. Of two
+concurrent runs of one unit, one executes and the other reports `claim_conflict`. A crash between the claim and the dispatch
+leaves a running claim that existing stale-claim recovery handles; the runner adds no recovery of its own.
 
 ## Composition root
 

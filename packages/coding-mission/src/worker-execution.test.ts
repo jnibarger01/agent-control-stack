@@ -364,3 +364,25 @@ describe("execution adapters", () => {
     expect(failureCategoryForCode("policy_denied")).toBe("policy_denied");
   });
 });
+
+describe("a deadline is set by ACS from verified authority, never by a caller", () => {
+  it("drops a caller-supplied deadline on an ungoverned dispatch, keeping the other references", () => {
+    const store = new CodingMissionStore(":memory:");
+    store.createGeneral({ missionId: "m1", summary: "execute", now: T0 });
+    store.addWorkUnits("m1", [{ unitId: "u1", kind: "coding", title: "unit" }], T0);
+    store.releaseReadyUnits("m1", T0);
+    const claim = { token: "claim-token-1", workerId: "worker-1", route: {}, claimedAt: T1 };
+    expect(store.claimUnit("m1", "u1", claim)).toMatchObject({ ok: true });
+    const dispatch = new WorkUnitExecutionLedger(store).beginDispatch({
+      missionId: "m1",
+      unitId: "u1",
+      claimToken: claim.token,
+      workerId: claim.workerId,
+      lane: "coder",
+      authority: { leaseId: "lease-1", deadlineAt: "2099-01-01T00:00:00.000Z" } as never,
+      now: T1
+    });
+    expect(dispatch.authority).toEqual({ leaseId: "lease-1" });
+    expect(dispatch.authority.deadlineAt).toBeUndefined();
+  });
+});

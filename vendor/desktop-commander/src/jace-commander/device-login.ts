@@ -159,6 +159,9 @@ export function loadCredentials(stateDir: string): StoredCredentials | undefined
   }
 }
 
+/** In-flight ACS refreshes keyed by `${stateDir}::${acsUrl}`; single-flight dedupe. */
+const refreshInFlight = new Map<string, Promise<string | undefined>>();
+
 /**
  * Bearer for ACS calls: JC_ACS_TOKEN (service deployments) wins, else the
  * device-login credential for the same ACS origin, refreshed when within
@@ -176,17 +179,31 @@ export async function acsAccessToken(
   if (!stored || stored.acsUrl !== acsUrl.replace(/\/$/, '')) return undefined;
   if (stored.expiresAt - now() > 60_000) return stored.accessToken;
   if (!stored.refreshToken) return undefined;
+  // Single-flight: concurrent callers share one refresh so the issuer's rotated
+  // refresh token is not invalidated by a parallel write, which would force a
+  // full re-login on the next call.
+  const key = `${stateDir}::${stored.acsUrl}`;
+  const inFlight = refreshInFlight.get(key);
+  if (inFlight) return inFlight;
+  const promise = (async (): Promise<string | undefined> => {
+    try {
+      const refreshed = await postJson(fetchImpl, `${stored.acsUrl}/oauth/token`, {
+        grant_type: 'refresh_token',
+        client_id: ACS_DEVICE_CLIENT_ID,
+        refresh_token: stored.refreshToken,
+      });
+      if (refreshed.status !== 200) return undefined;
+      const credentials = toCredentials(stored.acsUrl, refreshed.json, now());
+      writeSecretFile(credentialsPath(stateDir), JSON.stringify(credentials, null, 2));
+      return credentials.accessToken;
+    } catch {
+      return undefined;
+    }
+  })();
+  refreshInFlight.set(key, promise);
   try {
-    const refreshed = await postJson(fetchImpl, `${stored.acsUrl}/oauth/token`, {
-      grant_type: 'refresh_token',
-      client_id: ACS_DEVICE_CLIENT_ID,
-      refresh_token: stored.refreshToken,
-    });
-    if (refreshed.status !== 200) return undefined;
-    const credentials = toCredentials(stored.acsUrl, refreshed.json, now());
-    writeSecretFile(credentialsPath(stateDir), JSON.stringify(credentials, null, 2));
-    return credentials.accessToken;
-  } catch {
-    return undefined;
+    return await promise;
+  } finally {
+    refreshInFlight.delete(key);
   }
 }

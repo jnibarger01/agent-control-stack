@@ -679,6 +679,13 @@ export const acpRoles = [
 export const registryStatuses = ["UNKNOWN", "AVAILABLE", "BUSY", "DEGRADED", "OFFLINE", "ERROR"] as const;
 export const actorTypes = ["HUMAN", "SYSTEM", "AGENT", "SERVICE"] as const;
 
+/**
+ * A worker is bound to the actor whose `externalRef` is `worker:<workerId>`. The binding only counts if a human operator
+ * registered it (see `resolveVerifiedWorkerActor`); the prefix alone proves nothing, because any caller with mutation scope
+ * can register an actor with any reference.
+ */
+export const WORKER_ACTOR_REF_PREFIX = "worker:";
+
 export type AcpRole = (typeof acpRoles)[number];
 export type RegistryStatus = (typeof registryStatuses)[number];
 export type ActorType = (typeof actorTypes)[number];
@@ -5987,6 +5994,54 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return (this.db.prepare(`SELECT * FROM actors ORDER BY display_name ASC`).all() as unknown as ActorRow[]).map(
       rowToActor
     );
+  }
+
+  /** True only for a registered actor of type HUMAN. An unknown id is not an operator. */
+  isHumanOperator(actorId: string): boolean {
+    const row = this.db.prepare(`SELECT actor_type FROM actors WHERE id = ?`).get(actorId) as
+      { actor_type: string } | undefined;
+    return row?.actor_type === "HUMAN";
+  }
+
+  /**
+   * The actor a worker acts as, or `undefined`. This is the only mapping from a worker id to an authority-bearing identity
+   * and it fails closed. The worker id is never treated as an actor id. All of these must hold:
+   *
+   * - the worker id is a plain identifier, and exactly one actor carries the reference `worker:<workerId>`;
+   * - that actor is an AGENT or SERVICE, never a HUMAN or SYSTEM actor;
+   * - the actor's latest `actor.registered` audit event matches its current type and reference, and names a registering
+   *   actor that is a HUMAN operator. `POST /actors` is open to any mutation credential and overwrites an existing
+   *   actor, so a row in `actors` alone is not evidence that an operator bound this worker.
+   *
+   * The audit event is read from the hash-chained ledger; callers that rely on it must assert chain integrity first.
+   */
+  resolveVerifiedWorkerActor(workerId: string): string | undefined {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(workerId)) return undefined;
+    const rows = this.db
+      .prepare(`SELECT * FROM actors WHERE external_ref = ?`)
+      .all(`${WORKER_ACTOR_REF_PREFIX}${workerId}`) as unknown as ActorRow[];
+    if (rows.length !== 1) return undefined;
+    const actor = rowToActor(rows[0]!);
+    if (actor.actorType !== "AGENT" && actor.actorType !== "SERVICE") return undefined;
+    const event = this.db
+      .prepare(
+        `SELECT body FROM audit_events
+         WHERE name = 'actor.registered' AND json_extract(attributes, '$."registered_actor.id"') = ?
+         ORDER BY sequence DESC LIMIT 1`
+      )
+      .get(actor.id) as { body: string } | undefined;
+    if (!event) return undefined;
+    let registered: { actorType?: unknown; externalRef?: unknown; registeredByActorId?: unknown };
+    try {
+      registered = JSON.parse(event.body) as typeof registered;
+    } catch {
+      return undefined;
+    }
+    if (registered.actorType !== actor.actorType || registered.externalRef !== actor.externalRef) return undefined;
+    if (typeof registered.registeredByActorId !== "string" || !this.isHumanOperator(registered.registeredByActorId)) {
+      return undefined;
+    }
+    return actor.id;
   }
 
   resolveActorId(candidates: string[]): string | undefined {

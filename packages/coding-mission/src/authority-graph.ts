@@ -1,4 +1,5 @@
 import type { AutonomousAuthorityDefinition } from "./authority.js";
+import type { ExecutorLane } from "./worker-execution.js";
 
 /**
  * Read model of a mission's delegated authority: the mission grant at the root, every work unit beneath it, how each
@@ -32,6 +33,11 @@ export interface AuthorityGraphNode {
   definitionHash: string | null;
   derivedFromHash: string | null;
   executingActorId: string | null;
+  /**
+   * Executor lanes this unit's authority grants a tool runtime for, by the same mapping dispatch uses. A unit that names a
+   * specific tool is checked against that exact tool at dispatch, which this lane-level view does not repeat.
+   */
+  permittedLanes: ExecutorLane[];
   expiresAt: string | null;
   purpose: string | null;
   createdAt: string | null;

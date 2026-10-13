@@ -177,29 +177,30 @@ export function loadEd25519PublicKey(encoded: string | undefined): crypto.KeyObj
  * Single-use nonce reservation backed by one file per nonce digest created
  * with O_EXCL, so two processes (or the MCP server and the privileged helper
  * sharing a store) cannot both win. Store unavailability fails closed.
+ *
+ * The replay check is the O_EXCL create itself and stays O(1). Expiry cleanup
+ * and the entry cap are amortized: a full sweep reads every entry, which is
+ * O(n) and would block the event loop on every authorization, so it runs once
+ * every SWEEP_INTERVAL reservations instead of on each one.
  */
 export class FileNonceStore {
-  constructor(private readonly directory: string, private readonly maxEntries = 10_000) {}
+  private static readonly SWEEP_INTERVAL = 64;
+  private readonly dir: string;
+  private readonly maxEntries: number;
+  private reservationsSinceSweep = 0;
+
+  constructor(directory: string, maxEntries = 10_000) {
+    this.dir = path.resolve(directory);
+    this.maxEntries = maxEntries;
+  }
 
   reserve(key: string, retainUntil: number, now: number): void {
-    const dir = path.resolve(this.directory);
+    const digest = crypto.createHash('sha256').update(key, 'utf8').digest('hex');
     try {
-      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-      let retained = 0;
-      for (const entry of fs.readdirSync(dir)) {
-        if (!/^[a-f0-9]{64}$/.test(entry)) continue;
-        const entryPath = path.join(dir, entry);
-        const expiry = Number(fs.readFileSync(entryPath, 'utf8'));
-        // Only delete entries that are provably expired; unreadable ones stay.
-        if (Number.isSafeInteger(expiry) && expiry <= now) {
-          fs.rmSync(entryPath, { force: true });
-          continue;
-        }
-        retained += 1;
-      }
-      if (retained >= this.maxEntries) reject('JC_CAPABILITY_NONCE_REPLAY');
-      const digest = crypto.createHash('sha256').update(key, 'utf8').digest('hex');
-      const fd = fs.openSync(path.join(dir, digest), 'wx', 0o600);
+      fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+      // O_EXCL: an existing file for this digest means the nonce was already
+      // reserved (replay). This is the security-critical check and is O(1).
+      const fd = fs.openSync(path.join(this.dir, digest), 'wx', 0o600);
       try {
         fs.writeFileSync(fd, String(retainUntil));
         fs.fsyncSync(fd);
@@ -211,6 +212,44 @@ export class FileNonceStore {
       // EEXIST is the replay case; every other I/O failure also fails closed.
       reject('JC_CAPABILITY_NONCE_REPLAY');
     }
+    this.reservationsSinceSweep += 1;
+    if (this.reservationsSinceSweep >= FileNonceStore.SWEEP_INTERVAL) {
+      this.reservationsSinceSweep = 0;
+      this.sweep(now);
+    }
+  }
+
+  private sweep(now: number): void {
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(this.dir);
+    } catch {
+      return; // cleanup is best-effort; the O_EXCL reservation already succeeded
+    }
+    let retained = 0;
+    for (const entry of entries) {
+      if (!/^[a-f0-9]{64}$/.test(entry)) continue;
+      const entryPath = path.join(this.dir, entry);
+      let expiry: number;
+      try {
+        expiry = Number(fs.readFileSync(entryPath, 'utf8'));
+      } catch {
+        retained += 1; // unreadable entries stay (fail-closed on count)
+        continue;
+      }
+      // Only delete entries that are provably expired; unreadable ones stay.
+      if (Number.isSafeInteger(expiry) && expiry <= now) {
+        try {
+          fs.rmSync(entryPath, { force: true });
+        } catch {
+          retained += 1;
+        }
+        continue;
+      }
+      retained += 1;
+    }
+    // The cap is a DoS bound, not the replay check; exceeding it fails closed.
+    if (retained >= this.maxEntries) reject('JC_CAPABILITY_NONCE_REPLAY');
   }
 }
 
