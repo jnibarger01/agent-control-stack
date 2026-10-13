@@ -10,7 +10,14 @@ import { isWorkerCapacityTarget } from "./discover-actors.js";
 /**
  * Compatibility actor record for `acs actor list --available --json`.
  * Shape matches scheduler.py's Herdr fallback objects so json.loads(stdout) works.
- * capacity is a fixed shim (1), not an ACS capacity model.
+ *
+ * CAPACITY SEMANTICS:
+ * `capacity: 1` is an unmeasured single-slot compatibility placeholder for callers
+ * (like scheduler.py) that require an integer capacity field. ACS does not currently
+ * maintain an authoritative real-time capacity model per agent CLI, so this value
+ * indicates presence/availability (1 = available for dispatch), NOT measured throughput,
+ * concurrency limits, or queue headroom. Callers MUST NOT infer load, utilization, or
+ * headroom from this number.
  */
 export interface CompatibilityAvailableActor {
   actor_id: string;
@@ -18,6 +25,7 @@ export interface CompatibilityAvailableActor {
   status: "AVAILABLE";
   agent_type: string;
   pane_id: string;
+  /** Fixed single-slot availability indicator (1 = ready). Not a measured capacity model. */
   capacity: 1;
 }
 
