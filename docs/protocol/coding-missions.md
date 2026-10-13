@@ -15,6 +15,8 @@ HTTP surface:
 - `POST /coding-missions` creates the mission and runs preparation until it is waiting, approved by a grant, or stopped.
 - `GET /coding-missions` lists recent missions for Mission Control.
 - `GET /coding-missions/:id` returns the approval view.
+- `POST /coding-missions/:id/authority` binds a human-issued authority grant (`{ "grantId": "..." }`) to a governed mission and drives it forward. It needs the `acs:approve` scope **and** a human operator, is write-once, and is verified (the grant exists, is intact, belongs to this mission, is unrevoked and unexpired, and still matches the mission's execution inputs). `409` when governed execution is disabled.
+- `GET /coding-missions/:id/authority-graph` returns the delegated-authority projection: the grant, each unit's narrowing and permitted lanes, its effective state, and the authority history.
 - `POST /coding-missions/:id/approve` records the human decision for the exact displayed change-set hash and continues execution in the same request.
 
 `startGateway()` and the worker CLI attach these routes to real ports only when both a GitHub token (`ACS_GITHUB_TOKEN`, else `GITHUB_TOKEN`, else `GH_TOKEN`) and `ACS_CODING_CHECKOUT_ROOT` are set. Otherwise every coding-mission route returns `503 coding_mission_unconfigured`, and worker resume does nothing. A token by itself does not activate the ports. `buildGateway()` does not read this environment; tests keep supplying ports explicitly.

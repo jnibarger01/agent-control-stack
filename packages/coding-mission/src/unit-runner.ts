@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { ControlStackError } from "@agent-control-stack/shared";
 import type { GovernedExecution } from "./governed-runtime.js";
-import type {
-  ApplyResult,
-  DispatchEnvelope,
-  ExecutorLane,
-  ResultEnvelope,
-  WorkUnitExecutorAdapter
+import {
+  deadlineResult,
+  type ApplyResult,
+  type DispatchEnvelope,
+  type ExecutorLane,
+  type ResultEnvelope,
+  type WorkUnitExecutorAdapter
 } from "./worker-execution.js";
 
 export interface UnitRunnerOptions {
@@ -92,7 +93,7 @@ export class GovernedUnitRunner {
 
     let result: ResultEnvelope;
     try {
-      result = await adapter.execute(dispatch, input.signal);
+      result = await this.executeWithinDeadline(adapter, dispatch, input.signal);
     } catch (error) {
       // An adapter that throws leaves the outcome unknown, so the result says the external state may have changed.
       result = {
@@ -118,5 +119,45 @@ export class GovernedUnitRunner {
     }
     const applied = dispatcher.applyResult({ claimToken: token, result });
     return { status: "executed", applied, attemptId: dispatch.attemptId };
+  }
+
+  /**
+   * Races the executor against the deadline ACS set on a governed dispatch. ACS does not wait past it: the executor is
+   * signalled to stop and the outcome is recorded as uncertain, because the operation may have started and may still be
+   * running. A governed dispatch (it names a grant) with no deadline fails closed instead of running unbounded; a mission
+   * with no authority binding has none and runs as before. `applyResult` separately judges a late result on ACS's clock.
+   */
+  private async executeWithinDeadline(
+    adapter: WorkUnitExecutorAdapter,
+    dispatch: DispatchEnvelope,
+    callerSignal: AbortSignal | undefined
+  ): Promise<ResultEnvelope> {
+    const governed = dispatch.authority.grantId !== undefined;
+    const deadlineAt = dispatch.authority.deadlineAt;
+    if (deadlineAt === undefined) {
+      if (governed) return deadlineResult(dispatch, this.now());
+      return adapter.execute(dispatch, callerSignal);
+    }
+    const abort = new AbortController();
+    const onCallerAbort = () => abort.abort();
+    callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+    if (callerSignal?.aborted) abort.abort();
+    const budgetMs = Math.max(1, Date.parse(deadlineAt) - Date.parse(dispatch.issuedAt));
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<"deadline">((resolve) => {
+      timer = setTimeout(() => {
+        abort.abort();
+        resolve("deadline");
+      }, budgetMs);
+    });
+    const execution = adapter.execute(dispatch, abort.signal);
+    execution.catch(() => undefined); // an executor that fails after the deadline is not an unhandled rejection
+    try {
+      const winner = await Promise.race([execution, expired]);
+      return winner === "deadline" ? deadlineResult(dispatch, this.now()) : winner;
+    } finally {
+      clearTimeout(timer);
+      callerSignal?.removeEventListener("abort", onCallerAbort);
+    }
   }
 }

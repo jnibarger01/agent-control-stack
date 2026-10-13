@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { executionPlanSubjectInputHash } from "@agent-control-stack/work-items";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AutonomousAuthorityDefinition } from "./authority.js";
 import { DEFAULT_DELEGATION_BUDGET } from "./budget.js";
 import { createGovernedExecution, type GovernedExecution } from "./governed-runtime.js";
@@ -18,6 +18,7 @@ const ACTOR = "actor:lead";
 const open: GovernedExecution[] = [];
 const dirs: string[] = [];
 afterEach(() => {
+  vi.useRealTimers();
   while (open.length)
     try {
       open.pop()!.close();
@@ -89,12 +90,12 @@ function world(options: Options = {}) {
 
   const calls: DispatchEnvelope[] = [];
   const adapter = (
-    behavior: (d: DispatchEnvelope) => Promise<ResultEnvelope> | ResultEnvelope
+    behavior: (d: DispatchEnvelope, signal?: AbortSignal) => Promise<ResultEnvelope> | ResultEnvelope
   ): WorkUnitExecutorAdapter => ({
     lane: "dc",
-    async execute(dispatch) {
+    async execute(dispatch, signal) {
       calls.push(dispatch);
-      return behavior(dispatch);
+      return behavior(dispatch, signal);
     }
   });
   const ok = (d: DispatchEnvelope): ResultEnvelope => ({
@@ -195,5 +196,65 @@ describe("governed unit runner", () => {
     const statuses = [a.status, b.status].sort();
     expect(statuses).toEqual(["executed", "not_run"]);
     expect(w.calls).toHaveLength(1);
+  });
+});
+
+describe("governed unit runner deadline", () => {
+  it("abandons a hung governed executor at the dispatch deadline, signals it, and records the outcome as unknown", async () => {
+    vi.useFakeTimers();
+    const w = world();
+    let signal: AbortSignal | undefined;
+    const hung = w.adapter(
+      (_d, s) =>
+        new Promise<ResultEnvelope>(() => {
+          signal = s;
+        })
+    );
+    const pending = w.runner([hung]).runUnit(w.input);
+    await vi.advanceTimersByTimeAsync(600_000 + 1_000);
+    const result = await pending;
+    expect(result).toMatchObject({ status: "executed", applied: { applied: "unknown" } });
+    expect(signal?.aborted).toBe(true);
+    const report = JSON.parse(
+      (
+        w.exec.missions.db.prepare("SELECT report_json FROM work_unit_execution_attempts LIMIT 1").get() as {
+          report_json: string;
+        }
+      ).report_json
+    );
+    expect(report).toMatchObject({ outcome: "unknown", externalStateUncertain: true });
+  });
+
+  it("does not wait on an executor that finishes before the deadline", async () => {
+    const w = world();
+    const result = await w.runner([w.adapter(w.ok)]).runUnit(w.input);
+    expect(result).toMatchObject({ status: "executed", applied: { applied: "completed" } });
+  });
+
+  it("fails closed when a governed dispatch carries no deadline, and never calls the executor", async () => {
+    const w = world();
+    const real = w.exec.dispatcher;
+    const stripped = {
+      beginDispatch: (input: Parameters<typeof real.beginDispatch>[0]) => {
+        const d = real.beginDispatch(input);
+        const { deadlineAt: _deadline, ...authority } = d.authority;
+        return { ...d, authority };
+      },
+      applyResult: real.applyResult.bind(real)
+    };
+    const run = new GovernedUnitRunner({
+      execution: { missions: w.exec.missions, dispatcher: stripped as never },
+      adapters: [w.adapter(w.ok)],
+      now: () => w.state.now
+    });
+    const result = await run.runUnit(w.input);
+    expect(result).toMatchObject({ status: "executed", applied: { applied: "unknown" } });
+    expect(w.calls).toHaveLength(0);
+  });
+
+  it("runs a mission with no authority binding without inventing a deadline", async () => {
+    const w = world({ governed: false });
+    const result = await w.runner([w.adapter(w.ok)]).runUnit(w.input);
+    expect(result).toMatchObject({ status: "executed", applied: { applied: "completed" } });
   });
 });

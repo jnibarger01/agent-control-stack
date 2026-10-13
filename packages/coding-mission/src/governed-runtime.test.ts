@@ -59,7 +59,10 @@ function world() {
   const definition: AutonomousAuthorityDefinition = {
     executingActorId: ACTOR,
     scope: [{ kind: "path", id: root, coverage: "descendants" }],
-    toolClasses: [{ runtime: "desktop_commander", toolName: "read_file" }],
+    toolClasses: [
+      { runtime: "desktop_commander", toolName: "read_file" },
+      { runtime: "sandbox", toolName: "code_edit" }
+    ],
     maximumPrivileges: ["fs.read", "fs.write"],
     expiresAt: iso(3_600_000),
     limits: { maxOperations: 50, maxRuntimeMs: 600_000, maxParallelOperations: 4, maxAttemptsPerOperation: 3 }

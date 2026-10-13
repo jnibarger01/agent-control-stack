@@ -3,6 +3,17 @@ import type { RecoveryPolicy } from "./recovery-policy.js";
 import { readMissionFlightRecord, type MissionFlightRecord } from "./flight-recorder.js";
 import { NIMBLE_ROUTING_ALGORITHM_VERSION } from "@agent-control-stack/actor-router";
 import { ControlStackError, stableHash } from "@agent-control-stack/shared";
+import type { MissionAuthorityPolicy } from "./authority.js";
+import type { AuthorityGraph } from "./authority-graph.js";
+import type { MissionAuthorityRecord } from "./child-work.js";
+import { createGovernedExecution, type GovernedExecution } from "./governed-runtime.js";
+import {
+  CoderExecutionAdapter,
+  deadlineResult,
+  type ApplyResult,
+  type DispatchEnvelope,
+  type ResultEnvelope
+} from "./worker-execution.js";
 import {
   codingChangeSetHash,
   CodingMissionStore,
@@ -43,6 +54,8 @@ export interface CodingMissionPorts {
       workerId: string;
       /** The claim's fence. A fencing executor refuses to start or commit work under a token it has revoked. */
       claimToken?: string;
+      /** Aborted when a governed dispatch passes its deadline. A cooperative executor should stop; ACS does not wait for it. */
+      signal?: AbortSignal;
     }): Promise<ExternalOutcome<{ resultHash: string; files: string[] }>>;
     observe(input: {
       mission: CodingMissionRecord;
@@ -115,6 +128,13 @@ export interface CodingMissionPorts {
   claimTtlMs?: number;
   /** Bounds and backoff for recovering stale claims. Defaults are conservative; see recovery-policy.ts. */
   recoveryPolicy?: Partial<RecoveryPolicy>;
+  /**
+   * Governed execution. When set, the controller runs every operation through the dispatch authority gate
+   * (`createGovernedExecution`) and refuses to run a mission whose authority is missing, revoked, expired, for another
+   * actor, or whose audit history fails verification. Absent, the controller behaves exactly as before. Needs a database
+   * path, not a store instance, because the grant store and the mission store must share one file.
+   */
+  governance?: { mode: "enforce" };
   onTransition?: (from: CodingMissionState, to: CodingMissionState, missionId: string) => void;
 }
 
@@ -152,18 +172,38 @@ function succeeded<T>(value: T): ExternalOutcome<T> {
 
 export class CodingMissionController {
   readonly store: CodingMissionStore;
+  private readonly governed: GovernedExecution | undefined;
 
   constructor(
     dbOrPath: string | CodingMissionStore,
     private readonly ports: CodingMissionPorts
   ) {
-    this.store = dbOrPath instanceof CodingMissionStore ? dbOrPath : new CodingMissionStore(dbOrPath);
+    if (ports.governance) {
+      if (typeof dbOrPath !== "string") {
+        throw new ControlStackError(
+          "governed_execution_needs_database_path",
+          "governed execution needs a database path: the grant store and the mission store must share one file"
+        );
+      }
+      // Identity is the control plane's: an operator is a registered HUMAN actor, and a worker acts as the actor a human
+      // operator bound it to. Nothing here accepts an identity from the worker, the route, or the request.
+      this.governed = createGovernedExecution({
+        dbPath: dbOrPath,
+        verifyOperator: "control-plane",
+        resolveActor: "control-plane",
+        clock: () => ports.now()
+      });
+      this.store = this.governed.missions;
+    } else {
+      this.store = dbOrPath instanceof CodingMissionStore ? dbOrPath : new CodingMissionStore(dbOrPath);
+    }
     // Claim admission (recovery backoff) is judged on the control plane's clock, not on a time a caller names.
     this.store.admissionClock = () => Date.parse(this.ports.now());
   }
 
   close(): void {
-    this.store.close();
+    if (this.governed) this.governed.close();
+    else this.store.close();
   }
 
   create(input: {
@@ -422,6 +462,11 @@ export class CodingMissionController {
       .filter((operation) => !operation.retryNotBefore || nowMs >= Date.parse(operation.retryNotBefore))
       .sort((left, right) => left.operationId.localeCompare(right.operationId));
     const nextOperation = ready[0];
+    // Default deny: a governed controller does not start a mission nobody gave authority to. This waits (nothing is claimed,
+    // nothing is degraded) until an operator binds a grant; the binding itself is verified when it is made.
+    if (nextOperation && this.governed && !this.hasAuthorityBinding(mission.missionId)) {
+      return this.result(mission, false, "authority_required");
+    }
     if (!nextOperation) {
       // Units waiting out a recovery backoff are not blocked; the mission simply has nothing to run yet.
       if (eligible.length > 0) return this.result(mission, false, "recovery_backoff");
@@ -448,6 +493,7 @@ export class CodingMissionController {
       { workerId: route.workerId, algorithm: route.algorithm, decision: route.decision },
       this.ports.now()
     );
+    if (this.governed) return this.runGoverned(mission, nextOperation.operationId, route.workerId, token);
     const executed = await this.ports.coder.execute({
       mission,
       operationId: nextOperation.operationId,
@@ -455,6 +501,148 @@ export class CodingMissionController {
       claimToken: token
     });
     return this.acceptCoderResult(mission, nextOperation.operationId, token, executed);
+  }
+
+  private hasAuthorityBinding(missionId: string): boolean {
+    return this.store.db.prepare("SELECT 1 FROM mission_authority WHERE mission_id = ?").get(missionId) !== undefined;
+  }
+
+  /**
+   * Bind a mission to a human-issued grant. Verified by the authority ledger (the grant exists, belongs to this mission,
+   * is intact, current, unrevoked and unexpired, and still matches the mission's execution inputs). Write-once.
+   */
+  bindAuthority(
+    missionId: string,
+    grantId: string,
+    options: { policy?: MissionAuthorityPolicy; policyApprovedBy?: string } = {}
+  ): MissionAuthorityRecord {
+    if (!this.governed) {
+      throw new ControlStackError(
+        "governed_execution_disabled",
+        "governed execution is not enabled on this controller"
+      );
+    }
+    if (!MISSION_ID.test(missionId))
+      throw new ControlStackError("coding_mission_id_invalid", "mission identifier is invalid");
+    return this.governed.authority.grantMissionAuthority({ missionId, grantId, ...options });
+  }
+
+  /** The mission's delegated authority as a read-only projection (see authority-graph.ts). Governed controllers only. */
+  authorityGraph(missionId: string): AuthorityGraph {
+    if (!this.governed) {
+      throw new ControlStackError(
+        "governed_execution_disabled",
+        "governed execution is not enabled on this controller"
+      );
+    }
+    return this.governed.authority.authorityGraph(missionId);
+  }
+
+  /** Governed dispatch: audit integrity, then the authority gate, then execution within the deadline, then the result. */
+  private async runGoverned(
+    mission: CodingMissionRecord,
+    operationId: string,
+    workerId: string,
+    token: string
+  ): Promise<AdvanceResult> {
+    const governed = this.governed!;
+    const lane = "coder" as const;
+    // The authority check re-verifies the audit chain whenever another connection has written, and it runs inside the
+    // dispatch transaction. Doing it first, outside any transaction, keeps that cost off the write lock; a chain that does
+    // not verify refuses the dispatch.
+    try {
+      governed.items.assertAuditChainIntegrity();
+    } catch {
+      this.store.recordMissionEvent(
+        mission.missionId,
+        "authority.denied",
+        { operation: "dispatch", unitId: operationId, lane, reason: "audit_integrity_failed" },
+        this.ports.now()
+      );
+      return this.refuseDispatch(mission, operationId);
+    }
+    let dispatch: DispatchEnvelope;
+    try {
+      dispatch = governed.dispatcher.beginDispatch({
+        missionId: mission.missionId,
+        unitId: operationId,
+        claimToken: token,
+        workerId,
+        lane,
+        now: this.ports.now()
+      });
+    } catch (error) {
+      // beginDispatch has already committed the denial as evidence. Nothing ran.
+      if (error instanceof ControlStackError && error.code === "dispatch_authority_denied") {
+        return this.refuseDispatch(mission, operationId);
+      }
+      throw error;
+    }
+    const result = await this.executeWithinDeadline(dispatch, token);
+    const applied = governed.dispatcher.applyResult({ claimToken: token, result });
+    return this.afterGovernedResult(mission.missionId, operationId, applied);
+  }
+
+  /** The unit goes back to pending (it never ran) and the mission waits for an operator; it cannot proceed on its own. */
+  private refuseDispatch(mission: CodingMissionRecord, operationId: string): AdvanceResult {
+    return this.store.transaction(() => {
+      this.store.resetClaim(mission.missionId, operationId);
+      return this.degrade(this.store.require(mission.missionId), "dispatch_authority_denied");
+    });
+  }
+
+  /**
+   * Runs the executor against the dispatch's deadline. ACS does not wait past it: the executor is signalled to stop and the
+   * outcome is recorded as uncertain, because the operation may have started and may still be running.
+   */
+  private async executeWithinDeadline(dispatch: DispatchEnvelope, token: string): Promise<ResultEnvelope> {
+    const adapter = new CoderExecutionAdapter(this.store, this.ports.coder, () => this.ports.now(), token);
+    const abort = new AbortController();
+    const deadlineAt = dispatch.authority.deadlineAt;
+    // A governed dispatch always has a deadline. If one is somehow missing, fail closed rather than run unbounded.
+    if (deadlineAt === undefined) return deadlineResult(dispatch, this.ports.now());
+    const budgetMs = Math.max(1, Date.parse(deadlineAt) - Date.parse(dispatch.issuedAt));
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<"deadline">((resolve) => {
+      timer = setTimeout(() => {
+        abort.abort();
+        resolve("deadline");
+      }, budgetMs);
+    });
+    const execution = adapter.execute(dispatch, abort.signal);
+    execution.catch(() => undefined); // an executor that fails after the deadline is not an unhandled rejection
+    try {
+      const winner = await Promise.race([execution, expired]);
+      return winner === "deadline" ? deadlineResult(dispatch, this.ports.now()) : winner;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private afterGovernedResult(missionId: string, operationId: string, applied: ApplyResult): AdvanceResult {
+    const current = () => this.store.require(missionId);
+    switch (applied.applied) {
+      case "completed":
+      case "awaiting_verification":
+        return this.result(current(), true);
+      case "failed":
+      case "retryable": {
+        // A changed environment (the legacy "conflict") needs reconciliation; any other failure needs an operator.
+        const unit = this.store.workUnits(missionId).find((candidate) => candidate.unitId === operationId);
+        return this.degrade(
+          current(),
+          unit?.failureCategory === "environment_changed" ? "reconciliation_required" : "operation_failed"
+        );
+      }
+      case "unknown":
+        return this.result(current(), false, "unknown_operation");
+      case "cancelled":
+        return this.result(current(), false, "operation_cancelled");
+      case "duplicate":
+        return this.result(current(), false, "duplicate_result");
+      default:
+        return this.result(current(), false, applied.applied);
+    }
   }
 
   private async recoverOperation(mission: CodingMissionRecord, operation: CodingOperation): Promise<AdvanceResult> {
