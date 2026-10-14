@@ -536,7 +536,8 @@ async function callMcpTool(input: {
       store: input.store,
       caller: input.advisor.caller,
       readFlight: input.advisor.readFlight,
-      request: input.args
+      request: input.args,
+      actor: input.actor
     });
   }
   if (input.name === directAgentToolName) {

@@ -481,6 +481,11 @@
                     "minLength": 1,
                     "maxLength": 256
                   },
+                  "leaseToken": {
+                    "type": "string",
+                    "minLength": 16,
+                    "maxLength": 512
+                  },
                   "workerId": {
                     "type": "string",
                     "minLength": 1,
@@ -496,6 +501,7 @@
                   "kind",
                   "workItemId",
                   "leaseId",
+                  "leaseToken",
                   "workerId",
                   "fencingEpoch"
                 ],

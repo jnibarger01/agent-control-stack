@@ -20,7 +20,7 @@ import {
 } from "@agent-control-stack/shared";
 import {
   advisorAuditView,
-  advisorCompletionBlockReason,
+  advisorSubjectCompletionBlockReason,
   assertAdvisorConsultationLease,
   copyAdvisorBinding,
   disableAdvisorBinding,
@@ -1946,6 +1946,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           "change_set_completion_pending",
           "every operation needs an accepted result and verification"
         );
+      this.requireAdvisorBeforeSuccess(input.missionId);
       for (const operation of progress.operations) {
         const permit = this.getChangeSetOperationPermit(operation.permitId!)!;
         if ((permit.approvalId ?? permit.authorizationId) !== authorityId || permit.policyHash !== authority.policyHash)
@@ -4524,9 +4525,14 @@ export class SqliteWorkItemStore implements WorkItemStore {
             subjectKind: value.subjectKind,
             executorModelId: value.executorModelId,
             advisorModelId: value.advisorModelId,
-            requireBeforeCompletion: value.requireBeforeCompletion
+            requireBeforeCompletion: value.requireBeforeCompletion,
+            bindingHash: value.bindingHash,
+            actorId: options.actorId ?? null
           },
-          { "work_item.id": value.subjectKind === "work_item" ? value.subjectId : value.missionId }
+          {
+            "work_item.id": value.subjectKind === "work_item" ? value.subjectId : value.missionId,
+            ...(options.actorId ? { "actor.id": options.actorId } : {})
+          }
         )
       );
       return { value, events: [event] };
@@ -4540,8 +4546,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const event = this.appendAuditEvent(
         createEvent(
           "advisory.advisor_binding_disabled",
-          { subjectId, missionId },
-          { "work_item.id": value.subjectKind === "work_item" ? subjectId : missionId }
+          { subjectId, missionId, actorId: options.actorId ?? null },
+          {
+            "work_item.id": value.subjectKind === "work_item" ? subjectId : missionId,
+            ...(options.actorId ? { "actor.id": options.actorId } : {})
+          }
         )
       );
       return { value, events: [event] };
@@ -8893,6 +8902,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
         )
       );
       const createdEvent = this.appendAuditEvent(workItemCreatedEvent(linked));
+      // A parent binding that fails its integrity check throws here: the retry/clone is refused rather than
+      // silently producing a child without the advisor requirement.
       const parentBindings = readAdvisorBindingsForSubject(this.db, source.id).filter((binding) => !binding.disabledAt);
       const copyEvents: StoredAuditEvent[] = [];
       for (const parentBinding of parentBindings) {
@@ -8901,8 +8912,28 @@ export class SqliteWorkItemStore implements WorkItemStore {
           parentSubjectId: source.id,
           childMissionId: parentBinding.missionId === source.id ? linked.id : parentBinding.missionId,
           childSubjectId: linked.id,
-          now: linked.createdAt
+          now: linked.createdAt,
+          actorId: actor,
+          leaseProvenance: { kind: lineageType, sourceWorkItemId: source.id }
         });
+        if (copied.status === "copied" && copied.binding) {
+          copyEvents.push(
+            this.appendAuditEvent(
+              createEvent(
+                "advisory.advisor_binding_copied",
+                {
+                  parentSubjectId: source.id,
+                  childSubjectId: linked.id,
+                  missionId: copied.binding.missionId,
+                  bindingHash: copied.binding.bindingHash,
+                  actorId: copied.actorId ?? actor,
+                  leaseProvenance: copied.leaseProvenance ?? null
+                },
+                { "work_item.id": linked.id, "actor.id": actor }
+              )
+            )
+          );
+        }
         if (copied.status === "not_attached") {
           copyEvents.push(
             this.appendAuditEvent(
@@ -8911,9 +8942,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
                 {
                   parentSubjectId: source.id,
                   childSubjectId: linked.id,
-                  code: copied.code ?? "advisor_pairing_rejected"
+                  code: copied.code ?? "advisor_pairing_rejected",
+                  actorId: copied.actorId ?? actor,
+                  leaseProvenance: copied.leaseProvenance ?? null
                 },
-                { "work_item.id": linked.id }
+                { "work_item.id": linked.id, "actor.id": actor }
               )
             )
           );
@@ -8937,13 +8970,14 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
+  /**
+   * Single choke point for the advisor completion gate. Every terminal-success path for a work item
+   * (result submission, transition(..., "succeeded"), completeChangeSetMission) goes through here.
+   */
   private requireAdvisorBeforeSuccess(workItemId: string): void {
-    const bindings = readAdvisorBindingsForSubject(this.db, workItemId).filter((binding) => !binding.disabledAt);
-    for (const binding of bindings) {
-      const code = advisorCompletionBlockReason(this.db, binding.missionId, workItemId);
-      if (code) {
-        throw new ControlStackError(code, "before_completion advisor consultation is required");
-      }
+    const code = advisorSubjectCompletionBlockReason(this.db, workItemId);
+    if (code) {
+      throw new ControlStackError(code, "before_completion advisor consultation is required");
     }
   }
 
@@ -9089,6 +9123,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
       this.assertActorOwnsActiveLease(id, actorId);
       if (current.status === "running" && status === "blocked") {
         this.assertRunningTransitionLeaseProof(id, actorId, options.leaseToken);
+      }
+      if (status === "succeeded") {
+        this.requireAdvisorBeforeSuccess(id);
       }
       const updated = transitionWorkItem(current, status);
       const result =

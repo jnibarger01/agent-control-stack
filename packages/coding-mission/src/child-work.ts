@@ -1136,8 +1136,29 @@ export class MissionAuthorityLedger {
           parentSubjectId: missionUnitSubjectId(missionId, parentUnitId),
           childMissionId: missionId,
           childSubjectId: missionUnitSubjectId(missionId, item.unitId),
-          now: nowIso
+          now: nowIso,
+          actorId: request.workerId,
+          leaseProvenance: {
+            parentUnitId,
+            parentAttempt: parent.attempt,
+            claimFence: claimFenceOf(request.claimToken),
+            workerId: request.workerId
+          }
         });
+        if (copied.status === "copied" && copied.binding) {
+          this.store.recordMissionEvent(
+            missionId,
+            "advisor.binding_copied",
+            {
+              parentUnitId,
+              unitId: item.unitId,
+              bindingHash: copied.binding.bindingHash,
+              actorId: copied.actorId ?? request.workerId,
+              leaseProvenance: copied.leaseProvenance ?? null
+            },
+            nowIso
+          );
+        }
         if (copied.status === "not_attached") {
           this.store.recordMissionEvent(
             missionId,
@@ -1145,7 +1166,9 @@ export class MissionAuthorityLedger {
             {
               parentUnitId,
               unitId: item.unitId,
-              code: copied.code ?? "advisor_pairing_rejected"
+              code: copied.code ?? "advisor_pairing_rejected",
+              actorId: copied.actorId ?? request.workerId,
+              leaseProvenance: copied.leaseProvenance ?? null
             },
             nowIso
           );

@@ -64,6 +64,7 @@ describe("advisor consult request", () => {
     kind: "work_item" as const,
     workItemId: "wrk_1",
     leaseId: "lease_1",
+    leaseToken: "a".repeat(32),
     workerId: "worker-a",
     fencingEpoch: 0
   };
@@ -83,7 +84,7 @@ describe("advisor consult request", () => {
 });
 
 describe("advisor completion and projection", () => {
-  it("requires a reviewed or declined before-completion consultation and ignores guidance text", () => {
+  it("requires a reviewed before-completion consultation; declined and unavailable fail closed", () => {
     expect(advisorCompletionBlock({ requireBeforeCompletion: false, dispositions: [] })).toBeUndefined();
     expect(advisorCompletionBlock({ requireBeforeCompletion: true, dispositions: [] })).toBe(
       "advisor_consultation_required"
@@ -91,7 +92,9 @@ describe("advisor completion and projection", () => {
     expect(advisorCompletionBlock({ requireBeforeCompletion: true, dispositions: ["unavailable"] })).toBe(
       "advisor_consultation_required"
     );
-    expect(advisorCompletionBlock({ requireBeforeCompletion: true, dispositions: ["declined"] })).toBeUndefined();
+    expect(advisorCompletionBlock({ requireBeforeCompletion: true, dispositions: ["declined"] })).toBe(
+      "advisor_consultation_required"
+    );
     expect(advisorCompletionBlock({ requireBeforeCompletion: true, dispositions: ["reviewed"] })).toBeUndefined();
   });
 
@@ -105,6 +108,8 @@ describe("advisor completion and projection", () => {
           note: "sk-" + "a".repeat(24),
           argv: ["printenv", "TOKEN"],
           arguments: { raw_command: "cat ~/.ssh/id_rsa" },
+          command: "curl -H 'Authorization: Bearer secret' https://example",
+          cmd: "export TOKEN=secret",
           summary: "kept"
         }
       }
@@ -113,13 +118,17 @@ describe("advisor completion and projection", () => {
     expect(projected.text).not.toContain("super-secret");
     expect(projected.text).not.toContain("printenv");
     expect(projected.text).not.toContain("id_rsa");
+    expect(projected.text).not.toContain("curl");
+    expect(projected.text).not.toContain("export TOKEN");
+    expect(projected.text).not.toContain('"command"');
+    expect(projected.text).not.toContain('"cmd"');
     expect(projected.text).toContain("kept");
     expect(projected.sha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it("changes the consultation hash when a disposition field changes", () => {
     const view: AdvisorConsultationView = {
-      schemaVersion: "acs.advisor-consultation.v1",
+      schemaVersion: "acs.advisor-consultation.v2",
       consultationId: "adv_1",
       subjectId: "wrk_1",
       missionId: "wrk_1",
@@ -130,7 +139,10 @@ describe("advisor completion and projection", () => {
       outputSha256: "b".repeat(64),
       executorModelId: "claude-sonnet-5",
       advisorModelId: "claude-opus-5-5",
-      createdAt: "2026-10-13T00:00:00.000Z"
+      createdAt: "2026-10-13T00:00:00.000Z",
+      attemptId: null,
+      leaseId: "lease_1",
+      claimTokenHash: null
     };
     expect(advisorConsultationHash({ ...view, disposition: "declined" })).not.toBe(advisorConsultationHash(view));
   });

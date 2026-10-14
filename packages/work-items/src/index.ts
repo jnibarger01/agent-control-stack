@@ -18,8 +18,12 @@ export * from "./state-machine.js";
 export * from "./store.js";
 export {
   ADVISOR_COMPLETION_DISPOSITION_SQL,
+  ADVISOR_BINDING_HASH_DOMAIN,
   advisorAuditView,
+  advisorBindingHash,
+  advisorClaimTokenHash,
   advisorCompletionBlockReason,
+  advisorSubjectCompletionBlockReason,
   assertAdvisorConsultationLease,
   copyAdvisorBinding,
   disableAdvisorBinding,
@@ -30,10 +34,12 @@ export {
 } from "./advisor-consultation.js";
 export type {
   AdvisorBinding,
+  AdvisorCompletionBlockCode,
   AdvisorConsultationRecord,
   AdvisorFence,
   AdvisorLeaseAssertion,
   CopyAdvisorBindingInput,
+  CopyAdvisorBindingResult,
   EnableAdvisorBindingInput,
   MissionClaimFence,
   RecordAdvisorConsultationInput

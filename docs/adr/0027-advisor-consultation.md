@@ -21,7 +21,7 @@ An advisor consultation is an append-only evidence record. The leased executor m
 - The executor requests one of three checkpoints: `before_approach`, `recurring_failure`, `before_completion`. The caller cannot supply a transcript or choose the advisor model.
 - ACS builds the advisor input from the mission flight recorder, redacts it, and bounds it. A tampered flight chain is not sent.
 - The advisor request has no tools. A response that is not the strict guidance schema is stored as `unavailable`. Nothing is fabricated.
-- `requireBeforeCompletion` is opt-in. When set, success requires a `before_completion` row whose disposition is `reviewed` or `declined`. Missing or `unavailable` fails closed with `advisor_consultation_required`. A decline means the advisor answered. It does not mean the work passed.
+- `requireBeforeCompletion` is opt-in. When set, success requires a `before_completion` row whose disposition is `reviewed`, and that row must be recorded under the subject's live attempt, lease or claim. Missing, `declined` or `unavailable` fails closed with `advisor_consultation_required`. The record is treated as evidence that a review happened, never as a verdict. Amended by the #367 follow-up (migration 074): originally `declined` also satisfied the gate. The gate now runs on every terminal-success path, and it re-verifies the consultation hash and the binding integrity hash on every read.
 - Child work may copy a parent binding. Pairing is checked again against the child executor. A copy that cannot pair does not attach an advisor and does not block creating the child. Refusing the child would let pairing decide whether work exists.
 - Existing work with no binding is unchanged.
 
@@ -29,7 +29,7 @@ This does not call Anthropic's server advisor tool and does not change Jev's imp
 
 ## Consequences
 
-- New tables `advisor_bindings` and `advisor_consultations` (migration 073). Consultations are append-only.
+- New tables `advisor_bindings` and `advisor_consultations` (migration 073). Consultations are append-only. Migration 074 rebuilds both tables. It adds fence columns (`attempt_id`, `lease_id`, `claim_token_hash`) and `binding_hash`, widens `subject_id` to 1024 characters, and forbids deleting bindings.
 - Guidance text lives in `@agent-control-stack/advisory/guidance`. Authority packages may import the disposition module only.
 - Audit events carry identifiers, the checkpoint, the disposition, and hashes. They do not carry the flight projection or the guidance body.
 

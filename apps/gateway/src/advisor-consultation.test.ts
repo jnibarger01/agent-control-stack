@@ -3,9 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stableHash } from "@agent-control-stack/shared";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { handleMcpHttpRequest } from "./mcp.js";
-import { runAdvisorConsultation, type AdvisorFlightReader } from "./advisor-consultation.js";
+import { advisorPortFromEnv, runAdvisorConsultation, type AdvisorFlightReader } from "./advisor-consultation.js";
 import type { AdvisorModelCaller, AdvisorModelRequest } from "@agent-control-stack/advisory/guidance";
 
 const transition = { via: "domain_service" as const };
@@ -39,13 +39,14 @@ function claimedStore() {
   return { directory, store, claimed };
 }
 
-function requestFor(claimed: { id: string; leaseId: string; workerId: string }) {
+function requestFor(claimed: { id: string; leaseId: string; workerId: string; leaseToken: string }) {
   return {
     checkpoint: "before_approach" as const,
     subject: {
       kind: "work_item" as const,
       workItemId: claimed.id,
       leaseId: claimed.leaseId,
+      leaseToken: claimed.leaseToken,
       workerId: claimed.workerId,
       fencingEpoch: 0
     }
@@ -85,7 +86,7 @@ describe("runAdvisorConsultation", () => {
       expect(seen).toHaveLength(1);
       expect(seen[0]).not.toHaveProperty("tools");
       expect(seen[0]?.user).not.toContain("super-secret");
-      expect(seen[0]?.user).toContain("[redacted]");
+      expect(seen[0]?.user).toContain("kept");
       const audit = JSON.stringify(
         store.readEvents().filter((event) => event.name === "advisory.advisor_consultation_recorded")
       );
@@ -166,7 +167,7 @@ describe("runAdvisorConsultation", () => {
         tools,
         store,
         auth: { localBearerToken: "mcp-token" },
-        resolveActorId: () => "actor_system_bootstrap",
+        resolveActorId: () => claimed.workerId,
         advisor: { caller, readFlight: () => ({ verdict: "verified", events: [] }) }
       });
       expect(ok.statusCode).toBe(200);
@@ -201,5 +202,115 @@ describe("runAdvisorConsultation", () => {
       store.close();
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("rejects an MCP caller whose authenticated actor is not the lease holder", async () => {
+    const { directory, store, claimed } = claimedStore();
+    let calls = 0;
+    const caller: AdvisorModelCaller = {
+      async complete() {
+        calls += 1;
+        return JSON.stringify({ disposition: "reviewed", guidance: "should not be stored" });
+      }
+    };
+    try {
+      const response = await handleMcpHttpRequest({
+        body: {
+          jsonrpc: "2.0",
+          id: "impersonate",
+          method: "tools/call",
+          params: { name: "consult_advisor", arguments: requestFor(claimed) }
+        },
+        headers: { authorization: "Bearer mcp-token" },
+        tools: {} as Parameters<typeof handleMcpHttpRequest>[0]["tools"],
+        store,
+        auth: { localBearerToken: "mcp-token" },
+        resolveActorId: () => "someone-else",
+        advisor: { caller, readFlight: () => ({ verdict: "verified", events: [] }) }
+      });
+      expect(response.statusCode).not.toBe(200);
+      expect(JSON.stringify(response.body)).toContain("authenticated actor does not match the lease holder");
+      expect(calls).toBe(0);
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("requires the lease token and refuses a wrong one before calling the model", async () => {
+    const { directory, store, claimed } = claimedStore();
+    let calls = 0;
+    const caller: AdvisorModelCaller = {
+      async complete() {
+        calls += 1;
+        return JSON.stringify({ disposition: "reviewed", guidance: "should not be stored" });
+      }
+    };
+    const readFlight: AdvisorFlightReader = () => ({ verdict: "verified", events: [] });
+    try {
+      const { leaseToken: _omit, ...withoutToken } = requestFor(claimed).subject;
+      await expect(
+        runAdvisorConsultation({
+          store,
+          caller,
+          readFlight,
+          request: { checkpoint: "before_approach", subject: withoutToken }
+        })
+      ).rejects.toThrow();
+      await expect(
+        runAdvisorConsultation({
+          store,
+          caller,
+          readFlight,
+          request: {
+            checkpoint: "before_approach",
+            subject: { ...requestFor(claimed).subject, leaseToken: "w".repeat(32) }
+          }
+        })
+      ).rejects.toMatchObject({ code: "advisor_lease_stale" });
+      expect(calls).toBe(0);
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rechecks the lease with a fresh clock after the advisor returns", async () => {
+    const { directory, store, claimed } = claimedStore();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date());
+    const caller: AdvisorModelCaller = {
+      async complete() {
+        // The advisor call outlives the lease.
+        vi.setSystemTime(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000));
+        return JSON.stringify({ disposition: "reviewed", guidance: "late guidance" });
+      }
+    };
+    try {
+      await expect(
+        runAdvisorConsultation({
+          store,
+          caller,
+          readFlight: () => ({ verdict: "verified", events: [] }),
+          request: requestFor(claimed)
+        })
+      ).rejects.toMatchObject({ code: "advisor_lease_stale" });
+      expect(
+        store.readEvents().filter((event) => event.name === "advisory.advisor_consultation_recorded")
+      ).toHaveLength(0);
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves consult_advisor disabled in production unless explicitly enabled", () => {
+    expect(advisorPortFromEnv({}, ":memory:")).toBeUndefined();
+    expect(advisorPortFromEnv({ ACS_ADVISOR_CONSULTATION_ENABLED: "true" }, ":memory:")).toBeUndefined();
+    expect(advisorPortFromEnv({ ACS_ADVISOR_CONSULTATION_ENABLED: "1" }, ":memory:")).toBeDefined();
   });
 });

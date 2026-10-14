@@ -62,6 +62,21 @@ export function createAdvisorModelCaller(env?: ModelCallerEnv): AdvisorModelCall
   };
 }
 
+/**
+ * Production wiring for consult_advisor. ACS has no production path to create advisor bindings yet
+ * (only privileged in-process store calls), so the MCP tool is disabled unless an operator explicitly
+ * opts in with ACS_ADVISOR_CONSULTATION_ENABLED=1. When disabled, consult_advisor answers
+ * advisor_not_configured and never calls a model.
+ */
+export function advisorPortFromEnv(
+  env: Record<string, string | undefined>,
+  dbPath: string,
+  callerEnv?: ModelCallerEnv
+): AdvisorConsultPort | undefined {
+  if (env.ACS_ADVISOR_CONSULTATION_ENABLED !== "1") return undefined;
+  return { caller: createAdvisorModelCaller(callerEnv), readFlight: openAdvisorFlightReader(dbPath) };
+}
+
 export function openAdvisorFlightReader(dbPath: string): AdvisorFlightReader {
   return (missionId) => {
     const db = new DatabaseSync(dbPath);
@@ -99,17 +114,23 @@ export async function runAdvisorConsultation(input: {
   caller: AdvisorModelCaller;
   readFlight: AdvisorFlightReader;
   request: unknown;
+  /** Authenticated MCP actor. When set, must match the worker that holds the lease/claim. */
+  actor?: string;
   now?: string;
 }): Promise<AdvisorConsultationResult> {
   const request = advisorConsultRequestSchema.parse(input.request);
   const located = locateBinding(input.store, request);
-  const createdAt = input.now ?? new Date().toISOString();
+  if (input.actor !== undefined && input.actor !== located.fence.workerId) {
+    throw new ControlStackError("advisor_actor_mismatch", "authenticated actor does not match the lease holder");
+  }
+  // Pre-call lease check (fence existence). Recording rechecks with a fresh clock after the advisor returns.
+  const preCallAt = input.now ?? new Date().toISOString();
   input.store.assertAdvisorConsultationLease({
     subjectId: located.subjectId,
     missionId: located.binding.missionId,
     subjectKind: located.binding.subjectKind,
     fence: located.fence,
-    now: createdAt
+    now: preCallAt
   });
 
   const advisorModelId = resolveAdvisorModelId(located.binding.advisorModelId);
@@ -138,6 +159,8 @@ export async function runAdvisorConsultation(input: {
     inputSha256 = createHash("sha256").update(UNVERIFIED_FLIGHT).digest("hex");
   }
 
+  // Fresh clock after the (possibly long) advisor call so a lease that expired during the call cannot record.
+  const recordedAt = input.now ?? new Date().toISOString();
   const record = input.store.recordAdvisorConsultation(
     {
       subjectId: located.subjectId,
@@ -153,7 +176,7 @@ export async function runAdvisorConsultation(input: {
       advisorModelId: located.binding.advisorModelId,
       inputTokens: draft.inputTokens,
       outputTokens: draft.outputTokens,
-      createdAt,
+      createdAt: recordedAt,
       fence: located.fence
     },
     domain
@@ -207,6 +230,7 @@ function locateBinding(store: WorkItemStore, request: ReturnType<typeof advisorC
         workItemId: request.subject.workItemId,
         ...(request.subject.attemptId ? { attemptId: request.subject.attemptId } : {}),
         leaseId: request.subject.leaseId,
+        leaseToken: request.subject.leaseToken,
         workerId: request.subject.workerId,
         fencingEpoch: request.subject.fencingEpoch
       }
