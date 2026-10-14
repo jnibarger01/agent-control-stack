@@ -212,4 +212,16 @@ describe("local advisor MCP", () => {
       expect(calls).toBe(0);
     }
   );
+
+  it("keeps framing undecided until a split Content-Length header is identifiable", async () => {
+    const h = harness(async () => failed());
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 7, method: "ping" });
+    const frame = `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
+    for (const piece of [frame.slice(0, 3), frame.slice(3, 7), frame.slice(7)]) {
+      h.input.write(piece);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await settle(h.server);
+    expect(frames(h.text())[0]).toMatchObject({ id: 7, result: {} });
+  });
 });

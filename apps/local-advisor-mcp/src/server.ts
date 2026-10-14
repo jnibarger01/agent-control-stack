@@ -12,6 +12,7 @@ export const SUPPORTED_PROTOCOL_VERSIONS = ["2024-11-05", "2025-03-26", "2025-06
 export const PROTOCOL_VERSION = "2024-11-05";
 const MAX_FRAME_BYTES = 256 * 1024;
 const MAX_RESPONSE_BYTES = 256 * 1024;
+const LSP_HEADER = "content-length";
 
 export type AdvisorRunner = (request: unknown, signal: AbortSignal) => Promise<AdvisorResponse>;
 
@@ -142,9 +143,11 @@ export class LocalAdvisorMcpServer {
   private drain(): void {
     for (;;) {
       if (this.framing === null) {
-        const head = this.buffer.subarray(0, 16).toString("utf8").trimStart().toLowerCase();
+        const head = this.buffer.subarray(0, 32).toString("utf8").trimStart().toLowerCase();
         if (head.length === 0) return;
-        this.framing = head.startsWith("content-length") ? "lsp" : "ndjson";
+        // Stdio may split a write anywhere: stay undecided while the prefix could still become "content-length".
+        if (head.length < LSP_HEADER.length && LSP_HEADER.startsWith(head)) return;
+        this.framing = head.startsWith(LSP_HEADER) ? "lsp" : "ndjson";
       }
       const body = this.framing === "lsp" ? this.nextLspFrame() : this.nextLine();
       if (body === null) return;
