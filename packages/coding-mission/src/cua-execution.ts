@@ -487,7 +487,7 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
       await this.bounded(
         () =>
           context.routeWebSocket(/.*/u, (ws) => {
-            let allowed = false;
+            let allowed: boolean;
             try {
               allowed = webSocketAllowed(ws.url(), origins);
             } catch {
