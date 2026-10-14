@@ -18,19 +18,75 @@ export const authorityResourceSchema = changeSetResourceSchema
     if (!filesystem && resource.coverage !== "exact")
       context.addIssue({ code: "custom", message: "only filesystem resources support descendant scope" });
   });
+/**
+ * An exact http(s) origin: lowercase scheme and host plus an optional port, nothing else. No path, query, fragment,
+ * credentials, wildcard or trailing slash, no trailing-dot host and no non-ASCII (or Unicode-lookalike) host. The
+ * `pattern` is a necessary condition that also appears in the public contract; the refinement then requires the value
+ * to equal its own WHATWG-parsed origin (which drops default ports and rejects anything the pattern is loose about).
+ */
+export const EXACT_HTTP_ORIGIN_PATTERN =
+  /^https?:\/\/(?:[a-z0-9-]+(?:\.[a-z0-9-]+)*|\[[0-9a-f:.]+\])(?::[0-9]{1,5})?$/u;
+export function isExactHttpOrigin(value: string): boolean {
+  if (value.length > 256 || !EXACT_HTTP_ORIGIN_PATTERN.test(value)) return false;
+  try {
+    const url = new URL(value);
+    return (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      url.username === "" &&
+      url.password === "" &&
+      !url.hostname.endsWith(".") &&
+      url.origin === value
+    );
+  } catch {
+    return false;
+  }
+}
+const exactOrigin = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(EXACT_HTTP_ORIGIN_PATTERN, "must be an exact http(s) origin")
+  .refine(isExactHttpOrigin, "must be an exact http(s) origin");
+/**
+ * An exact application name: printable ASCII only (so no Unicode lookalike of a granted name), no whitespace and no
+ * wildcard or glob characters (* ? [ ] { }).
+ */
+export const EXACT_APPLICATION_PATTERN = /^[!-)+->@-Z\\^-z|~]+$/u;
+const exactApplication = id.regex(EXACT_APPLICATION_PATTERN, "must be an exact ASCII application name, not a glob");
+/** A bounded, duplicate-free list; `uniqueItems` carries the uniqueness rule into the generated public contract. */
+const uniqueList = <T extends z.ZodType<string>>(item: T, max: number) =>
+  z
+    .array(item)
+    .min(1)
+    .max(max)
+    .refine((values) => new Set(values).size === values.length, "must be unique")
+    .meta({ uniqueItems: true });
+export const commanderToolClassSchema = z
+  .object({
+    runtime: z.enum(["desktop_commander", "jace_commander", "sandbox"]),
+    toolName: id
+  })
+  .strict();
+/**
+ * The browser runtime (the cua lane). A grant names the exact origins and applications it covers; a dispatch is only
+ * authorized when its whole origin and application allowlist is inside one browser grant. Nothing is implied by the
+ * runtime alone, so an empty or wildcard scope cannot be expressed.
+ */
+export const browserToolClassSchema = z
+  .object({
+    runtime: z.literal("browser"),
+    toolName: z.literal("cua"),
+    allowedOrigins: uniqueList(exactOrigin, 64),
+    allowedApplications: uniqueList(exactApplication, 64)
+  })
+  .strict();
+export type AuthorityToolClass = z.infer<typeof commanderToolClassSchema> | z.infer<typeof browserToolClassSchema>;
 export const autonomousAuthorityDefinitionSchema = z
   .object({
     executingActorId: id,
     scope: z.array(authorityResourceSchema).min(1).max(512),
     toolClasses: z
-      .array(
-        z
-          .object({
-            runtime: z.enum(["desktop_commander", "jace_commander", "sandbox"]),
-            toolName: id
-          })
-          .strict()
-      )
+      .array(z.union([commanderToolClassSchema, browserToolClassSchema]))
       .min(1)
       .max(512),
     maximumPrivileges: z.array(changeSetPrivilegeSchema).min(1).max(16),

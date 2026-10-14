@@ -29,6 +29,23 @@ function resourceWithin(parent: AuthorityResource, child: AuthorityResource): bo
   return suffix !== ".." && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix);
 }
 
+type AuthorityToolClass = AutonomousAuthorityDefinition["toolClasses"][number];
+
+/**
+ * True when one parent browser tool covers every origin and every application of the child browser tool. Both sets
+ * must fit inside the SAME parent tool, since the browser boundary authorizes a dispatch against one grant entry; a
+ * child spanning two parent entries would combine scopes no single parent entry granted. Non-browser tools only match
+ * by exact equality (checked by the caller).
+ */
+function toolWithin(parent: AuthorityToolClass, child: AuthorityToolClass): boolean {
+  if (parent.runtime !== "browser" || child.runtime !== "browser") return false;
+  if (parent.toolName !== child.toolName) return false;
+  return (
+    child.allowedOrigins.every((origin) => parent.allowedOrigins.includes(origin)) &&
+    child.allowedApplications.every((application) => parent.allowedApplications.includes(application))
+  );
+}
+
 /**
  * Every way `child` is broader than `parent` at `now`, or an empty list when it is a subset. Malformed input is
  * reported as a violation too, so the caller can never mistake a parse failure for "no violations".
@@ -54,7 +71,10 @@ export function authorityNarrowingViolations(parentInput: unknown, childInput: u
       violations.push(`scope ${resource.kind}:${resource.id} (${resource.coverage}) exceeds parent`);
   const parentTools = new Set(p.toolClasses.map((tool) => strictCanonicalJsonV1(tool)));
   for (const tool of c.toolClasses)
-    if (!parentTools.has(strictCanonicalJsonV1(tool)))
+    if (
+      !parentTools.has(strictCanonicalJsonV1(tool)) &&
+      !p.toolClasses.some((parentTool) => toolWithin(parentTool, tool))
+    )
       violations.push(`tool ${tool.runtime}:${tool.toolName} exceeds parent`);
   for (const privilege of c.maximumPrivileges)
     if (!p.maximumPrivileges.includes(privilege)) violations.push(`privilege ${privilege} exceeds parent`);

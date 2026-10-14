@@ -6,6 +6,7 @@
  * Illegal transitions fail closed.
  */
 import { ControlStackError } from "@agent-control-stack/shared";
+import { isExactHttpOrigin } from "@agent-control-stack/work-items";
 
 export const MISSION_STATES = [
   "CREATED",
@@ -197,7 +198,13 @@ export type WorkUnitPayload =
       maxRuntimeMs?: number;
     }
   | { kind: "desktop"; objective: string }
-  | { kind: "cua"; objective: string; allowedApplications?: string[] }
+  | {
+      kind: "cua";
+      objective: string;
+      allowedApplications?: string[];
+      allowedOrigins?: string[];
+      actions?: CuaAction[];
+    }
   | { kind: "verification"; targetUnitId: string }
   | { kind: "agent"; role: string; prompt: string }
   | {
@@ -216,6 +223,93 @@ const isBoundedInteger = (value: unknown, max: number): value is number =>
 const isStringList = (value: unknown, max = 256): value is string[] =>
   Array.isArray(value) && value.length <= max && value.every((entry) => isString(entry));
 
+export const CUA_ACTION_TYPES = ["observe", "click", "type", "scroll", "navigate"] as const;
+export type CuaActionType = (typeof CUA_ACTION_TYPES)[number];
+
+/** Browser actions a CUA work unit may already carry. No script, shell, or evaluate. */
+export type CuaAction =
+  | { type: "observe" }
+  | { type: "click"; selector: string }
+  | { type: "type"; selector: string; text: string }
+  /**
+   * A secret is never carried as a value. `secretRef` names a secret-broker scope that is leased and resolved only at
+   * execution time, so payload_json and dispatch_json hold the reference, not the secret.
+   */
+  | { type: "type"; selector: string; secretRef: string }
+  | { type: "scroll"; dx: number; dy: number }
+  | { type: "navigate"; url: string };
+
+const CUA_ACTION_FIELDS: Record<CuaActionType, readonly string[]> = {
+  observe: ["type"],
+  click: ["type", "selector"],
+  type: ["type", "selector", "text", "secretRef"],
+  scroll: ["type", "dx", "dy"],
+  navigate: ["type", "url"]
+};
+
+/**
+ * Uses the authority grant's own origin rule, so a work unit can only name an origin a browser grant could cover:
+ * exact lowercase scheme and host plus optional port, no trailing-dot host and no non-ASCII host.
+ */
+function parseExactHttpOrigin(value: unknown): string | undefined {
+  if (!isString(value, 256)) return undefined;
+  return isExactHttpOrigin(value) ? value : undefined;
+}
+
+/** Secret-broker scope names (secret-broker scopeNameSchema). */
+const SECRET_REF = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const isSecretRef = (value: unknown): value is string => typeof value === "string" && SECRET_REF.test(value);
+/** Fields whose input is a credential. Literal text into them must be a `secretRef`. */
+const SECRET_SELECTOR =
+  /pass(word|wd|code|phrase)|\bpass\b|secret|token|otp|one-?time|\bpin\b|api[-_]?key|credential|\bcvv\b|\bcvc\b|card-?number|cc-?(number|csc)|current-password|new-password/iu;
+/** Value patterns of common credentials, refused as literal text even under an innocuous selector. */
+const SECRET_VALUE_PATTERNS: readonly RegExp[] = [
+  /\bbearer\s+[A-Za-z0-9._~+/-]{8,}/iu,
+  /\b(gh[pousr]|github_pat)_[A-Za-z0-9_]{16,}/u,
+  /\bsk-[A-Za-z0-9_-]{16,}/u,
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}/u,
+  /\bAKIA[0-9A-Z]{16}\b/u,
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/u,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/u
+];
+export function looksLikeSecretValue(text: string): boolean {
+  return SECRET_VALUE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function parseCuaAction(value: unknown): CuaAction | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.type !== "string" ||
+    !(CUA_ACTION_TYPES as readonly string[]).includes(value.type)
+  ) {
+    return undefined;
+  }
+  const type = value.type as CuaActionType;
+  if (Object.keys(value).some((key) => !CUA_ACTION_FIELDS[type].includes(key))) return undefined;
+  if (type === "observe") return { type };
+  if (type === "click") return isString(value.selector, 512) ? { type, selector: value.selector } : undefined;
+  if (type === "type") {
+    if (!isString(value.selector, 512)) return undefined;
+    // Exactly one of a literal or a broker reference. A literal is refused when the field or the value looks secret.
+    if (value.secretRef !== undefined) {
+      return value.text === undefined && isSecretRef(value.secretRef)
+        ? { type, selector: value.selector, secretRef: value.secretRef }
+        : undefined;
+    }
+    if (!isString(value.text, 4096)) return undefined;
+    if (SECRET_SELECTOR.test(value.selector) || looksLikeSecretValue(value.text)) return undefined;
+    return { type, selector: value.selector, text: value.text };
+  }
+  if (type === "scroll") {
+    const bounded = (entry: unknown) =>
+      typeof entry === "number" && Number.isInteger(entry) && Math.abs(entry) <= 1_000_000;
+    return bounded(value.dx) && bounded(value.dy)
+      ? { type, dx: value.dx as number, dy: value.dy as number }
+      : undefined;
+  }
+  return isString(value.url, 2048) ? { type, url: value.url } : undefined;
+}
+
 /** Validate an untrusted payload for a unit kind. Unknown fields are rejected so a payload cannot smuggle authority. */
 export function parseWorkUnitPayload(kind: WorkUnitKind, value: unknown): WorkUnitPayload {
   const invalid = (reason: string): never => {
@@ -228,7 +322,7 @@ export function parseWorkUnitPayload(kind: WorkUnitKind, value: unknown): WorkUn
     shell: ["argv", "cwd"],
     tool: ["toolName", "argsHash", "arguments", "maxRuntimeMs"],
     desktop: ["objective"],
-    cua: ["objective", "allowedApplications"],
+    cua: ["objective", "allowedApplications", "allowedOrigins", "actions"],
     verification: ["targetUnitId"],
     agent: ["role", "prompt"],
     swarm: ["strategy", "fanOut"],
@@ -296,18 +390,43 @@ export function parseWorkUnitPayload(kind: WorkUnitKind, value: unknown): WorkUn
     case "desktop":
       if (!isString(value.objective, 8192)) return invalid("requires objective");
       return { kind, objective: value.objective };
-    case "cua":
+    case "cua": {
       if (!isString(value.objective, 8192)) return invalid("requires objective");
       if (value.allowedApplications !== undefined && !isStringList(value.allowedApplications, 64)) {
         return invalid("has bad allowedApplications");
+      }
+      let allowedOrigins: string[] | undefined;
+      if (value.allowedOrigins !== undefined) {
+        if (!Array.isArray(value.allowedOrigins) || value.allowedOrigins.length > 64) {
+          return invalid("has bad allowedOrigins");
+        }
+        allowedOrigins = [];
+        for (const origin of value.allowedOrigins) {
+          const parsed = parseExactHttpOrigin(origin);
+          if (!parsed) return invalid("has bad allowedOrigins");
+          allowedOrigins.push(parsed);
+        }
+      }
+      let actions: CuaAction[] | undefined;
+      if (value.actions !== undefined) {
+        if (!Array.isArray(value.actions) || value.actions.length > 32) return invalid("has bad actions");
+        actions = [];
+        for (const action of value.actions) {
+          const parsed = parseCuaAction(action);
+          if (!parsed) return invalid("has bad actions");
+          actions.push(parsed);
+        }
       }
       return {
         kind,
         objective: value.objective,
         ...(value.allowedApplications === undefined
           ? {}
-          : { allowedApplications: value.allowedApplications as string[] })
+          : { allowedApplications: value.allowedApplications as string[] }),
+        ...(allowedOrigins === undefined ? {} : { allowedOrigins }),
+        ...(actions === undefined ? {} : { actions })
       };
+    }
     case "verification":
       if (!isString(value.targetUnitId, 128)) return invalid("requires targetUnitId");
       return { kind, targetUnitId: value.targetUnitId };
