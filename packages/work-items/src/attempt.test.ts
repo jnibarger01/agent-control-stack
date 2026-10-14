@@ -270,6 +270,7 @@ describe("getCommandAuthority", () => {
   let directory: string | undefined;
 
   afterEach(() => {
+    vi.useRealTimers();
     if (directory) rmSync(directory, { recursive: true, force: true });
     directory = undefined;
   });
@@ -382,9 +383,11 @@ describe("getCommandAuthority", () => {
   });
 
   it("rejects an expired lease even though every identifier otherwise matches", () => {
+    // Same shape as the cleanup-expiry test: freeze the clock before setup so it never depends on runner speed.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
     const fixture = leasedFixture();
     directory = fixture.directory;
-    vi.useFakeTimers();
     vi.setSystemTime(new Date(Date.parse(fixture.lease.expiresAt) + 1));
     const authority = fixture.store.getCommandAuthority({
       workItemId: fixture.workItem.id,
@@ -422,6 +425,7 @@ describe("getWorkspaceCleanupAuthority", () => {
   let directory: string | undefined;
 
   afterEach(() => {
+    vi.useRealTimers();
     if (directory) rmSync(directory, { recursive: true, force: true });
     directory = undefined;
   });
@@ -480,9 +484,12 @@ describe("getWorkspaceCleanupAuthority", () => {
   });
 
   it("refuses cleanup once the presented lease has expired, even though worker/epoch still match", () => {
+    // Freeze the clock BEFORE building the fixture: with real time a slow runner could spend the whole 50 ms TTL
+    // inside setup, so recordWorkspaceAllocation itself refused the already-expired lease.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
     const fixture = leasedFixture({ ttlMs: 50 });
     directory = fixture.directory;
-    vi.useFakeTimers();
     vi.setSystemTime(new Date(Date.parse(fixture.lease.expiresAt) + 1));
 
     const authorized = fixture.store.getWorkspaceCleanupAuthority({
