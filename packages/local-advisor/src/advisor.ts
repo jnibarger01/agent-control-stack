@@ -168,7 +168,9 @@ export async function runAdvisor(
       return finish({ status: "invalid_output", reason: "model_output_incoherent", model }, ...usage);
     }
 
-    const recommendedActions = output.data.recommendedActions;
+    // Model output is returned to the MCP client; redact it in case the model echoes a secret redaction missed upstream.
+    const clean = (text: string, max: number) => redactText(text).text.slice(0, max);
+    const recommendedActions = output.data.recommendedActions.map((action) => clean(action, 500));
     if (output.data.verdict === "INSUFFICIENT_EVIDENCE") {
       return finish(
         { status: "insufficient_evidence", reason: "model_reports_insufficient_evidence", model, recommendedActions },
@@ -183,7 +185,7 @@ export async function runAdvisor(
         findings: output.data.findings.map((finding) => ({
           category: finding.category,
           severity: finding.severity,
-          summary: finding.summary,
+          summary: clean(finding.summary, 2_000),
           evidenceRefs: finding.evidenceIds
         })),
         recommendedActions,

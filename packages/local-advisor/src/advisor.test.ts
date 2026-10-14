@@ -236,6 +236,26 @@ describe("runAdvisor: prompt-injection and evidence handling", () => {
     expect(a.inputHash).toBe(b.inputHash);
   });
 
+  it("redacts model output (finding summaries and recommended actions) before returning it", async () => {
+    const leaked = "AKIA" + "ZZZZZZZZZZZZZZZZ";
+    const response = await runAdvisor(
+      request(),
+      new FakeProvider(() =>
+        ok(
+          verdictJson(
+            "BLOCK",
+            [{ category: "security", severity: "high", summary: `leaks ${leaked}`, evidenceIds: ["diff-1"] }],
+            [`rotate ${leaked}`]
+          )
+        )
+      )
+    );
+    expect(response.status).toBe("completed");
+    expect(JSON.stringify(response)).not.toContain(leaked);
+    expect(response.findings[0]?.summary).toContain("[REDACTED:aws_key]");
+    expect(response.recommendedActions[0]).toContain("[REDACTED:aws_key]");
+  });
+
   it("uses the model-supplied output only as a recommendation (no authority fields are honored)", async () => {
     const response = await runAdvisor(
       request(),
