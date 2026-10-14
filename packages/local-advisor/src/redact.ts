@@ -65,7 +65,9 @@ const PATTERNS: readonly { readonly name: string; readonly pattern: RegExp; read
 ];
 
 const INVISIBLE = /[\u00AD\u200B-\u200F\u2060-\u2064\uFEFF]/gu;
-const BASE64_BLOB = /[A-Za-z0-9+/_-]{24,}={0,2}/gu;
+// A blob may be wrapped across lines (PEM/MIME style); lines are rejoined before decoding.
+const BASE64_BLOB = /[A-Za-z0-9+/_-]{16,}(?:\r?\n[A-Za-z0-9+/_-]+)*={0,2}/gu;
+const MIN_BASE64_CHARS = 24;
 
 export interface RedactionResult {
   readonly text: string;
@@ -119,7 +121,7 @@ export function redactText(input: string): RedactionResult {
   const counts: Record<string, number> = {};
   let text = applyPatterns(input.normalize("NFKC").replace(INVISIBLE, ""), counts);
   text = text.replace(BASE64_BLOB, (blob) => {
-    if (!base64HidesSecret(blob)) return blob;
+    if (blob.replace(/[\r\n=]/gu, "").length < MIN_BASE64_CHARS || !base64HidesSecret(blob)) return blob;
     counts.base64_secret = (counts.base64_secret ?? 0) + 1;
     return "[REDACTED:base64_secret]";
   });
