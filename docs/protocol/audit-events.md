@@ -25,6 +25,10 @@ Audit events provide the replayable record of requests, policy decisions, approv
 | Event type                                     | Meaning                                                                                           |
 | ---------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `tool.intent`                                  | Tool call was received and normalized.                                                            |
+| `advisory.advisor_binding_enabled`             | An operator enabled an advisor binding. Body has model ids and the completion flag, not guidance. |
+| `advisory.advisor_binding_disabled`            | An operator disabled an advisor binding. Prior consultation rows stay.                            |
+| `advisory.advisor_consultation_recorded`       | A leased advisor consultation was stored. Body has ids, checkpoint, disposition, and hashes only. |
+| `advisory.advisor_not_attached`                | A child binding was not copied because the advisor cannot pair with the child executor.           |
 | `policy.decision`                              | Policy classified and decided the action.                                                         |
 | `approval.requested`                           | Approval request was created.                                                                     |
 | `approval.granted`                             | Human approved out-of-band.                                                                       |

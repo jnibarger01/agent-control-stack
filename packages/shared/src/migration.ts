@@ -148,7 +148,8 @@ const migrationFiles = [
   { version: 63, name: "work_unit_recovery", filename: "063_work_unit_recovery.sql" },
   { version: 64, name: "model_routing_evidence", filename: "064_model_routing_evidence.sql" },
   { version: 71, name: "execution_receipts", filename: "071_execution_receipts.sql" },
-  { version: 72, name: "cua_browser_execution", filename: "072_cua_browser_execution.sql" }
+  { version: 72, name: "cua_browser_execution", filename: "072_cua_browser_execution.sql" },
+  { version: 73, name: "advisor_consultations", filename: "073_advisor_consultations.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {

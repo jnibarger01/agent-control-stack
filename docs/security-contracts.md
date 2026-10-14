@@ -23,6 +23,8 @@ request -> validation -> policy -> approval if required -> audit -> execution ->
 
 Skipping any step is a defect, not an optimization. Software loves calling missing brakes "simplicity."
 
+Advisor consultation ([ADR 0027](adr/0027-advisor-consultation.md)) is evidence for the executor. Guidance text is not a policy, approval, routing, or completion decision. Success may require that a before-completion consultation exists. It does not read what the advisor said.
+
 ## Implementation acceptance bar
 
 A production-ready ChatGPT tunnel connector must prove:

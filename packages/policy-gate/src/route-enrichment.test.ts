@@ -334,7 +334,7 @@ describe("route enrichment (ADR 0025)", () => {
     await route(fx, "alpha", {
       workUnit: unit(),
       routeShadow: {
-        observer: async () => ({ status: "recommended", recommendedExecutorId: "beta", confidence: 0.99 }),
+        observer: async () => ({ status: "recommended", recommendedExecutorId: "beta", confidence: 0.9901 }),
         recorder: fx.store,
         track: (settled) => void pending.push(settled)
       }
@@ -342,7 +342,9 @@ describe("route enrichment (ADR 0025)", () => {
     await Promise.all(pending);
     const evidence = JSON.stringify(fx.store.getLatestAuthoritativeRoutingEvidence(fx.workItemId));
     expect(evidence).not.toContain("jev");
-    expect(evidence).not.toContain("0.99");
+    // Match the shadow confidence exactly. A substring such as "0.99" also
+    // appears in timestamps like 20.990Z and fails this check at random.
+    expect(evidence).not.toContain("0.9901");
   });
 
   it("keeps outcome accounting optional and the latest outcome authoritative in the comparison view", async () => {

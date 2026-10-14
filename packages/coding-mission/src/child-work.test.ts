@@ -1,7 +1,13 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { autonomousAuthorityHash, type AutonomousAuthorityGrant } from "@agent-control-stack/work-items";
+import { missionUnitSubjectId } from "@agent-control-stack/advisory";
+import {
+  autonomousAuthorityHash,
+  enableAdvisorBinding,
+  readAdvisorBinding,
+  type AutonomousAuthorityGrant
+} from "@agent-control-stack/work-items";
 import { afterEach, describe, expect, it } from "vitest";
 import { isSubset, type AutonomousAuthorityDefinition } from "./authority.js";
 import { DEFAULT_DELEGATION_BUDGET, type MissionBudget } from "./budget.js";
@@ -1437,5 +1443,28 @@ describe("review round five", () => {
     store.retryUnit("m1", "root", at(1200));
     expect(store.workUnits("m1").find((unit) => unit.unitId === "plain")?.status).toBe("pending");
     expect(store.db.prepare("SELECT COUNT(*) AS n FROM work_unit_child_supersessions").get()).toEqual({ n: 0 });
+  });
+});
+
+describe("advisor binding copy", () => {
+  it("copies a parent unit binding onto an admitted child and still creates the child", () => {
+    const { store, ask } = setup();
+    enableAdvisorBinding(store.db, {
+      subjectId: missionUnitSubjectId("m1", "root"),
+      missionId: "m1",
+      subjectKind: "mission_unit",
+      executorModelId: "claude-sonnet-5",
+      advisorModelId: "claude-fable-5-1",
+      requireBeforeCompletion: true,
+      now: T0
+    });
+    const result = ask([child("child-1")]);
+    expect(result.ok).toBe(true);
+    expect(readAdvisorBinding(store.db, "m1", missionUnitSubjectId("m1", "child-1"))).toMatchObject({
+      advisorModelId: "claude-fable-5-1",
+      executorModelId: "claude-sonnet-5",
+      requireBeforeCompletion: true,
+      disabledAt: null
+    });
   });
 });

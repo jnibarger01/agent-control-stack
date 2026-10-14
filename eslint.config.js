@@ -50,6 +50,17 @@ export default tseslint.config(
             },
             {
               group: [
+                "@agent-control-stack/advisory/guidance",
+                "**/advisory/guidance",
+                "**/advisor-guidance",
+                "**/advisor-guidance.js",
+                "**/advisor-guidance.ts"
+              ],
+              message:
+                "Advisor guidance is evidence for the executor (ADR 0027). Policy, routing, approval, and completion import the disposition view only."
+            },
+            {
+              group: [
                 "@agent-control-stack/policy-gate/*jev-shadow*",
                 "**/policy-gate/src/jev-shadow.js",
                 "**/policy-gate/src/jev-shadow.ts"
@@ -96,6 +107,17 @@ export default tseslint.config(
             },
             {
               group: [
+                "@agent-control-stack/advisory/guidance",
+                "**/advisory/guidance",
+                "**/advisor-guidance",
+                "**/advisor-guidance.js",
+                "**/advisor-guidance.ts"
+              ],
+              message:
+                "Advisor guidance is evidence for the executor (ADR 0027). The MCP transport calls the consult wrapper and does not import guidance text."
+            },
+            {
+              group: [
                 "@agent-control-stack/policy-gate/*jev-shadow*",
                 "**/policy-gate/src/jev-shadow.js",
                 "**/policy-gate/src/jev-shadow.ts"
@@ -131,6 +153,17 @@ export default tseslint.config(
             },
             {
               group: [
+                "@agent-control-stack/advisory/guidance",
+                "**/advisory/guidance",
+                "**/advisor-guidance",
+                "**/advisor-guidance.js",
+                "**/advisor-guidance.ts"
+              ],
+              message:
+                "Advisor guidance is evidence for the executor (ADR 0027). Policy, routing, approval, and completion import the disposition view only."
+            },
+            {
+              group: [
                 "@agent-control-stack/policy-gate/*jev-shadow*",
                 "**/policy-gate/src/jev-shadow.js",
                 "**/policy-gate/src/jev-shadow.ts"
@@ -163,6 +196,17 @@ export default tseslint.config(
                 "**/local-advisor/**"
               ],
               message: "The local advisor is untrusted evidence and must not be imported by policy modules."
+            },
+            {
+              group: [
+                "@agent-control-stack/advisory/guidance",
+                "**/advisory/guidance",
+                "**/advisor-guidance",
+                "**/advisor-guidance.js",
+                "**/advisor-guidance.ts"
+              ],
+              message:
+                "Advisor guidance is evidence for the executor (ADR 0027). Policy and classification modules import the disposition view only."
             },
             {
               group: ["./jev-shadow.js", "**/jev-shadow.js"],
@@ -201,6 +245,46 @@ export default tseslint.config(
         URLSearchParams: "readonly",
         AbortSignal: "readonly"
       }
+    }
+  },
+  {
+    // ADR 0027: only the consult wrapper may read guidance text. Jev stays banned here.
+    files: ["apps/gateway/src/advisor-consultation.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "@agent-control-stack/policy-gate",
+              importNames: [
+                "maybeRunJevShadowAdvisory",
+                "runJevShadowAdvisory",
+                "createJevRouteShadow",
+                "createJevRouteShadowObserver"
+              ],
+              message:
+                "Jev shadow hooks are advisory-only (ADR 0020, ADR 0025). Only the gateway MCP observation path and the two authoritative-claim composition roots may import them from the policy-gate barrel."
+            }
+          ],
+          patterns: [
+            {
+              group: ["@agent-control-stack/jev-advisor", "@agent-control-stack/jev-advisor/*", "**/jev-advisor/**"],
+              message:
+                "Jev is advisory-only (ADR 0020). Import it only from the allow-listed shadow hook or observation worker, never from authority code."
+            },
+            {
+              group: [
+                "@agent-control-stack/policy-gate/*jev-shadow*",
+                "**/policy-gate/src/jev-shadow.js",
+                "**/policy-gate/src/jev-shadow.ts"
+              ],
+              message:
+                "Jev shadow hooks are advisory-only (ADR 0020). Do not deep-import the shadow module from authority code."
+            }
+          ]
+        }
+      ]
     }
   }
 );
