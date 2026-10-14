@@ -6,6 +6,7 @@
  * Illegal transitions fail closed.
  */
 import { ControlStackError } from "@agent-control-stack/shared";
+import { isExactHttpOrigin } from "@agent-control-stack/work-items";
 
 export const MISSION_STATES = [
   "CREATED",
@@ -246,18 +247,13 @@ const CUA_ACTION_FIELDS: Record<CuaActionType, readonly string[]> = {
   navigate: ["type", "url"]
 };
 
+/**
+ * Uses the authority grant's own origin rule, so a work unit can only name an origin a browser grant could cover:
+ * exact lowercase scheme and host plus optional port, no trailing-dot host and no non-ASCII host.
+ */
 function parseExactHttpOrigin(value: unknown): string | undefined {
-  if (!isString(value, 256) || /[\s*\\]/u.test(value)) return undefined;
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return undefined;
-  }
-  if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username !== "" || url.password !== "") {
-    return undefined;
-  }
-  return value === url.origin ? url.origin : undefined;
+  if (!isString(value, 256)) return undefined;
+  return isExactHttpOrigin(value) ? value : undefined;
 }
 
 /** Secret-broker scope names (secret-broker scopeNameSchema). */

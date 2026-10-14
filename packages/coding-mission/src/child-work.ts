@@ -149,6 +149,7 @@ export interface LedgerOptions {
 export type CuaAuthorityRefusal =
   | "cua_authority_revoked"
   | "cua_authority_expired"
+  | "cua_authority_subject_changed"
   | "cua_authority_deadline_passed"
   | "cua_browser_grant_missing"
   | "cua_browser_scope_not_covered"
@@ -475,6 +476,11 @@ export class MissionAuthorityLedger {
       if (this.grantRevoked(grantId)) return refuse("cua_authority_revoked");
       const grant = this.readGrant(grantId);
       if (!grant) return refuse("cua_authority_unavailable");
+      // The mission's execution inputs must still be the ones the human granted against. A changed (or unreadable)
+      // subject hash ends the session at the next browser boundary, just as dispatch refuses `grant_subject_changed`.
+      const subjectHash = this.currentSubjectHash(input.missionId);
+      if (subjectHash === undefined || subjectHash !== grant.subjectInputHash)
+        return refuse("cua_authority_subject_changed");
       for (const expiresAt of [definition.expiresAt, grant.definition.expiresAt]) {
         const at = Date.parse(expiresAt);
         if (!Number.isFinite(at) || !(now < at)) return refuse("cua_authority_expired");
