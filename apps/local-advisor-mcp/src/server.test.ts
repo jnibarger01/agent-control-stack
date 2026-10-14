@@ -285,4 +285,26 @@ describe("local advisor MCP", () => {
     for (const done of release) done();
     await settle(h.server);
   });
+
+  it("ignores empty lines before and between LSP frames", async () => {
+    const h = harness(async () => failed());
+    const frame = (id: number) => {
+      const body = JSON.stringify({ jsonrpc: "2.0", id, method: "ping" });
+      return `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
+    };
+    h.input.write(`\r\n\n${frame(1)}\r\n${frame(2)}`);
+    await settle(h.server);
+    const out = frames(h.text()) as Array<{ id?: unknown; result?: unknown }>;
+    expect(out.map((f) => f.id)).toEqual([1, 2]);
+  });
+
+  it("does not treat a header preceded by spaces as an LSP header", async () => {
+    const h = harness(async () => failed());
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" });
+    h.input.write(`  Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}\n`);
+    await settle(h.server);
+    // The stream is read as NDJSON: the indented header line is a parse error, never a frame length.
+    expect(h.text()).not.toContain("Content-Length:");
+    expect(h.text()).toContain('"message":"parse error"');
+  });
 });

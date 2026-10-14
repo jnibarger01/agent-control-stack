@@ -152,7 +152,12 @@ export class LocalAdvisorMcpServer {
   private drain(): void {
     for (;;) {
       if (this.framing === null) {
-        const head = this.buffer.subarray(0, 32).toString("utf8").trimStart().toLowerCase();
+        // Only empty lines (CR/LF) may precede the first header; see nextLspFrame for why spaces are not skipped.
+        const head = this.buffer
+          .subarray(0, 32)
+          .toString("utf8")
+          .replace(/^[\r\n]+/u, "")
+          .toLowerCase();
         if (head.length === 0) return;
         // Stdio may split a write anywhere: stay undecided while the prefix could still become "content-length".
         if (head.length < LSP_HEADER.length && LSP_HEADER.startsWith(head)) return;
@@ -166,6 +171,13 @@ export class LocalAdvisorMcpServer {
   }
 
   private nextLspFrame(): string | null {
+    // RFC 9112 2.2 (robustness) lets a recipient ignore empty lines before a message, so stray CR/LF between
+    // frames is skipped. Leading spaces or tabs are NOT skipped: whitespace before a header field is obsolete line
+    // folding / an invalid field name (RFC 9112 2.2 and 5.2 require rejecting it), and the LSP base protocol
+    // defines headers as starting at the first byte of the message. Such a frame fails the header parse below.
+    let skip = 0;
+    while (skip < this.buffer.length && (this.buffer[skip] === 0x0d || this.buffer[skip] === 0x0a)) skip++;
+    if (skip > 0) this.buffer = this.buffer.subarray(skip);
     const sep = this.buffer.indexOf("\r\n\r\n");
     if (sep < 0) return null;
     const header = this.buffer.subarray(0, sep).toString("utf8");
