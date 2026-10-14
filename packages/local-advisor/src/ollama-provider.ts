@@ -70,6 +70,11 @@ function loopbackBase(baseUrl: string | undefined): URL {
   return assertLoopback(baseUrl ?? DEFAULT_OLLAMA_BASE_URL);
 }
 
+/** Validates an Ollama base URL (loopback only, no credentials) and returns it parsed. */
+export function assertOllamaBaseUrl(baseUrl: string | undefined): URL {
+  return loopbackBase(baseUrl);
+}
+
 /**
  * Ollama provider. Hard constraints:
  * - endpoint must be loopback (reuses `@agent-control-stack/model-broker` `assertLoopback`), so there is no cloud fallback;

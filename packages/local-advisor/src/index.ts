@@ -17,12 +17,25 @@ export {
   advisorResponseSchema,
   modelReviewOutputSchema
 } from "./contracts.js";
-export type { AdvisorOperation, AdvisorReason, AdvisorRequest, AdvisorResponse, AdvisorStatus, EvidenceItem } from "./contracts.js";
+export type {
+  AdvisorOperation,
+  AdvisorReason,
+  AdvisorRequest,
+  AdvisorResponse,
+  AdvisorStatus,
+  EvidenceItem
+} from "./contracts.js";
 export { findModelOutputViolation, runAdvisor } from "./advisor.js";
 export type { RunAdvisorOptions } from "./advisor.js";
 export { ProviderError } from "./provider.js";
 export type { AdvisorProvider, GenerateInput, GenerateResult, ProviderErrorKind } from "./provider.js";
-export { DEFAULT_OLLAMA_BASE_URL, OllamaProvider, chatModelNames, listInstalledOllamaModels } from "./ollama-provider.js";
+export {
+  DEFAULT_OLLAMA_BASE_URL,
+  OllamaProvider,
+  assertOllamaBaseUrl,
+  chatModelNames,
+  listInstalledOllamaModels
+} from "./ollama-provider.js";
 export type { InstalledOllamaModel, OllamaProviderOptions } from "./ollama-provider.js";
 export { redactText } from "./redact.js";
 export { EgressConfigError, assertDirectLoopbackEgress, envProxyModeOn, nodeWouldProxy } from "./egress.js";

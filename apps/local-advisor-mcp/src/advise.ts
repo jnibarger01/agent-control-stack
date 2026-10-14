@@ -1,5 +1,6 @@
 import {
   DEFAULT_MODEL_ROUTES,
+  assertOllamaBaseUrl,
   chatModelNames,
   listInstalledOllamaModels,
   OllamaProvider,
@@ -43,14 +44,25 @@ function digestFromEnv(env: AdvisorEnv): `sha256:${string}` | undefined {
 
 export type Advise = (request: AdvisorRequest, signal: AbortSignal) => Promise<AdvisorResponse>;
 
+function minFreeBytesFromEnv(env: AdvisorEnv): number | undefined {
+  const raw = env.ACS_LOCAL_ADVISOR_MIN_FREE_BYTES;
+  if (raw === undefined || raw === "") return undefined;
+  const value = /^\d+$/u.test(raw) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(value)) throw new Error("ACS_LOCAL_ADVISOR_MIN_FREE_BYTES must be a non-negative integer");
+  return value;
+}
+
 export function createAdvise(env: AdvisorEnv, deps: AdviseDeps = {}): Advise {
   const providers = new Map<string, OllamaProvider>();
+  // Validate every setting once, at startup, so misconfiguration fails before the server accepts a call.
+  const pinnedDigest = digestFromEnv(env);
+  const baseUrl = env.ACS_LOCAL_ADVISOR_BASE_URL || undefined;
+  assertOllamaBaseUrl(baseUrl);
+  const minFreeMemoryBytes = minFreeBytesFromEnv(env);
   // Parse routes once so a bad ACS_LOCAL_ADVISOR_ROUTES fails at startup instead of on every call.
   const routes = routesFromEnv(env);
   const discoveryTimeoutMs = deps.discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS;
   return async (request, signal) => {
-    const baseUrl = env.ACS_LOCAL_ADVISOR_BASE_URL;
-    const pinnedDigest = digestFromEnv(env);
     let model = env.ACS_LOCAL_ADVISOR_MODEL;
     let expected = pinnedDigest;
     if (!model) {
@@ -67,7 +79,6 @@ export function createAdvise(env: AdvisorEnv, deps: AdviseDeps = {}): Advise {
     const cacheKey = JSON.stringify([model, expected ?? null, baseUrl ?? null]);
     let provider = providers.get(cacheKey);
     if (!provider) {
-      const minRaw = env.ACS_LOCAL_ADVISOR_MIN_FREE_BYTES;
       provider = new OllamaProvider({
         model,
         baseUrl,
@@ -75,7 +86,7 @@ export function createAdvise(env: AdvisorEnv, deps: AdviseDeps = {}): Advise {
         fetchImpl: deps.fetchImpl,
         maxConcurrency: 1,
         retries: 1,
-        minFreeMemoryBytes: minRaw ? Number(minRaw) : undefined
+        minFreeMemoryBytes
       });
       providers.set(cacheKey, provider);
     }

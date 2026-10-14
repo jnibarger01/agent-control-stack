@@ -20,7 +20,7 @@ import { LocalAdvisorMcpServer } from "./server.js";
 assertDirectLoopbackEgress(
   process.env,
   process.execArgv,
-  process.env.ACS_LOCAL_ADVISOR_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL
+  process.env.ACS_LOCAL_ADVISOR_BASE_URL || DEFAULT_OLLAMA_BASE_URL
 );
 
 const advise = createAdvise(process.env);

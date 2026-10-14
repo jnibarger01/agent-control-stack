@@ -33,6 +33,27 @@ describe("createAdvise: startup validation", () => {
     expect(() => createAdvise({ ACS_LOCAL_ADVISOR_ROUTES: "{not json" })).toThrow();
     expect(() => createAdvise({ ACS_LOCAL_ADVISOR_ROUTES: JSON.stringify([{ bogus: true }]) })).toThrow();
   });
+
+  it.each([
+    { ACS_LOCAL_ADVISOR_EXPECTED_DIGEST: "sha256:zz" },
+    { ACS_LOCAL_ADVISOR_BASE_URL: "http://evil.example" },
+    { ACS_LOCAL_ADVISOR_BASE_URL: "not a url" },
+    { ACS_LOCAL_ADVISOR_MIN_FREE_BYTES: "abc" },
+    { ACS_LOCAL_ADVISOR_MIN_FREE_BYTES: "-1" },
+    { ACS_LOCAL_ADVISOR_MIN_FREE_BYTES: "1.5" }
+  ])("rejects invalid settings at startup: %j", (env) => {
+    expect(() => createAdvise(env)).toThrow();
+  });
+
+  it("accepts valid settings at startup", () => {
+    expect(() =>
+      createAdvise({
+        ACS_LOCAL_ADVISOR_EXPECTED_DIGEST: `sha256:${"e".repeat(64)}`,
+        ACS_LOCAL_ADVISOR_BASE_URL: "http://127.0.0.1:11434",
+        ACS_LOCAL_ADVISOR_MIN_FREE_BYTES: "1073741824"
+      })
+    ).not.toThrow();
+  });
 });
 
 describe("createAdvise: provider cache identity", () => {
@@ -41,18 +62,37 @@ describe("createAdvise: provider cache identity", () => {
     const fetchImpl = (async (input: string | URL | Request) => {
       const url = input instanceof URL ? input : new URL(String(input));
       if (url.pathname === "/api/tags") {
-        return new Response(JSON.stringify({ models: [{ name: "qwen2.5-coder:7b", digest: installedHex, capabilities: ["completion"] }] }));
+        return new Response(
+          JSON.stringify({ models: [{ name: "qwen2.5-coder:7b", digest: installedHex, capabilities: ["completion"] }] })
+        );
       }
-      return new Response(JSON.stringify({ message: { content: JSON.stringify({ verdict: "PASS", findings: [], recommendedActions: [] }) } }));
+      return new Response(
+        JSON.stringify({
+          message: { content: JSON.stringify({ verdict: "PASS", findings: [], recommendedActions: [] }) }
+        })
+      );
     }) as unknown as typeof fetch;
     const routes = [
-      { role: "architecture", model: "qwen2.5-coder:7b", operations: ["review_plan"], expectedDigest: `sha256:${installedHex}` },
-      { role: "triage", model: "qwen2.5-coder:7b", operations: ["diagnose_failure"], expectedDigest: `sha256:${"d".repeat(64)}` }
+      {
+        role: "architecture",
+        model: "qwen2.5-coder:7b",
+        operations: ["review_plan"],
+        expectedDigest: `sha256:${installedHex}`
+      },
+      {
+        role: "triage",
+        model: "qwen2.5-coder:7b",
+        operations: ["diagnose_failure"],
+        expectedDigest: `sha256:${"d".repeat(64)}`
+      }
     ];
     const advise = createAdvise({ ACS_LOCAL_ADVISOR_ROUTES: JSON.stringify(routes) }, { fetchImpl });
     const first = await advise(request, new AbortController().signal);
     expect(first.status).toBe("completed");
-    const second = await advise({ ...request, operation: "diagnose_failure" } as AdvisorRequest, new AbortController().signal);
+    const second = await advise(
+      { ...request, operation: "diagnose_failure" } as AdvisorRequest,
+      new AbortController().signal
+    );
     expect(second).toMatchObject({ status: "unavailable", reason: "model_digest_mismatch" });
   });
 });
