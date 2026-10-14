@@ -138,6 +138,8 @@ function script(actions: CuaAction[], extra: { applications?: string[]; origins?
   };
 }
 
+const LIVE = { claimToken: "claim-super-secret" };
+
 function claimed(payload: ReturnType<typeof script> | { kind: "cua"; objective: string }) {
   const store = new CodingMissionStore(":memory:");
   store.createGeneral({ missionId: "m1", summary: "cua", now: T0 });
@@ -232,6 +234,22 @@ describe("CUA payload boundary", () => {
 });
 
 describe("governed CUA browser execution", () => {
+  it("refuses a missing claim before opening the browser", async () => {
+    const { adapter, dispatch, opens, checkpoints } = harness(script([{ type: "observe" }]));
+    await expect(adapter.execute(dispatch)).rejects.toMatchObject({ code: "coding_mission_claim_conflict" });
+    expect(opens()).toBe(0);
+    expect(checkpoints()).toEqual([]);
+  });
+
+  it("refuses a forged claim before opening the browser", async () => {
+    const { adapter, dispatch, opens, checkpoints } = harness(script([{ type: "observe" }]));
+    await expect(adapter.execute(dispatch, undefined, { claimToken: "forged-token" })).rejects.toMatchObject({
+      code: "coding_mission_claim_conflict"
+    });
+    expect(opens()).toBe(0);
+    expect(checkpoints()).toEqual([]);
+  });
+
   it("stores hashes for an allowlisted script and never the screenshot bytes or typed text", async () => {
     const actions: CuaAction[] = [
       { type: "observe" },
@@ -241,7 +259,7 @@ describe("governed CUA browser execution", () => {
       { type: "scroll", dx: 0, dy: 40 }
     ];
     const { adapter, dispatch, page, checkpoints } = harness(script(actions));
-    const result = await adapter.execute(dispatch);
+    const result = await adapter.execute(dispatch, undefined, LIVE);
     expect(result).toMatchObject({
       outcome: "succeeded",
       externalStateUncertain: false,
@@ -273,7 +291,7 @@ describe("governed CUA browser execution", () => {
     const { adapter, dispatch, checkpoints, opens, page } = harness(
       script([{ type: "navigate", url: "https://evil.example/phish" }])
     );
-    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
       outcome: "failed",
       externalStateUncertain: false,
       failure: { category: "policy_denied", nativeCode: "cua_origin_denied", retrySafe: false }
@@ -285,7 +303,7 @@ describe("governed CUA browser execution", () => {
 
   it("refuses an application outside the allowlist before any page call", async () => {
     const { adapter, dispatch, checkpoints, opens } = harness(script([{ type: "observe" }]), "terminal");
-    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
       outcome: "failed",
       failure: { category: "policy_denied", nativeCode: "cua_application_denied" }
     });
@@ -303,7 +321,7 @@ describe("governed CUA browser execution", () => {
     ];
     for (const payload of cases) {
       const { adapter, dispatch, checkpoints, opens } = harness(payload);
-      await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+      await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
         outcome: "failed",
         failure: { category: "policy_denied", retrySafe: false }
       });
@@ -316,7 +334,7 @@ describe("governed CUA browser execution", () => {
     const { adapter, dispatch, checkpoints, opens, page } = harness(
       script([{ type: "navigate", url: "javascript:alert(1)" }])
     );
-    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
       outcome: "failed",
       failure: { nativeCode: "cua_scheme_denied" }
     });
@@ -333,7 +351,7 @@ describe("governed CUA browser execution", () => {
       ])
     );
     page.redirectTo = "https://evil.example/landed";
-    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
       outcome: "unknown",
       externalStateUncertain: true,
       failure: { retrySafe: false }
@@ -360,7 +378,7 @@ describe("governed CUA browser execution", () => {
         .prepare("UPDATE work_unit_execution_attempts SET authority_json = ? WHERE attempt_id = ?")
         .run(JSON.stringify({ fencingToken: 8 }), dispatch.attemptId);
     }
-    await expect(adapter.execute(dispatch)).rejects.toThrow(/CUA (fence|fencing token)/);
+    await expect(adapter.execute(dispatch, undefined, LIVE)).rejects.toThrow(/CUA (fence|fencing token)/);
     expect(checkpoints()).toEqual([]);
     expect(opens()).toBe(0);
     expect(page.calls).toEqual([]);
@@ -375,7 +393,7 @@ describe("governed CUA browser execution", () => {
       ])
     );
     const signal = AbortSignal.abort();
-    await expect(adapter.execute(dispatch, signal)).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, signal, LIVE)).resolves.toMatchObject({
       outcome: "cancelled",
       externalStateUncertain: false,
       failure: { category: "cancelled", retrySafe: false }
@@ -396,7 +414,7 @@ describe("governed CUA browser execution", () => {
       await original(url);
       controller.abort();
     };
-    await expect(adapter.execute(dispatch, controller.signal)).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, controller.signal, LIVE)).resolves.toMatchObject({
       outcome: "cancelled",
       externalStateUncertain: true,
       receipts: [expect.objectContaining({ kind: "cua_navigate" })],
@@ -415,7 +433,7 @@ describe("governed CUA browser execution", () => {
       ])
     );
     page.failClick = true;
-    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
       outcome: "unknown",
       externalStateUncertain: true,
       receipts: [expect.objectContaining({ kind: "cua_navigate" })],
@@ -427,7 +445,7 @@ describe("governed CUA browser execution", () => {
     ]);
     expect(page.calls).toEqual(["open:browser", `goto:${ORIGIN}/inbox`, "click:#go"]);
     expect(page.current).toBe(`${ORIGIN}/inbox`);
-    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
       outcome: "unknown",
       externalStateUncertain: true,
       receipts: [expect.objectContaining({ kind: "cua_navigate" })]
@@ -441,13 +459,13 @@ describe("governed CUA browser execution", () => {
     const { adapter, dispatch, page, checkpoints, opens } = harness(
       script([{ type: "navigate", url: `${ORIGIN}/inbox` }, { type: "observe" }])
     );
-    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
       outcome: "succeeded",
       externalStateUncertain: false,
       receipts: [expect.objectContaining({ kind: "cua_navigate" }), expect.objectContaining({ kind: "cua_observe" })]
     });
     const calls = [...page.calls];
-    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
       outcome: "unknown",
       externalStateUncertain: true,
       receipts: [expect.objectContaining({ kind: "cua_navigate" }), expect.objectContaining({ kind: "cua_observe" })],
@@ -465,9 +483,11 @@ describe("governed CUA browser execution", () => {
         { type: "click", selector: "#go" }
       ])
     );
-    await expect(adapter.execute(dispatch)).resolves.toMatchObject({ outcome: "succeeded" });
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
+      outcome: "succeeded"
+    });
     const calls = page.calls.length;
-    await expect(adapter.execute(dispatch, AbortSignal.abort())).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, AbortSignal.abort(), LIVE)).resolves.toMatchObject({
       outcome: "cancelled",
       externalStateUncertain: true,
       receipts: [expect.objectContaining({ kind: "cua_navigate" }), expect.objectContaining({ kind: "cua_click" })],
@@ -479,11 +499,11 @@ describe("governed CUA browser execution", () => {
 
   it("cancels an observe-only checkpoint without claiming an external effect", async () => {
     const { adapter, dispatch, opens } = harness(script([{ type: "observe" }]));
-    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
       outcome: "succeeded",
       receipts: [expect.objectContaining({ kind: "cua_observe" })]
     });
-    await expect(adapter.execute(dispatch, AbortSignal.abort())).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, AbortSignal.abort(), LIVE)).resolves.toMatchObject({
       outcome: "cancelled",
       externalStateUncertain: false,
       receipts: [expect.objectContaining({ kind: "cua_observe" })],
@@ -501,7 +521,7 @@ describe("governed CUA browser execution", () => {
       script([{ type: "navigate", url: `${ORIGIN}/inbox` }, action, { type: "observe" }])
     );
     page.followTo = "https://evil.example/after";
-    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
       outcome: "unknown",
       externalStateUncertain: true,
       receipts: [expect.objectContaining({ kind: "cua_navigate" })],
@@ -530,7 +550,7 @@ describe("governed CUA browser execution", () => {
       if (reads === 1) page.current = "https://evil.example/drift";
       return value;
     };
-    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
       outcome: "unknown",
       externalStateUncertain: true,
       receipts: [expect.objectContaining({ kind: "cua_navigate" })],
@@ -546,7 +566,7 @@ describe("governed CUA browser execution", () => {
   it("refuses a click on the fresh about:blank page before opening", async () => {
     const { adapter, dispatch, page, checkpoints, opens } = harness(script([{ type: "click", selector: "#go" }]));
     page.current = `${ORIGIN}/inbox`;
-    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
       outcome: "failed",
       externalStateUncertain: false,
       failure: { category: "policy_denied", nativeCode: "cua_origin_denied", retrySafe: false }
@@ -621,7 +641,7 @@ describe("R4: typed secrets are broker-resolved references", () => {
         }
       }
     );
-    const result = await adapter.execute(dispatch);
+    const result = await adapter.execute(dispatch, undefined, LIVE);
     expect(result).toMatchObject({ outcome: "succeeded" });
     expect(page.calls).toContain(`fill:#password:${BROKERED}`);
     expect(resolved).toEqual([
@@ -645,7 +665,7 @@ describe("R4: typed secrets are broker-resolved references", () => {
     const { adapter, dispatch, page, opens, checkpoints } = harness(
       script([{ type: "type", selector: "#password", secretRef: "APP_LOGIN" }])
     );
-    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
       outcome: "failed",
       failure: { category: "policy_denied", nativeCode: "cua_secret_unavailable" }
     });
@@ -693,7 +713,9 @@ describe("R4: typed secrets are broker-resolved references", () => {
 describe("R3: browser boundary", () => {
   it("enforces the origin allowlist on the whole context before the first action", async () => {
     const { adapter, dispatch, page } = harness(script([{ type: "navigate", url: `${ORIGIN}/inbox` }]));
-    await expect(adapter.execute(dispatch)).resolves.toMatchObject({ outcome: "succeeded" });
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
+      outcome: "succeeded"
+    });
     expect(page.fakeContext.routes).toHaveLength(1);
     await expect(page.fakeContext.request(`${ORIGIN}/api`)).resolves.toBe(true);
     await expect(page.fakeContext.request("https://evil.example/exfil")).resolves.toBe(false);
@@ -715,7 +737,7 @@ describe("R3: browser boundary", () => {
         page.fakeContext.popup(popup);
       }
     });
-    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
       outcome: "unknown",
       externalStateUncertain: true
     });
@@ -732,7 +754,9 @@ describe("R3: browser boundary", () => {
   it("fails closed when the page exposes no browser context", async () => {
     const { adapter, dispatch, page, checkpoints } = harness(script([{ type: "observe" }]));
     (page as unknown as { context: unknown }).context = undefined;
-    await expect(adapter.execute(dispatch)).resolves.toMatchObject({ outcome: "unknown" });
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
+      outcome: "unknown"
+    });
     expect(page.calls).not.toContain("screenshot");
     expect(checkpoints().map((row) => row.state)).toEqual(["uncertain"]);
     expect(page.closed).toBe(true);
@@ -749,7 +773,9 @@ describe("R3: browser boundary", () => {
       store.db.prepare("UPDATE coding_operations SET worker_id = 'worker-2' WHERE operation_id = 'u1'").run();
       return opened;
     };
-    await expect(adapter.execute(dispatch)).rejects.toMatchObject({ code: "coding_mission_claim_conflict" });
+    await expect(adapter.execute(dispatch, undefined, LIVE)).rejects.toMatchObject({
+      code: "coding_mission_claim_conflict"
+    });
     expect(page.calls).not.toContain("screenshot");
     expect(page.closed).toBe(true);
   });
@@ -759,7 +785,7 @@ describe("R3: browser boundary", () => {
       actionTimeoutMs: 30
     });
     page.screenshot = () => new Promise<Uint8Array>(() => undefined);
-    await expect(adapter.execute(dispatch)).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
       outcome: "unknown",
       externalStateUncertain: true
     });
@@ -785,7 +811,7 @@ describe("R3: browser boundary", () => {
         return new Promise<void>(() => undefined);
       }
     });
-    await expect(adapter.execute(dispatch, controller.signal)).resolves.toMatchObject({
+    await expect(adapter.execute(dispatch, controller.signal, LIVE)).resolves.toMatchObject({
       outcome: "cancelled",
       externalStateUncertain: true
     });
@@ -803,7 +829,7 @@ describe("R3: browser boundary", () => {
       authority: ALLOW,
       actionTimeoutMs: 30
     });
-    await expect(adapter.execute(ctx.dispatch)).resolves.toMatchObject({ outcome: "unknown" });
+    await expect(adapter.execute(ctx.dispatch, undefined, LIVE)).resolves.toMatchObject({ outcome: "unknown" });
   });
 });
 
@@ -821,7 +847,7 @@ describe("R1: evidence-bound CUA acceptance", () => {
 
   it("accepts a result whose receipts are rebuilt from the committed checkpoints", async () => {
     const { adapter, dispatch, ledger, claim } = harness(twoStep());
-    const result = await adapter.execute(dispatch);
+    const result = await adapter.execute(dispatch, undefined, LIVE);
     expect(result.outcome).toBe("succeeded");
     expect(ledger.applyResult({ claimToken: claim.token, result })).toEqual({ applied: "completed" });
   });
@@ -843,7 +869,7 @@ describe("R1: evidence-bound CUA acceptance", () => {
 
   it("refuses receipts that differ from the committed checkpoints", async () => {
     const { adapter, dispatch, ledger, claim } = harness(twoStep());
-    const result = await adapter.execute(dispatch);
+    const result = await adapter.execute(dispatch, undefined, LIVE);
     const forged = { ...result, receipts: [...result.receipts, { kind: "cua_click", hash: "e".repeat(64) }] };
     expect(ledger.applyResult({ claimToken: claim.token, result: forged })).toMatchObject({
       applied: "rejected_invalid",
@@ -859,7 +885,7 @@ describe("R1: evidence-bound CUA acceptance", () => {
       await original(url);
       controller.abort();
     };
-    const partial = await adapter.execute(dispatch, controller.signal);
+    const partial = await adapter.execute(dispatch, controller.signal, LIVE);
     const forged = {
       ...partial,
       outcome: "succeeded" as const,
@@ -875,7 +901,7 @@ describe("R1: evidence-bound CUA acceptance", () => {
 
   it("rejects a cua unit with no actions instead of reporting success", async () => {
     const { adapter, dispatch, ledger, claim, opens } = harness(script([]));
-    const result = await adapter.execute(dispatch);
+    const result = await adapter.execute(dispatch, undefined, LIVE);
     expect(result).toMatchObject({
       outcome: "failed",
       failure: { category: "invalid_output", nativeCode: "cua_payload_invalid" }
@@ -903,10 +929,12 @@ describe("R1: evidence-bound CUA acceptance", () => {
       await gate;
       await original(url);
     };
-    const first = adapter.execute(dispatch);
+    const first = adapter.execute(dispatch, undefined, LIVE);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(checkpoints().map((row) => row.state)).toEqual(["planned"]);
-    await expect(adapter.execute(dispatch)).rejects.toMatchObject({ code: "cua_execution_in_progress" });
+    await expect(adapter.execute(dispatch, undefined, LIVE)).rejects.toMatchObject({
+      code: "cua_execution_in_progress"
+    });
     expect(checkpoints().map((row) => row.state)).toEqual(["planned"]);
     release();
     await expect(first).resolves.toMatchObject({ outcome: "succeeded" });
@@ -967,10 +995,12 @@ describe("R1: evidence-bound CUA acceptance", () => {
       }
     };
     const adapter = new CuaExecutionAdapter(store, browser, "browser", () => T2, { authority: ALLOW });
-    const first = adapter.execute(firstDispatch);
+    const first = adapter.execute(firstDispatch, undefined, LIVE);
     await new Promise((resolve) => setTimeout(resolve, 20));
     // A second attempt runs to completion on the SAME adapter while the first is mid-action.
-    await expect(adapter.execute(dispatchB)).resolves.toMatchObject({ outcome: "succeeded" });
+    await expect(adapter.execute(dispatchB, undefined, { claimToken: "claim-two" })).resolves.toMatchObject({
+      outcome: "succeeded"
+    });
     release();
     await expect(first).resolves.toMatchObject({ outcome: "succeeded" });
     const states = store.db
@@ -987,17 +1017,21 @@ describe("R1: evidence-bound CUA acceptance", () => {
 
   it("recovers a planned checkpoint only after the previous owner's lock expired", async () => {
     const { adapter, dispatch, store, checkpoints } = harness(twoStep());
-    const first = await adapter.execute(dispatch);
+    const first = await adapter.execute(dispatch, undefined, LIVE);
     expect(first.outcome).toBe("succeeded");
     // Simulate a crashed owner: a planned row past the end of the script cannot exist, so plant a stale lock instead.
     store.db
       .prepare("INSERT INTO cua_execution_locks (attempt_id, owner_id, expires_at) VALUES (?, 'crashed', ?)")
       .run(dispatch.attemptId, "2099-01-01T00:00:00.000Z");
-    await expect(adapter.execute(dispatch)).rejects.toMatchObject({ code: "cua_execution_in_progress" });
+    await expect(adapter.execute(dispatch, undefined, LIVE)).rejects.toMatchObject({
+      code: "cua_execution_in_progress"
+    });
     store.db
       .prepare("UPDATE cua_execution_locks SET expires_at = ? WHERE attempt_id = ?")
       .run("2000-01-01T00:00:00.000Z", dispatch.attemptId);
-    await expect(adapter.execute(dispatch)).resolves.toMatchObject({ outcome: "unknown" });
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({
+      outcome: "unknown"
+    });
     expect(checkpoints().map((row) => row.state)).toEqual(["committed", "committed"]);
   });
 
@@ -1023,9 +1057,11 @@ describe("R1: evidence-bound CUA acceptance", () => {
       await original(url);
       controller.abort();
     };
-    const partial = await adapter.execute(dispatch, controller.signal);
+    const partial = await adapter.execute(dispatch, controller.signal, LIVE);
     store.db.exec(tamper);
-    await expect(adapter.execute(dispatch)).rejects.toMatchObject({ code: "cua_checkpoint_integrity" });
+    await expect(adapter.execute(dispatch, undefined, LIVE)).rejects.toMatchObject({
+      code: "cua_checkpoint_integrity"
+    });
     expect(ledger.applyResult({ claimToken: claim.token, result: partial })).toMatchObject({
       applied: "rejected_invalid",
       reason: expect.stringContaining("cua checkpoint integrity failure")
@@ -1034,7 +1070,7 @@ describe("R1: evidence-bound CUA acceptance", () => {
 
   it("binds the selected application into every checkpoint and receipt hash", async () => {
     const { adapter, dispatch, checkpoints } = harness(twoStep());
-    await adapter.execute(dispatch);
+    await adapter.execute(dispatch, undefined, LIVE);
     const rows = checkpoints();
     expect(rows.map((row) => row.application)).toEqual(["browser", "browser"]);
     const row = rows[0]!;
@@ -1055,7 +1091,7 @@ describe("R1: evidence-bound CUA acceptance", () => {
 
   it("uses domain-separated hashes for checkpoints, actions and results", async () => {
     const { adapter, dispatch, checkpoints } = harness(twoStep());
-    const result = await adapter.execute(dispatch);
+    const result = await adapter.execute(dispatch, undefined, LIVE);
     const rows = checkpoints();
     const actions = (dispatch.payload as { actions: unknown[] }).actions;
     const core = {
@@ -1084,9 +1120,9 @@ describe("R1: evidence-bound CUA acceptance", () => {
       await original(url);
       controller.abort();
     };
-    await ctx.adapter.execute(ctx.dispatch, controller.signal);
+    await ctx.adapter.execute(ctx.dispatch, controller.signal, LIVE);
     const other = new CuaExecutionAdapter(ctx.store, { open: async () => ctx.page }, "browser-profile-2", () => T2);
-    await expect(other.execute(ctx.dispatch)).rejects.toMatchObject({
+    await expect(other.execute(ctx.dispatch, undefined, LIVE)).rejects.toMatchObject({
       code: "cua_checkpoint_integrity",
       message: expect.stringContaining("application_mismatch")
     });
@@ -1118,7 +1154,9 @@ describe("R2: the executor runs only the stored dispatch", () => {
     ];
     for (const edit of edits) {
       const h = harness(script(actions));
-      await expect(h.adapter.execute(tampered(h.dispatch, edit))).rejects.toMatchObject({
+      await expect(
+        h.adapter.execute(tampered(h.dispatch, edit), undefined, { claimToken: h.claim.token })
+      ).rejects.toMatchObject({
         code: "cua_dispatch_mismatch"
       });
       expect(h.opens()).toBe(0);
@@ -1134,7 +1172,9 @@ describe("R2: the executor runs only the stored dispatch", () => {
       p.actions = [{ type: "navigate", url: "https://evil.example/" }];
     });
     // Recomputing payloadHash on the caller side does not help: the stored dispatch hash is the authority.
-    await expect(h.adapter.execute(widened)).rejects.toMatchObject({ code: "cua_dispatch_mismatch" });
+    await expect(h.adapter.execute(widened, undefined, { claimToken: h.claim.token })).rejects.toMatchObject({
+      code: "cua_dispatch_mismatch"
+    });
     expect(h.opens()).toBe(0);
   });
 
@@ -1143,7 +1183,7 @@ describe("R2: the executor runs only the stored dispatch", () => {
     // The attempt lock references the attempt row, so an unknown attempt is refused before the stored-dispatch load
     // (FOREIGN KEY on cua_execution_locks); executeLocked's own cua_dispatch_missing check is the second line.
     const unknown = { ...h.dispatch, attemptId: "attempt-never-stored" };
-    await expect(h.adapter.execute(unknown)).rejects.toThrow();
+    await expect(h.adapter.execute(unknown, undefined, { claimToken: h.claim.token })).rejects.toThrow();
     expect(h.opens()).toBe(0);
   });
 
@@ -1152,7 +1192,9 @@ describe("R2: the executor runs only the stored dispatch", () => {
     h.store.db
       .prepare("UPDATE work_unit_execution_attempts SET executor_lane = 'coder' WHERE attempt_id = ?")
       .run(h.dispatch.attemptId);
-    await expect(h.adapter.execute(h.dispatch)).rejects.toMatchObject({ code: "cua_dispatch_missing" });
+    await expect(h.adapter.execute(h.dispatch, undefined, { claimToken: h.claim.token })).rejects.toMatchObject({
+      code: "cua_dispatch_missing"
+    });
     expect(h.opens()).toBe(0);
   });
 
@@ -1166,8 +1208,12 @@ describe("R2: the executor runs only the stored dispatch", () => {
     h.store.db
       .prepare("UPDATE work_unit_execution_attempts SET dispatch_json = ? WHERE attempt_id = ?")
       .run(JSON.stringify(stored), h.dispatch.attemptId);
-    await expect(h.adapter.execute(stored)).rejects.toMatchObject({ code: "cua_dispatch_integrity" });
-    await expect(h.adapter.execute(h.dispatch)).rejects.toMatchObject({ code: "cua_dispatch_integrity" });
+    await expect(h.adapter.execute(stored, undefined, { claimToken: h.claim.token })).rejects.toMatchObject({
+      code: "cua_dispatch_integrity"
+    });
+    await expect(h.adapter.execute(h.dispatch, undefined, { claimToken: h.claim.token })).rejects.toMatchObject({
+      code: "cua_dispatch_integrity"
+    });
     expect(h.opens()).toBe(0);
   });
 
@@ -1176,13 +1222,17 @@ describe("R2: the executor runs only the stored dispatch", () => {
     h.store.db
       .prepare("UPDATE work_unit_execution_attempts SET dispatch_hash = ? WHERE attempt_id = ?")
       .run("0".repeat(64), h.dispatch.attemptId);
-    await expect(h.adapter.execute(h.dispatch)).rejects.toMatchObject({ code: "cua_dispatch_integrity" });
+    await expect(h.adapter.execute(h.dispatch, undefined, { claimToken: h.claim.token })).rejects.toMatchObject({
+      code: "cua_dispatch_integrity"
+    });
     expect(h.opens()).toBe(0);
   });
 
   it("runs the unmodified stored dispatch", async () => {
     const h = harness(script(actions));
-    const result = await h.adapter.execute(JSON.parse(JSON.stringify(h.dispatch)) as DispatchEnvelope);
+    const result = await h.adapter.execute(JSON.parse(JSON.stringify(h.dispatch)) as DispatchEnvelope, undefined, {
+      claimToken: h.claim.token
+    });
     expect(result.outcome).toBe("succeeded");
     expect(h.opens()).toBe(1);
   });
@@ -1220,7 +1270,7 @@ describe("R2: the executor runs only the stored dispatch", () => {
       () => f.iso(2_100),
       { authority: f.ledger }
     );
-    const result = await adapter.execute(dispatch);
+    const result = await adapter.execute(dispatch, undefined, { claimToken: f.claim.token });
     expect(result.outcome).toBe("succeeded");
     expect(opens).toBe(1);
   });
@@ -1268,7 +1318,7 @@ describe("R2: live authority re-check at the browser boundary", () => {
     return { ...f, dispatch, adapter, page, opens: () => opens };
   }
   const refusedBeforeBrowser = async (h: ReturnType<typeof realGrant>, code: string) => {
-    const result = await h.adapter.execute(h.dispatch);
+    const result = await h.adapter.execute(h.dispatch, undefined, { claimToken: h.claim.token });
     expect(result).toMatchObject({ outcome: "failed" });
     expect(JSON.stringify(result)).toContain(code);
     expect(h.opens()).toBe(0);
@@ -1278,7 +1328,9 @@ describe("R2: live authority re-check at the browser boundary", () => {
   it("passes a still-valid grant and opens the browser", async () => {
     const h = realGrant();
     h.state.now = h.iso(2_100);
-    await expect(h.adapter.execute(h.dispatch)).resolves.toMatchObject({ outcome: "succeeded" });
+    await expect(h.adapter.execute(h.dispatch, undefined, { claimToken: h.claim.token })).resolves.toMatchObject({
+      outcome: "succeeded"
+    });
     expect(h.opens()).toBe(1);
   });
 
@@ -1358,7 +1410,7 @@ describe("R2: live authority re-check at the browser boundary", () => {
       "browser",
       () => T2
     );
-    await expect(unconfigured.execute(ctx.dispatch)).resolves.toMatchObject({ outcome: "failed" });
+    await expect(unconfigured.execute(ctx.dispatch, undefined, LIVE)).resolves.toMatchObject({ outcome: "failed" });
     expect(opened).toBe(0);
   });
 
@@ -1373,7 +1425,7 @@ describe("R2: live authority re-check at the browser boundary", () => {
       })
     });
     h.state.now = h.iso(2_100);
-    const result = await h.adapter.execute(h.dispatch);
+    const result = await h.adapter.execute(h.dispatch, undefined, { claimToken: h.claim.token });
     expect(JSON.stringify(result)).toContain("cua_authority_revoked");
     expect(h.opens()).toBe(1);
     expect(h.page.calls.filter((call) => call === "screenshot")).toEqual([]);

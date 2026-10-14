@@ -16,6 +16,7 @@ import {
   boundedText,
   resultBase,
   type DispatchEnvelope,
+  type ExecutionClaim,
   type ExecutionReceipt,
   type ResultEnvelope,
   type WorkUnitExecutorAdapter
@@ -372,9 +373,13 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     }
   }
 
-  async execute(dispatch: DispatchEnvelope, signal?: AbortSignal): Promise<ResultEnvelope> {
+  async execute(dispatch: DispatchEnvelope, signal?: AbortSignal, claim?: ExecutionClaim): Promise<ResultEnvelope> {
     if (dispatch.lane !== this.lane) {
       throw new ControlStackError("execution_lane_mismatch", `cua adapter cannot execute ${dispatch.lane}`);
+    }
+    // Only the live claim holder may open the browser: a missing or forged claim is refused before any side effect.
+    if (!claim || stableHash(claim.claimToken) !== dispatch.claimTokenHash) {
+      throw new ControlStackError("coding_mission_claim_conflict", "CUA execution requires the live claim token");
     }
     // One live executor per attempt: a second run cannot observe, settle or extend the first one's checkpoints.
     const owner = this.acquireLock(dispatch);
