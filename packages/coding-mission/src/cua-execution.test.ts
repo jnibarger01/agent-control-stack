@@ -1414,6 +1414,24 @@ describe("R2: live authority re-check at the browser boundary", () => {
     expect(opened).toBe(0);
   });
 
+  it("re-checks authority after the browser opens: a revocation during open stops the first action", async () => {
+    const h = realGrant();
+    h.state.now = h.iso(2_100);
+    const browser = (h.adapter as unknown as { browser: CuaBrowserProvider }).browser;
+    const open = browser.open.bind(browser);
+    browser.open = async (application: string) => {
+      const opened = await open(application);
+      h.items.revokeAutonomousAuthority(h.grant.grantId, HUMAN, "stop", { via: "policy_gate", actorId: HUMAN });
+      return opened;
+    };
+    const result = await h.adapter.execute(h.dispatch, undefined, { claimToken: h.claim.token });
+    expect(JSON.stringify(result)).toContain("cua_authority_revoked");
+    expect(result).toMatchObject({ outcome: "failed", externalStateUncertain: true, failure: { retrySafe: false } });
+    expect(h.opens()).toBe(1);
+    expect(h.page.calls.filter((call) => call.startsWith("goto:"))).toEqual([]);
+    expect(h.page.closed).toBe(true);
+  });
+
   it("re-checks before every action: a revocation mid-script stops the next step", async () => {
     let calls = 0;
     const h = realGrant({

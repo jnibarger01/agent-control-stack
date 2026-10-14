@@ -627,6 +627,17 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
           // Ownership is re-checked immediately before every browser action. A stale worker stops here, before acting.
           // The window between this check and the browser call cannot be closed; an effect inside it is uncertain.
           this.assertFence(dispatch);
+          // Authority is re-read after the browser is open and right before acting: opening can take long enough for a
+          // grant to be revoked, expire or pass its deadline after the pre-plan check above. No action has run on this
+          // checkpoint, but the browser was opened under it, so it is settled uncertain and the refusal is not retryable.
+          const liveRefusal = this.authorityRefusal(stored, origins, applications);
+          if (liveRefusal) {
+            this.finish(dispatch, owner, sequence, action.type, hash, "uncertain", {
+              uncertain: true,
+              origin: pageOrigin(page.url())
+            });
+            return this.refusedAfterOpen(dispatch, liveRefusal, receipts);
+          }
           const effect = await this.perform(dispatch, page, action, origins, requireAllowlisted, signal);
           if (session && this.contextEscaped(session)) effect.uncertain = true;
           if (effect.uncertain) {
@@ -939,6 +950,22 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
         retrySafe: false
       },
       externalStateUncertain: false
+    };
+  }
+
+  /** A policy refusal after the browser opened on a planned checkpoint: failed, never retry-safe, state uncertain. */
+  private refusedAfterOpen(dispatch: DispatchEnvelope, code: string, receipts: ExecutionReceipt[]): ResultEnvelope {
+    return {
+      ...resultBase(dispatch, this.now()),
+      outcome: "failed",
+      receipts,
+      failure: {
+        category: "policy_denied",
+        nativeCode: boundedText(code),
+        nativeMessage: boundedText("CUA authority no longer covers this attempt"),
+        retrySafe: false
+      },
+      externalStateUncertain: true
     };
   }
 
