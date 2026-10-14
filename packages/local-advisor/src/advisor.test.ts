@@ -199,9 +199,9 @@ describe("runAdvisor: prompt-injection and evidence handling", () => {
   });
 
   it("redacts credentials before inference and hashing, and the hash reflects the redacted text", async () => {
-    const secret = "AKIAABCDEFGHIJKLMNOP";
+    const secret = "AKIA" + "ABCDEFGHIJKLMNOP";
     const provider = new FakeProvider(() => ok(verdictJson("PASS")));
-    const response = await runAdvisor(request({}, `key=${secret} token: "ghp_${"a".repeat(36)}"`), provider);
+    const response = await runAdvisor(request({}, `key=${secret} token: "${"ghp" + "_"}${"a".repeat(36)}"`), provider);
     expect(provider.calls[0]?.user).not.toContain(secret);
     expect(provider.calls[0]?.user).toContain("[REDACTED:aws_key]");
     expect(response.evidenceHashes["diff-1"]).toMatch(/^sha256:[a-f0-9]{64}$/u);

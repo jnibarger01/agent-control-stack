@@ -4,9 +4,9 @@ import { redactText } from "./redact.js";
 describe("redactText", () => {
   it("removes common credential shapes and counts them", () => {
     const input = [
-      "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----",
-      "aws AKIAABCDEFGHIJKLMNOP",
-      "gh ghp_" + "x".repeat(36),
+      "-----BEGIN RSA " + "PRIVATE KEY-----\nMIIB\n-----END RSA " + "PRIVATE KEY-----",
+      "aws " + "AKIA" + "ABCDEFGHIJKLMNOP",
+      "gh " + "ghp" + "_" + "x".repeat(36),
       "Authorization: Bearer abcdefghijklmnopqrstuv",
       "password=hunter22secret",
       "api_key: 'supersecretvalue'"
