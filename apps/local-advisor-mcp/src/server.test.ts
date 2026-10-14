@@ -298,18 +298,60 @@ describe("local advisor MCP", () => {
     expect(out.map((f) => f.id)).toEqual([1, 2]);
   });
 
-  it("refuses a header preceded by spaces without locking the session into NDJSON", async () => {
+  it("consumes any amount of leading whitespace before the first frame instead of stalling", async () => {
     const h = harness(async () => failed());
-    const frame = (id: number) => {
-      const body = JSON.stringify({ jsonrpc: "2.0", id, method: "ping" });
+    const ping = (id: number) => JSON.stringify({ jsonrpc: "2.0", id, method: "ping" });
+    // More whitespace than any fixed peek window, then 20 LSP frames and one stray NDJSON line, each its own write.
+    h.input.write(" ".repeat(65));
+    for (let id = 1; id <= 20; id++) h.input.write(`Content-Length: ${Buffer.byteLength(ping(id))}\r\n\r\n${ping(id)}`);
+    h.input.write(`${ping(21)}\n`);
+    await settle(h.server);
+    const out = frames(h.text()) as Array<{ id?: unknown; error?: { message?: string } }>;
+    expect(out.filter((f) => f.id !== null).map((f) => f.id)).toEqual(Array.from({ length: 20 }, (_, k) => k + 1));
+    // The NDJSON line in an LSP session is refused at once rather than buffered until a 4 MiB overflow.
+    expect(out.filter((f) => f.id === null).map((f) => f.error?.message)).toEqual(["invalid or oversized frame"]);
+  });
+
+  describe("after a rejected LSP header", () => {
+    const lsp = (message: unknown) => {
+      const body = JSON.stringify(message);
       return `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
     };
-    h.input.write(`  ${frame(1)}${frame(2)}`);
-    await settle(h.server);
-    // The indented header is never used as a frame length, and the session stays LSP-framed for the next frame.
-    const out = frames(h.text()) as Array<{ id?: unknown; error?: { message?: string } }>;
-    expect(out.map((f) => f.id)).toEqual([null, 2]);
-    expect(out[0]?.error?.message).toBe("invalid or oversized frame");
+    const smuggled = lsp({ jsonrpc: "2.0", id: "SMUGGLED", method: "tools/list" });
+    const cases: [string, string][] = [
+      ["non-numeric length, frame inside the body", `Content-Length: abc\r\n\r\nGARBAGE${smuggled}`],
+      ["oversized length, frame at the start of the body", `Content-Length: 99999999\r\n\r\n${smuggled}`],
+      ["duplicate lengths, frame inside the body", `Content-Length: 5\r\nContent-Length: 5\r\n\r\n${smuggled}`]
+    ];
+    it.each(cases)("never runs a frame smuggled in the rejected body: %s", async (_name, input) => {
+      const h = harness(async () => failed());
+      h.input.write(input);
+      await settle(h.server);
+      const out = frames(h.text()) as Array<{ id?: unknown; result?: { tools?: unknown } }>;
+      expect(out.some((f) => f.id === "SMUGGLED" || f.result?.tools !== undefined)).toBe(false);
+      expect(out.length).toBeGreaterThan(0);
+    });
+
+    it("keeps a next header split across writes right after the rejected one", async () => {
+      const h = harness(async () => failed());
+      const next = lsp({ jsonrpc: "2.0", id: 2, method: "ping" });
+      h.input.write(`Content-Length: abc\r\n\r\n${next.slice(0, 11)}`);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      h.input.write(next.slice(11));
+      await settle(h.server);
+      const out = frames(h.text()) as Array<{ id?: unknown }>;
+      expect(out.map((f) => f.id)).toEqual([null, 2]);
+    });
+
+    it("skips exactly the declared body of a rejected frame and serves the next frame", async () => {
+      const h = harness(async () => failed());
+      const inner = '{"jsonrpc":"2.0","id":"SMUGGLED","method":"tools/list"}';
+      h.input.write(`Content-Length: ${inner.length}\r\nContent-Length: ${inner.length}\r\n\r\n${inner}`);
+      h.input.write(lsp({ jsonrpc: "2.0", id: 3, method: "ping" }));
+      await settle(h.server);
+      const out = frames(h.text()) as Array<{ id?: unknown }>;
+      expect(out.map((f) => f.id)).toEqual([null, 3]);
+    });
   });
 
   it("drops only the bad frame and still serves valid frames queued behind it", async () => {
@@ -318,7 +360,8 @@ describe("local advisor MCP", () => {
       const body = JSON.stringify({ jsonrpc: "2.0", id, method: "ping" });
       return `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
     };
-    h.input.write(`${frame(1)}Content-Length: abc\r\n\r\n{}${frame(2)}${frame(3)}`);
+    // The rejected header carries no length, so its own empty line is a boundary and the next frame starts there.
+    h.input.write(`${frame(1)}Content-Length: abc\r\n\r\n${frame(2)}${frame(3)}`);
     await settle(h.server);
     const out = frames(h.text()) as Array<{ id?: unknown; error?: { message?: string } }>;
     // The error is sent synchronously while responses are async, so compare without assuming interleaving.

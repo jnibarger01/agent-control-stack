@@ -18,6 +18,10 @@ export const PROTOCOL_VERSION = "2024-11-05";
 const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const LSP_HEADER = "content-length";
+const HEADER_START = /^[A-Za-z0-9!#$%&'*+.^_`|~-]$/u;
+const WHITESPACE = new Set([0x20, 0x09, 0x0d, 0x0a]);
+// A frame boundary we can trust after a rejected header: an empty line immediately followed by a Content-Length header.
+const RESYNC_MARKER = `\r\n\r\n${LSP_HEADER}`;
 /** Tool calls held at once (running or queued behind the provider semaphore). Further calls are refused, not queued. */
 export const MAX_PENDING_TOOL_CALLS = 8;
 
@@ -120,6 +124,10 @@ export class LocalAdvisorMcpServer {
   private toolCalls = 0;
   private readonly inflight = new Map<string, AbortController>();
   private stopped = false;
+  /** Body bytes of a rejected frame (declared length within the limit) still to be discarded. */
+  private skipBytes = 0;
+  /** After a rejected frame with no usable length: discard until RESYNC_MARKER. */
+  private resyncing = false;
 
   constructor(
     private readonly input: Readable,
@@ -152,14 +160,12 @@ export class LocalAdvisorMcpServer {
   private drain(): void {
     for (;;) {
       if (this.framing === null) {
-        // Framing is chosen on the first non-whitespace bytes, so a stray space before the first frame cannot lock an
-        // LSP client into NDJSON. The bytes are not consumed here: an indented header is still refused by
-        // nextLspFrame (see there), which then resynchronises on the next frame.
-        const head = this.buffer
-          .subarray(0, 64)
-          .toString("utf8")
-          .replace(/^[ \t\r\n]+/u, "")
-          .toLowerCase();
+        // Whitespace before the first frame is consumed from the buffer itself (not just skipped in a peek), so any
+        // amount of it is dropped as it arrives and framing is always decided on the first real bytes.
+        let lead = 0;
+        while (lead < this.buffer.length && WHITESPACE.has(this.buffer[lead]!)) lead++;
+        if (lead > 0) this.buffer = this.buffer.subarray(lead);
+        const head = this.buffer.subarray(0, LSP_HEADER.length).toString("utf8").toLowerCase();
         if (head.length === 0) return;
         // Stdio may split a write anywhere: stay undecided while the prefix could still become "content-length".
         if (head.length < LSP_HEADER.length && LSP_HEADER.startsWith(head)) return;
@@ -177,24 +183,47 @@ export class LocalAdvisorMcpServer {
     // frames is skipped. Leading spaces or tabs are NOT skipped: whitespace before a header field is obsolete line
     // folding / an invalid field name (RFC 9112 2.2 and 5.2 require rejecting it), and the LSP base protocol
     // defines headers as starting at the first byte of the message. Such a frame fails the header parse below.
+    if (this.skipBytes > 0) {
+      const n = Math.min(this.skipBytes, this.buffer.length);
+      this.buffer = this.buffer.subarray(n);
+      this.skipBytes -= n;
+      if (this.skipBytes > 0) return null;
+    }
+    if (this.resyncing && !this.resync()) return null;
     let skip = 0;
     while (skip < this.buffer.length && (this.buffer[skip] === 0x0d || this.buffer[skip] === 0x0a)) skip++;
     if (skip > 0) this.buffer = this.buffer.subarray(skip);
+    // A frame must start with a header field name (RFC 9110 token). Anything else (an NDJSON line, an indented
+    // header) is refused at once instead of waiting for a "\r\n\r\n" that may never come.
+    if (this.buffer.length > 0 && !HEADER_START.test(String.fromCharCode(this.buffer[0]!))) {
+      this.resyncing = true;
+      this.send({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "invalid or oversized frame" } });
+      return "";
+    }
     const sep = this.buffer.indexOf("\r\n\r\n");
     if (sep < 0) return null;
     const header = this.buffer.subarray(0, sep).toString("utf8");
     // Exactly one Content-Length header whose value is all digits; anything else is refused.
     const lengths = header.split("\r\n").filter((line) => /^content-length\s*:/iu.test(line));
-    const match = lengths.length === 1 ? /^content-length\s*:\s*(\d+)\s*$/iu.exec(lengths[0]!) : null;
-    const len = match ? Number(match[1]) : NaN;
-    if (!Number.isFinite(len) || len < 0 || len > MAX_FRAME_BYTES) {
-      // Drop only the bad frame: resynchronise on the next Content-Length header after this header block, so valid
-      // frames already queued behind it are still served. Without one, nothing usable is buffered.
-      const next = this.buffer
-        .toString("latin1")
-        .toLowerCase()
-        .indexOf(LSP_HEADER, sep + 4);
-      this.buffer = next < 0 ? Buffer.alloc(0) : this.buffer.subarray(next);
+    const declared = lengths.map((line) => /^content-length\s*:\s*(\d+)\s*$/iu.exec(line)?.[1]);
+    const len = lengths.length === 1 && declared[0] !== undefined ? Number(declared[0]) : NaN;
+    if (!Number.isFinite(len) || len > MAX_FRAME_BYTES) {
+      // Never search the rejected frame's body for a header: that body is attacker-controlled and could carry a
+      // smuggled frame. If every Content-Length agrees on a length within the limit, skip exactly that many body
+      // bytes. Otherwise the body's extent is unknown, so discard until an empty line followed by a header.
+      const agreed = declared.length > 0 && declared.every((value) => value !== undefined && value === declared[0]);
+      const skip = agreed ? Number(declared[0]) : NaN;
+      if (Number.isFinite(skip) && skip <= MAX_FRAME_BYTES) {
+        this.buffer = this.buffer.subarray(sep + 4);
+        this.skipBytes = skip;
+      } else {
+        // With no length at all, no body was claimed, so the rejected header's own empty line is a boundary. An
+        // oversized or conflicting length claims a body we cannot measure; its bytes are never a trusted boundary.
+        this.buffer = this.buffer.subarray(
+          lengths.length === 0 || declared.every((v) => v === undefined) ? sep : sep + 4
+        );
+        this.resyncing = true;
+      }
       this.send({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "invalid or oversized frame" } });
       // An empty body tells drain to keep going with whatever is still buffered.
       return "";
@@ -204,6 +233,24 @@ export class LocalAdvisorMcpServer {
     const body = this.buffer.subarray(sep + 4, end).toString("utf8");
     this.buffer = this.buffer.subarray(end);
     return body;
+  }
+
+  /**
+   * Discards bytes until RESYNC_MARKER and leaves the buffer at the header that follows it. A marker split across
+   * writes is kept (only the longest suffix that could still start the marker survives), so it is never dropped.
+   */
+  private resync(): boolean {
+    const text = this.buffer.toString("latin1").toLowerCase();
+    const at = text.indexOf(RESYNC_MARKER);
+    if (at >= 0) {
+      this.buffer = this.buffer.subarray(at + 4);
+      this.resyncing = false;
+      return true;
+    }
+    let keep = Math.min(RESYNC_MARKER.length - 1, text.length);
+    while (keep > 0 && !RESYNC_MARKER.startsWith(text.slice(text.length - keep))) keep--;
+    this.buffer = this.buffer.subarray(this.buffer.length - keep);
+    return false;
   }
 
   private nextLine(): string | null {
