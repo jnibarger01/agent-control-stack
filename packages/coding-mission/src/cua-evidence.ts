@@ -178,12 +178,19 @@ const sameReceipts = (left: readonly ExecutionReceipt[], right: readonly Executi
 /**
  * Evidence-bound acceptance for the cua lane, run inside the result-acceptance transaction. Returns a rejection
  * reason or undefined. Receipts must equal the ones rebuilt from committed checkpoints; success additionally needs a
- * non-empty script whose every action committed and the matching result hash.
+ * non-empty script whose every action committed and the matching result hash; any other outcome after an uncertain
+ * or planned checkpoint must be non-retry-safe and report uncertain external state.
  */
 export function cuaAcceptanceDefect(
   db: Db,
   attemptId: string,
-  result: { outcome: string; receipts: readonly ExecutionReceipt[]; result?: { resultHash: string } }
+  result: {
+    outcome: string;
+    receipts: readonly ExecutionReceipt[];
+    result?: { resultHash: string };
+    failure?: { retrySafe?: boolean };
+    externalStateUncertain?: boolean;
+  }
 ): string | undefined {
   const verified = verifyCuaCheckpoints(db, attemptId);
   if (!verified.ok) return `cua checkpoint integrity failure: ${verified.defect}`;
@@ -194,6 +201,15 @@ export function cuaAcceptanceDefect(
     if (verified.rows.length !== verified.actions.length || verified.rows.some((row) => row.state !== "committed"))
       return "cua success requires every action to be committed";
     if (result.result?.resultHash !== cuaResultHash(receipts)) return "cua result hash does not match its receipts";
+  }
+  // An uncertain or planned checkpoint means an external effect may have happened. Whatever the reported outcome
+  // (failed, cancelled or unknown), it must say the external state is uncertain and must never be retry-safe, so a
+  // later attempt cannot repeat an effect whose first outcome is unknown.
+  if (verified.rows.some((row) => row.state === "uncertain" || row.state === "planned")) {
+    if (result.outcome === "succeeded") return "cua success requires every action to be committed";
+    if (result.failure?.retrySafe === true) return "cua result after an uncertain checkpoint cannot be retry-safe";
+    if (result.externalStateUncertain !== true)
+      return "cua result after an uncertain checkpoint must report uncertain external state";
   }
   return undefined;
 }

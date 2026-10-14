@@ -1165,6 +1165,64 @@ describe("R1: evidence-bound CUA acceptance", () => {
     });
   });
 
+  const forgedFailure = (
+    base: ReturnType<typeof resultBase>,
+    receipts: Array<{ kind: string; hash: string }>,
+    retrySafe: boolean,
+    externalStateUncertain: boolean,
+    outcome: "failed" | "cancelled" = "failed"
+  ) => ({
+    ...base,
+    outcome,
+    receipts,
+    failure: { category: outcome === "failed" ? ("tool_failure" as const) : ("cancelled" as const), retrySafe },
+    externalStateUncertain
+  });
+
+  it("rejects a retry-safe or certain failure after an uncertain checkpoint", async () => {
+    const { adapter, dispatch, ledger, claim, page, checkpoints } = harness(twoStep());
+    page.failClick = true;
+    const real = await adapter.execute(dispatch, undefined, LIVE);
+    expect(real.outcome).toBe("unknown");
+    expect(checkpoints().map((row) => row.state)).toEqual(["committed", "uncertain"]);
+    const base = resultBase(dispatch, T2);
+    for (const [retrySafe, uncertain, outcome] of [
+      [true, false, "failed"],
+      [true, true, "failed"],
+      [false, false, "failed"],
+      [false, false, "cancelled"]
+    ] as const) {
+      expect(
+        ledger.applyResult({
+          claimToken: claim.token,
+          result: forgedFailure(base, real.receipts, retrySafe, uncertain, outcome)
+        })
+      ).toMatchObject({ applied: "rejected_invalid", reason: expect.stringContaining("uncertain") });
+    }
+    expect(ledger.applyResult({ claimToken: claim.token, result: real })).toMatchObject({
+      applied: expect.not.stringContaining("rejected")
+    });
+  });
+
+  it("rejects a retry-safe failure while a checkpoint is still planned", async () => {
+    const { adapter, dispatch, ledger, claim, page, checkpoints } = harness(twoStep());
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const original = page.goto.bind(page);
+    page.goto = async (url: string) => {
+      await gate;
+      await original(url);
+    };
+    const running = adapter.execute(dispatch, undefined, LIVE);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(checkpoints().map((row) => row.state)).toEqual(["planned"]);
+    expect(
+      ledger.applyResult({ claimToken: claim.token, result: forgedFailure(resultBase(dispatch, T2), [], true, false) })
+    ).toMatchObject({ applied: "rejected_invalid", reason: expect.stringContaining("uncertain") });
+    release();
+    await running;
+  });
+
   it("rejects a cua unit with no actions instead of reporting success", async () => {
     const { adapter, dispatch, ledger, claim, opens } = harness(script([]));
     const result = await adapter.execute(dispatch, undefined, LIVE);
