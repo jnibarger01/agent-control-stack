@@ -9,8 +9,12 @@ import { z } from "zod";
  * `advisor-guidance.ts` and must not be imported by policy, routing, or approval.
  */
 
-export const ADVISOR_CONSULTATION_SCHEMA_VERSION = "acs.advisor-consultation.v1" as const;
-export const ADVISOR_CONSULTATION_HASH_DOMAIN = "acs:advisor-consultation:v1" as const;
+/**
+ * v2 binds the hash to the attempt / lease / claim the consultation was fenced to (migration 074).
+ * v1 rows (073) do not verify under v2 and therefore never satisfy the completion gate.
+ */
+export const ADVISOR_CONSULTATION_SCHEMA_VERSION = "acs.advisor-consultation.v2" as const;
+export const ADVISOR_CONSULTATION_HASH_DOMAIN = "acs:advisor-consultation:v2" as const;
 
 export const ADVISOR_CHECKPOINTS = ["before_approach", "recurring_failure", "before_completion"] as const;
 export type AdvisorCheckpoint = (typeof ADVISOR_CHECKPOINTS)[number];
@@ -33,6 +37,8 @@ export const advisorConsultRequestSchema = z
           workItemId: boundedId,
           attemptId: boundedId.optional(),
           leaseId: boundedId,
+          /** Proof of lease possession. Required: a worker/lease/epoch tuple alone is guessable or leakable. */
+          leaseToken: z.string().min(16).max(512),
           workerId: boundedId,
           fencingEpoch: z.number().int().nonnegative()
         })
@@ -167,6 +173,12 @@ export interface AdvisorConsultationView {
   executorModelId: string;
   advisorModelId: string;
   createdAt: string;
+  /** The execution attempt the consultation was fenced to (work items on the attempt protocol). */
+  attemptId: string | null;
+  /** The worker lease the consultation was fenced to (work items). */
+  leaseId: string | null;
+  /** sha256 of the mission-unit claim token the consultation was fenced to (mission units). */
+  claimTokenHash: string | null;
 }
 
 export function advisorConsultationHash(view: AdvisorConsultationView): string {
@@ -184,7 +196,10 @@ export function advisorConsultationHash(view: AdvisorConsultationView): string {
         outputSha256: view.outputSha256,
         executorModelId: view.executorModelId,
         advisorModelId: view.advisorModelId,
-        createdAt: view.createdAt
+        createdAt: view.createdAt,
+        attemptId: view.attemptId,
+        leaseId: view.leaseId,
+        claimTokenHash: view.claimTokenHash
       })}`
     )
     .digest("hex");
@@ -193,14 +208,17 @@ export function advisorConsultationHash(view: AdvisorConsultationView): string {
 /**
  * Success may require a before-completion consultation. The input is dispositions
  * only: guidance text is not a parameter and is not inspected.
+ *
+ * Only `reviewed` satisfies the gate. `declined` (the advisor refused to answer) and
+ * `unavailable` fail closed: a gate token must show the advisor actually reviewed the work.
  */
 export function advisorCompletionBlock(input: {
   requireBeforeCompletion: boolean;
   dispositions: readonly AdvisorDisposition[];
 }): "advisor_consultation_required" | undefined {
   if (!input.requireBeforeCompletion) return undefined;
-  const answered = input.dispositions.some((disposition) => disposition === "reviewed" || disposition === "declined");
-  return answered ? undefined : "advisor_consultation_required";
+  const reviewed = input.dispositions.some((disposition) => disposition === "reviewed");
+  return reviewed ? undefined : "advisor_consultation_required";
 }
 
 export interface AdvisorFlightEvent {
@@ -211,14 +229,24 @@ export interface AdvisorFlightEvent {
 
 const MAX_FLIGHT_EVENTS = 40;
 const MAX_PROJECTION_CHARS = 24_000;
-const DROPPED_KEY = /^(?:argv|arguments|raw_?command)$/i;
+/**
+ * Keys whose values are dropped (not just redacted) before a flight is sent to an external advisor:
+ * command lines, environments, headers and other credential-bearing material. Matching is on the
+ * key name, case-insensitive, with `_`/`-` separators ignored.
+ */
+const DROPPED_KEY =
+  /^(?:argv|args|arguments|raw ?command|commands?|cmds?|command ?line|cmd ?line|shell ?command|script|stdin|env|environment|env ?vars?|headers?|authorization|proxy ?authorization|cookies?|set ?cookie|credentials?|passwords?|passwd|secrets?|tokens?|access ?token|refresh ?token|api ?keys?|private ?key|connection ?string|dsn)$/i;
+
+function droppedKey(key: string): boolean {
+  return DROPPED_KEY.test(key.replace(/[_-]+/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2"));
+}
 
 function dropCommandMaterial(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((entry) => dropCommandMaterial(entry));
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(
     Object.entries(value as Record<string, unknown>)
-      .filter(([key]) => !DROPPED_KEY.test(key))
+      .filter(([key]) => !droppedKey(key))
       .map(([key, entry]) => [key, dropCommandMaterial(entry)])
   );
 }

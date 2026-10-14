@@ -2329,6 +2329,25 @@ describe("Change Set result verification", () => {
             } finally {
               verifierDb.close();
             }
+            // Advisor completion gate (PR #367 follow-up): completeChangeSetMission is a terminal-success
+            // path and must enforce a required before_completion consultation like every other path.
+            store.enableAdvisorBinding(
+              {
+                subjectId: ctx.mission.id,
+                missionId: ctx.mission.id,
+                subjectKind: "work_item",
+                executorModelId: "claude-sonnet-5",
+                advisorModelId: "claude-opus-5-5",
+                requireBeforeCompletion: true
+              },
+              { via: "domain_service" }
+            );
+            expect(() => store.completeChangeSetMission(complete, options)).toThrow(
+              expect.objectContaining({ code: "advisor_consultation_required" })
+            );
+            expect(store.get(ctx.mission.id)!.status).not.toBe("succeeded");
+            expect(store.readEvents({ name: "change_set.completed" })).toHaveLength(0);
+            store.disableAdvisorBinding(ctx.mission.id, ctx.mission.id, { via: "domain_service" });
             const receipt = store.completeChangeSetMission(complete, options);
             expect(receipt.operationReceipts).toHaveLength(1);
             const operationReceipt = receipt.operationReceipts![0]!;
