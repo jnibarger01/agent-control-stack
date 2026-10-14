@@ -50,5 +50,5 @@ export {
 export type { AdvisorModelRole, ModelRoute } from "./router.js";
 export { advisorTraceEvent } from "./trace-event.js";
 export type { AdvisorAuthorizationOutcome } from "./trace-event.js";
-export { projectReviewFinding } from "./to-review-finding.js";
+export { ReviewBindingError, projectReviewFinding } from "./to-review-finding.js";
 export type { ReviewFindingBinding } from "./to-review-finding.js";

@@ -56,7 +56,7 @@ Keep using the gateway for execution. When a mission requires an advisor result,
 - `required` plus `completed` is `evidence_only`. Policy still has to allow the action on its own evidence.
 - `required` plus any other status is `fail_closed`.
 
-`projectReviewFinding` stores a completed review as `acs.review-finding.v1` only when ACS already has an evidence-manifest hash and an attempt id. `advisorTraceEvent` is the LoopTrace record. Neither function approves work.
+`projectReviewFinding` stores a completed review as `acs.review-finding.v1` only when ACS already has an evidence-manifest hash and an attempt id, and only for the mission and request (`missionId`, `inputHash`) that were actually reviewed. `advisorTraceEvent` is the LoopTrace record. Neither function approves work.
 
 ## Benchmark
 
