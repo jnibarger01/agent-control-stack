@@ -26,7 +26,17 @@ const T1 = "2026-10-10T00:00:01.000Z";
 const T2 = "2026-10-10T00:00:02.000Z";
 const ORIGIN = "https://app.example";
 const SECRET = "super-secret-phrase";
-const SHOT = Buffer.from("PNG-SECRET-BYTES");
+/** A PNG header (signature + IHDR) with the given dimensions, followed by `rest`. */
+function png(width: number, height: number, rest: Buffer = Buffer.alloc(0)): Buffer {
+  const header = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(header, 0);
+  header.writeUInt32BE(13, 8);
+  header.write("IHDR", 12, "ascii");
+  header.writeUInt32BE(width, 16);
+  header.writeUInt32BE(height, 20);
+  return Buffer.concat([header, rest]);
+}
+const SHOT = png(1280, 720, Buffer.from("PNG-SECRET-BYTES"));
 /** Stand-in live authority re-check for adapter tests that are not about authority; R2 tests use the real ledger. */
 const ALLOW: CuaAuthorityRecheck = {
   browserAuthorityVerdict: () => ({ ok: true }),
@@ -1072,6 +1082,32 @@ describe("R3: browser boundary", () => {
     });
     expect(page.calls).not.toContain("screenshot");
     expect(page.closed).toBe(true);
+  });
+
+  it.each([
+    ["more bytes than the cap", () => png(1280, 720, Buffer.alloc(9 * 1024 * 1024))],
+    ["a width over the dimension cap", () => png(20_000, 10)],
+    ["a height over the dimension cap", () => png(10, 20_000)],
+    ["a pixel count over the cap", () => png(8_000, 8_000)],
+    ["bytes that are not a PNG", () => Buffer.from("not-a-png-image-at-all-really")]
+  ])("refuses a screenshot with %s before hashing it and fails the action", async (_name, bytes) => {
+    const { adapter, dispatch, page, checkpoints } = harness(script([{ type: "observe" }, { type: "observe" }]));
+    const shot = bytes();
+    page.screenshot = async () => {
+      page.calls.push("screenshot");
+      return shot;
+    };
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({ outcome: "unknown" });
+    expect(checkpoints().map((row) => [row.state, row.screenshot_hash])).toEqual([["uncertain", null]]);
+    expect(page.calls.filter((call) => call === "screenshot")).toHaveLength(1);
+  });
+
+  it("honours a configured screenshot byte cap", async () => {
+    const { adapter, dispatch, checkpoints } = harness(script([{ type: "observe" }]), "browser", {
+      maxScreenshotBytes: 16
+    });
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({ outcome: "unknown" });
+    expect(checkpoints().map((row) => row.state)).toEqual(["uncertain"]);
   });
 
   it("bounds every browser call by a deadline and closes the page", async () => {

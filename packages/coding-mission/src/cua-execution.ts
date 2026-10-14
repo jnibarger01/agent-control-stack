@@ -24,7 +24,7 @@ import {
 
 /**
  * Subset of Playwright's Page. A real Page already has these members; this package does not depend on playwright.
- * screenshot returns bytes the caller hashes and drops. It must not retain them.
+ * screenshot returns PNG bytes (Playwright's default) the caller size-checks, hashes and drops. It must not retain them.
  */
 export interface CuaPage {
   url(): string;
@@ -230,6 +230,30 @@ export interface CuaExecutionOptions {
   actionTimeoutMs?: number;
   /** Lease on the per-attempt execution lock, renewed at every checkpoint. Default max(5 min, 4 x actionTimeoutMs). */
   lockTtlMs?: number;
+  /** Largest screenshot accepted, in bytes, checked before hashing. Default 8 MiB. */
+  maxScreenshotBytes?: number;
+  /** Largest screenshot width or height, in pixels, read from the PNG header before hashing. Default 8192. */
+  maxScreenshotDimension?: number;
+  /** Largest screenshot width x height. Default 8192 x 4096. */
+  maxScreenshotPixels?: number;
+}
+
+const DEFAULT_MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024;
+const DEFAULT_MAX_SCREENSHOT_DIMENSION = 8192;
+const DEFAULT_MAX_SCREENSHOT_PIXELS = 8192 * 4096;
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+/**
+ * Width and height from a PNG's IHDR chunk (signature, length 13, "IHDR", then big-endian width and height), or
+ * undefined when the bytes are not a PNG. Constant time: only the first 24 bytes are read.
+ */
+function pngDimensions(bytes: Uint8Array): { width: number; height: number } | undefined {
+  if (bytes.length < 24) return undefined;
+  if (PNG_SIGNATURE.some((byte, index) => bytes[index] !== byte)) return undefined;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, 24);
+  if (view.getUint32(8) !== 13) return undefined;
+  if (String.fromCharCode(bytes[12]!, bytes[13]!, bytes[14]!, bytes[15]!) !== "IHDR") return undefined;
+  return { width: view.getUint32(16), height: view.getUint32(20) };
 }
 
 const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
@@ -898,6 +922,7 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
       if (!(bytes instanceof Uint8Array)) {
         throw new ControlStackError("cua_observation_invalid", "screenshot was not bytes");
       }
+      this.assertScreenshotBounded(bytes);
       screenshotHash = sha256Bytes(bytes);
     } else if (action.type === "click") {
       await this.bounded(() => page.locator(action.selector).click(), signal);
@@ -937,6 +962,30 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
    * The full fence, then a lease renewal, in one transaction. Run immediately before every browser action, so a stale
    * executor (its claim, attempt, fencing token or execution lock gone or expired) stops before acting.
    */
+  /**
+   * Caps a screenshot before it is hashed: byte length first, then the PNG header's width, height and pixel count.
+   * Anything over a cap, or not a PNG, fails the observe action (recorded uncertain) without hashing the bytes.
+   */
+  private assertScreenshotBounded(bytes: Uint8Array): void {
+    const maxBytes = this.options.maxScreenshotBytes ?? DEFAULT_MAX_SCREENSHOT_BYTES;
+    if (bytes.byteLength > maxBytes) {
+      throw new ControlStackError("cua_observation_too_large", "screenshot exceeds the byte cap");
+    }
+    const size = pngDimensions(bytes);
+    if (!size) throw new ControlStackError("cua_observation_invalid", "screenshot is not a PNG image");
+    const maxDimension = this.options.maxScreenshotDimension ?? DEFAULT_MAX_SCREENSHOT_DIMENSION;
+    const maxPixels = this.options.maxScreenshotPixels ?? DEFAULT_MAX_SCREENSHOT_PIXELS;
+    if (
+      size.width === 0 ||
+      size.height === 0 ||
+      size.width > maxDimension ||
+      size.height > maxDimension ||
+      size.width * size.height > maxPixels
+    ) {
+      throw new ControlStackError("cua_observation_too_large", "screenshot dimensions exceed the cap");
+    }
+  }
+
   private assertFence(dispatch: DispatchEnvelope, owner: string): void {
     this.store.transaction(() => {
       this.assertFenceInTransaction(dispatch, owner);
