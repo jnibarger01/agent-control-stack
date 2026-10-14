@@ -1223,6 +1223,37 @@ describe("R1: evidence-bound CUA acceptance", () => {
     await running;
   });
 
+  it("verifies the stored dispatch hash before trusting its script: a truncated dispatch cannot accept a prefix", async () => {
+    const controller = new AbortController();
+    const { adapter, dispatch, ledger, claim, page, store } = harness(twoStep());
+    const original = page.goto.bind(page);
+    page.goto = async (url: string) => {
+      await original(url);
+      controller.abort();
+    };
+    const partial = await adapter.execute(dispatch, controller.signal, LIVE);
+    expect(partial.receipts).toHaveLength(1);
+    const row = store.db
+      .prepare("SELECT dispatch_json FROM work_unit_execution_attempts WHERE attempt_id = ?")
+      .get(dispatch.attemptId) as { dispatch_json: string };
+    const truncated = JSON.parse(row.dispatch_json) as { payload: { actions: unknown[] } };
+    truncated.payload.actions = truncated.payload.actions.slice(0, 1);
+    store.db
+      .prepare("UPDATE work_unit_execution_attempts SET dispatch_json = ? WHERE attempt_id = ?")
+      .run(JSON.stringify(truncated), dispatch.attemptId);
+    const forged = {
+      ...partial,
+      outcome: "succeeded" as const,
+      failure: undefined,
+      result: { resultHash: cuaResultHash(partial.receipts), files: [] },
+      externalStateUncertain: false
+    };
+    expect(ledger.applyResult({ claimToken: claim.token, result: forged })).toMatchObject({
+      applied: "rejected_invalid",
+      reason: "cua checkpoint integrity failure: dispatch_integrity"
+    });
+  });
+
   it("rejects a cua unit with no actions instead of reporting success", async () => {
     const { adapter, dispatch, ledger, claim, opens } = harness(script([]));
     const result = await adapter.execute(dispatch, undefined, LIVE);

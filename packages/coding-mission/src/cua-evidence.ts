@@ -1,4 +1,4 @@
-import { domainHash } from "@agent-control-stack/shared";
+import { domainHash, stableHash } from "@agent-control-stack/shared";
 import { parseWorkUnitPayload, type CuaAction, type CuaActionType } from "./mission-model.js";
 import type { ExecutionReceipt } from "./worker-execution.js";
 
@@ -81,6 +81,7 @@ interface AttemptBindingRow {
   worker_id: string;
   claim_token_hash: string;
   executor_lane: string;
+  dispatch_hash: string;
   dispatch_json: string;
   authority_json: string;
 }
@@ -94,7 +95,8 @@ export type CuaCheckpointVerification =
   | { ok: false; defect: string };
 
 /**
- * Verify every persisted checkpoint of an attempt against the persisted attempt and dispatch: identity, claim and
+ * Verify every persisted checkpoint of an attempt against the persisted attempt and dispatch (which must first
+ * recompute to its recorded dispatch hash): identity, claim and
  * fence bindings, contiguous sequence, the action hash of the dispatched script at that position, one selected
  * application that the payload allows (and equals `expectedApplication` when given), and the recomputed receipt hash.
  */
@@ -106,8 +108,8 @@ export function verifyCuaCheckpoints(
   const fail = (defect: string): CuaCheckpointVerification => ({ ok: false, defect });
   const attempt = db
     .prepare(
-      `SELECT attempt_id, mission_id, unit_id, unit_attempt, worker_id, claim_token_hash, executor_lane, dispatch_json,
-              authority_json
+      `SELECT attempt_id, mission_id, unit_id, unit_attempt, worker_id, claim_token_hash, executor_lane, dispatch_hash,
+              dispatch_json, authority_json
        FROM work_unit_execution_attempts WHERE attempt_id = ?`
     )
     .get(attemptId) as AttemptBindingRow | undefined;
@@ -115,8 +117,24 @@ export function verifyCuaCheckpoints(
   let actions: CuaAction[];
   let allowedApplications: string[];
   let fencingToken: number | null;
+  // The script, allowlist and fence are read from the stored dispatch only after it recomputes to its recorded hash
+  // and is this attempt's cua dispatch, so a rewritten or truncated dispatch cannot vouch for a forged result.
+  let dispatch: { payload?: unknown; attemptId?: unknown; lane?: unknown };
   try {
-    const dispatch = JSON.parse(attempt.dispatch_json) as { payload?: unknown };
+    dispatch = JSON.parse(attempt.dispatch_json) as typeof dispatch;
+    if (
+      !dispatch ||
+      typeof dispatch !== "object" ||
+      typeof attempt.dispatch_hash !== "string" ||
+      stableHash(dispatch) !== attempt.dispatch_hash ||
+      dispatch.attemptId !== attempt.attempt_id ||
+      dispatch.lane !== "cua"
+    )
+      return fail("dispatch_integrity");
+  } catch {
+    return fail("dispatch_integrity");
+  }
+  try {
     const payload = parseWorkUnitPayload("cua", dispatch.payload ?? {});
     if (payload.kind !== "cua") return fail("dispatch_payload_invalid");
     actions = payload.actions ?? [];
