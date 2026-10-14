@@ -72,6 +72,8 @@ describe("advisor governance", () => {
     expect(event.event_type).toBe("advisor.recorded");
     expect(event.stage).toBe("lifecycle");
     expect(event.integrity.trust).toBe("asserted");
+    // null = unchecked; false would be read by LoopTrace verification as a confirmed integrity failure.
+    expect(event.integrity.hash_verified).toBeNull();
     expect(isTrusted(event.integrity.trust)).toBe(false);
     expect(event.flags).toContain("not_authorization");
     expect(JSON.stringify(event.untrusted)).toBe("{}");

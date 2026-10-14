@@ -56,7 +56,8 @@ export function advisorTraceEvent(
   const integrityBody = {
     trust: "asserted" as const,
     basis: "local_advisor_recommendation",
-    hash_verified: false,
+    // Unchecked, not failed: LoopTrace treats `false` as a confirmed integrity failure and would poison verification.
+    hash_verified: null,
     chain: "not_chained" as const
   };
   const event = {
