@@ -172,4 +172,17 @@ describe("redactText", () => {
     const text = "Rotate the token after review. const base = new URL(input); /usr/local/bin is not a home path.";
     expect(redactText(text)).toEqual({ text, counts: {} });
   });
+
+  it.each([
+    ["long letter run", () => "a".repeat(200_000)],
+    ["scheme-like run without @", () => "Ab3+".repeat(50_000)],
+    ["unterminated quoted value", () => cat("pass", 'word = "', "a b ".repeat(50_000))],
+    ["repeated key words", () => "token".repeat(40_000)],
+    ["url with no @", () => cat("postgres", "://a:", "b".repeat(200_000))]
+  ])("stays linear on adversarial input: %s", (_name, build) => {
+    const input = build();
+    const started = performance.now();
+    redactText(input);
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
 });

@@ -6,7 +6,9 @@
  * variants cannot slip a credential past the ASCII patterns. Base64 blobs that decode to a credential are
  * redacted as a whole.
  */
-const KEY = String.raw`(?:api[_-]?key|secret|token|passphrase|passw(?:or)?d|auth)[\w-]*`;
+// Every quantifier that can run over a near-total character class is bounded: unbounded adjacent quantifiers
+// gated on a literal that a long input never contains backtrack quadratically (see packages/shared/src/redact.ts).
+const KEY = String.raw`(?:api[_-]?key|secret|token|passphrase|passw(?:or)?d|auth)[\w-]{0,64}`;
 
 const PATTERNS: readonly { readonly name: string; readonly pattern: RegExp; readonly replace: string }[] = [
   {
@@ -36,7 +38,7 @@ const PATTERNS: readonly { readonly name: string; readonly pattern: RegExp; read
   {
     // The username may be empty and the password may itself contain '@', so match up to the last '@'.
     name: "url_password",
-    pattern: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]*:)[^\s/?#]*@/giu,
+    pattern: /\b([a-z][a-z0-9+.-]{0,31}:\/\/[^\s:/@]{0,256}:)[^\s/?#]{1,256}@/giu,
     replace: "$1[REDACTED:url_password]@"
   },
   { name: "basic_auth", pattern: /\b(Basic)\s+[A-Za-z0-9+/]{8,}=*/giu, replace: "$1 [REDACTED:basic_auth]" },
@@ -45,12 +47,12 @@ const PATTERNS: readonly { readonly name: string; readonly pattern: RegExp; read
   {
     // Keys may be JSON-quoted ({"password": "..."}); quoted values may contain spaces.
     name: "quoted_assignment",
-    pattern: new RegExp(String.raw`(${KEY}["']?\s*[:=]\s*)(["'])[^"'\n]*\s[^"'\n]*\2`, "giu"),
+    pattern: new RegExp(String.raw`(${KEY}["']?[ \t]{0,16}[:=]\s{0,16})(["'])[^"'\n]{1,256}\2`, "giu"),
     replace: "$1$2[REDACTED:assignment]$2"
   },
   {
     name: "assignment",
-    pattern: new RegExp(String.raw`(${KEY}["']?\s*[:=]\s*)(["']?)[^\s"',;]{4,}\2`, "giu"),
+    pattern: new RegExp(String.raw`(${KEY}["']?[ \t]{0,16}[:=]\s{0,16})(["']?)[^\s"',;]{4,256}\2`, "giu"),
     replace: "$1$2[REDACTED:assignment]$2"
   },
   { name: "home_path", pattern: /(?:\/home|\/Users)\/[^/\s]+/gu, replace: "~" },
