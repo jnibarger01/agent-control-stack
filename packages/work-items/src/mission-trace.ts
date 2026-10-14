@@ -7,7 +7,8 @@ import { readVerifiedChangeSetAuthorityEvent } from "./change-set-approval-store
 export const missionTraceQuerySchema = z
   .object({
     afterSequence: z.coerce.number().int().nonnegative().default(0),
-    limit: z.coerce.number().int().min(1).max(200).default(100)
+    limit: z.coerce.number().int().min(1).max(200).default(100),
+    asOfSequence: z.coerce.number().int().nonnegative().optional()
   })
   .strict();
 export type MissionTraceQuery = z.input<typeof missionTraceQuerySchema>;
@@ -49,11 +50,16 @@ export function readMissionTrace(
   missionId: string,
   query: MissionTraceQuery = {}
 ): MissionTrace {
-  const { afterSequence, limit } = missionTraceQuerySchema.parse(query);
+  const { afterSequence, limit, asOfSequence } = missionTraceQuerySchema.parse(query);
   if (!store.get(missionId)) throw new ControlStackError("work_item_not_found", "mission not found");
   const rows = db
-    .prepare(`SELECT permit_id FROM change_set_operation_permits WHERE mission_id = ? LIMIT 2049`)
-    .all(missionId) as Array<{ permit_id: string }>;
+    .prepare(
+      `SELECT p.permit_id FROM change_set_operation_permits p
+      JOIN audit_events permit_event ON permit_event.id = p.audit_event_id
+      WHERE p.mission_id = ? AND (? IS NULL OR permit_event.sequence <= ?)
+      ORDER BY permit_event.sequence LIMIT 2049`
+    )
+    .all(missionId, asOfSequence ?? null, asOfSequence ?? null) as Array<{ permit_id: string }>;
   if (rows.length > 2048)
     throw new ControlStackError("mission_trace_resource_limit", "too many historical operation links");
   const operations = rows.map((row): Link => {
@@ -70,9 +76,16 @@ export function readMissionTrace(
   });
   // A historical revision remains traceable after amendment; do not follow only the
   // head. Bounding the history is the resource guard.
+  // An as-of read only counts revisions whose submission audit event is at or
+  // before the cutoff, so later amendments cannot break a historical snapshot.
   const revisions = db
-    .prepare(`SELECT revision FROM change_set_revisions WHERE mission_id = ? LIMIT 2049`)
-    .all(missionId) as Array<{ revision: number }>;
+    .prepare(
+      `SELECT r.revision FROM change_set_revisions r
+      JOIN audit_events submission_event ON submission_event.id = r.audit_event_id
+      WHERE r.mission_id = ? AND (? IS NULL OR submission_event.sequence <= ?)
+      ORDER BY r.revision ASC LIMIT 2049`
+    )
+    .all(missionId, asOfSequence ?? null, asOfSequence ?? null) as Array<{ revision: number }>;
   if (revisions.length > 2048)
     throw new ControlStackError("mission_trace_resource_limit", "too many historical revisions");
   // Verify the whole revision ancestry exactly once. readChangeSet with no revision
@@ -80,7 +93,9 @@ export function readMissionTrace(
   // contiguity, parent bindings, canonical hashes and each submission audit event.
   // Calling it per revision re-verified the whole ancestry each time, which was
   // quadratic in the amendment count and rehashed the same audit events repeatedly.
-  store.getChangeSet(missionId);
+  // As of a cutoff, verify ancestry only through the latest revision at or before it.
+  if (asOfSequence === undefined) store.getChangeSet(missionId);
+  else if (revisions.length > 0) store.getChangeSet(missionId, revisions.at(-1)!.revision);
   const workIds = JSON.stringify([missionId, ...operations.map((link) => link.workItemId)]);
   const traceIds = (
     db
@@ -90,21 +105,24 @@ export function readMissionTrace(
       )
       .all(workIds) as Array<{ work_item_id: string; trace_id: string }>
   ).map((row) => ({ workItemId: row.work_item_id, traceId: row.trace_id }));
-  const observationRows = db
-    .prepare(
-      `SELECT observation_id, work_item_id, trace_id, status,
+  const observationRows =
+    asOfSequence === undefined
+      ? (db
+          .prepare(
+            `SELECT observation_id, work_item_id, trace_id, status,
     classifier_version, question_set_version, telemetry_correlation_id FROM jev_observation_outbox
     WHERE work_item_id IN (SELECT value FROM json_each(?)) LIMIT 2049`
-    )
-    .all(workIds) as Array<{
-    observation_id: string;
-    work_item_id: string;
-    trace_id: string;
-    status: string;
-    classifier_version: string;
-    question_set_version: string;
-    telemetry_correlation_id: string | null;
-  }>;
+          )
+          .all(workIds) as Array<{
+          observation_id: string;
+          work_item_id: string;
+          trace_id: string;
+          status: string;
+          classifier_version: string;
+          question_set_version: string;
+          telemetry_correlation_id: string | null;
+        }>)
+      : [];
   if (observationRows.length > 2048)
     throw new ControlStackError("mission_trace_resource_limit", "too many historical observations");
   const observations = observationRows.map((row) => ({
@@ -120,7 +138,7 @@ export function readMissionTrace(
   const selected = db
     .prepare(
       `SELECT id, sequence, previous_hash, event_hash FROM audit_events
-    WHERE sequence > ? AND (
+    WHERE sequence > ? AND (? IS NULL OR sequence <= ?) AND (
       json_extract(attributes, '$."work_item.id"') IN (SELECT value FROM json_each(?)) OR
       json_extract(attributes, '$."execution.work_item_id"') IN (SELECT value FROM json_each(?)) OR
       json_extract(body, '$.workItemId') IN (SELECT value FROM json_each(?)) OR
@@ -131,7 +149,18 @@ export function readMissionTrace(
         WHERE work_item_id IN (SELECT value FROM json_each(?)))
     ) ORDER BY sequence ASC LIMIT ?`
     )
-    .all(afterSequence, workIds, workIds, workIds, missionId, workIds, workIds, limit + 1) as Array<{
+    .all(
+      afterSequence,
+      asOfSequence ?? null,
+      asOfSequence ?? null,
+      workIds,
+      workIds,
+      workIds,
+      missionId,
+      workIds,
+      workIds,
+      limit + 1
+    ) as Array<{
     id: string;
     sequence: number;
     previous_hash: string;
@@ -215,8 +244,10 @@ export function readMissionTrace(
     integrity: "selected-events-and-predecessor-links",
     globalChainVerified: false,
     operations,
-    traceIds,
-    observations,
+    // Current projection rows have no historical audit anchor: never present
+    // them as historical facts when an as-of cutoff was requested.
+    traceIds: asOfSequence === undefined ? traceIds : [],
+    observations: asOfSequence === undefined ? observations : [],
     events,
     ...(selected.length > limit ? { nextAfterSequence: selected[limit - 1]!.sequence } : {})
   };

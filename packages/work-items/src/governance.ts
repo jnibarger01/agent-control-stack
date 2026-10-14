@@ -162,6 +162,11 @@ export interface ReviewFindingProjection {
   workItemId: string;
   reviewerPrincipalId: string;
   reviewerProvider: string;
+  /**
+   * Verifier engine, written by the server at review time from the authenticated reviewer credential.
+   * Null for findings recorded before migration 071 or by a caller that supplied no server-side engine.
+   */
+  verifierEngineId: string | null;
   evidenceManifestHash: string;
   verdict: "PASS" | "NEEDS_CHANGES" | "BLOCK" | "UNKNOWN";
   finding: Record<string, unknown>;

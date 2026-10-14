@@ -69,6 +69,22 @@ export const codingMissionCreateBodySchema = z
     summary: z.string().min(1).max(4000)
   })
   .strict();
+export const codingMissionAuthorityBodySchema = z
+  .object({
+    grantId: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[A-Za-z0-9._:-]+$/u)
+  })
+  .strict();
+export const flightRecordQuerySchema = z
+  .object({
+    afterSeq: z.coerce.number().int().min(0).default(0),
+    limit: z.coerce.number().int().min(1).max(1000).default(200)
+  })
+  .strict();
+
 export const codingMissionApprovalBodySchema = z
   .object({
     expectedChangeSetHash: z.string().regex(/^[a-f0-9]{64}$/u)
@@ -778,6 +794,44 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     additionalResponses: {
       "503": { description: "Coding mission ports are not configured." },
       "409": { description: "Mission is missing or its persisted state conflicts." }
+    }
+  },
+  {
+    method: "post",
+    path: "/coding-missions/{id}/authority",
+    operationId: "bindCodingMissionAuthority",
+    summary:
+      "Bind a coding mission to a human-issued authority grant. Write-once; verified; a human operator is required. Drives the mission forward.",
+    requestSchema: codingMissionAuthorityBodySchema,
+    additionalResponses: {
+      "403": { description: "A human operator is required." },
+      "409": {
+        description: "The grant is missing, revoked, expired, for another mission, or governed execution is disabled."
+      }
+    }
+  },
+  {
+    method: "get",
+    path: "/coding-missions/{id}/authority-graph",
+    operationId: "getCodingMissionAuthorityGraph",
+    summary:
+      "Read the mission's delegated authority: the grant, each unit's narrowing, permitted lanes, state and history.",
+    additionalResponses: {
+      "404": { description: "Coding mission does not exist." },
+      "409": { description: "Governed execution is disabled." },
+      "503": { description: "Coding mission ports are not configured." }
+    }
+  },
+  {
+    method: "get",
+    path: "/coding-missions/{id}/flight-record",
+    operationId: "getCodingMissionFlightRecord",
+    querySchema: flightRecordQuerySchema,
+    summary:
+      "Replay a coding mission from its tamper-evident flight record, with a whole-chain integrity verdict. Tamper evidence, not prevention.",
+    additionalResponses: {
+      "404": { description: "Coding mission does not exist." },
+      "503": { description: "Coding mission ports are not configured." }
     }
   },
   {

@@ -127,6 +127,31 @@ As of 2026-10-04, re-checked in an isolated worktree on `fix/review-reconciliati
   This 2026-07-10 lesson is encoded and testable in
   `skills/bounded-orchestration/SKILL.md`.
 
+## Current status (2026-10-12)
+
+Re-checked against `origin/main` (`bc33c48d`) on 2026-10-12 during the independent-review
+remediation pass. This section is a dated update only; the July 2026 prompt-sequence ledger
+and the sections above remain the historical record.
+
+- Workspace: 14 apps and 31 packages (npm workspaces). `npm run lint` and `npm run format:check`
+  resolve against directories and paths that exist on this baseline.
+- Migration numbering contention: resolved. `packages/shared/src/migration.ts` explicitly
+  treats `037_*`/`038_*` fixture duplicates as non-canonical and ships a
+  `repairExactDeployedThirtyNineFortySevenLayout()` recovery path for databases that ran the
+  older duplicate layout. There is exactly one canonical `039_*` migration.
+- Desktop Commander / Jace Commander bridge test coverage: 15 `.test.mjs` files under
+  `apps/dc-mcp-gateway/test/`, covering managed-mode fail-closed behavior, bridge readiness,
+  direct-managed initialize, edge-ready lease, runtime bootstrap, stale-bootstrap replay,
+  JC route/attestation/result reporting, and release identity. OAuth/PKCE/DCR boundaries are
+  exercised by `authority-endpoints.test.mjs`.
+- Gateway `server.ts` remains large (5,673 lines on this baseline) and is the main source of
+  merge conflicts. Route-handler and mission-control view-model extraction is tracked as
+  architectural debt; see `docs/superpowers/plans/` for the active split plan.
+- The legacy `ACS_GATEWAY_TOKEN` single-token path still exists as the human operator
+  credential, alongside the credential-array model (`ACS_GATEWAY_CREDENTIALS_JSON`) and
+  OAuth/tunnel modes.
+- The full `npm run check` gate was not re-run during this refresh.
+
 ## Last session
 
 On 2026-10-02 a review of Jev authority, the monorepo, admin ("YOLO") mode, Mission Control and the OAuth paths

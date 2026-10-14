@@ -3,11 +3,18 @@
  * via the jc-privileged-helper sudo entrypoint).
  *
  * Trust model: the unprivileged MCP server is NOT trusted to have checked
- * anything. This module independently verifies the ACS acs.jc.v1 capability
- * (signature, audience, tool=privileged_exec, scope=process.privileged,
- * mandatory human approvalId, exact argv binding, 30 s window, single-use
- * nonce) against root-owned configuration, writes a hash-chained audit intent
+ * anything. This module independently verifies the authorization (signature,
+ * tool=privileged_exec, exact argv binding, 30 s window, single-use nonce)
+ * against root-owned configuration, writes a hash-chained audit intent
  * record, and only then executes. Anything ambiguous fails closed.
+ *
+ * Two trust anchors (ADR 0026 D4), both read ONLY from the root-owned config,
+ * never from the environment:
+ *   - ACS    acs.jc.v1 capability, scope process.privileged, mandatory human approvalId
+ *   - local  jc.local.v1 token minted by approverd after a human approved this exact argv
+ * The envelope's keyId selects the anchor; the two key ids and public keys must
+ * differ, and an unknown keyId is rejected. Neither anchor can verify the other's
+ * artifact (distinct keys, distinct signing domains).
  *
  * "Free" sudo means: once ACS has a human approval for this exact argv, no
  * local command blocklist second-guesses it. It does NOT mean ambient sudo:
@@ -18,6 +25,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { FileNonceStore, JcAuthorizationError, JcCapabilityVerifier, type JcAuthorization } from './contract.js';
+import { JcLocalTokenError, JcLocalTokenVerifier, type JcLocalAuthorization } from './local-token.js';
 import { JsonlTraceChain, redactArgv } from './looptrace.js';
 
 export const PRIVILEGED_TOOL = 'privileged_exec';
@@ -39,6 +47,9 @@ export interface PrivilegedConfig {
   nonceDir: string;
   auditPath: string;
   maxTimeoutMs?: number;
+  /** base64url SPKI DER Ed25519 public key of approverd (jc.local.v1). Optional; set with localKeyId. */
+  localPublicKey?: string;
+  localKeyId?: string;
 }
 
 export interface PrivilegedArguments {
@@ -73,7 +84,18 @@ export interface PrivilegedResult {
   stderr: string;
   stdoutTruncated: boolean;
   stderrTruncated: boolean;
-  authorization: Pick<JcAuthorization, 'workItemId' | 'attemptId' | 'approvalId' | 'invocationHash' | 'actionHash'>;
+  authorization: {
+    authority: 'acs.jc.v1' | 'jc.local.v1';
+    approvalId?: string;
+    invocationHash: string;
+    /** acs.jc.v1 only */
+    workItemId?: string;
+    attemptId?: string;
+    actionHash?: string;
+    /** jc.local.v1 only */
+    approverId?: string;
+    tokenId?: string;
+  };
   auditEventHash: string;
 }
 
@@ -148,6 +170,19 @@ export function loadPrivilegedConfig(configPath: string, enforceRootOwnership: b
   }
   if (maxTimeoutMs !== undefined && (!Number.isSafeInteger(maxTimeoutMs) || (maxTimeoutMs as number) < 1)) {
     throw new PrivilegedError('PRIVILEGED_CONFIG_INVALID', 'config.maxTimeoutMs must be a positive integer');
+  }
+  const { localPublicKey, localKeyId } = parsed;
+  if ((localPublicKey === undefined) !== (localKeyId === undefined)) {
+    throw new PrivilegedError('PRIVILEGED_CONFIG_INVALID', 'config.localPublicKey and config.localKeyId must be set together');
+  }
+  if (localPublicKey !== undefined) {
+    if (typeof localPublicKey !== 'string' || typeof localKeyId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(localPublicKey) || !/^[A-Za-z0-9._:-]{1,64}$/.test(localKeyId)) {
+      throw new PrivilegedError('PRIVILEGED_CONFIG_INVALID', 'config.localPublicKey/localKeyId are malformed');
+    }
+    // Two anchors must be two different keys: otherwise an artifact for one authority could be read as the other's.
+    if (localKeyId === acsKeyId || localPublicKey === acsPublicKey) {
+      throw new PrivilegedError('PRIVILEGED_CONFIG_INVALID', 'config local and ACS trust anchors must differ');
+    }
   }
   return parsed as unknown as PrivilegedConfig;
 }
@@ -226,25 +261,58 @@ export async function executePrivileged(
     if (keys.join(',') !== 'arguments,capability') throw new PrivilegedError('PRIVILEGED_REQUEST_INVALID', 'request must be {capability, arguments}');
 
     const args = validatePrivilegedArguments(request.arguments, config.maxTimeoutMs);
-    const verifier = new JcCapabilityVerifier({
-      publicKey: config.acsPublicKey,
-      keyId: config.acsKeyId,
-      runtimeId: config.runtimeId,
-      nonceStore: new FileNonceStore(config.nonceDir),
-      now: deps.now,
-    });
-    const auth = verifier.verify(PRIVILEGED_TOOL, request.arguments, request.capability);
-    assertRootControlledExecutable(args.argv[0]);
+    const nonceStore = new FileNonceStore(config.nonceDir);
+    const envelopeKeyId = isPlainObject(request.capability) && typeof request.capability.keyId === 'string' ? request.capability.keyId : undefined;
+    let attribution: Record<string, unknown>;
+    let authorization: PrivilegedResult['authorization'];
+    if (config.localKeyId !== undefined && envelopeKeyId === config.localKeyId) {
+      // Local anchor: approverd's jc.local.v1 token for exactly this argv, verified here against root-owned config.
+      const local: JcLocalAuthorization = new JcLocalTokenVerifier({
+        publicKey: config.localPublicKey,
+        keyId: config.localKeyId,
+        runtimeId: config.runtimeId,
+        nonceStore,
+        now: deps.now,
+      }).verify(PRIVILEGED_TOOL, request.arguments, request.capability);
+      assertRootControlledExecutable(args.argv[0]);
+      attribution = {
+        authority: 'jc.local.v1',
+        approvalId: local.approvalId,
+        approverId: local.approverId,
+        tokenId: local.tokenId,
+        invocationHash: local.invocationHash,
+        nonceHash: local.nonceHash,
+      };
+      authorization = { authority: 'jc.local.v1', approvalId: local.approvalId, approverId: local.approverId, tokenId: local.tokenId, invocationHash: local.invocationHash };
+    } else {
+      const auth = new JcCapabilityVerifier({
+        publicKey: config.acsPublicKey,
+        keyId: config.acsKeyId,
+        runtimeId: config.runtimeId,
+        nonceStore,
+        now: deps.now,
+      }).verify(PRIVILEGED_TOOL, request.arguments, request.capability);
+      assertRootControlledExecutable(args.argv[0]);
+      attribution = {
+        authority: 'acs.jc.v1',
+        workItemId: auth.workItemId,
+        attemptId: auth.attemptId,
+        approvalId: auth.approvalId,
+        invocationHash: auth.invocationHash,
+        actionHash: auth.actionHash,
+        nonceHash: auth.nonceHash,
+      };
+      authorization = {
+        authority: 'acs.jc.v1',
+        workItemId: auth.workItemId,
+        attemptId: auth.attemptId,
+        approvalId: auth.approvalId,
+        invocationHash: auth.invocationHash,
+        actionHash: auth.actionHash,
+      };
+    }
 
     const audit = new JsonlTraceChain(config.auditPath, 'jc-privileged-exec');
-    const attribution = {
-      workItemId: auth.workItemId,
-      attemptId: auth.attemptId,
-      approvalId: auth.approvalId,
-      invocationHash: auth.invocationHash,
-      actionHash: auth.actionHash,
-      nonceHash: auth.nonceHash,
-    };
     // Boundary 1: durable intent BEFORE the side effect. No audit, no exec.
     try {
       // argv is evidence, not a secret store: argv-aware redaction, bound to the
@@ -266,8 +334,8 @@ export async function executePrivileged(
         PATH: SECURE_PATH,
         HOME: '/root',
         LANG: 'C.UTF-8',
-        JC_WORK_ITEM_ID: auth.workItemId,
-        JC_APPROVAL_ID: auth.approvalId ?? '',
+        JC_WORK_ITEM_ID: typeof attribution.workItemId === 'string' ? attribution.workItemId : '',
+        JC_APPROVAL_ID: typeof attribution.approvalId === 'string' ? attribution.approvalId : '',
       }, config.maxTimeoutMs);
     } catch (error) {
       // Close the intent record so the chain never shows a dangling start.
@@ -300,17 +368,11 @@ export async function executePrivileged(
     return {
       ok: true,
       ...outcome,
-      authorization: {
-        workItemId: auth.workItemId,
-        attemptId: auth.attemptId,
-        approvalId: auth.approvalId,
-        invocationHash: auth.invocationHash,
-        actionHash: auth.actionHash,
-      },
+      authorization,
       auditEventHash,
     };
   } catch (error) {
-    if (error instanceof JcAuthorizationError || error instanceof PrivilegedError) return { ok: false, code: error.code };
+    if (error instanceof JcAuthorizationError || error instanceof JcLocalTokenError || error instanceof PrivilegedError) return { ok: false, code: error.code };
     return { ok: false, code: 'PRIVILEGED_INTERNAL_ERROR' };
   }
 }

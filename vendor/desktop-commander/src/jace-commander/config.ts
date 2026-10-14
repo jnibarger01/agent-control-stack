@@ -34,6 +34,27 @@ export interface JcConfig {
   privilegedHelperPath: string;
   sudoPath: string;
   requestTimeoutMs: number;
+  /** System policy for the `local` preset (ADR 0026 D3). */
+  policyPath: string;
+  /** True when JC_POLICY_PATH named it: a missing file is then an invalid policy, not "no policy". */
+  policyPathExplicit: boolean;
+  /** Tighten-only user layer. */
+  policyUserPath: string;
+  /** JC_POLICY_UNSAFE_DEV=1: accept a policy this process can edit. Dev only; surfaced by jc_status/jc_doctor. */
+  policyUnsafeDev: boolean;
+  /** approverd request socket (JC_APPROVER_SOCKET); with the two below it enables local approval. */
+  approverRequestSocket: string | undefined;
+  /** approverd decide socket. The SERVER must not be able to reach it; only used by `approve` and the doctor check. */
+  approverDecideSocket: string | undefined;
+  /** base64url SPKI Ed25519 public key of approverd (PUBLIC material). */
+  approverPublicKey: string | undefined;
+  approverKeyId: string | undefined;
+  /** JC_ACS_MIRROR_URL: where the local trace is mirrored (best effort, local preset only). Unset: no mirroring. */
+  mirrorUrl: string | undefined;
+  mirrorIntervalMs: number;
+  mirrorMaxPending: number;
+  /** JC_GATEWAY_META_TRUSTED=1 (set only by the OAuth bridge): `_meta.gateway` is bridge-stamped, not client-written. */
+  gatewayMetaTrusted: boolean;
 }
 
 function httpUrl(raw: string, name: string): string {
@@ -46,6 +67,13 @@ function httpUrl(raw: string, name: string): string {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(`${name} must be http(s)`);
   if (url.username || url.password) throw new Error(`${name} must not embed credentials`);
   return url.toString().replace(/\/$/, '');
+}
+
+function boundedInt(raw: string | undefined, fallback: number, min: number, max: number, name: string): number {
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${name} must be an integer in [${min}, ${max}]`);
+  return value;
 }
 
 function splitRoots(raw: string | undefined): string[] {
@@ -84,5 +112,17 @@ export function loadJcConfig(env: NodeJS.ProcessEnv = process.env): JcConfig {
     privilegedHelperPath: env.JC_PRIVILEGED_HELPER ?? '/usr/local/libexec/jace-commander/jc-privileged-helper',
     sudoPath: env.JC_SUDO_PATH ?? '/usr/bin/sudo',
     requestTimeoutMs: timeout,
+    policyPath: path.resolve(env.JC_POLICY_PATH ?? '/etc/jace-commander/policy.json'),
+    policyPathExplicit: env.JC_POLICY_PATH !== undefined,
+    policyUserPath: path.join(stateDir, 'policy.user.json'),
+    policyUnsafeDev: env.JC_POLICY_UNSAFE_DEV === '1',
+    approverRequestSocket: env.JC_APPROVER_SOCKET ? path.resolve(env.JC_APPROVER_SOCKET) : undefined,
+    approverDecideSocket: env.JC_APPROVER_DECIDE_SOCKET ? path.resolve(env.JC_APPROVER_DECIDE_SOCKET) : undefined,
+    approverPublicKey: env.JC_APPROVER_PUBLIC_KEY,
+    approverKeyId: env.JC_APPROVER_KEY_ID,
+    mirrorUrl: env.JC_ACS_MIRROR_URL ? httpUrl(env.JC_ACS_MIRROR_URL, 'JC_ACS_MIRROR_URL') : undefined,
+    mirrorIntervalMs: boundedInt(env.JC_ACS_MIRROR_INTERVAL_MS, 5000, 100, 3_600_000, 'JC_ACS_MIRROR_INTERVAL_MS'),
+    gatewayMetaTrusted: env.JC_GATEWAY_META_TRUSTED === '1',
+    mirrorMaxPending: boundedInt(env.JC_ACS_MIRROR_MAX_PENDING, 5000, 10, 1_000_000, 'JC_ACS_MIRROR_MAX_PENDING'),
   };
 }

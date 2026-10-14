@@ -1,0 +1,79 @@
+# Jace Commander `local` preset bridge (ADR 0026). SYSTEM unit, dedicated account.
+#
+# Root-only install steps (the repo ships files; it never runs these for you):
+#   useradd --system --create-home --home-dir /home/jc --shell /usr/sbin/nologin jc
+#   install -d -o root -g root -m 0755 /etc/jace-commander
+#   install -o root -g root -m 0644 policy.json /etc/jace-commander/policy.json   # root-owned: jc CANNOT edit it
+#   cp this file /etc/systemd/system/jace-commander-mcp-local.service
+#   install -m 0600 -o root -g root jc-bridge.env /etc/jace-commander/bridge.env
+#   systemctl daemon-reload && systemctl enable --now jace-commander-mcp-local
+#
+# The policy MUST be unwritable by the `jc` user and its directory chain, or the JC
+# server rejects it as invalid and denies everything but jc.meta (jc_doctor explains).
+#
+# Containment is the OS's job, not the policy's: exec: allow is arbitrary code
+# execution. These directives are the actual boundary.
+[Unit]
+Description=Jace Commander MCP bridge, local preset (loopback only)
+After=network.target
+
+[Service]
+# The bridge holds the gateway secrets as `jc-bridge`; the executor (and every command the model
+# starts) runs as `jc` via setpriv, so same-uid /proc/<pid>/environ reads cannot reach those secrets.
+#   useradd --system --shell /usr/sbin/nologin jc-bridge
+#   install -d -o jc -g jc -m 0700 /var/lib/jace-commander-mcp
+User=jc-bridge
+Group=jc-bridge
+WorkingDirectory=/opt/agent-control-stack/apps/dc-mcp-gateway
+Environment=BRIDGE_PROFILE=jace-commander
+Environment=BRIDGE_PORT=8003
+Environment=NODE_ENV=production
+Environment=JC_PRESET=local
+Environment=JC_POLICY_PATH=/etc/jace-commander/policy.json
+Environment=JC_STATE_DIR=/var/lib/jace-commander-mcp/state
+Environment=JC_RUNTIME_ID=jc-local
+Environment=DC_CMD=/usr/bin/setpriv
+Environment="DC_ARGS=--reuid=jc --regid=jc --init-groups --inh-caps=-all --bounding-set=-all /usr/bin/node /opt/agent-control-stack/vendor/desktop-commander/dist/jace-commander/cli.js serve --preset local"
+EnvironmentFile=/etc/jace-commander/bridge.env
+ExecStart=/usr/bin/env node /opt/agent-control-stack/apps/dc-mcp-gateway/bridge.js
+Restart=on-failure
+RestartSec=5
+
+# --- hardening -----------------------------------------------------------
+# privileged_exec needs `sudo -n` (setuid), which NoNewPrivileges blocks. This unit
+# therefore has NO privileged path; use the managed unit for privileged_exec.
+NoNewPrivileges=true
+# Only what setpriv needs to drop the executor to `jc`; the executor itself ends with no capabilities.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_SETUID CAP_SETGID
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# setpriv must be able to change uid/gid/groups: add those syscalls back.
+SystemCallFilter=@setuid
+UMask=0077
+# Only these paths are writable. Add the workspace roots named in policy.json.
+ReadWritePaths=/var/lib/jace-commander-mcp /home/jc/work
+ReadOnlyPaths=/etc/jace-commander
+# Outbound network is a policy decision (network class = approve). To forbid it
+# outright, add: IPAddressDeny=any  and  IPAddressAllow=localhost
+# State lives in a DEDICATED directory owned by `jc` (created above; StateDirectory= would hand it to
+# jc-bridge). /var/lib/jace-commander (approver key/state, helper nonces) stays root-owned.
+
+[Install]
+WantedBy=multi-user.target

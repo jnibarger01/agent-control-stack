@@ -679,6 +679,13 @@ export const acpRoles = [
 export const registryStatuses = ["UNKNOWN", "AVAILABLE", "BUSY", "DEGRADED", "OFFLINE", "ERROR"] as const;
 export const actorTypes = ["HUMAN", "SYSTEM", "AGENT", "SERVICE"] as const;
 
+/**
+ * A worker is bound to the actor whose `externalRef` is `worker:<workerId>`. The binding only counts if a human operator
+ * registered it (see `resolveVerifiedWorkerActor`); the prefix alone proves nothing, because any caller with mutation scope
+ * can register an actor with any reference.
+ */
+export const WORKER_ACTOR_REF_PREFIX = "worker:";
+
 export type AcpRole = (typeof acpRoles)[number];
 export type RegistryStatus = (typeof registryStatuses)[number];
 export type ActorType = (typeof actorTypes)[number];
@@ -1111,6 +1118,11 @@ export interface PrivilegedTransitionOptions {
   actorId?: string;
   /** Lease bearer proof required for non-terminal transitions away from running. */
   leaseToken?: string;
+  /**
+   * Server-derived verifier engine identity for review findings. The gateway sets it from the authenticated
+   * reviewer credential; it is never read from a request body. Recorded on review_findings.verifier_engine_id.
+   */
+  verifierEngineId?: string;
 }
 
 /**
@@ -1151,6 +1163,11 @@ function validateAdminModeTtl(value: number): number {
 }
 
 export interface SqliteWorkItemStoreOptions {
+  /**
+   * Resolves a reviewer credential id (the `<id>` in `acs-credential:<id>`) to a configured credential. Review
+   * findings may only record a verifier engine that resolves; without a resolver no engine can be recorded.
+   */
+  reviewerCredentialExists?: (credentialId: string) => boolean;
   leaseMs?: number;
   heartbeatTtlMs?: number;
   /**
@@ -1443,6 +1460,8 @@ export interface WorkItemStore {
   /** Deep health view: recomputes database integrity, foreign keys, migrations, and the full audit chain. */
   health(): StoreHealth;
   verifyAuditChain(): AuditChainVerification;
+  /** Revalidates a cached audit verdict when another database connection may have changed the chain. */
+  assertAuditChainIntegrity(): void;
   transition(id: string, status: WorkItemStatus, options?: PrivilegedTransitionOptions): WorkItem;
   approveWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem;
   blockWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem;
@@ -1644,6 +1663,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
   /** Memoized lazy validation result: undefined = not checked yet, null = valid. */
   private traceConfigError: ControlStackError | null | undefined;
 
+  private readonly reviewerCredentialExists: ((credentialId: string) => boolean) | undefined;
+
   constructor(dbPath: string, options: SqliteWorkItemStoreOptions = {}) {
     // Trace producer identity: validated lazily at trace time by default (a bad value
     // never stops the store from opening, and never fails an approval); "eager" refuses
@@ -1655,6 +1676,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     this.leaseMs = options.leaseMs ?? 5 * 60 * 1000;
+    this.reviewerCredentialExists = options.reviewerCredentialExists;
     this.heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
     // No implicit expiry: admin mode is sticky unless a caller explicitly asks
     // for a bounded elevation.
@@ -4623,12 +4645,16 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const existing = this.readReviewFinding(parsed.findingHash);
       if (existing) return { value: existing, events: [] };
       const createdAt = (parsed.now ?? new Date()).toISOString();
+      const verifierEngineId =
+        options.verifierEngineId === undefined
+          ? null
+          : resolveReviewEngineId(options.verifierEngineId, this.reviewerCredentialExists);
       this.db
         .prepare(
           `INSERT INTO review_findings
            (finding_hash, finding_id, work_item_id, attempt_id, reviewer_principal_id, reviewer_provider,
-            evidence_manifest_hash, verdict, finding_json, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            verifier_engine_id, evidence_manifest_hash, verdict, finding_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           parsed.findingHash,
@@ -4637,6 +4663,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           parsed.attemptId,
           parsed.reviewerPrincipalId,
           parsed.reviewerProvider,
+          verifierEngineId,
           parsed.evidenceManifestHash,
           parsed.verdict,
           JSON.stringify(parsed.finding),
@@ -4651,6 +4678,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
             attemptId: parsed.attemptId,
             workItemId: parsed.workItemId,
             reviewerPrincipalId: parsed.reviewerPrincipalId,
+            verifierEngineId,
             verdict: parsed.verdict,
             evidenceManifestHash: parsed.evidenceManifestHash
           },
@@ -4659,6 +4687,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
             "attempt.id": parsed.attemptId,
             ...(options.actorId ? { "actor.id": options.actorId } : {}),
             "review.reviewer_principal_id": parsed.reviewerPrincipalId,
+            ...(verifierEngineId ? { "review.verifier_engine_id": verifierEngineId } : {}),
             "review.verdict": parsed.verdict,
             "review.evidence_manifest_hash": parsed.evidenceManifestHash,
             "advisory.role": "ADVISORY_REASONER"
@@ -4684,6 +4713,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           work_item_id: string;
           reviewer_principal_id: string;
           reviewer_provider: string;
+          verifier_engine_id: string | null;
           evidence_manifest_hash: string;
           verdict: ReviewFindingProjection["verdict"];
           finding_json: string;
@@ -4697,6 +4727,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           workItemId: row.work_item_id,
           reviewerPrincipalId: row.reviewer_principal_id,
           reviewerProvider: row.reviewer_provider,
+          verifierEngineId: row.verifier_engine_id ?? null,
           evidenceManifestHash: row.evidence_manifest_hash,
           verdict: row.verdict,
           finding: JSON.parse(row.finding_json) as Record<string, unknown>,
@@ -5987,6 +6018,54 @@ export class SqliteWorkItemStore implements WorkItemStore {
     );
   }
 
+  /** True only for a registered actor of type HUMAN. An unknown id is not an operator. */
+  isHumanOperator(actorId: string): boolean {
+    const row = this.db.prepare(`SELECT actor_type FROM actors WHERE id = ?`).get(actorId) as
+      { actor_type: string } | undefined;
+    return row?.actor_type === "HUMAN";
+  }
+
+  /**
+   * The actor a worker acts as, or `undefined`. This is the only mapping from a worker id to an authority-bearing identity
+   * and it fails closed. The worker id is never treated as an actor id. All of these must hold:
+   *
+   * - the worker id is a plain identifier, and exactly one actor carries the reference `worker:<workerId>`;
+   * - that actor is an AGENT or SERVICE, never a HUMAN or SYSTEM actor;
+   * - the actor's latest `actor.registered` audit event matches its current type and reference, and names a registering
+   *   actor that is a HUMAN operator. `POST /actors` is open to any mutation credential and overwrites an existing
+   *   actor, so a row in `actors` alone is not evidence that an operator bound this worker.
+   *
+   * The audit event is read from the hash-chained ledger; callers that rely on it must assert chain integrity first.
+   */
+  resolveVerifiedWorkerActor(workerId: string): string | undefined {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(workerId)) return undefined;
+    const rows = this.db
+      .prepare(`SELECT * FROM actors WHERE external_ref = ?`)
+      .all(`${WORKER_ACTOR_REF_PREFIX}${workerId}`) as unknown as ActorRow[];
+    if (rows.length !== 1) return undefined;
+    const actor = rowToActor(rows[0]!);
+    if (actor.actorType !== "AGENT" && actor.actorType !== "SERVICE") return undefined;
+    const event = this.db
+      .prepare(
+        `SELECT body FROM audit_events
+         WHERE name = 'actor.registered' AND json_extract(attributes, '$."registered_actor.id"') = ?
+         ORDER BY sequence DESC LIMIT 1`
+      )
+      .get(actor.id) as { body: string } | undefined;
+    if (!event) return undefined;
+    let registered: { actorType?: unknown; externalRef?: unknown; registeredByActorId?: unknown };
+    try {
+      registered = JSON.parse(event.body) as typeof registered;
+    } catch {
+      return undefined;
+    }
+    if (registered.actorType !== actor.actorType || registered.externalRef !== actor.externalRef) return undefined;
+    if (typeof registered.registeredByActorId !== "string" || !this.isHumanOperator(registered.registeredByActorId)) {
+      return undefined;
+    }
+    return actor.id;
+  }
+
   resolveActorId(candidates: string[]): string | undefined {
     const normalized = [...new Set(candidates.map((candidate) => candidate.trim()).filter(Boolean))];
     for (const candidate of normalized) {
@@ -6027,6 +6106,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   verifyAuditChain(): AuditChainVerification {
     return verifyAuditChain(this.readAllEvents());
+  }
+
+  assertAuditChainIntegrity(): void {
+    this.assertAuditIntegrityFreshForWrite();
   }
 
   readinessHealth(): StoreHealth {
@@ -9833,6 +9916,49 @@ const TERMINAL_WORK_ITEM_STATUSES: readonly WorkItemStatus[] = ["succeeded", "fa
 
 function isTerminalStatus(status: WorkItemStatus): boolean {
   return TERMINAL_WORK_ITEM_STATUSES.includes(status);
+}
+
+const REVIEWER_CREDENTIAL_ENGINE = /^acs-credential:([A-Za-z0-9][A-Za-z0-9._:@/-]{0,255})$/u;
+
+/**
+ * The credential id inside a server-written verifier engine id (`acs-credential:<credential id>`), or undefined when
+ * the value is not in that exact format. Callers must still resolve the id to a configured credential.
+ */
+export function reviewerCredentialIdFromEngineId(value: string): string | undefined {
+  return REVIEWER_CREDENTIAL_ENGINE.exec(value)?.[1];
+}
+
+function resolveReviewEngineId(value: string, exists: ((credentialId: string) => boolean) | undefined): string {
+  const credentialId = reviewerCredentialIdFromEngineId(value);
+  if (credentialId === undefined || !exists || !exists(credentialId))
+    throw new ControlStackError("review_engine_unknown", "verifier engine does not resolve to a known credential");
+  return value;
+}
+
+/**
+ * Recompute a stored execution result's payload hash from its canonical fields, with the same function the
+ * store used at ingest. A receipt binds this recomputed value, never the stored `payloadHash` column alone.
+ */
+export function storedExecutionResultPayloadHash(result: StoredExecutionResult): string {
+  return resultPayloadHash({
+    workItemId: result.workItemId,
+    leaseId: result.leaseId,
+    workerId: result.workerId,
+    actionHash: result.actionHash,
+    idempotencyKey: result.idempotencyKey,
+    outcome: result.outcome,
+    startedAt: result.startedAt,
+    finishedAt: result.finishedAt,
+    exitCode: result.exitCode ?? null,
+    summary: result.summary,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    structuredOutput: result.structuredOutput,
+    artifacts: result.artifacts,
+    error: result.error,
+    resourceUsage: result.resourceUsage,
+    simulationMetadata: result.simulationMetadata
+  } as PersistedResultInput);
 }
 
 function resultPayloadHash(input: PersistedResultInput): string {

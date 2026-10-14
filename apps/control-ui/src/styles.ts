@@ -1,6 +1,7 @@
 import { mcpClientsStyles } from "./mcp-clients.js";
 import { agentDispatchStyles } from "./agent-dispatch.js";
 import { premiumStyles } from "./premium-styles.js";
+import { operatorThirtyStyles } from "./operator-thirty-ui.js";
 export function styles(): string {
   return `
 :root {
@@ -440,5 +441,6 @@ body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
 ${premiumStyles()}
 ${mcpClientsStyles()}
 ${agentDispatchStyles()}
+${operatorThirtyStyles()}
 `;
 }

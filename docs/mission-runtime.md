@@ -143,14 +143,163 @@ parent, so the append-only result cannot go stale. Both operations require the p
 operator, so a stale worker cannot cancel or decide for work owned by a newer claimant; refusals are durable
 `authority.denied` evidence, and `child.reduced` records the selected child and result hash.
 
+## Dispatch authority gate
+
+`WorkUnitExecutionLedger.beginDispatch` is the one place every executor lane passes before a worker runs a unit, and it
+is where authority is enforced. A mission with a persisted `mission_authority` binding is **governed**:
+
+- The ledger needs a `DispatchAuthorityVerifier` (`MissionAuthorityLedger.verifyDispatch` implements it). A governed
+  mission dispatched with no verifier is refused (`authority_verifier_unavailable`), never run unchecked.
+- The verifier reads durable state and ACS's clock and refuses anything it cannot prove: mission not active, no unit
+  authority for a derived unit (a unit created outside `request_child_work` is never promoted to the mission's
+  authority), a unit superseded by a newer parent claim, a revoked grant, execution inputs that no longer match what the
+  grant approved, an expired authority, a worker that does not resolve to the actor the authority was issued to, an
+  attempt beyond the authority's `maxAttemptsPerOperation`, and a `jc`/`dc` lane whose tool runtime the authority does
+  not grant.
+- A caller-supplied `authority.grantId` that is not the verified one is refused (`authority_ref_mismatch`). On success
+  the envelope's `authority` carries the verified `grantId` and the hash of the unit's derived authority
+  (`unitAuthorityHash`), so what a worker ran under is bound into the dispatch hash.
+- The check runs before the replay path, so a resumed dispatch after revocation or expiry is refused too.
+- A refusal throws `dispatch_authority_denied` after the transaction commits an `authority.denied` event
+  (`operation: "dispatch"`) and writes no execution attempt.
+- A mission with no authority binding dispatches exactly as before.
+
+Lane and tool authorization is exact. Every lane maps to a runtime the authority can grant: `dc` to `desktop_commander`,
+`jc` to `jace_commander`, `coder` to `sandbox`. The `mcp` lane maps to none, because the authority schema cannot express an
+MCP tool, so it is never authorized for a governed mission. A unit whose payload names a specific tool (`kind: "tool"`) may
+only run it if that exact runtime and tool pair is granted; a broad runtime grant does not cover a tool nobody listed.
+
+A governed dispatch carries a **deadline** set by ACS: the earlier of the dispatch time plus the authority's `maxRuntimeMs`
+and the authority's expiry. A caller-supplied deadline is ignored. The controller races the executor against it, aborts the
+executor's `AbortSignal`, and records the outcome as uncertain (never as a retry-safe failure). Independently,
+`applyResult` judges a result against the deadline on ACS's own clock: one that arrives late is recorded as `unknown`
+whatever finish time the worker reports. `claimUnit` itself does not consult authority; the gate is at dispatch.
+
+## Production entry point
+
+`CodingMissionController` is the production caller of `createGovernedExecution`. With `ports.governance = { mode: "enforce" }`
+(the gateway sets this when `ACS_CODING_MISSION_GOVERNED=1`; it is off by default) the controller:
+
+- **Takes identity from the control plane, never from the worker.** An operator is a registered `HUMAN` actor
+  (`isHumanOperator`). A worker acts as the actor `resolveVerifiedWorkerActor` returns: exactly one `AGENT` or `SERVICE`
+  actor with `externalRef` `worker:<workerId>`, whose latest `actor.registered` audit event matches its row and names a
+  `HUMAN` registrar. `POST /actors` is open to any mutation credential and overwrites an existing actor, so a row in `actors`
+  alone proves nothing; a binding made by, or overwritten by, a non-human does not resolve. The grant's executing actor must
+  equal the resolved actor: delegating to a different actor stays refused.
+- **Does not start a mission nobody gave authority to.** With no binding it waits (`authority_required`): nothing is claimed,
+  nothing runs, nothing is degraded. An operator binds a grant with `POST /coding-missions/:id/authority`.
+- **Verifies audit integrity before opening the dispatch transaction**, so a full-chain verification does not hold the write
+  lock; a chain that does not verify refuses the dispatch (`audit_integrity_failed`).
+- **Runs the gate between claim and execute.** A denial returns the unit to `pending` (it never ran), records
+  `authority.denied`, and degrades the mission with `dispatch_authority_denied`. Binding is write-once, so a mission whose
+  grant was revoked or expired stays stopped; it needs a new mission.
+- **Completes through the ledger.** Success completes the unit; a failure or retryable outcome degrades the mission for an
+  operator (`reconciliation_required` if the environment changed, else `operation_failed`); an uncertain outcome is handled
+  by the existing recovery path, which escalates unless the executor can fence the old run or declares itself idempotent.
+
+Grants must be issued under the same id as the coding mission, and the work item with that id must be non-terminal.
+
+Cost note: `assertAuditChainIntegrity` re-verifies the whole audit chain when another connection has written (or every 30s).
+Each governed dispatch therefore costs a chain verification in the worst case. This has not been measured on a large
+production database.
+
 ## Not yet in this runtime
 
-- Consulting `unitAuthority` when a worker is dispatched. Until then authority is a verified, tamper-evident ledger of
-  what each unit may do, not an enforcement point at dispatch. Production composition roots that construct the ledger
-  with the real grant store and operator verification are also not wired yet.
+- Governed execution is implemented and tested end to end, but it is **off by default** and has not been enabled or deployed
+  anywhere. Turning it on is an operational action (`ACS_CODING_MISSION_GOVERNED=1`, plus operator-bound worker actors and a
+  grant per mission).
+- The `jc` and `mcp` lanes have no executor adapter that enforces its own authority yet, so they are not runnable. The `dc`
+  lane has a boundary adapter for four read-only tools (see "Desktop Commander lane") and the general-mission `coding` unit
+  has an execution contract, a boundary adapter and a bounded driver (see "General-mission coding units"). Neither has a
+  concrete executor/invoker behind its port, there is no `dc` driver, and no worker, gateway route or CLI constructs a
+  driver, so nothing runs a general mission in production.
 - Checkpoint/resume as worker adapters on the execution ledger, the CUA worker, and recovery policy.
-- A driver for the `general` mission kind. The legacy coding path has no budget row (uncapped).
+- The legacy coding path has no budget row (uncapped).
 - Delegating to a different executing actor (`authorityNarrowingViolations` refuses it deliberately and it needs its own decision).
+
+## Unit runner
+
+`GovernedUnitRunner.runUnit({ missionId, unitId, workerId, lane })` (`unit-runner.ts`) runs one **general-mission** work unit
+end to end: it claims the unit, dispatches it through the governed root, runs the lane's `WorkUnitExecutorAdapter` and applies
+the result. (The coding-mission controller has its own governed path; see "Production entry point" above.) A lane with no
+adapter is refused before anything is claimed. If authority refuses the dispatch, the refusal is already durable, no attempt
+exists, no adapter runs, and the claimed unit is failed as `policy_denied` (non-retryable) instead of being left running;
+reopening it takes an explicit retry. An expired authority is recorded as `authority_expired` and any other refusal as
+`policy_denied`. This differs from the controller, which returns the unit to `pending` and degrades the mission. Any other
+failure of the dispatch (for example a verified unit with no implementer identity) happens before anything ran, so the claim
+is released and the error rethrown instead of leaving the unit in `running`. A unit with a verification policy needs
+`implementerEngineId` in the runner options; the runner never invents one.
+
+The executor is raced against the deadline ACS set on the dispatch. At the deadline it is signalled to stop, ACS stops waiting,
+and the outcome is recorded as `unknown` with the external state marked uncertain, as in the controller. A governed dispatch
+(one that names a grant) with no deadline fails closed and never calls the executor; a mission with no authority binding has no
+deadline and runs as before. An adapter that throws becomes a failed result with the external state marked uncertain, and its message is redacted
+before it is persisted. A "succeeded" result without a non-empty result hash and a list of string files is converted to a
+failed `invalid_output` result, because the ledger itself only checks that a result object exists. Of two
+concurrent runs of one unit, one executes and the other reports `claim_conflict`. A crash between the claim and the dispatch
+leaves a running claim that existing stale-claim recovery handles; the runner adds no recovery of its own.
+
+## General-mission coding units
+
+A coding unit in a `general` mission is one explicit, repository-scoped task, not a coding mission. It does not inherit a
+mission branch, pull request or merge lifecycle; that stays with `CodingMissionController` and its governed path, which this
+section does not change. The task is the typed `coding` payload (`general-coding.ts`, `parseGeneralCodingTask`): a canonical
+absolute `repository`, an immutable 40-hex `baseSha` (a branch name is rejected), `instructions`, the declared `files`
+(normal repository-relative paths), `maxRuntimeMs` and `maxFiles`. The generic payload parser keeps these optional so legacy
+coding payloads still parse; the strict parser requires all of them and is what the driver and adapter use.
+
+`GeneralCodingExecutionAdapter` (`general-coding-adapter.ts`, coder lane) enforces authority where the work happens, not only
+at dispatch. `GovernedUnitRunner` hands every adapter the live claim, and the adapter checks, before the executor is called and
+failing closed: the claim token matches the dispatch and is still the unit's live claim for the same worker; the dispatch gate
+still passes on current durable state (so a revocation, expiry or changed grant between dispatch and execution is caught) over
+the same authority hash; the unit's stored payload is a complete task; the authority grants the `sandbox` runtime; the
+repository lies inside a scope resource (descendant containment, not a path prefix); and the task's runtime bound does not
+exceed the authority's. A refusal records a failed attempt with a `nativeCode` naming the reason and marks the external state
+certain (nothing ran). After the executor runs, a success is accepted only if it attests the same `baseSha`, a non-empty result
+hash, at most `maxFiles` normal relative paths, each equal to or under a declared path; otherwise the attempt is
+`invalid_output` with the state marked uncertain, because the work did run. The executor is stopped at the task's own bound,
+capped by the time left on the dispatch, and a timeout is `unknown`.
+
+`runGeneralCodingUnits` (`general-coding-driver.ts`) is the bounded driver: one sequential pass over active governed `general`
+missions, coder lane and coding units only, at most `maxUnits` (default 1, ceiling 10) units started per pass. A unit without a
+complete task contract is reported as skipped and never claimed. The driver and adapter take the executor as a port
+(`GeneralCodingExecutor`); symlink and filesystem containment inside the repository is that executor's responsibility. No
+executor, worker hook or gateway route is included.
+
+## Desktop Commander lane
+
+`DcLaneExecutionAdapter` (`dc-lane-adapter.ts`, `dc` lane) runs a `tool` unit under the same execution-boundary discipline as
+the coding adapter, with its own tool-name authority. The shared checks live in `execution-boundary.ts` and both adapters use
+them: the live claim (token hash, store row, worker, unit kind, status), the dispatch gate re-verified on current durable
+state over the same authority hash, containment on physical paths (symlinks resolved; a sibling sharing a prefix is outside),
+and a runtime budget that never starts the invoker when no time is left.
+
+The unit's input is the typed call in `dc-tool-call.ts`: `toolName`, complete `arguments`, `argsHash` (bound to the tool name,
+so arguments cannot be replayed under another tool) and `maxRuntimeMs`. The generic payload parser keeps the new fields
+optional so legacy tool payloads still parse. The adapter then requires, before the invoker is called: the tool is managed by
+`@agent-control-stack/dc-tool-manifest` and is on the lane's explicit allowlist (`read_file`, `read_multiple_files`,
+`get_file_info`, `list_directory`); the manifest marks it read-only with no approval requirement; the authority lists this
+exact `(desktop_commander, tool)` pair and grants the privilege the tool's manifest scope consumes; the arguments satisfy the
+tool's strict schema; every path argument is canonical and lies inside a `path`/`repository` scope resource; and the call's
+bound does not exceed the authority's. A refusal is a failed attempt with a `nativeCode` and the external state marked certain.
+A read-only tool that reports changed files, or a success without a result hash, is `invalid_output` with the state marked
+uncertain.
+
+Mutation and process tools (`write_file`, `edit_block`, `move_file`, `create_directory`, `start_process`) are refused as
+`tool_not_supported`: the Desktop Commander chain requires a recorded human approval per call, a work unit has none, and a
+grant is not one. Tools whose paths the lane cannot enumerate are refused rather than guessed at. The adapter does not mint a
+Desktop Commander capability; the `DcToolInvoker` is the existing transport and has no production binding yet.
+
+## Composition root
+
+`createGovernedExecution({ dbPath, verifyOperator, resolveActor })` (`governed-runtime.ts`) opens the work-item store
+and the mission store on one database and returns the authority ledger plus a dispatch ledger already wired to it, so
+a dispatcher built this way cannot run a governed mission unchecked. `verifyOperator` and `resolveActor` are required
+on purpose: there is no default that trusts a caller-supplied identity. Grants must be issued under the same id as the
+coding mission. A terminal work item (`succeeded`, `failed`, `cancelled`, `rejected`, `quarantined`) stops dispatch and
+child requests even while the mission row is still active. A private database (`:memory:`, an empty path, a `file:` URI)
+is refused, because revocations are read from the mission store's connection and the two stores must see one file.
+Tests drive claim, dispatch, result, revocation, cancellation and a process restart through this root only.
 
 ## Verification gate
 
@@ -160,9 +309,12 @@ Verification criteria are admitted before the first execution attempt and persis
 A first claim is refused when a non-`none` policy has no rubric. Verified dispatch also requires the actual implementer
 engine/provider identity, which is persisted separately from the worker owner id. Databases upgraded with already
 in-flight verified units are quarantined fail-closed; admitting a rubric explicitly resets only that quarantined unit
-for a fresh attempt. Terminal units (`succeeded`, `cancelled`) are not in flight: migration 059 restores any terminal
-unit that 057 rewrote to `failed`, provided it is unchanged since 057. It also drops that unit's quarantine row and
-records a `verification.migration_057_terminal_restored` event.
+for a fresh attempt. Terminal units (`succeeded`, `cancelled`) are not in flight. For a new upgrade that applies
+057, 058 and 059 together under one SQLite writer lock, 059 restores unchanged terminal units rewritten by 057,
+removes their quarantine rows, and records `verification.migration_057_terminal_restored` events. If 057 was
+applied on an earlier startup, matching terminal candidates are ambiguous: a later genuine retry could have
+returned them to the same failure tuple. Startup then refuses automatic 059 restoration and requires audited,
+operator-approved reconciliation. Never force 059 past this guard by altering checksums or migration metadata.
 
 The gate derives the implementer engine identity from the hashed durable dispatch. It recomputes `dispatch_hash` from
 `dispatch_json` and requires the dispatch's attempt, worker, lane, claim and engine bindings to match the attempt row

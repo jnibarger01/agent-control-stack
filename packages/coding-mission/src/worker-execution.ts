@@ -12,6 +12,40 @@ export interface ExecutionAuthorityRefs {
   leaseId?: string;
   fencingToken?: number;
   actionHash?: string;
+  /** Hash of the unit's derived authority definition, set by ACS (never the caller) for governed missions. */
+  unitAuthorityHash?: string;
+  /**
+   * The instant by which this dispatch must finish, set by ACS (never the caller) for governed missions: the earlier of
+   * the dispatch time plus the authority's `maxRuntimeMs` and the authority's own expiry.
+   */
+  deadlineAt?: string;
+}
+
+/** The outcome of checking a dispatch against the authority the mission was granted. */
+export type DispatchAuthorityVerdict =
+  | {
+      ok: true;
+      grantId: string;
+      unitAuthorityHash: string;
+      executingActorId: string;
+      /** The authority's per-dispatch runtime limit and its expiry, from which ACS derives the deadline. */
+      maxRuntimeMs: number;
+      expiresAt: string;
+    }
+  | { ok: false; reason: string };
+
+/**
+ * Decides whether a worker may run a unit on a lane right now. `MissionAuthorityLedger` implements it. It must read
+ * durable state and ACS's own clock, and return a refusal for anything it cannot prove.
+ */
+export interface DispatchAuthorityVerifier {
+  verifyDispatch(input: {
+    missionId: string;
+    unitId: string;
+    workerId: string;
+    lane: ExecutorLane;
+    attempt: number;
+  }): DispatchAuthorityVerdict;
 }
 
 export interface DispatchEnvelope {
@@ -148,7 +182,9 @@ function normalizedAuthority(authority: ExecutionAuthorityRefs | undefined): Exe
     ...(typeof authority.fencingToken === "number" && Number.isInteger(authority.fencingToken)
       ? { fencingToken: authority.fencingToken }
       : {}),
-    ...(typeof authority.actionHash === "string" ? { actionHash: authority.actionHash } : {})
+    ...(typeof authority.actionHash === "string" ? { actionHash: authority.actionHash } : {}),
+    ...(typeof authority.unitAuthorityHash === "string" ? { unitAuthorityHash: authority.unitAuthorityHash } : {})
+    // deadlineAt is deliberately not copied: only ACS sets it, from the verified authority.
   };
 }
 
@@ -165,7 +201,10 @@ export function failureCategoryForCode(code?: string, message?: string): Failure
   return "tool_failure";
 }
 
-function resultBase(dispatch: DispatchEnvelope, now: string): Omit<ResultEnvelope, "outcome" | "receipts" | "externalStateUncertain"> {
+export function resultBase(
+  dispatch: DispatchEnvelope,
+  now: string
+): Omit<ResultEnvelope, "outcome" | "receipts" | "externalStateUncertain"> {
   return {
     schemaVersion: "acs.work-unit-result.v1",
     attemptId: dispatch.attemptId,
@@ -180,9 +219,28 @@ function resultBase(dispatch: DispatchEnvelope, now: string): Omit<ResultEnvelop
   };
 }
 
+/**
+ * The result ACS records when a dispatch ran out of time. The operation may have started and may still be running, so it is
+ * an uncertain outcome (never a failure that is safe to retry) and carries no result.
+ */
+export function deadlineResult(dispatch: DispatchEnvelope, now: string): ResultEnvelope {
+  return {
+    ...resultBase(dispatch, now),
+    outcome: "unknown",
+    receipts: [],
+    failure: { category: "timeout", retrySafe: false },
+    externalStateUncertain: true
+  };
+}
+
+/** The live claim a dispatch ran under. An adapter that fences at the execution boundary checks it against durable state. */
+export interface ExecutionClaim {
+  claimToken: string;
+}
+
 export interface WorkUnitExecutorAdapter {
   readonly lane: ExecutorLane;
-  execute(dispatch: DispatchEnvelope, signal?: AbortSignal): Promise<ResultEnvelope>;
+  execute(dispatch: DispatchEnvelope, signal?: AbortSignal, claim?: ExecutionClaim): Promise<ResultEnvelope>;
 }
 
 export class CoderExecutionAdapter implements WorkUnitExecutorAdapter {
@@ -191,7 +249,9 @@ export class CoderExecutionAdapter implements WorkUnitExecutorAdapter {
   constructor(
     private readonly store: CodingMissionStore,
     private readonly coder: CodingMissionPorts["coder"],
-    private readonly now: () => string = () => new Date().toISOString()
+    private readonly now: () => string = () => new Date().toISOString(),
+    /** The claim's fence, handed to the executor so a fencing executor can validate it. */
+    private readonly claimToken?: string
   ) {}
 
   async execute(dispatch: DispatchEnvelope, signal?: AbortSignal): Promise<ResultEnvelope> {
@@ -212,7 +272,9 @@ export class CoderExecutionAdapter implements WorkUnitExecutorAdapter {
       const outcome = await this.coder.execute({
         mission,
         operationId: dispatch.unitId,
-        workerId: dispatch.workerId
+        workerId: dispatch.workerId,
+        ...(this.claimToken ? { claimToken: this.claimToken } : {}),
+        ...(signal ? { signal } : {})
       });
       const finishedAt = this.now();
       if (outcome.status === "succeeded" && outcome.value) {
@@ -281,10 +343,7 @@ export interface ToolLaneOutcome {
   externalStateUncertain?: boolean;
 }
 
-export type ToolLaneInvoker = (input: {
-  dispatch: DispatchEnvelope;
-  signal?: AbortSignal;
-}) => Promise<ToolLaneOutcome>;
+export type ToolLaneInvoker = (input: { dispatch: DispatchEnvelope; signal?: AbortSignal }) => Promise<ToolLaneOutcome>;
 
 /**
  * Thin facade for the existing JC, Desktop Commander, and generic MCP composition roots.
@@ -320,7 +379,8 @@ export class ToolLaneExecutionAdapter implements WorkUnitExecutorAdapter {
             ? [{ kind: `${this.lane}_result`, hash: outcome.resultHash }]
             : [];
       if (outcome.ok) {
-        const resultHash = outcome.resultHash ?? stableHash({ lane: this.lane, attemptId: dispatch.attemptId, receipts });
+        const resultHash =
+          outcome.resultHash ?? stableHash({ lane: this.lane, attemptId: dispatch.attemptId, receipts });
         return {
           ...resultBase(dispatch, this.now()),
           outcome: "succeeded",
@@ -363,7 +423,15 @@ export class ToolLaneExecutionAdapter implements WorkUnitExecutorAdapter {
 }
 
 export class WorkUnitExecutionLedger {
-  constructor(private readonly store: CodingMissionStore) {}
+  constructor(
+    private readonly store: CodingMissionStore,
+    private readonly options: { authority?: DispatchAuthorityVerifier; clock?: () => string } = {}
+  ) {}
+
+  /** ACS's own clock. A worker-reported time is never used to decide whether a deadline was met. */
+  private clock(): string {
+    return (this.options.clock ?? (() => new Date().toISOString()))();
+  }
 
   beginDispatch(input: {
     missionId: string;
@@ -374,7 +442,9 @@ export class WorkUnitExecutionLedger {
     authority?: ExecutionAuthorityRefs;
     now: string;
   }): DispatchEnvelope {
-    return this.store.transaction(() => {
+    // A refusal is evidence, so it is committed inside the transaction and thrown only after it.
+    let denial: ControlStackError | undefined;
+    const envelope = this.store.transaction((): DispatchEnvelope | undefined => {
       const unit = this.store.workUnits(input.missionId).find((candidate) => candidate.unitId === input.unitId);
       if (!unit) throw new ControlStackError("work_unit_not_found", "work unit does not exist");
       if (
@@ -383,10 +453,69 @@ export class WorkUnitExecutionLedger {
         unit.workerId !== input.workerId ||
         unit.attempt < 1
       ) {
-        throw new ControlStackError("coding_mission_claim_conflict", "execution dispatch does not match the live claim");
+        throw new ControlStackError(
+          "coding_mission_claim_conflict",
+          "execution dispatch does not match the live claim"
+        );
       }
       if (!EXECUTOR_LANES.includes(input.lane)) {
         throw new ControlStackError("execution_lane_invalid", "executor lane is invalid");
+      }
+      // A mission with a persisted authority binding is governed: nothing in it runs unless that authority is verified
+      // for this worker, unit, lane and attempt. A governed mission with no verifier configured is refused, not run
+      // unchecked. Missions with no binding dispatch exactly as before. The check precedes the replay path below, so
+      // a revoked or expired authority also stops a resumed dispatch.
+      let governedAuthority: ExecutionAuthorityRefs | undefined;
+      const governed = this.store.db
+        .prepare("SELECT 1 AS present FROM mission_authority WHERE mission_id = ?")
+        .get(input.missionId);
+      if (governed) {
+        let refusal: string | undefined;
+        if (!this.options.authority) {
+          refusal = "authority_verifier_unavailable";
+        } else {
+          let verdict: DispatchAuthorityVerdict;
+          try {
+            verdict = this.options.authority.verifyDispatch({
+              missionId: input.missionId,
+              unitId: input.unitId,
+              workerId: input.workerId,
+              lane: input.lane,
+              attempt: unit.attempt
+            });
+          } catch {
+            verdict = { ok: false, reason: "authority_verifier_failed" };
+          }
+          if (!verdict.ok) {
+            refusal = verdict.reason;
+          } else if (input.authority?.grantId !== undefined && input.authority.grantId !== verdict.grantId) {
+            refusal = "authority_ref_mismatch";
+          } else {
+            const issuedMs = Date.parse(input.now);
+            const deadlineMs = Math.min(issuedMs + verdict.maxRuntimeMs, Date.parse(verdict.expiresAt));
+            if (!Number.isFinite(deadlineMs) || deadlineMs <= issuedMs) {
+              // A deadline that is not strictly in the future is an authority that is already unusable.
+              refusal = "deadline_unavailable";
+            } else {
+              governedAuthority = {
+                ...normalizedAuthority(input.authority),
+                grantId: verdict.grantId,
+                unitAuthorityHash: verdict.unitAuthorityHash,
+                deadlineAt: new Date(deadlineMs).toISOString()
+              };
+            }
+          }
+        }
+        if (refusal !== undefined) {
+          this.store.recordMissionEvent(
+            input.missionId,
+            "authority.denied",
+            { operation: "dispatch", unitId: input.unitId, lane: input.lane, reason: refusal },
+            input.now
+          );
+          denial = new ControlStackError("dispatch_authority_denied", `dispatch refused: ${refusal}`);
+          return undefined;
+        }
       }
       if (unit.verificationPolicy !== "none" && !this.store.verificationRequirement(input.missionId, input.unitId)) {
         throw new ControlStackError(
@@ -405,7 +534,7 @@ export class WorkUnitExecutionLedger {
         );
       }
       const claimTokenHash = stableHash(input.claimToken);
-      const authority = normalizedAuthority(input.authority);
+      const authority = governedAuthority ?? normalizedAuthority(input.authority);
       const payloadHash = stableHash(unit.payload ?? null);
       const routeHash = stableHash(unit.route ?? null);
       // Migration-056 attempts used an identity without implementerEngineId.
@@ -437,7 +566,10 @@ export class WorkUnitExecutionLedger {
             stored.routeHash !== routeHash ||
             stableHash(stored.authority) !== stableHash(authority)
           ) {
-            throw new ControlStackError("execution_attempt_conflict", "legacy execution attempt binding does not match");
+            throw new ControlStackError(
+              "execution_attempt_conflict",
+              "legacy execution attempt binding does not match"
+            );
           }
           return { ...stored, implementerEngineId };
         }
@@ -478,7 +610,10 @@ export class WorkUnitExecutionLedger {
           existing.implementer_engine_id !== implementerEngineId ||
           existing.executor_lane !== input.lane
         ) {
-          throw new ControlStackError("execution_attempt_conflict", "execution attempt identity already has another dispatch");
+          throw new ControlStackError(
+            "execution_attempt_conflict",
+            "execution attempt identity already has another dispatch"
+          );
         }
         return JSON.parse(existing.dispatch_json) as DispatchEnvelope;
       }
@@ -487,9 +622,7 @@ export class WorkUnitExecutionLedger {
           `SELECT attempt_id, dispatch_hash FROM work_unit_execution_attempts
            WHERE mission_id = ? AND unit_id = ? AND unit_attempt = ?`
         )
-        .get(input.missionId, input.unitId, unit.attempt) as
-        | { attempt_id: string; dispatch_hash: string }
-        | undefined;
+        .get(input.missionId, input.unitId, unit.attempt) as { attempt_id: string; dispatch_hash: string } | undefined;
       if (sameUnitAttempt) {
         throw new ControlStackError(
           "execution_attempt_conflict",
@@ -520,11 +653,20 @@ export class WorkUnitExecutionLedger {
       this.store.putEvidence(
         input.missionId,
         `execution_dispatch:${attemptId}`,
-        { attemptId, unitId: input.unitId, unitAttempt: unit.attempt, workerId: input.workerId, lane: input.lane, dispatchHash },
+        {
+          attemptId,
+          unitId: input.unitId,
+          unitAttempt: unit.attempt,
+          workerId: input.workerId,
+          lane: input.lane,
+          dispatchHash
+        },
         input.now
       );
       return dispatch;
     });
+    if (denial) throw denial;
+    return envelope!;
   }
 
   attempt(attemptId: string): ExecutionAttemptRecord | undefined {
@@ -578,7 +720,8 @@ export class WorkUnitExecutionLedger {
         if (row.report_hash === reportHash) return { applied: "duplicate" };
         return { applied: "rejected_invalid", reason: "attempt already has a different terminal report" };
       }
-      const unit = this.store.workUnits(row.mission_id).find((candidate) => candidate.unitId === row.unit_id);
+      // Only the claim columns: a unit whose stored payload no longer parses must still be failed and released here.
+      const unit = this.store.workUnitClaim(row.mission_id, row.unit_id);
       if (
         !unit ||
         unit.status !== "running" ||
@@ -596,6 +739,22 @@ export class WorkUnitExecutionLedger {
         return { applied: "rejected_stale", reason: "live claim no longer matches this execution attempt" };
       }
 
+      // A governed dispatch carries a deadline set by ACS. A result that arrives after it, on ACS's clock, is not accepted
+      // as what it claims to be: the operation may have run, so it is recorded as an uncertain outcome instead. The
+      // worker-reported finish time is not trusted for this.
+      const deadlineAt = (JSON.parse(row.authority_json) as ExecutionAuthorityRefs).deadlineAt;
+      const receivedAt = this.clock();
+      const late = deadlineAt !== undefined && !(Date.parse(receivedAt) <= Date.parse(deadlineAt));
+      const outcome: ExecutionOutcome = late ? "unknown" : input.result.outcome;
+      if (late) {
+        this.store.recordMissionEvent(
+          row.mission_id,
+          "work_unit.deadline_exceeded",
+          { unitId: row.unit_id, attemptId: row.attempt_id, deadlineAt, receivedAt, reported: input.result.outcome },
+          receivedAt
+        );
+      }
+
       for (const [index, receipt] of input.result.receipts.entries()) {
         this.store.db
           .prepare(
@@ -606,7 +765,7 @@ export class WorkUnitExecutionLedger {
       }
 
       let applied: ApplyResult;
-      switch (input.result.outcome) {
+      switch (outcome) {
         case "succeeded": {
           if (!input.result.result) {
             const next = this.store.failUnit(row.mission_id, row.unit_id, input.claimToken, {
@@ -642,16 +801,12 @@ export class WorkUnitExecutionLedger {
             if (changed.changes !== 1) {
               throw new ControlStackError("coding_mission_claim_conflict", "verification hand-off lost the claim");
             }
-            this.store.db
-              .prepare(
-                `INSERT INTO coding_events (mission_id, name, body_json, created_at)
-                 VALUES (?, 'verification.started', ?, ?)`
-              )
-              .run(
-                row.mission_id,
-                JSON.stringify({ unitId: row.unit_id, attemptId: row.attempt_id, resultHash: input.result.result.resultHash }),
-                input.result.finishedAt
-              );
+            this.store.recordMissionEvent(
+              row.mission_id,
+              "verification.started",
+              { unitId: row.unit_id, attemptId: row.attempt_id, resultHash: input.result.result.resultHash },
+              input.result.finishedAt
+            );
             applied = { applied: "awaiting_verification" };
           }
           break;
@@ -682,16 +837,12 @@ export class WorkUnitExecutionLedger {
           if (changed.changes !== 1) {
             throw new ControlStackError("coding_mission_claim_conflict", "cancelled outcome lost the claim");
           }
-          this.store.db
-            .prepare(
-              `INSERT INTO coding_events (mission_id, name, body_json, created_at)
-               VALUES (?, 'work_unit.cancelled', ?, ?)`
-            )
-            .run(
-              row.mission_id,
-              JSON.stringify({ unitId: row.unit_id, attemptId: row.attempt_id }),
-              input.result.finishedAt
-            );
+          this.store.recordMissionEvent(
+            row.mission_id,
+            "work_unit.cancelled",
+            { unitId: row.unit_id, attemptId: row.attempt_id },
+            input.result.finishedAt
+          );
           applied = { applied: "cancelled" };
           break;
         }
@@ -705,15 +856,21 @@ export class WorkUnitExecutionLedger {
           if (changed.changes !== 1) {
             throw new ControlStackError("coding_mission_claim_conflict", "unknown outcome lost the claim");
           }
+          this.store.recordMissionEvent(
+            row.mission_id,
+            "work_unit.unknown",
+            { unitId: row.unit_id, attemptId: row.attempt_id },
+            input.result.finishedAt
+          );
           applied = { applied: "unknown" };
           break;
         }
       }
-      this.persistReport(row, input.result, reportHash, input.result.outcome);
+      this.persistReport(row, input.result, reportHash, outcome);
       this.store.putEvidence(
         row.mission_id,
         `execution_result:${row.attempt_id}`,
-        { attemptId: row.attempt_id, reportHash, outcome: input.result.outcome, applied: applied.applied },
+        { attemptId: row.attempt_id, reportHash, outcome, applied: applied.applied, ...(late ? { late: true } : {}) },
         input.result.finishedAt
       );
       return applied;
