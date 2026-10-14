@@ -3001,3 +3001,76 @@ describe("Change Set operation permits", () => {
     }
   });
 });
+
+describe("browser (cua) Autonomous Authority Grants through the issuance route", () => {
+  const browserTool = {
+    runtime: "browser",
+    toolName: "cua",
+    allowedOrigins: ["https://app.example", "https://admin.example:8443"],
+    allowedApplications: ["Chrome", "Firefox"]
+  };
+  const browserBody = (ctx: ReturnType<typeof fixture>, tool: Record<string, unknown> = browserTool) => {
+    const body = grantBody(ctx);
+    return {
+      ...body,
+      definition: { ...body.definition, toolClasses: [...body.definition.toolClasses, tool] }
+    };
+  };
+
+  it("issues a path-scoped grant that carries an exact browser tool class", async () => {
+    const ctx = fixture();
+    try {
+      const grant = await issueGrant(ctx, browserBody(ctx) as ReturnType<typeof grantBody>);
+      expect(grant.definition.toolClasses).toContainEqual(browserTool);
+      const onlyBrowser = grantBody(ctx);
+      const response = await ctx.app.inject({
+        method: "POST",
+        url: `/work-items/${ctx.mission.id}/authority-grants`,
+        headers: reviewerHeaders,
+        payload: {
+          ...onlyBrowser,
+          requestId: "browser-only",
+          definition: { ...onlyBrowser.definition, toolClasses: [browserTool] }
+        }
+      });
+      expect(response.statusCode, response.body).toBe(201);
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("still rejects glob, non-exact and lookalike browser scope, and runtimes without containment", async () => {
+    const ctx = fixture();
+    try {
+      for (const tool of [
+        { ...browserTool, allowedOrigins: ["https://*.example"] },
+        { ...browserTool, allowedOrigins: ["https://app.example/path"] },
+        { ...browserTool, allowedOrigins: ["https://app.example."] },
+        { ...browserTool, allowedOrigins: [] },
+        { ...browserTool, allowedApplications: ["Chrome*"] },
+        { ...browserTool, allowedApplications: ["Сhrome"] },
+        { ...browserTool, allowedApplications: ["Chrome", "Chrome"] },
+        { ...browserTool, toolName: "anything" }
+      ]) {
+        const response = await ctx.app.inject({
+          method: "POST",
+          url: `/work-items/${ctx.mission.id}/authority-grants`,
+          headers: reviewerHeaders,
+          payload: browserBody(ctx, tool)
+        });
+        expect(response.statusCode, JSON.stringify(tool)).toBe(400);
+      }
+      const sandbox = await ctx.app.inject({
+        method: "POST",
+        url: `/work-items/${ctx.mission.id}/authority-grants`,
+        headers: reviewerHeaders,
+        payload: browserBody(ctx, { runtime: "sandbox", toolName: "code_edit" })
+      });
+      expect(sandbox.json().code).toBe("autonomous_authority_runtime_unsupported");
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+});

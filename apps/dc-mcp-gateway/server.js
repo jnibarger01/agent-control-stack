@@ -685,7 +685,14 @@ function proxyInitializeWithAttestation(req, res, bodyBuf, identity, challenge, 
             typeof runtimeIdentity.challenge === 'string' && runtimeIdentity.challenge.length > 0 &&
             Array.isArray(runtimeIdentity.scopes);
           if (!valid) return fail('runtime_identity_proof_missing_or_malformed');
-          await completeRuntimeBootstrap(initializeManaged, identity, challenge, runtimeIdentity);
+          try {
+            await completeRuntimeBootstrap(initializeManaged, identity, challenge, runtimeIdentity);
+          } catch (error) {
+            // ACS rejection keeps its explicit code; transport failures have a
+            // distinct, non-sensitive code so intermittent CI failures are diagnosable.
+            if (error && error.acsCode) throw error;
+            throw Object.assign(new Error('ACS bootstrap completion unavailable'), { acsCode: 'bootstrap_complete_unavailable' });
+          }
           const out = {};
           for (const [k, v] of Object.entries(ures.headers)) if (!HOP.has(k.toLowerCase())) out[k] = v;
           delete out['transfer-encoding'];
