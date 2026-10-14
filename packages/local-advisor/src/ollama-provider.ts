@@ -5,6 +5,10 @@ import { type AdvisorProvider, type GenerateInput, type GenerateResult, Provider
 export const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 const HEX64 = /^[a-f0-9]{64}$/u;
+/** Upper bound on an /api/chat reply body. A well-behaved non-streaming reply is far smaller. */
+export const MAX_CHAT_RESPONSE_BYTES = 1024 * 1024;
+/** Upper bound on an /api/tags reply body. */
+export const MAX_TAGS_RESPONSE_BYTES = 256 * 1024;
 
 export interface OllamaProviderOptions {
   /** Ollama model name, e.g. `qwen2.5-coder:7b`. Must already be installed; this provider never pulls models. */
@@ -185,11 +189,50 @@ export class OllamaProvider implements AdvisorProvider {
   }
 
   private async json(response: Response): Promise<unknown> {
-    try {
-      return await response.json();
-    } catch {
-      throw new ProviderError("malformed_response", "endpoint returned non-JSON");
+    return readBoundedJson(response, MAX_CHAT_RESPONSE_BYTES);
+  }
+}
+
+/**
+ * Reads a JSON body while enforcing a byte cap during the read, so a hostile or broken local
+ * listener cannot make us buffer an unbounded reply. The read is cancelled as soon as the cap is passed.
+ */
+export async function readBoundedJson(response: Response, maxBytes: number): Promise<unknown> {
+  const declared = response.headers.get("content-length");
+  if (declared !== null && Number(declared) > maxBytes) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new ProviderError("malformed_response", "endpoint response exceeds size limit");
+  }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  if (response.body) {
+    const reader = response.body.getReader();
+    for (;;) {
+      let next: ReadableStreamReadResult<Uint8Array>;
+      try {
+        next = await reader.read();
+      } catch {
+        throw new ProviderError("unavailable", "endpoint response read failed");
+      }
+      if (next.done) break;
+      total += next.value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new ProviderError("malformed_response", "endpoint response exceeds size limit");
+      }
+      chunks.push(next.value);
     }
+  }
+  const buffer = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    buffer.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer)) as unknown;
+  } catch {
+    throw new ProviderError("malformed_response", "endpoint returned non-JSON");
   }
 }
 
@@ -206,12 +249,7 @@ async function readInstalled(fetchImpl: typeof fetch, base: URL, signal: AbortSi
     throw new ProviderError("unavailable", "endpoint unreachable or redirected");
   }
   if (!response.ok) throw new ProviderError("unavailable", `endpoint returned HTTP ${response.status}`);
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    throw new ProviderError("malformed_response", "endpoint returned non-JSON");
-  }
+  const body = await readBoundedJson(response, MAX_TAGS_RESPONSE_BYTES);
   const list = (body as { models?: unknown } | null)?.models;
   if (!Array.isArray(list)) throw new ProviderError("malformed_response", "tags response has no models array");
   const installed: InstalledOllamaModel[] = [];

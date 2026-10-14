@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { OllamaProvider, DEFAULT_OLLAMA_BASE_URL, chatModelNames } from "./ollama-provider.js";
+import {
+  OllamaProvider,
+  DEFAULT_OLLAMA_BASE_URL,
+  MAX_CHAT_RESPONSE_BYTES,
+  MAX_TAGS_RESPONSE_BYTES,
+  chatModelNames,
+  listInstalledOllamaModels,
+  readBoundedJson
+} from "./ollama-provider.js";
 import { ProviderError } from "./provider.js";
 
 const HEX = "c".repeat(64);
@@ -165,5 +173,51 @@ describe("chatModelNames", () => {
       { name: "legacy:7b", digest: DIGEST }
     ]);
     expect([...names].sort()).toEqual(["legacy:7b", "qwen2.5-coder:7b"]);
+  });
+});
+
+/** A body that streams `chunk` forever and records whether the reader cancelled it. */
+function endlessBody(chunk: Uint8Array) {
+  const state = { cancelled: false, pulls: 0 };
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      state.pulls++;
+      controller.enqueue(chunk);
+    },
+    cancel() {
+      state.cancelled = true;
+    }
+  });
+  return { body, state };
+}
+
+describe("OllamaProvider: response size caps", () => {
+  it("aborts an oversized /api/chat body during the read", async () => {
+    const stream = endlessBody(new Uint8Array(64 * 1024).fill(0x20));
+    const provider = new OllamaProvider({
+      model: "qwen2.5-coder:7b",
+      fetchImpl: fakeFetch((url) => (url.pathname === "/api/tags" ? tags() : new Response(stream.body, { status: 200 }))).impl
+    });
+    await expect(provider.generate(input())).rejects.toMatchObject({ kind: "malformed_response" });
+    expect(stream.state.cancelled).toBe(true);
+    expect(stream.state.pulls * 64 * 1024).toBeLessThanOrEqual(MAX_CHAT_RESPONSE_BYTES + 3 * 64 * 1024);
+  });
+
+  it("aborts an oversized /api/tags body during the read", async () => {
+    const stream = endlessBody(new Uint8Array(16 * 1024).fill(0x20));
+    await expect(
+      listInstalledOllamaModels({ fetchImpl: fakeFetch(() => new Response(stream.body, { status: 200 })).impl })
+    ).rejects.toMatchObject({ kind: "malformed_response" });
+    expect(stream.state.cancelled).toBe(true);
+    expect(stream.state.pulls * 16 * 1024).toBeLessThanOrEqual(MAX_TAGS_RESPONSE_BYTES + 3 * 16 * 1024);
+  });
+
+  it("rejects a declared content-length above the cap without reading", async () => {
+    const response = new Response("{}", { status: 200, headers: { "content-length": String(MAX_TAGS_RESPONSE_BYTES + 1) } });
+    await expect(readBoundedJson(response, MAX_TAGS_RESPONSE_BYTES)).rejects.toBeInstanceOf(ProviderError);
+  });
+
+  it("parses a body under the cap", async () => {
+    await expect(readBoundedJson(new Response('{"ok":true}'), 1024)).resolves.toEqual({ ok: true });
   });
 });
