@@ -248,4 +248,14 @@ describe("redactText", () => {
       expect(text).toContain("[REDACTED:assignment]");
     }
   });
+
+  it("redacts both of two jwts glued together without a separator", () => {
+    const first = jwt();
+    const second = [b64url(JSON.stringify({ alg: "none" })), b64url(JSON.stringify({ sub: fill(12) })), fill(30)].join(
+      "."
+    );
+    const { text, counts } = redactText(cat(first, second));
+    expect(text).toBe("[REDACTED:jwt][REDACTED:jwt]");
+    expect(counts.jwt).toBe(2);
+  });
 });

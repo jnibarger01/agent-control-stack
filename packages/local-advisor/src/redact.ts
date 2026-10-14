@@ -86,23 +86,42 @@ const JWT_RUN = /(?<![A-Za-z0-9_.-])(?=([A-Za-z0-9_.-]+))\1/gu;
 function redactJwtRun(run: string): { text: string; count: number } {
   if (!run.includes("eyJ")) return { text: run, count: 0 };
   const pieces = run.split(".");
-  const out: string[] = [];
-  let count = 0;
-  let i = 0;
-  while (i < pieces.length) {
-    const piece = pieces[i] ?? "";
+  // A token starts at "eyJ" inside piece `i` (header >= 8 chars after it), has a payload piece of >= 8 chars, and a
+  // (possibly empty) signature piece, i.e. the second '.' must be present.
+  const startsToken = (piece: string, i: number): number => {
     const at = piece.indexOf("eyJ");
     const payload = pieces[i + 1];
-    if (at >= 0 && piece.length - at >= 11 && payload !== undefined && payload.length >= 8 && i + 2 < pieces.length) {
-      out.push(piece.slice(0, at) + "[REDACTED:jwt]");
+    return at >= 0 && piece.length - at >= 11 && payload !== undefined && payload.length >= 8 && i + 2 < pieces.length
+      ? at
+      : -1;
+  };
+  let text = "";
+  let count = 0;
+  let i = 0;
+  let current = pieces[0] ?? "";
+  for (;;) {
+    const at = startsToken(current, i);
+    if (at >= 0) {
+      text += current.slice(0, at) + "[REDACTED:jwt]";
       count += 1;
+      // Two tokens glued with no separator: the next one starts inside this one's signature piece.
+      const signature = pieces[i + 2] ?? "";
+      const glued = signature.indexOf("eyJ");
+      if (glued >= 0 && startsToken(signature.slice(glued), i + 2) === 0) {
+        current = signature.slice(glued);
+        i += 2;
+        continue;
+      }
       i += 3;
     } else {
-      out.push(piece);
+      text += current;
       i += 1;
     }
+    if (i >= pieces.length) break;
+    text += ".";
+    current = pieces[i] ?? "";
   }
-  return { text: out.join("."), count };
+  return { text, count };
 }
 
 function redactJwts(input: string, counts: Record<string, number>): string {
