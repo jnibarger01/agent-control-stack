@@ -913,4 +913,4 @@ for executor selection, verification overrides, exit codes, and log behavior.
 
 ## License
 
-No license file is currently declared in this repository. Add one before publishing binaries or accepting outside contributions.
+No license has been selected. See [`LICENSE.md`](LICENSE.md) for the explicit owner decision and the steps required before publishing binaries or accepting outside contributions.

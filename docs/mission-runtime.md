@@ -208,11 +208,13 @@ production database.
 - Governed execution is implemented and tested end to end, but it is **off by default** and has not been enabled or deployed
   anywhere. Turning it on is an operational action (`ACS_CODING_MISSION_GOVERNED=1`, plus operator-bound worker actors and a
   grant per mission).
-- The generalized work-unit path and the `jc`, `dc` and `mcp` lanes have no production driver yet; only the `coder` lane runs.
-  `GovernedUnitRunner` (`unit-runner.ts`) runs one general-mission work unit end to end, but no worker, gateway route or CLI
-  constructs it yet.
+- The `jc` and `mcp` lanes have no executor adapter that enforces its own authority yet, so they are not runnable. The `dc`
+  lane has a boundary adapter for four read-only tools (see "Desktop Commander lane") and the general-mission `coding` unit
+  has an execution contract, a boundary adapter and a bounded driver (see "General-mission coding units"). Neither has a
+  concrete executor/invoker behind its port, there is no `dc` driver, and no worker, gateway route or CLI constructs a
+  driver, so nothing runs a general mission in production.
 - Checkpoint/resume as worker adapters on the execution ledger, the CUA worker, and recovery policy.
-- A driver for the `general` mission kind. The legacy coding path has no budget row (uncapped).
+- The legacy coding path has no budget row (uncapped).
 - Delegating to a different executing actor (`authorityNarrowingViolations` refuses it deliberately and it needs its own decision).
 
 ## Unit runner
@@ -236,6 +238,57 @@ before it is persisted. A "succeeded" result without a non-empty result hash and
 failed `invalid_output` result, because the ledger itself only checks that a result object exists. Of two
 concurrent runs of one unit, one executes and the other reports `claim_conflict`. A crash between the claim and the dispatch
 leaves a running claim that existing stale-claim recovery handles; the runner adds no recovery of its own.
+
+## General-mission coding units
+
+A coding unit in a `general` mission is one explicit, repository-scoped task, not a coding mission. It does not inherit a
+mission branch, pull request or merge lifecycle; that stays with `CodingMissionController` and its governed path, which this
+section does not change. The task is the typed `coding` payload (`general-coding.ts`, `parseGeneralCodingTask`): a canonical
+absolute `repository`, an immutable 40-hex `baseSha` (a branch name is rejected), `instructions`, the declared `files`
+(normal repository-relative paths), `maxRuntimeMs` and `maxFiles`. The generic payload parser keeps these optional so legacy
+coding payloads still parse; the strict parser requires all of them and is what the driver and adapter use.
+
+`GeneralCodingExecutionAdapter` (`general-coding-adapter.ts`, coder lane) enforces authority where the work happens, not only
+at dispatch. `GovernedUnitRunner` hands every adapter the live claim, and the adapter checks, before the executor is called and
+failing closed: the claim token matches the dispatch and is still the unit's live claim for the same worker; the dispatch gate
+still passes on current durable state (so a revocation, expiry or changed grant between dispatch and execution is caught) over
+the same authority hash; the unit's stored payload is a complete task; the authority grants the `sandbox` runtime; the
+repository lies inside a scope resource (descendant containment, not a path prefix); and the task's runtime bound does not
+exceed the authority's. A refusal records a failed attempt with a `nativeCode` naming the reason and marks the external state
+certain (nothing ran). After the executor runs, a success is accepted only if it attests the same `baseSha`, a non-empty result
+hash, at most `maxFiles` normal relative paths, each equal to or under a declared path; otherwise the attempt is
+`invalid_output` with the state marked uncertain, because the work did run. The executor is stopped at the task's own bound,
+capped by the time left on the dispatch, and a timeout is `unknown`.
+
+`runGeneralCodingUnits` (`general-coding-driver.ts`) is the bounded driver: one sequential pass over active governed `general`
+missions, coder lane and coding units only, at most `maxUnits` (default 1, ceiling 10) units started per pass. A unit without a
+complete task contract is reported as skipped and never claimed. The driver and adapter take the executor as a port
+(`GeneralCodingExecutor`); symlink and filesystem containment inside the repository is that executor's responsibility. No
+executor, worker hook or gateway route is included.
+
+## Desktop Commander lane
+
+`DcLaneExecutionAdapter` (`dc-lane-adapter.ts`, `dc` lane) runs a `tool` unit under the same execution-boundary discipline as
+the coding adapter, with its own tool-name authority. The shared checks live in `execution-boundary.ts` and both adapters use
+them: the live claim (token hash, store row, worker, unit kind, status), the dispatch gate re-verified on current durable
+state over the same authority hash, containment on physical paths (symlinks resolved; a sibling sharing a prefix is outside),
+and a runtime budget that never starts the invoker when no time is left.
+
+The unit's input is the typed call in `dc-tool-call.ts`: `toolName`, complete `arguments`, `argsHash` (bound to the tool name,
+so arguments cannot be replayed under another tool) and `maxRuntimeMs`. The generic payload parser keeps the new fields
+optional so legacy tool payloads still parse. The adapter then requires, before the invoker is called: the tool is managed by
+`@agent-control-stack/dc-tool-manifest` and is on the lane's explicit allowlist (`read_file`, `read_multiple_files`,
+`get_file_info`, `list_directory`); the manifest marks it read-only with no approval requirement; the authority lists this
+exact `(desktop_commander, tool)` pair and grants the privilege the tool's manifest scope consumes; the arguments satisfy the
+tool's strict schema; every path argument is canonical and lies inside a `path`/`repository` scope resource; and the call's
+bound does not exceed the authority's. A refusal is a failed attempt with a `nativeCode` and the external state marked certain.
+A read-only tool that reports changed files, or a success without a result hash, is `invalid_output` with the state marked
+uncertain.
+
+Mutation and process tools (`write_file`, `edit_block`, `move_file`, `create_directory`, `start_process`) are refused as
+`tool_not_supported`: the Desktop Commander chain requires a recorded human approval per call, a work unit has none, and a
+grant is not one. Tools whose paths the lane cannot enumerate are refused rather than guessed at. The adapter does not mint a
+Desktop Commander capability; the `DcToolInvoker` is the existing transport and has no production binding yet.
 
 ## Composition root
 
