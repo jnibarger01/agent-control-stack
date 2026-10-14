@@ -27,3 +27,10 @@ describe("createAdvise: route discovery deadline", () => {
     expect(Date.now() - started).toBeLessThan(5_000);
   });
 });
+
+describe("createAdvise: startup validation", () => {
+  it("rejects invalid ACS_LOCAL_ADVISOR_ROUTES when created, not on first call", () => {
+    expect(() => createAdvise({ ACS_LOCAL_ADVISOR_ROUTES: "{not json" })).toThrow();
+    expect(() => createAdvise({ ACS_LOCAL_ADVISOR_ROUTES: JSON.stringify([{ bogus: true }]) })).toThrow();
+  });
+});

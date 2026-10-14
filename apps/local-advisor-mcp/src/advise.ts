@@ -45,6 +45,8 @@ export type Advise = (request: AdvisorRequest, signal: AbortSignal) => Promise<A
 
 export function createAdvise(env: AdvisorEnv, deps: AdviseDeps = {}): Advise {
   const providers = new Map<string, OllamaProvider>();
+  // Parse routes once so a bad ACS_LOCAL_ADVISOR_ROUTES fails at startup instead of on every call.
+  const routes = routesFromEnv(env);
   const discoveryTimeoutMs = deps.discoveryTimeoutMs ?? DISCOVERY_TIMEOUT_MS;
   return async (request, signal) => {
     const baseUrl = env.ACS_LOCAL_ADVISOR_BASE_URL;
@@ -57,7 +59,7 @@ export function createAdvise(env: AdvisorEnv, deps: AdviseDeps = {}): Advise {
         fetchImpl: deps.fetchImpl,
         signal: AbortSignal.any([signal, AbortSignal.timeout(discoveryTimeoutMs)])
       });
-      const route = selectModelRoute(routesFromEnv(env), request.operation, chatModelNames(installed));
+      const route = selectModelRoute(routes, request.operation, chatModelNames(installed));
       model = route.model;
       expected = asDigest(route.expectedDigest) ?? pinnedDigest;
     }
