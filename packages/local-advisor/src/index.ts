@@ -49,7 +49,9 @@ export {
   selectModelRoute
 } from "./router.js";
 export type { AdvisorModelRole, ModelRoute } from "./router.js";
-export { advisorTraceEvent } from "./trace-event.js";
 export type { AdvisorAuthorizationOutcome } from "./trace-event.js";
-export { ReviewBindingError, projectReviewFinding } from "./to-review-finding.js";
+export { ReviewBindingError, projectReviewFinding, projectReviewFindingFromConsultation } from "./to-review-finding.js";
 export type { ReviewFindingBinding } from "./to-review-finding.js";
+export { consultationDraftFromResponse, recordLocalAdvisorConsultation } from "./to-consultation.js";
+export type { LocalAdvisorFence, RecordLocalAdvisorConsultationInput } from "./to-consultation.js";
+export { advisorTraceEvent, advisorTraceEventFromConsultation } from "./trace-event.js";
