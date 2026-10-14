@@ -93,4 +93,83 @@ describe("redactText", () => {
       expect(result.counts[testCase.count]).toBeGreaterThanOrEqual(1);
     });
   }
+
+  // Hardening cases from the R/V redaction harness, rebuilt with runtime fixtures.
+  const pw = fill(14);
+  const hardening: readonly { name: string; input: string; secret: string }[] = [
+    { name: "JSON password key", input: cat('{"pass', 'word": "', pw, '"}'), secret: pw },
+    { name: "JSON access_token key", input: cat('{"access', '_token":"', pw, '"}'), secret: pw },
+    { name: "client_secret assignment", input: cat("client", "_secret=", pw), secret: pw },
+    { name: "passphrase assignment", input: cat("pass", "phrase=", pw), secret: pw },
+    { name: "YAML value on the next line", input: cat("pass", "word:\n  ", pw), secret: pw },
+    { name: "short assignment value", input: cat("pass", "word=", fill(5)), secret: fill(5) },
+    { name: "upper-case key", input: cat("PASS", "WORD=", pw), secret: pw },
+    {
+      name: "lower-case basic auth",
+      input: cat("authorization: ", "bas", "ic ", b64(cat("u:", pw))),
+      secret: b64(cat("u:", pw)).slice(0, 16)
+    },
+    {
+      name: "upper-case BASIC auth",
+      input: cat("Authorization: ", "BAS", "IC ", b64(cat("u:", pw))),
+      secret: b64(cat("u:", pw)).slice(0, 16)
+    },
+    { name: "lower-case bearer", input: cat("authorization: ", "bea", "rer ", fill(22)), secret: fill(22) },
+    { name: "bearer under 16 chars", input: cat("Authorization: ", "Bea", "rer ", fill(15)), secret: fill(15) },
+    { name: "url_password with empty username", input: cat("redis", "://:", pw, "@db:6379"), secret: pw },
+    { name: "url_password containing @", input: cat("postgres", "://admin:", "p@", pw, "@db/app"), secret: pw },
+    { name: "url_password with upper-case scheme", input: cat("POSTGRES", "://admin:", pw, "@db/app"), secret: pw },
+    {
+      name: "url_password url-encoded",
+      input: cat("postgres", "://admin:", fill(4), "%40", pw, "@db/app"),
+      secret: pw
+    },
+    { name: "npm token of exactly 36", input: cat("np", "m_", fill(36)), secret: fill(36) },
+    { name: "npm token longer than 36", input: cat("np", "m_", fill(37)), secret: fill(36) },
+    { name: "upper-case NPM_ prefix", input: cat("NP", "M_", fill(36)), secret: fill(36) },
+    { name: "C:\\Users\\<u> home path", input: cat("C:\\Users\\", "jdoe", "\\x"), secret: "jdoe" },
+    { name: "/Users/<u> home path", input: cat("/Users/", "jdoe", "/x"), secret: "jdoe" },
+    { name: "/root home path", input: cat("/ro", "ot/.ssh/id_rsa"), secret: cat("/ro", "ot/.ssh") },
+    { name: "lower-case PEM header", input: cat("-----begin rsa ", "private ", "key-----\n", pw), secret: pw },
+    { name: "PEM with no type", input: cat(pem(""), "\n", pw), secret: pw },
+    { name: "aws key in lower case", input: cat("ak", "ia", fill(16).toLowerCase()), secret: fill(16).toLowerCase() },
+    {
+      name: "aws key embedded in a word",
+      input: cat("x", "AK", "IA", fill(16).toUpperCase()),
+      secret: fill(16).toUpperCase()
+    },
+    { name: "upper-case GHP_ prefix", input: cat("GH", "P_", fill(36)), secret: fill(36) },
+    { name: "35-char ghs_ token", input: cat("gh", "s_", fill(35)), secret: fill(35) },
+    { name: "github token wrapped across lines", input: cat("gh", "p_", fill(18), "\n", fill(18)), secret: fill(18) },
+    { name: "upper-case XOXB- token", input: cat("XO", "XB-", "1234567890-", fill(12)), secret: fill(12) },
+    { name: "upper-case GLPAT- token", input: cat("GL", "PAT-", fill(20)), secret: fill(20) },
+    { name: "upper-case SK- key", input: cat("S", "K-", fill(26)), secret: fill(26) },
+    {
+      name: "JWT with a short signature",
+      input: ((t) => cat(t.split(".").slice(0, 2).join("."), ".", fill(7)))(jwt()),
+      secret: jwt().split(".")[1]!
+    },
+    {
+      name: "base64-wrapped github token",
+      input: b64(cat("gh", "p_", fill(36))),
+      secret: b64(cat("gh", "p_", fill(36)))
+    },
+    { name: "zero-width split github token", input: cat("gh", "p_", fill(10), "\u200b", fill(26)), secret: fill(26) },
+    {
+      name: "full-width AWS prefix",
+      input: cat(String.fromCodePoint(0xff21, 0xff2b, 0xff29, 0xff21), fill(16).toUpperCase()),
+      secret: fill(16).toUpperCase()
+    }
+  ];
+
+  for (const testCase of hardening) {
+    it(`redacts ${testCase.name}`, () => {
+      expect(redactText(testCase.input).text).not.toContain(testCase.secret);
+    });
+  }
+
+  it("keeps ordinary prose and code that merely mentions credential words", () => {
+    const text = "Rotate the token after review. const base = new URL(input); /usr/local/bin is not a home path.";
+    expect(redactText(text)).toEqual({ text, counts: {} });
+  });
 });
