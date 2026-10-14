@@ -208,7 +208,13 @@ export class LocalAdvisorMcpServer {
       const method = msg.method;
       const isNotification = idValue === undefined;
       if (idValue !== undefined && idValue !== null) {
-        key = String(idValue);
+        const candidate = inflightKey(idValue);
+        if (this.inflight.has(candidate)) {
+          // Never overwrite the live controller: cancellation must keep targeting the original request.
+          this.send({ jsonrpc: "2.0", id: idValue as never, error: { code: -32600, message: "duplicate request id" } });
+          return;
+        }
+        key = candidate;
         this.inflight.set(key, controller);
       }
       if (typeof method !== "string") {
@@ -247,7 +253,7 @@ export class LocalAdvisorMcpServer {
         return undefined;
       case "notifications/cancelled": {
         const requestId = params.requestId ?? params.request_id;
-        if (requestId !== undefined && requestId !== null) this.inflight.get(String(requestId))?.abort();
+        if (requestId !== undefined && requestId !== null) this.inflight.get(inflightKey(requestId))?.abort();
         return undefined;
       }
       case "ping":
@@ -297,4 +303,9 @@ export class LocalAdvisorMcpServer {
 function toolError(code: string, message: string): Json {
   const body = { error: { code, message }, status: "unavailable", verdict: null };
   return { content: [{ type: "text", text: JSON.stringify(body) }], structuredContent: body, isError: true };
+}
+
+/** Distinguishes `1` from `"1"`: JSON-RPC ids are compared by type and value. */
+function inflightKey(id: unknown): string {
+  return `${typeof id}:${JSON.stringify(id)}`;
 }

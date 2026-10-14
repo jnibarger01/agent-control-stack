@@ -120,4 +120,37 @@ describe("local advisor MCP", () => {
     const [frame] = frames(h.text());
     expect(frame?.result?.isError).toBe(true);
   });
+
+  it("keys in-flight requests by id type and value, and rejects duplicate ids", async () => {
+    const signals: AbortSignal[] = [];
+    const h = harness(async (_request, signal) => {
+      signals.push(signal);
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("aborted")));
+      });
+      return failed();
+    });
+    const call = (id: unknown) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "advisor_review_plan", arguments: args } });
+    h.send(call(1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    h.send(call("1"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    h.send(call(1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(signals).toHaveLength(2);
+
+    const duplicate = frames(h.text()) as Array<{ id?: unknown; error?: { message?: string } }>;
+    expect(duplicate).toHaveLength(1);
+    expect(duplicate[0]).toMatchObject({ id: 1, error: { message: "duplicate request id" } });
+
+    // Cancelling the string id must not abort the numeric request with the same digits.
+    h.send({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: "1" } });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(signals[1]?.aborted).toBe(true);
+    expect(signals[0]?.aborted).toBe(false);
+
+    h.send({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 1 } });
+    await settle(h.server);
+    expect(signals[0]?.aborted).toBe(true);
+  });
 });
