@@ -35,6 +35,10 @@ export interface RealGrantOptions {
   extraToolClasses?: AutonomousAuthorityDefinition["toolClasses"];
   /** Replace the grant's tool classes entirely. */
   toolClasses?: AutonomousAuthorityDefinition["toolClasses"];
+  /** Extra scope resources on the grant, for example a `{ kind: "secret" }` resource. */
+  extraScope?: AutonomousAuthorityDefinition["scope"];
+  /** Extra privileges on the grant, for example `secret.read`. */
+  extraPrivileges?: AutonomousAuthorityDefinition["maximumPrivileges"];
   /** Make the root unit a cua unit with this payload. */
   cuaRootPayload?: {
     kind: "cua";
@@ -62,13 +66,13 @@ export function setupRealGrants(options: RealGrantOptions = {}) {
   const iso = (ms: number) => new Date(base + ms).toISOString();
   const definition: AutonomousAuthorityDefinition = {
     executingActorId: ACTOR,
-    scope: [{ kind: "path", id: root, coverage: "descendants" }],
+    scope: [{ kind: "path", id: root, coverage: "descendants" }, ...(options.extraScope ?? [])],
     toolClasses: options.toolClasses ?? [
       { runtime: "desktop_commander", toolName: "read_file" },
       { runtime: "sandbox", toolName: "code_edit" },
       ...(options.extraToolClasses ?? [])
     ],
-    maximumPrivileges: ["fs.read", "fs.write"],
+    maximumPrivileges: ["fs.read", "fs.write", ...(options.extraPrivileges ?? [])],
     expiresAt: iso(3_600_000),
     limits: { maxOperations: 50, maxRuntimeMs: 600_000, maxParallelOperations: 4, maxAttemptsPerOperation: 3 }
   };

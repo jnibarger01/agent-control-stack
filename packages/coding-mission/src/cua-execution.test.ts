@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   CuaExecutionAdapter,
   PlaywrightCuaBrowser,
+  missionCuaAuthority,
   secretBrokerCuaResolver,
   type CuaAuthorityRecheck,
   type CuaBrowserContext,
@@ -25,7 +26,13 @@ const ORIGIN = "https://app.example";
 const SECRET = "super-secret-phrase";
 const SHOT = Buffer.from("PNG-SECRET-BYTES");
 /** Stand-in live authority re-check for adapter tests that are not about authority; R2 tests use the real ledger. */
-const ALLOW: CuaAuthorityRecheck = { browserAuthorityVerdict: () => ({ ok: true }) };
+const ALLOW: CuaAuthorityRecheck = {
+  browserAuthorityVerdict: () => ({ ok: true }),
+  secretAuthorityVerdict: () => ({ ok: true })
+};
+
+/** A re-check that answers for browser scope only, as a pre-secret-aware implementation would. */
+const ALLOW_BROWSER_ONLY: CuaAuthorityRecheck = { browserAuthorityVerdict: () => ({ ok: true }) };
 
 /** A Playwright-shaped context: a context-wide route, its page list, and the "page" event for popups. */
 class FakeContext implements CuaBrowserContext {
@@ -707,6 +714,134 @@ describe("R4: typed secrets are broker-resolved references", () => {
       engineId: "browser"
     });
     expect(events).toEqual([`lease:APP_LOGIN:1:${principal}`, `inject:${principal}`, "revoke"]);
+  });
+});
+
+describe("R4: a secretRef is leased only under a grant that covers that secret", () => {
+  const browserTool = {
+    runtime: "browser" as const,
+    toolName: "cua" as const,
+    allowedOrigins: [ORIGIN],
+    allowedApplications: ["browser"]
+  };
+  const secretScript = script([
+    { type: "navigate", url: `${ORIGIN}/login` },
+    { type: "type", selector: "#password", secretRef: "APP_LOGIN" }
+  ]);
+
+  function governed(
+    grant: { scope?: string[]; privileges?: Array<"secret.read"> },
+    authority: (live: CuaAuthorityRecheck) => CuaAuthorityRecheck = (live) => live
+  ) {
+    const f = setupRealGrants({
+      cuaRootPayload: secretScript,
+      extraToolClasses: [browserTool],
+      extraScope: (grant.scope ?? []).map((id) => ({ kind: "secret" as const, id, coverage: "exact" as const })),
+      extraPrivileges: grant.privileges ?? []
+    });
+    f.ledger.grantMissionAuthority({ missionId: f.item.id, grantId: f.grant.grantId });
+    expect(f.missions.claimUnit(f.item.id, "root", f.claim)).toMatchObject({ ok: true });
+    const dispatch = new WorkUnitExecutionLedger(f.missions, { authority: f.ledger }).beginDispatch({
+      missionId: f.item.id,
+      unitId: "root",
+      claimToken: f.claim.token,
+      workerId: f.claim.workerId,
+      lane: "cua",
+      now: f.iso(2_000)
+    });
+    f.state.now = f.iso(2_100);
+    const page = new FakePage();
+    let opens = 0;
+    const resolved: string[] = [];
+    const adapter = new CuaExecutionAdapter(
+      f.missions,
+      {
+        async open() {
+          opens += 1;
+          page.current = "about:blank";
+          return page;
+        }
+      },
+      "browser",
+      () => f.state.now,
+      {
+        authority: authority(missionCuaAuthority(f.ledger, f.missions)),
+        secrets: {
+          async resolve(ref) {
+            resolved.push(ref);
+            return BROKERED;
+          }
+        }
+      }
+    );
+    const run = () => adapter.execute(dispatch, undefined, { claimToken: f.claim.token });
+    return { ...f, run, page, resolved, opens: () => opens };
+  }
+
+  it("refuses before any browser call when the grant lacks secret.read", async () => {
+    const h = governed({ scope: ["APP_LOGIN"] });
+    const result = await h.run();
+    expect(result).toMatchObject({
+      outcome: "failed",
+      failure: { category: "policy_denied", nativeCode: "cua_secret_not_granted", retrySafe: false }
+    });
+    expect(h.resolved).toEqual([]);
+    expect(h.opens()).toBe(0);
+    expect(JSON.stringify(h.page.calls)).not.toContain(BROKERED);
+  });
+
+  it("refuses before any browser call when the grant does not cover that exact secret", async () => {
+    const h = governed({ scope: ["OTHER_SECRET"], privileges: ["secret.read"] });
+    await expect(h.run()).resolves.toMatchObject({
+      outcome: "failed",
+      failure: { nativeCode: "cua_secret_not_granted" }
+    });
+    expect(h.resolved).toEqual([]);
+    expect(h.opens()).toBe(0);
+  });
+
+  it("fails closed when the authority re-check cannot answer for secrets", async () => {
+    const browserOnly = governed({ scope: ["APP_LOGIN"], privileges: ["secret.read"] }, () => ALLOW_BROWSER_ONLY);
+    await expect(browserOnly.run()).resolves.toMatchObject({
+      outcome: "failed",
+      failure: { nativeCode: "cua_secret_not_granted" }
+    });
+    expect(browserOnly.resolved).toEqual([]);
+    expect(browserOnly.opens()).toBe(0);
+    const throwing = governed(
+      { scope: ["APP_LOGIN"], privileges: ["secret.read"] },
+      () => ({
+        ...ALLOW_BROWSER_ONLY,
+        secretAuthorityVerdict: () => {
+          throw new Error("store unavailable");
+        }
+      })
+    );
+    await expect(throwing.run()).resolves.toMatchObject({ failure: { nativeCode: "cua_secret_not_granted" } });
+    expect(throwing.resolved).toEqual([]);
+  });
+
+  it("re-checks the secret grant right before leasing: a revocation mid-script stops the lease", async () => {
+    let calls = 0;
+    const g = governed({ scope: ["APP_LOGIN"], privileges: ["secret.read"] }, (live) => ({
+      browserAuthorityVerdict: (input) => live.browserAuthorityVerdict(input),
+      secretAuthorityVerdict: (input) => {
+        calls += 1;
+        return calls === 1 ? live.secretAuthorityVerdict!(input) : { ok: false, reason: "cua_secret_not_granted" };
+      }
+    }));
+    const result = await g.run();
+    expect(JSON.stringify(result)).toContain("cua_secret_not_granted");
+    expect(result).toMatchObject({ outcome: "failed", externalStateUncertain: true, failure: { retrySafe: false } });
+    expect(g.resolved).toEqual([]);
+    expect(g.page.calls.some((call) => call.startsWith("fill:"))).toBe(false);
+  });
+
+  it("leases and types the secret when the grant has secret.read and covers that secret", async () => {
+    const h = governed({ scope: ["APP_LOGIN"], privileges: ["secret.read"] });
+    await expect(h.run()).resolves.toMatchObject({ outcome: "succeeded" });
+    expect(h.resolved).toEqual(["APP_LOGIN"]);
+    expect(h.page.calls).toContain(`fill:#password:${BROKERED}`);
   });
 });
 

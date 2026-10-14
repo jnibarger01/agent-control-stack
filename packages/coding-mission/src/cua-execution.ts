@@ -142,6 +142,53 @@ export interface CuaAuthorityRecheck {
     applications: readonly string[];
     deadlineAt: string | undefined;
   }): { ok: true } | { ok: false; reason: string };
+  /**
+   * Re-reads whether the live authority for this attempt grants `secret.read` and covers exactly this secret as a
+   * `{ kind: "secret" }` resource. Without it (or when it throws or refuses) a `secretRef` is never leased.
+   */
+  secretAuthorityVerdict?(input: {
+    missionId: string;
+    unitId: string;
+    secretRef: string;
+  }): { ok: true } | { ok: false; reason: string };
+}
+
+/** The read side of MissionAuthorityLedger this package needs, structurally (no import cycle). */
+export interface CuaMissionAuthorityReader extends CuaAuthorityRecheck {
+  missionAuthority(missionId: string): { definition: CuaGrantDefinition } | undefined;
+  unitAuthority(missionId: string, unitId: string): { definition: CuaGrantDefinition } | undefined;
+}
+interface CuaGrantDefinition {
+  scope: ReadonlyArray<{ kind: string; id: string }>;
+  maximumPrivileges: readonly string[];
+}
+
+/**
+ * The live CUA authority re-check backed by MissionAuthorityLedger: the browser verdict is the ledger's own, and the
+ * secret verdict re-reads the attempt's effective authority (the derived unit's record, or the mission's for a root
+ * unit) and requires `secret.read` plus an exact `{ kind: "secret", id: secretRef }` resource. Any doubt refuses.
+ */
+export function missionCuaAuthority(ledger: CuaMissionAuthorityReader, store: CodingMissionStore): CuaAuthorityRecheck {
+  return {
+    browserAuthorityVerdict: (input) => ledger.browserAuthorityVerdict(input),
+    secretAuthorityVerdict(input) {
+      const refuse = { ok: false as const, reason: "cua_secret_not_granted" };
+      try {
+        const unit = store.workUnits(input.missionId).find((candidate) => candidate.unitId === input.unitId);
+        if (!unit) return refuse;
+        const definition = unit.parentUnitId
+          ? ledger.unitAuthority(input.missionId, input.unitId)?.definition
+          : ledger.missionAuthority(input.missionId)?.definition;
+        if (!definition) return refuse;
+        const granted =
+          definition.maximumPrivileges.includes("secret.read") &&
+          definition.scope.some((resource) => resource.kind === "secret" && resource.id === input.secretRef);
+        return granted ? { ok: true } : refuse;
+      } catch {
+        return refuse;
+      }
+    }
+  };
 }
 
 export interface CuaExecutionOptions {
@@ -503,6 +550,22 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     }
   }
 
+  /** Whether the live authority grants this exact secret. No checker, a throw or any refusal fails closed. */
+  private secretRefusal(stored: DispatchEnvelope, secretRef: string): string | undefined {
+    const checker = this.options.authority;
+    if (!checker || typeof checker.secretAuthorityVerdict !== "function") return "cua_secret_not_granted";
+    try {
+      const verdict = checker.secretAuthorityVerdict({
+        missionId: stored.missionId,
+        unitId: stored.unitId,
+        secretRef
+      });
+      return verdict.ok === true ? undefined : "cua_secret_not_granted";
+    } catch {
+      return "cua_secret_not_granted";
+    }
+  }
+
   private async executeLocked(
     dispatch: DispatchEnvelope,
     owner: string,
@@ -552,6 +615,15 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     }
     if (!this.options.secrets && actions.some((action) => action.type === "type" && "secretRef" in action)) {
       return this.failed(dispatch, "policy_denied", "cua_secret_unavailable", "no secret resolver is configured", []);
+    }
+    // Every secretRef must be granted (secret.read and that exact secret resource) before the browser opens.
+    for (const action of actions) {
+      if (action.type === "type" && "secretRef" in action) {
+        const secretRefusal = this.secretRefusal(stored, action.secretRef);
+        if (secretRefusal) {
+          return this.failed(dispatch, "policy_denied", secretRefusal, "CUA authority does not grant this secret", []);
+        }
+      }
     }
 
     this.assertFence(dispatch, owner);
@@ -631,7 +703,12 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
           // Authority is re-read after the browser is open and right before acting: opening can take long enough for a
           // grant to be revoked, expire or pass its deadline after the pre-plan check above. No action has run on this
           // checkpoint, but the browser was opened under it, so it is settled uncertain and the refusal is not retryable.
-          const liveRefusal = this.authorityRefusal(stored, origins, applications);
+          // A secretRef is re-checked against the live grant right before it is leased.
+          const liveRefusal =
+            this.authorityRefusal(stored, origins, applications) ??
+            (action.type === "type" && "secretRef" in action
+              ? this.secretRefusal(stored, action.secretRef)
+              : undefined);
           if (liveRefusal) {
             this.finish(dispatch, owner, sequence, action.type, hash, "uncertain", {
               uncertain: true,
