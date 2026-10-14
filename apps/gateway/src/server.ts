@@ -1899,6 +1899,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       const body = issueAutonomousAuthorityBodySchema.parse(request.body);
       for (const resource of body.definition.scope.filter((r) => r.kind === "path" || r.kind === "repository")) {
         for (const runtime of new Set(body.definition.toolClasses.map((tool) => tool.runtime))) {
+          // The browser (cua) runtime never consumes filesystem resources: it is bounded by its exact origin and
+          // application allowlist, which the schema has already validated. It has no path containment to consult.
+          if (runtime === "browser") continue;
           const containment =
             runtime === "desktop_commander" ? dcContainment : runtime === "jace_commander" ? jcContainment : undefined;
           if (!containment)
