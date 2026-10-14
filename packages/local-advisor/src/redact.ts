@@ -51,12 +51,13 @@ const PATTERNS: readonly { readonly name: string; readonly pattern: RegExp; read
   {
     // Keys may be JSON-quoted ({"password": "..."}); quoted values may contain spaces.
     name: "quoted_assignment",
-    pattern: new RegExp(String.raw`(${KEY}["']?[ \t]{0,16}[:=]\s{0,16})(["'])[^"'\n]{1,256}\3`, "giu"),
+    pattern: new RegExp(String.raw`(${KEY}["']?[ \t]{0,16}(?:[:=]|%3[ad])\s{0,16})(["'])[^"'\n]{1,256}\3`, "giu"),
     replace: "$1$3[REDACTED:assignment]$3"
   },
   {
+    // `%3D` / `%3A` cover percent-encoded query strings and form bodies (password%3D...).
     name: "assignment",
-    pattern: new RegExp(String.raw`(${KEY}["']?[ \t]{0,16}[:=]\s{0,16})(["']?)[^\s"',;]{4,256}\3`, "giu"),
+    pattern: new RegExp(String.raw`(${KEY}["']?[ \t]{0,16}(?:[:=]|%3[ad])\s{0,16})(["']?)[^\s"',;]{4,256}\3`, "giu"),
     replace: "$1$3[REDACTED:assignment]$3"
   },
   { name: "home_path", pattern: /(?:\/home|\/Users)\/[^/\s]+/gu, replace: "~" },

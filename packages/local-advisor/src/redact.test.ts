@@ -99,6 +99,8 @@ describe("redactText", () => {
   const hardening: readonly { name: string; input: string; secret: string }[] = [
     { name: "JSON password key", input: cat('{"pass', 'word": "', pw, '"}'), secret: pw },
     { name: "JSON access_token key", input: cat('{"access', '_token":"', pw, '"}'), secret: pw },
+    { name: "percent-encoded password=", input: cat("user=a&pass", "word%3D", pw), secret: pw },
+    { name: "percent-encoded token:", input: cat("tok", "en%3a", pw), secret: pw },
     { name: "client_secret assignment", input: cat("client", "_secret=", pw), secret: pw },
     { name: "passphrase assignment", input: cat("pass", "phrase=", pw), secret: pw },
     { name: "YAML value on the next line", input: cat("pass", "word:\n  ", pw), secret: pw },
