@@ -11,7 +11,8 @@ import {
   type CuaBrowserProvider,
   type CuaExecutionOptions,
   type CuaPage,
-  type CuaRoute
+  type CuaRoute,
+  type CuaWebSocketRoute
 } from "./cua-execution.js";
 import { parseWorkUnitPayload, type CuaAction } from "./mission-model.js";
 import { CodingMissionStore } from "./store.js";
@@ -57,6 +58,35 @@ class FakeContext implements CuaBrowserContext {
 
   off(_event: "page", listener: (page: CuaPage) => void): void {
     this.listeners = this.listeners.filter((candidate) => candidate !== listener);
+  }
+
+  wsRoutes: Array<(ws: CuaWebSocketRoute) => unknown> = [];
+  workers: unknown[] = [];
+
+  async routeWebSocket(_url: string | RegExp, handler: (ws: CuaWebSocketRoute) => unknown): Promise<void> {
+    this.wsRoutes.push(handler);
+  }
+
+  serviceWorkers(): unknown[] {
+    return this.workers;
+  }
+
+  /** Simulate a page opening a WebSocket; returns whether the route connected it to the server. */
+  async webSocket(url: string): Promise<"connected" | "closed" | "unrouted"> {
+    let verdict: "connected" | "closed" | "unrouted" = "unrouted";
+    for (const handler of this.wsRoutes) {
+      await handler({
+        url: () => url,
+        connectToServer: () => {
+          verdict = "connected";
+          return {};
+        },
+        close: async () => {
+          verdict = "closed";
+        }
+      });
+    }
+    return verdict;
   }
 
   /** Simulate a request leaving any page in the context; returns whether the route let it through. */
@@ -931,6 +961,41 @@ describe("R3: browser boundary", () => {
     page.fakeContext.popup(next);
     await Promise.resolve();
     expect(next.closed).toBe(false);
+  });
+
+  it("enforces the origin allowlist on WebSockets: only an allowlisted origin reaches the server", async () => {
+    const { adapter, dispatch, page } = harness(script([{ type: "navigate", url: `${ORIGIN}/inbox` }]));
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({ outcome: "succeeded" });
+    expect(page.fakeContext.wsRoutes).toHaveLength(1);
+    await expect(page.fakeContext.webSocket("wss://app.example/live")).resolves.toBe("connected");
+    await expect(page.fakeContext.webSocket("wss://evil.example/exfil")).resolves.toBe("closed");
+    // ws:// maps to http://, which is a different origin from the allowlisted https:// one.
+    await expect(page.fakeContext.webSocket("ws://app.example/live")).resolves.toBe("closed");
+    await expect(page.fakeContext.webSocket("wss://user:pw@app.example/live")).resolves.toBe("closed");
+    await expect(page.fakeContext.webSocket("not a url")).resolves.toBe("closed");
+  });
+
+  it("fails closed before any action when the context cannot route WebSockets", async () => {
+    const { adapter, dispatch, page, checkpoints } = harness(script([{ type: "observe" }]));
+    (page.fakeContext as unknown as { routeWebSocket: unknown }).routeWebSocket = undefined;
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({ outcome: "unknown" });
+    expect(page.calls).not.toContain("screenshot");
+    expect(checkpoints().map((row) => row.state)).toEqual(["uncertain"]);
+    expect(page.closed).toBe(true);
+  });
+
+  it("treats a service worker in the context as an escape (requests it makes bypass the route)", async () => {
+    const { adapter, dispatch, page, checkpoints } = harness(
+      script([{ type: "navigate", url: `${ORIGIN}/inbox` }, { type: "observe" }])
+    );
+    const original = page.goto.bind(page);
+    page.goto = async (url: string) => {
+      await original(url);
+      page.fakeContext.workers.push({ url: () => `${ORIGIN}/sw.js` });
+    };
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({ outcome: "unknown" });
+    expect(checkpoints().map((row) => [row.action_type, row.state])).toEqual([["navigate", "uncertain"]]);
+    expect(page.calls).not.toContain("screenshot");
   });
 
   it("fails closed when the page exposes no browser context", async () => {

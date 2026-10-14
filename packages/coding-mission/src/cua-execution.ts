@@ -49,9 +49,23 @@ export interface CuaRoute {
   abort(errorCode?: string): Promise<void>;
 }
 
-/** Subset of Playwright's BrowserContext: request interception and the set of open pages, including popups. */
+/** Subset of Playwright's WebSocketRoute. */
+export interface CuaWebSocketRoute {
+  url(): string;
+  connectToServer(): unknown;
+  close(options?: { code?: number; reason?: string }): Promise<void>;
+}
+
+/**
+ * Subset of Playwright's BrowserContext: request and WebSocket interception, the set of open pages (including
+ * popups) and its service workers. Providers should create the context with `serviceWorkers: "block"`: requests a
+ * service worker makes are not seen by `route`, so any service worker in the context makes the session uncertain.
+ */
 export interface CuaBrowserContext {
   route(url: string, handler: (route: CuaRoute) => unknown): Promise<void>;
+  /** `route` does not govern WebSockets; without this hook the session fails closed. */
+  routeWebSocket(url: string | RegExp, handler: (ws: CuaWebSocketRoute) => unknown): Promise<void>;
+  serviceWorkers(): unknown[];
   pages(): CuaPage[];
   on(event: "page", listener: (page: CuaPage) => void): unknown;
   /** Removes a listener added with `on`, so a reused context keeps no listener from a closed session. */
@@ -223,6 +237,27 @@ function requestAllowed(url: string, origins: readonly string[]): boolean {
   return origin !== null && origin !== "about:blank" && origins.includes(origin);
 }
 
+/** True when a WebSocket URL is ws(s) on an allowlisted origin: ws maps to http and wss to https, no credentials. */
+function webSocketAllowed(url: string, origins: readonly string[]): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.username !== "" || parsed.password !== "") return false;
+  const scheme = parsed.protocol === "wss:" ? "https:" : parsed.protocol === "ws:" ? "http:" : undefined;
+  if (!scheme) return false;
+  const port = parsed.port === "" ? "" : `:${parsed.port}`;
+  let origin: string;
+  try {
+    origin = new URL(`${scheme}//${parsed.hostname}${port}`).origin;
+  } catch {
+    return false;
+  }
+  return origins.includes(origin);
+}
+
 /** Per-session state for the browser boundary. */
 interface CuaSession {
   page: CuaPage;
@@ -239,7 +274,10 @@ interface CuaSession {
   closed: boolean;
 }
 
-/** Opens a Playwright-shaped page and starts it at about:blank before any governed action. */
+/**
+ * Opens a Playwright-shaped page and starts it at about:blank before any governed action. `connect` should create the
+ * page's context with `serviceWorkers: "block"`; a context with a running service worker is refused or made uncertain.
+ */
 export class PlaywrightCuaBrowser implements CuaBrowserProvider {
   constructor(private readonly connect: (application: string) => Promise<CuaPage>) {}
 
@@ -407,6 +445,28 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
           ),
         signal
       );
+      // WebSockets bypass `route`, so they get their own allowlist; a context that cannot route them fails closed.
+      if (typeof context.routeWebSocket !== "function") {
+        throw new ControlStackError("cua_context_unavailable", "browser context cannot govern WebSockets");
+      }
+      await this.bounded(
+        () =>
+          context.routeWebSocket(/.*/u, (ws) => {
+            let allowed = false;
+            try {
+              allowed = webSocketAllowed(ws.url(), origins);
+            } catch {
+              allowed = false;
+            }
+            if (allowed) return ws.connectToServer();
+            return ws.close({ code: 1008, reason: "blocked by CUA origin allowlist" }).catch(() => undefined);
+          }),
+        signal
+      );
+      // Service-worker traffic bypasses the context route: a context that already runs one is not governable.
+      if (this.serviceWorkerPresent(session)) {
+        throw new ControlStackError("cua_context_unavailable", "browser context runs a service worker");
+      }
     } catch (error) {
       await this.closeSession(session);
       throw error;
@@ -421,6 +481,7 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
    */
   private contextEscaped(session: CuaSession): boolean {
     if (session.foreignPage) return true;
+    if (this.serviceWorkerPresent(session)) return true;
     let pages: CuaPage[];
     try {
       pages = session.context.pages();
@@ -428,6 +489,17 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
       return true;
     }
     return pages.some((candidate) => candidate !== session.page && !session.preexisting.has(candidate));
+  }
+
+  /** True when the context runs (or may run) a service worker. A missing or throwing hook counts as present. */
+  private serviceWorkerPresent(session: CuaSession): boolean {
+    try {
+      if (typeof session.context.serviceWorkers !== "function") return true;
+      const workers = session.context.serviceWorkers();
+      return !Array.isArray(workers) || workers.length > 0;
+    } catch {
+      return true;
+    }
   }
 
   /**
