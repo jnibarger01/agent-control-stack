@@ -63,7 +63,9 @@ export function createAdvise(env: AdvisorEnv, deps: AdviseDeps = {}): Advise {
       model = route.model;
       expected = asDigest(route.expectedDigest) ?? pinnedDigest;
     }
-    let provider = providers.get(model);
+    // The digest pin and base URL are frozen into a provider, so both are part of its identity.
+    const cacheKey = JSON.stringify([model, expected ?? null, baseUrl ?? null]);
+    let provider = providers.get(cacheKey);
     if (!provider) {
       const minRaw = env.ACS_LOCAL_ADVISOR_MIN_FREE_BYTES;
       provider = new OllamaProvider({
@@ -75,7 +77,7 @@ export function createAdvise(env: AdvisorEnv, deps: AdviseDeps = {}): Advise {
         retries: 1,
         minFreeMemoryBytes: minRaw ? Number(minRaw) : undefined
       });
-      providers.set(model, provider);
+      providers.set(cacheKey, provider);
     }
     return runAdvisor(request, provider, { signal });
   };

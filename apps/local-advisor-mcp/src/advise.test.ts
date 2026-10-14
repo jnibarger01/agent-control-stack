@@ -34,3 +34,25 @@ describe("createAdvise: startup validation", () => {
     expect(() => createAdvise({ ACS_LOCAL_ADVISOR_ROUTES: JSON.stringify([{ bogus: true }]) })).toThrow();
   });
 });
+
+describe("createAdvise: provider cache identity", () => {
+  it("does not reuse a provider pinned to a different digest for the same model", async () => {
+    const installedHex = "c".repeat(64);
+    const fetchImpl = (async (input: string | URL | Request) => {
+      const url = input instanceof URL ? input : new URL(String(input));
+      if (url.pathname === "/api/tags") {
+        return new Response(JSON.stringify({ models: [{ name: "qwen2.5-coder:7b", digest: installedHex, capabilities: ["completion"] }] }));
+      }
+      return new Response(JSON.stringify({ message: { content: JSON.stringify({ verdict: "PASS", findings: [], recommendedActions: [] }) } }));
+    }) as unknown as typeof fetch;
+    const routes = [
+      { role: "architecture", model: "qwen2.5-coder:7b", operations: ["review_plan"], expectedDigest: `sha256:${installedHex}` },
+      { role: "triage", model: "qwen2.5-coder:7b", operations: ["diagnose_failure"], expectedDigest: `sha256:${"d".repeat(64)}` }
+    ];
+    const advise = createAdvise({ ACS_LOCAL_ADVISOR_ROUTES: JSON.stringify(routes) }, { fetchImpl });
+    const first = await advise(request, new AbortController().signal);
+    expect(first.status).toBe("completed");
+    const second = await advise({ ...request, operation: "diagnose_failure" } as AdvisorRequest, new AbortController().signal);
+    expect(second).toMatchObject({ status: "unavailable", reason: "model_digest_mismatch" });
+  });
+});
