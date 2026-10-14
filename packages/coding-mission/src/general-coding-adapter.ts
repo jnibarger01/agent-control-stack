@@ -129,9 +129,10 @@ export class GeneralCodingExecutionAdapter implements WorkUnitExecutorAdapter {
     if (!definition.toolClasses.some((tool) => tool.runtime === REQUIRED_RUNTIME)) {
       return refuse("tool_class_not_granted");
     }
-    if (!scopeCovers(definition.scope, task.repository)) return refuse("repository_out_of_scope");
+    // Resolve once and judge scope on that physical path, so the path pinned is exactly the one the scope check passed.
     const repository = physicalPath(task.repository);
-    if (repository === undefined) return refuse("repository_out_of_scope");
+    if (repository === undefined || !scopeCovers(definition.scope, repository))
+      return refuse("repository_out_of_scope");
     if (task.maxRuntimeMs > definition.limits.maxRuntimeMs) return refuse("runtime_exceeds_authority");
     // Pin the task to the physical path that was checked, so a symlink swapped later cannot redirect the executor.
     return { task: { ...task, repository }, claimToken: guarded.claimToken };
