@@ -98,7 +98,8 @@ export async function runAdvisor(
       }
     });
 
-  if (evidence.length === 0) {
+  // Blank or whitespace-only items are not evidence: never let them carry a model verdict.
+  if (!evidence.some((item) => item.text.trim().length > 0)) {
     return finish({ status: "insufficient_evidence", reason: "no_evidence" satisfies AdvisorReason });
   }
 

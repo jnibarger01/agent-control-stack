@@ -256,6 +256,14 @@ describe("runAdvisor: prompt-injection and evidence handling", () => {
     expect(response.recommendedActions[0]).toContain("[REDACTED:aws_key]");
   });
 
+  it.each(["", "   \n\t"])("treats blank-only evidence %j as insufficient without calling the model", async (content) => {
+    const provider = new FakeProvider(() => ok(verdictJson("PASS")));
+    const response = await runAdvisor(request({}, content), provider);
+    expect(response.status).toBe("insufficient_evidence");
+    expect(response.verdict).toBeUndefined();
+    expect(provider.calls).toHaveLength(0);
+  });
+
   it("uses the model-supplied output only as a recommendation (no authority fields are honored)", async () => {
     const response = await runAdvisor(
       request(),
