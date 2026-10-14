@@ -511,4 +511,63 @@ await test('fix 4: on restart a passkey approval must match its webauthn-uv audi
   await env2.daemon.stop();
 });
 
+await test('fix 5: decide_begin honors the risk class; the CLI falls back for non-passkey classes', async () => {
+  const env = await setup();
+  const w = authorizeExact(env, 'write_file', WRITE_ARGS);
+  assert.equal(begin(env, w.approvalId).code, 'PASSKEY_NOT_REQUIRED');
+  const lines = [];
+  const io = { stdout: (t) => lines.push(t), stderr: (t) => lines.push(t), isTty: true, prompt: async () => show(env, w.approvalId).invocationHash.slice(0, 8) };
+  assert.equal(await runApproveCommand('approve', [w.approvalId], { decideSocket: env.config.decideSocket, approverId: 'jace', io }), APPROVE_EXIT.ok, lines.join('\n'));
+  assert.equal(statusOf(env, w.approvalId), 'approved');
+  await env.daemon.stop();
+});
+
+await test('fix 5: the CLI handles an older daemon that answers UNKNOWN_OP to decide_begin', async () => {
+  const base = path.join(root, `old${++seq}`);
+  const keyPath = path.join(base, 'key', 'approver.key');
+  const keyInfo = ensureApproverKey(keyPath, 'jc-approver-test');
+  const daemon = new Approverd({ runtimeId: RUNTIME, stateDir: path.join(base, 'state'), keyPath, keyId: keyInfo.keyId, allowSelfAssertedPrivileged: true,
+    requestSocket: path.join(base, 'request', 'request.sock'), decideSocket: path.join(base, 'decide', 'decide.sock') }, { now });
+  await daemon.start();
+  // A pre-v2 approverd: no decide_begin/decide_complete.
+  const oldSock = path.join(base, 'old.sock');
+  const ops = [];
+  const server = net.createServer((c) => {
+    let buf = '';
+    c.on('data', (d) => {
+      buf += d; const nl = buf.indexOf('\n'); if (nl < 0) return;
+      const msg = JSON.parse(buf.slice(0, nl)); ops.push(msg.op);
+      const reply = msg.op === 'decide_begin' || msg.op === 'decide_complete' ? { ok: false, code: 'UNKNOWN_OP' } : daemon.handleDecideOp(msg);
+      c.end(`${JSON.stringify(reply)}\n`);
+    });
+  });
+  await new Promise((resolve) => server.listen(oldSock, resolve));
+  const p = daemon.handleRequestOp({ op: 'authorize', runtimeId: RUNTIME, tool: 'write_file', arguments: WRITE_ARGS });
+  const hash = daemon.handleDecideOp({ op: 'show', id: p.approvalId }).approval.invocationHash;
+  const lines = [];
+  const io = { stdout: (t) => lines.push(t), stderr: (t) => lines.push(t), isTty: true, prompt: async () => hash.slice(0, 8) };
+  assert.equal(await runApproveCommand('approve', [p.approvalId], { decideSocket: oldSock, approverId: 'jace', io }), APPROVE_EXIT.ok, lines.join('\n'));
+  assert.match(lines.join('\n'), /older daemon/);
+  assert.deepEqual(ops, ['show', 'decide_begin', 'decide']);
+  assert.equal(daemon.handleDecideOp({ op: 'show', id: p.approvalId }).approval.status, 'approved');
+  await new Promise((resolve) => server.close(resolve));
+  await daemon.stop();
+});
+
+await test('fix 5: Node engines match the WebAuthn library and the installer ships it root-owned', () => {
+  const here = path.dirname(new URL(import.meta.url).pathname);
+  const pkg = JSON.parse(fs.readFileSync(path.join(here, '..', 'package.json'), 'utf8'));
+  const lib = JSON.parse(fs.readFileSync(path.join(here, '..', 'node_modules', '@simplewebauthn', 'server', 'package.json'), 'utf8'));
+  const major = (range) => Number(/>=\s*(\d+)/.exec(range)[1]);
+  assert.ok(major(pkg.engines.node) >= major(lib.engines.node), `engines ${pkg.engines.node} < library ${lib.engines.node}`);
+  assert.equal(pkg.dependencies['@simplewebauthn/server'], lib.version);
+  const sh = fs.readFileSync(path.join(here, '..', 'deploy', 'jace-commander', 'install-approverd.sh'), 'utf8');
+  assert.match(sh, /WEBAUTHN_PKG=@simplewebauthn\/server/);
+  assert.match(sh, /\/opt\/jace-commander\/node_modules/);
+  assert.match(sh, /chown -R root:root \/opt\/jace-commander\/node_modules/);
+  assert.match(sh, /installed \$WEBAUTHN_PKG/);
+  assert.doesNotMatch(sh, /if \[\[ -f "\$SRC\/\$f" \]\]; then install/); // passkey files are no longer optional
+  assert.match(sh, /"passkey": \{ \\"trustAnchorPath|\\"passkey\\": \{/);
+});
+
 console.log(`jace-commander passkey approval: ${passed} passed`);

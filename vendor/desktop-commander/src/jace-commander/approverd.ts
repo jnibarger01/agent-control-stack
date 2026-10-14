@@ -460,6 +460,8 @@ export class Approverd {
     if (!record) return { ok: false, code: 'NOT_FOUND' };
     if (record.status !== 'pending') return { ok: false, code: record.status === 'expired' ? 'EXPIRED' : 'NOT_PENDING' };
     if (message.confirmHash !== record.invocationHash) return { ok: false, code: 'CONFIRMATION_MISMATCH' };
+    // Classes outside the passkey set keep the legacy decide (the CLI falls back on this code).
+    if (!this.passkeyClasses.has(record.riskClass)) return { ok: false, code: 'PASSKEY_NOT_REQUIRED' };
     let allowCredentials: Array<{ id: string; transports?: string[] }> = [];
     try {
       allowCredentials = this.humanVerifier?.allowCredentials?.() ?? [];

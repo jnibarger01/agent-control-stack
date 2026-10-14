@@ -47,19 +47,71 @@ fi
 # Code approverd runs is root-owned: the agent must not be able to edit what holds the signing key.
 install -d -o root -g root -m 0755 /opt/jace-commander /opt/jace-commander/dist /opt/jace-commander/dist/jace-commander
 for f in "${FILES[@]}"; do install -o root -g root -m 0644 "$SRC/$f" "/opt/jace-commander/dist/$f"; done
-# Passkey approvals (opt-in, docs/jace-commander-passkey-approvals.md) are loaded lazily by approverd only when
-# its config has a `passkey` block. They also need @simplewebauthn/server installed root-owned under
-# /opt/jace-commander/node_modules; this script does not fetch packages.
+# Passkey approvals (docs/jace-commander-passkey-approvals.md) are REQUIRED for privileged approvals:
+# approverd refuses to start without a `passkey` block unless JC_ALLOW_SELF_ASSERTED_PRIVILEGED=1 is set
+# (an explicit opt-out that approverd records in its audit chain on every start).
 PASSKEY_FILES=(jace-commander/passkey-verifier.js jace-commander/root-controlled-file.js)
 for f in "${PASSKEY_FILES[@]}"; do
-  if [[ -f "$SRC/$f" ]]; then install -o root -g root -m 0644 "$SRC/$f" "/opt/jace-commander/dist/$f"; fi
+  [[ -f "$SRC/$f" ]] || { echo "missing $SRC/$f; run npm run build first" >&2; exit 1; }
+  install -o root -g root -m 0644 "$SRC/$f" "/opt/jace-commander/dist/$f"
 done
+# Install the pinned WebAuthn library and its runtime dependency closure, root-owned, from the repo's
+# node_modules (run `npm ci` first). Nothing is fetched from the network here.
+WEBAUTHN_PKG=@simplewebauthn/server
+WEBAUTHN_VERSION="$("$node_real" -e 'console.log(require(process.argv[1]).dependencies[process.argv[2]])' "$REPO/package.json" "$WEBAUTHN_PKG")"
+mapfile -t WEBAUTHN_DIRS < <("$node_real" - "$REPO" "$WEBAUTHN_PKG" "$WEBAUTHN_VERSION" <<'JS'
+const fs = require('node:fs'); const path = require('node:path');
+const [repo, root, want] = process.argv.slice(2);
+const find = (name, from) => { for (let d = from; ; d = path.dirname(d)) { const p = path.join(d, 'node_modules', name); if (fs.existsSync(path.join(p, 'package.json'))) return p; if (d === path.dirname(d)) return null; } };
+const top = find(root, repo);
+if (!top) { console.error(`missing ${root}; run npm ci first`); process.exit(1); }
+const v = JSON.parse(fs.readFileSync(path.join(top, 'package.json'), 'utf8')).version;
+if (v !== want) { console.error(`${root} is ${v}, expected pinned ${want}`); process.exit(1); }
+// Mirror the resolved layout (nested copies included) under /opt/jace-commander/node_modules.
+const marker = `${path.sep}node_modules${path.sep}`;
+const base = top.slice(0, top.indexOf(marker) + marker.length - 1);
+const seen = new Set(); const queue = [[root, top]];
+while (queue.length) {
+  const [name, dir] = queue.shift();
+  if (seen.has(dir)) continue; seen.add(dir);
+  if (!dir.startsWith(base + path.sep)) { console.error(`${name} resolves outside ${base}`); process.exit(1); }
+  const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+  for (const dep of Object.keys(pkg.dependencies ?? {})) { const d = find(dep, dir); if (!d) { console.error(`missing dependency ${dep} of ${name}`); process.exit(1); } queue.push([dep, d]); }
+}
+for (const dir of seen) console.log(`${path.relative(base, dir)}\t${dir}`);
+JS
+)
+[[ ${#WEBAUTHN_DIRS[@]} -gt 0 ]] || { echo "could not resolve $WEBAUTHN_PKG" >&2; exit 1; }
+rm -rf /opt/jace-commander/node_modules
+install -d -o root -g root -m 0755 /opt/jace-commander/node_modules
+for entry in "${WEBAUTHN_DIRS[@]}"; do
+  name="${entry%%$'\t'*}"; dir="${entry#*$'\t'}"
+  [[ "$name" != /* && "$name" != *..* ]] || { echo "refusing package path $name" >&2; exit 1; }
+  install -d -o root -g root -m 0755 "/opt/jace-commander/node_modules/$name"
+  cp -R --no-preserve=ownership "$dir/." "/opt/jace-commander/node_modules/$name"
+done
+chown -R root:root /opt/jace-commander/node_modules
+chmod -R u=rwX,go=rX /opt/jace-commander/node_modules
+installed="$("$node_real" -e 'console.log(require(process.argv[1]).version)' "/opt/jace-commander/node_modules/$WEBAUTHN_PKG/package.json")"
+[[ "$installed" == "$WEBAUTHN_VERSION" ]] || { echo "installed $WEBAUTHN_PKG $installed != $WEBAUTHN_VERSION" >&2; exit 1; }
 printf '{"type":"module","private":true}\n' > /opt/jace-commander/package.json
 chmod 0644 /opt/jace-commander/package.json
 
 install -d -o root -g root -m 0711 /var/lib/jace-commander
 install -d -o jc-approverd -g jc-approverd -m 0700 /var/lib/jace-commander/approverd /var/lib/jace-commander/approverd-key
 install -d -o root -g root -m 0755 /etc/jace-commander
+PASSKEY_ANCHOR=/etc/jace-commander/passkeys.json
+if [[ "${JC_ALLOW_SELF_ASSERTED_PRIVILEGED:-}" == 1 ]]; then
+  echo "WARNING: JC_ALLOW_SELF_ASSERTED_PRIVILEGED=1: privileged approvals will be self-asserted (no passkey); approverd audits this on every start" >&2
+  PASSKEY_JSON='"allowSelfAssertedPrivileged": true'
+else
+  PASSKEY_RP_ID="${JC_PASSKEY_RP_ID:-localhost}"
+  PASSKEY_ORIGIN="${JC_PASSKEY_ORIGIN:-http://localhost:7391}"
+  [[ "$PASSKEY_RP_ID" =~ ^[a-z0-9.-]{1,253}$ ]] || { echo "invalid JC_PASSKEY_RP_ID" >&2; exit 1; }
+  [[ "$PASSKEY_ORIGIN" =~ ^https?://[a-z0-9.-]+(:[0-9]{1,5})?$ ]] || { echo "invalid JC_PASSKEY_ORIGIN" >&2; exit 1; }
+  PASSKEY_JSON="\"passkey\": { \"trustAnchorPath\": \"$PASSKEY_ANCHOR\", \"rpId\": \"$PASSKEY_RP_ID\", \"origin\": \"$PASSKEY_ORIGIN\" }"
+  [[ -f "$PASSKEY_ANCHOR" ]] || echo "note: $PASSKEY_ANCHOR does not exist yet; privileged approvals fail closed until you register a passkey (jace-commander passkey-register)" >&2
+fi
 umask 022
 cat > /etc/jace-commander/approverd.json <<CFG
 {
@@ -73,7 +125,8 @@ cat > /etc/jace-commander/approverd.json <<CFG
   "decideGroup": "jc-approvers",
   "approvalTtlMs": 900000,
   "tokenTtlMs": 25000,
-  "maxPending": 64
+  "maxPending": 64,
+  $PASSKEY_JSON
 }
 CFG
 chown root:root /etc/jace-commander/approverd.json

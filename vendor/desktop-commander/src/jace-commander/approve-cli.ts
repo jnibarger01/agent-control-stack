@@ -104,7 +104,10 @@ export async function runApproveCommand(command: 'approve' | 'reject' | 'pending
     if (command === 'approve') {
       const started = await approverCall(deps.decideSocket, { op: 'decide_begin', protocol: JC_DECIDE_PROTOCOL_VERSION, id, confirmHash: hash });
       if (started.ok === true) begin = started;
-      else if (started.code !== 'PASSKEY_NOT_CONFIGURED') {
+      else if (started.code === 'UNKNOWN_OP') {
+        // An approverd older than jc.decide.v2 has no passkey support; it still enforces its own legacy rules.
+        io.stderr('jace-commander: approverd does not support passkey approvals (older daemon); using the legacy confirmation');
+      } else if (started.code !== 'PASSKEY_NOT_CONFIGURED' && started.code !== 'PASSKEY_NOT_REQUIRED') {
         io.stderr(`jace-commander: could not start the passkey approval (${String(started.code ?? 'unknown')})`);
         return APPROVE_EXIT.failed;
       }
