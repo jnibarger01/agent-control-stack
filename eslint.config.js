@@ -40,7 +40,11 @@ export default tseslint.config(
                 "Jev is advisory-only (ADR 0020). Import it only from the allow-listed shadow hook or observation worker, never from authority code."
             },
             {
-              group: ["@agent-control-stack/local-advisor", "@agent-control-stack/local-advisor/*", "**/local-advisor/**"],
+              group: [
+                "@agent-control-stack/local-advisor",
+                "@agent-control-stack/local-advisor/*",
+                "**/local-advisor/**"
+              ],
               message:
                 "The local advisor is untrusted evidence. Import it only from its package or apps/local-advisor-mcp, never from authority code."
             },
@@ -153,7 +157,11 @@ export default tseslint.config(
               message: "Jev is advisory-only (ADR 0020)."
             },
             {
-              group: ["@agent-control-stack/local-advisor", "@agent-control-stack/local-advisor/*", "**/local-advisor/**"],
+              group: [
+                "@agent-control-stack/local-advisor",
+                "@agent-control-stack/local-advisor/*",
+                "**/local-advisor/**"
+              ],
               message: "The local advisor is untrusted evidence and must not be imported by policy modules."
             },
             {
