@@ -6,6 +6,7 @@ export interface ReviewFindingBinding {
   readonly missionId: string;
   /** `inputHash` of the request the caller sent. Must equal `response.inputHash`, binding the finding to what was reviewed. */
   readonly inputHash: string;
+  /** Work item the finding is recorded against. Must equal `response.missionId` (the trace's `work_item_id`). */
   readonly workItemId: string;
   readonly attemptId: string;
   /** Hash of an ACS EvidenceManifest. The advisor does not invent one. */
@@ -31,6 +32,10 @@ export function projectReviewFinding(response: AdvisorResponse, binding: ReviewF
   // Refuse cross-mission or cross-request projection: a review of A must never become evidence for B.
   if (response.missionId !== binding.missionId) {
     throw new ReviewBindingError("advisor response mission does not match the binding mission");
+  }
+  // The advisor trace records missionId as work_item_id, so the finding's work item must be that same mission.
+  if (binding.workItemId !== response.missionId) {
+    throw new ReviewBindingError("binding work item does not match the advisor response mission");
   }
   if (response.inputHash !== binding.inputHash) {
     throw new ReviewBindingError("advisor response input hash does not match the reviewed request");
