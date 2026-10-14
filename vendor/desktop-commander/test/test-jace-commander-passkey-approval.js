@@ -568,6 +568,10 @@ await test('fix 5: Node engines match the WebAuthn library and the installer shi
   assert.match(sh, /installed \$WEBAUTHN_PKG/);
   assert.doesNotMatch(sh, /if \[\[ -f "\$SRC\/\$f" \]\]; then install/); // passkey files are no longer optional
   assert.match(sh, /"passkey": \{ \\"trustAnchorPath|\\"passkey\\": \{/);
+  // The shipped example config must be startable under the mandatory-passkey rule.
+  const example = JSON.parse(fs.readFileSync(path.join(here, '..', 'deploy', 'jace-commander', 'approverd.example.json'), 'utf8'));
+  assert.ok(example.passkey, 'approverd.example.json has a passkey block');
+  assert.doesNotThrow(() => new Approverd({ ...example, runtimeId: RUNTIME }));
 });
 
 console.log(`jace-commander passkey approval: ${passed} passed`);
