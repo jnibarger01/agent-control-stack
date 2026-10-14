@@ -481,4 +481,34 @@ await test('fix 3: a malformed sign counter is rejected, never treated as 0', ()
   assert.equal(new FileSignCountStore(file).get('cred'), 5);
 });
 
+await test('fix 4: on restart a passkey approval must match its webauthn-uv audit entry', async () => {
+  let env = await setup();
+  const good = await fresh(env);
+  assert.equal((await complete(env, good, env.a.sign(good.webauthn.challenge))).ok, true);
+  const bad = await fresh(env);
+  assert.equal((await complete(env, bad, env.a.sign(bad.webauthn.challenge))).ok, true);
+  const tampered = JSON.parse(fs.readFileSync(recordFile(env, bad.approvalId), 'utf8'));
+  tampered.approverId = 'mallory';
+  fs.writeFileSync(recordFile(env, bad.approvalId), JSON.stringify(tampered));
+  env = await restart(env);
+  assert.equal(statusOf(env, good.approvalId), 'approved');
+  assert.equal(env.daemon.handleDecideOp({ op: 'show', id: bad.approvalId }).code, 'NOT_FOUND');
+  assert.equal(authorizeExact(env, 'privileged_exec', tampered.arguments).state, 'pending');
+  await env.daemon.stop();
+
+  // A privileged approval that was only self-asserted (opt-out era) is not restored once passkeys are on.
+  const legacy = await setup();
+  await legacy.daemon.stop();
+  const optOut = new Approverd({ ...legacy.config, passkey: undefined, allowSelfAssertedPrivileged: true }, { now });
+  await optOut.start();
+  const p = optOut.handleRequestOp({ op: 'authorize', runtimeId: RUNTIME, tool: 'privileged_exec', arguments: PRIV });
+  const h = optOut.handleDecideOp({ op: 'show', id: p.approvalId }).approval.invocationHash;
+  assert.equal(optOut.handleDecideOp({ op: 'decide', id: p.approvalId, decision: 'approve', confirmHash: h, approverId: 'jace' }).ok, true);
+  await optOut.stop();
+  const env2 = await restart(legacy);
+  assert.equal(env2.daemon.handleDecideOp({ op: 'show', id: p.approvalId }).code, 'NOT_FOUND');
+  assert.equal(authorizeExact(env2, 'privileged_exec', PRIV).state, 'pending');
+  await env2.daemon.stop();
+});
+
 console.log(`jace-commander passkey approval: ${passed} passed`);

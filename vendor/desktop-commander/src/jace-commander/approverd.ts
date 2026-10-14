@@ -594,6 +594,7 @@ export class Approverd {
     const auditPath = path.join(this.config.stateDir, 'audit.jsonl');
     const requested = new Map<string, { hash: string; principal: string }>();
     const decided = new Map<string, Map<string, string>>();
+    const approvedBy = new Map<string, { approverId: unknown; assurance: unknown }>();
     if (fs.existsSync(auditPath)) {
       const parsed = readTraceFile(auditPath);
       if (parsed.parseError || !verifyChain(parsed.events).ok) return;
@@ -606,6 +607,7 @@ export class Approverd {
           const actions = decided.get(id) ?? new Map<string, string>();
           actions.set(event.payload.action, hash);
           decided.set(id, actions);
+          if (event.payload.action === 'approved') approvedBy.set(id, { approverId: event.payload.approverId, assurance: event.payload.approverIdAssurance });
         }
       }
     }
@@ -614,6 +616,11 @@ export class Approverd {
       try {
         const record = JSON.parse(fs.readFileSync(path.join(this.approvalsDir, entry), 'utf8')) as ApprovalRecord;
         if (!this.persistedRecordValid(record, requested, decided)) continue;
+        // A passkey-class approval must be backed by a webauthn-uv audit entry for the SAME approver.
+        if ((record.status === 'approved' || record.status === 'claimed') && this.passkeyConfigured && this.passkeyClasses.has(record.riskClass)) {
+          const by = approvedBy.get(record.id);
+          if (!by || by.assurance !== 'webauthn-uv' || typeof by.approverId !== 'string' || by.approverId !== record.approverId) continue;
+        }
         // The audit is the durable truth: a consumed approval must never be restored as usable.
         if (decided.get(record.id)?.has('claimed') && record.status !== 'claimed') record.status = 'claimed';
         this.records.set(record.id, record);
