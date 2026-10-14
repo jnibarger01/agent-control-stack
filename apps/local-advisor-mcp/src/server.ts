@@ -152,11 +152,13 @@ export class LocalAdvisorMcpServer {
   private drain(): void {
     for (;;) {
       if (this.framing === null) {
-        // Only empty lines (CR/LF) may precede the first header; see nextLspFrame for why spaces are not skipped.
+        // Framing is chosen on the first non-whitespace bytes, so a stray space before the first frame cannot lock an
+        // LSP client into NDJSON. The bytes are not consumed here: an indented header is still refused by
+        // nextLspFrame (see there), which then resynchronises on the next frame.
         const head = this.buffer
-          .subarray(0, 32)
+          .subarray(0, 64)
           .toString("utf8")
-          .replace(/^[\r\n]+/u, "")
+          .replace(/^[ \t\r\n]+/u, "")
           .toLowerCase();
         if (head.length === 0) return;
         // Stdio may split a write anywhere: stay undecided while the prefix could still become "content-length".
@@ -186,9 +188,16 @@ export class LocalAdvisorMcpServer {
     const match = lengths.length === 1 ? /^content-length\s*:\s*(\d+)\s*$/iu.exec(lengths[0]!) : null;
     const len = match ? Number(match[1]) : NaN;
     if (!Number.isFinite(len) || len < 0 || len > MAX_FRAME_BYTES) {
-      this.buffer = Buffer.alloc(0);
+      // Drop only the bad frame: resynchronise on the next Content-Length header after this header block, so valid
+      // frames already queued behind it are still served. Without one, nothing usable is buffered.
+      const next = this.buffer
+        .toString("latin1")
+        .toLowerCase()
+        .indexOf(LSP_HEADER, sep + 4);
+      this.buffer = next < 0 ? Buffer.alloc(0) : this.buffer.subarray(next);
       this.send({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "invalid or oversized frame" } });
-      return null;
+      // An empty body tells drain to keep going with whatever is still buffered.
+      return "";
     }
     const end = sep + 4 + len;
     if (this.buffer.length < end) return null;

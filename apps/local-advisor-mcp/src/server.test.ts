@@ -298,13 +298,31 @@ describe("local advisor MCP", () => {
     expect(out.map((f) => f.id)).toEqual([1, 2]);
   });
 
-  it("does not treat a header preceded by spaces as an LSP header", async () => {
+  it("refuses a header preceded by spaces without locking the session into NDJSON", async () => {
     const h = harness(async () => failed());
-    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" });
-    h.input.write(`  Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}\n`);
+    const frame = (id: number) => {
+      const body = JSON.stringify({ jsonrpc: "2.0", id, method: "ping" });
+      return `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
+    };
+    h.input.write(`  ${frame(1)}${frame(2)}`);
     await settle(h.server);
-    // The stream is read as NDJSON: the indented header line is a parse error, never a frame length.
-    expect(h.text()).not.toContain("Content-Length:");
-    expect(h.text()).toContain('"message":"parse error"');
+    // The indented header is never used as a frame length, and the session stays LSP-framed for the next frame.
+    const out = frames(h.text()) as Array<{ id?: unknown; error?: { message?: string } }>;
+    expect(out.map((f) => f.id)).toEqual([null, 2]);
+    expect(out[0]?.error?.message).toBe("invalid or oversized frame");
+  });
+
+  it("drops only the bad frame and still serves valid frames queued behind it", async () => {
+    const h = harness(async () => failed());
+    const frame = (id: number) => {
+      const body = JSON.stringify({ jsonrpc: "2.0", id, method: "ping" });
+      return `Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
+    };
+    h.input.write(`${frame(1)}Content-Length: abc\r\n\r\n{}${frame(2)}${frame(3)}`);
+    await settle(h.server);
+    const out = frames(h.text()) as Array<{ id?: unknown; error?: { message?: string } }>;
+    // The error is sent synchronously while responses are async, so compare without assuming interleaving.
+    expect(out.filter((f) => f.id !== null).map((f) => f.id)).toEqual([1, 2, 3]);
+    expect(out.filter((f) => f.id === null).map((f) => f.error?.message)).toEqual(["invalid or oversized frame"]);
   });
 });
