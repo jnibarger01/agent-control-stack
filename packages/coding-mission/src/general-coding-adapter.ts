@@ -4,10 +4,11 @@ import {
   guardAuthority,
   guardClaim,
   isRefusal,
+  physicalPath,
   refuse,
   refusalResult,
   runWithinBudget,
-  scopeCovers,
+  physicalScopeCovers,
   type BoundaryAuthority,
   type BoundaryRefusal
 } from "./execution-boundary.js";
@@ -92,6 +93,10 @@ export class GeneralCodingExecutionAdapter implements WorkUnitExecutorAdapter {
     const checked = this.refusal(dispatch, claim);
     if (isRefusal(checked)) return refusalResult(dispatch, checked, this.now());
     const { task, claimToken } = checked;
+    // The checked path must still be the physical path right before the executor starts (TOCTOU, #361).
+    if (physicalPath(task.repository) !== task.repository) {
+      return refusalResult(dispatch, refuse("repository_moved"), this.now());
+    }
     return runWithinBudget({
       dispatch,
       maxRuntimeMs: task.maxRuntimeMs,
@@ -124,9 +129,13 @@ export class GeneralCodingExecutionAdapter implements WorkUnitExecutorAdapter {
     if (!definition.toolClasses.some((tool) => tool.runtime === REQUIRED_RUNTIME)) {
       return refuse("tool_class_not_granted");
     }
-    if (!scopeCovers(definition.scope, task.repository)) return refuse("repository_out_of_scope");
+    // Resolve once and judge scope on that physical path, so the path pinned is exactly the one the scope check passed.
+    const repository = physicalPath(task.repository);
+    if (repository === undefined || !physicalScopeCovers(definition.scope, repository))
+      return refuse("repository_out_of_scope");
     if (task.maxRuntimeMs > definition.limits.maxRuntimeMs) return refuse("runtime_exceeds_authority");
-    return { task, claimToken: guarded.claimToken };
+    // Pin the task to the physical path that was checked, so a symlink swapped later cannot redirect the executor.
+    return { task: { ...task, repository }, claimToken: guarded.claimToken };
   }
 
   /** Judges an executor's report against the contract. A report that breaks it is never a success. */

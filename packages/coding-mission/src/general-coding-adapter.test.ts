@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { GeneralCodingOutcome } from "./general-coding-adapter.js";
+import { GeneralCodingExecutionAdapter, type GeneralCodingOutcome } from "./general-coding-adapter.js";
 import { cleanupWorlds, HUMAN, SHA, world } from "./general-coding-fixture.js";
 import type { ExecutionClaim, WorkUnitExecutorAdapter } from "./worker-execution.js";
 
@@ -454,6 +454,56 @@ describe("GeneralCodingExecutionAdapter", () => {
         await w.run([w.adapter(w.executor(() => w.good()))]);
         expect(w.requests).toHaveLength(1);
         expect(w.unit().status).toBe("succeeded");
+      });
+
+      it("refuses when the checked repository is swapped for an escaping symlink before the executor starts (#361)", async () => {
+        const outside = mkdtempSync(join(tmpdir(), "acs-outside-"));
+        outsides.push(outside);
+        const w = world({ scope: parentScope });
+        mkdirSync(w.repository, { recursive: true });
+        const link = join(w.repository, "..", "swap");
+        symlinkSync(w.repository, link);
+        retarget(w, link);
+        // Swap only after the scope check has passed: replace the repository the link resolved to with a symlink that
+        // escapes the scope. `limits` is read after covers(), so this lands in the check-to-use window.
+        let swapped = false;
+        const swap = () => {
+          if (swapped) return;
+          swapped = true;
+          renameSync(w.repository, `${w.repository}-moved`);
+          symlinkSync(outside, w.repository);
+        };
+        const authority = {
+          verifyDispatch: (...args: Parameters<typeof w.exec.authority.verifyDispatch>) =>
+            w.exec.authority.verifyDispatch(...args),
+          unitAuthority: (...args: Parameters<typeof w.exec.authority.unitAuthority>) =>
+            w.exec.authority.unitAuthority(...args),
+          missionAuthority: (...args: Parameters<typeof w.exec.authority.missionAuthority>) => {
+            const record = w.exec.authority.missionAuthority(...args);
+            if (!record) return record;
+            const definition = record.definition;
+            return {
+              ...record,
+              definition: {
+                ...definition,
+                get limits() {
+                  swap();
+                  return definition.limits;
+                }
+              }
+            };
+          }
+        };
+        const adapter = new GeneralCodingExecutionAdapter(
+          w.exec.missions,
+          authority,
+          w.executor(() => w.good()),
+          () => w.state.now
+        );
+        await w.run([adapter]);
+        expect(swapped).toBe(true);
+        expect(w.requests).toHaveLength(0);
+        expect(w.attempt().report?.failure?.nativeCode).toBe("repository_moved");
       });
     });
 
