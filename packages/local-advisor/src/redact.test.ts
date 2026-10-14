@@ -258,4 +258,12 @@ describe("redactText", () => {
     expect(text).toBe("[REDACTED:jwt][REDACTED:jwt]");
     expect(counts.jwt).toBe(2);
   });
+
+  it("redacts a truncated second jwt glued to a complete one", () => {
+    const first = jwt();
+    const payload = b64url(JSON.stringify({ sub: fill(12) }));
+    const { text } = redactText(cat(first, b64url(JSON.stringify({ alg: "none" })), ".", payload));
+    expect(text).not.toContain(payload.slice(-12));
+    expect(text).toMatch(/^\[REDACTED:jwt\]/u);
+  });
 });

@@ -112,6 +112,12 @@ function redactJwtRun(run: string): { text: string; count: number } {
         i += 2;
         continue;
       }
+      if (glued >= 0) {
+        // A glued second token that is truncated (no complete payload/signature): redact the rest of the run.
+        count += 1;
+        text += "[REDACTED:jwt]";
+        break;
+      }
       i += 3;
     } else {
       text += current;
