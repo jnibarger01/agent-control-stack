@@ -54,6 +54,8 @@ export interface CuaBrowserContext {
   route(url: string, handler: (route: CuaRoute) => unknown): Promise<void>;
   pages(): CuaPage[];
   on(event: "page", listener: (page: CuaPage) => void): unknown;
+  /** Removes a listener added with `on`, so a reused context keeps no listener from a closed session. */
+  off(event: "page", listener: (page: CuaPage) => void): unknown;
 }
 
 export interface CuaBrowserProvider {
@@ -231,6 +233,10 @@ interface CuaSession {
   preexisting: ReadonlySet<CuaPage>;
   /** Pages that appeared in the context during the session. Closed with the session. */
   created: Set<CuaPage>;
+  /** Unsubscribes this session's "page" listener. Set once the listener is registered. */
+  detach?: () => void;
+  /** Set when the session closes; a listener that outlives its removal then ignores every page. */
+  closed: boolean;
 }
 
 /** Opens a Playwright-shaped page and starts it at about:blank before any governed action. */
@@ -369,7 +375,8 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
       context: undefined as unknown as CuaBrowserContext,
       foreignPage: false,
       preexisting: new Set(),
-      created: new Set()
+      created: new Set(),
+      closed: false
     };
     try {
       if (typeof page.context !== "function") {
@@ -378,14 +385,21 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
       session.context = page.context();
       // Snapshot the tabs that predate this session so cleanup and escape detection only consider pages it created.
       session.preexisting = new Set(session.context.pages().filter((candidate) => candidate !== page));
-      session.context.on("page", (opened) => {
-        if (opened === page || session.preexisting.has(opened)) return;
+      const context = session.context;
+      // Without a way to remove the listener, a reused context would keep closing later sessions' pages: fail closed.
+      if (typeof context.off !== "function") {
+        throw new ControlStackError("cua_context_unavailable", "browser context cannot remove a page listener");
+      }
+      const onPage = (opened: CuaPage) => {
+        if (session.closed || opened === page || session.preexisting.has(opened)) return;
         session.created.add(opened);
         session.foreignPage = true;
         void Promise.resolve()
           .then(() => opened.close())
           .catch(() => undefined);
-      });
+      };
+      context.on("page", onPage);
+      session.detach = () => context.off("page", onPage);
       await this.bounded(
         () =>
           session.context.route("**/*", (route) =>
@@ -421,6 +435,12 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
    * open in a reused context are left alone. A close failure never replaces a result.
    */
   private async closeSession(session: CuaSession): Promise<void> {
+    session.closed = true;
+    try {
+      session.detach?.();
+    } catch {
+      // The closed flag already makes a listener that could not be removed inert.
+    }
     const pages = new Set<CuaPage>([session.page, ...session.created]);
     try {
       if (session.context) {

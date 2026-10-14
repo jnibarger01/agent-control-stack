@@ -55,6 +55,10 @@ class FakeContext implements CuaBrowserContext {
     this.listeners.push(listener);
   }
 
+  off(_event: "page", listener: (page: CuaPage) => void): void {
+    this.listeners = this.listeners.filter((candidate) => candidate !== listener);
+  }
+
   /** Simulate a request leaving any page in the context; returns whether the route let it through. */
   async request(url: string): Promise<boolean> {
     let verdict = true;
@@ -916,6 +920,17 @@ describe("R3: browser boundary", () => {
     await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({ outcome: "succeeded" });
     expect(operatorTab.closed).toBe(false);
     expect(page.closed).toBe(true);
+  });
+
+  it("removes its page listener on close, so a reused context's next session page is not closed", async () => {
+    const { adapter, dispatch, page } = harness(script([{ type: "navigate", url: `${ORIGIN}/inbox` }]));
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({ outcome: "succeeded" });
+    expect(page.fakeContext.listeners).toEqual([]);
+    // The next attempt's governed page is created in the same reused context.
+    const next = new FakePage();
+    page.fakeContext.popup(next);
+    await Promise.resolve();
+    expect(next.closed).toBe(false);
   });
 
   it("fails closed when the page exposes no browser context", async () => {
