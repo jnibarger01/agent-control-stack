@@ -28,6 +28,7 @@ export * from "./mission-intelligence.js";
 export {
   FLIGHT_RECORD_SCHEMA_VERSION,
   FLIGHT_TRUST_ASSUMPTIONS,
+  readFlightRecords,
   readMissionFlightRecord,
   verifyFlightRecord,
   type FlightFinding,

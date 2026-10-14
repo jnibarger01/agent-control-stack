@@ -6,11 +6,13 @@
  * (budget.ts) and the authority narrowing (authority.ts, on the migration-047 grant model) cannot be bypassed by
  * concurrency or a restart. Time comes from ACS's own clock; nothing a worker sends can set it.
  */
+import { missionUnitSubjectId } from "@agent-control-stack/advisory";
 import { ControlStackError, redactValue, stableHash } from "@agent-control-stack/shared";
 import {
   autonomousAuthorityCoreSchema,
   autonomousAuthorityHash,
   changeSetPrivilegeSchema,
+  copyAdvisorBinding,
   readAutonomousAuthorityRevocation,
   type AutonomousAuthorityGrant
 } from "@agent-control-stack/work-items";
@@ -1129,6 +1131,25 @@ export class MissionAuthorityLedger {
           },
           nowIso
         );
+        const copied = copyAdvisorBinding(this.store.db, {
+          parentMissionId: missionId,
+          parentSubjectId: missionUnitSubjectId(missionId, parentUnitId),
+          childMissionId: missionId,
+          childSubjectId: missionUnitSubjectId(missionId, item.unitId),
+          now: nowIso
+        });
+        if (copied.status === "not_attached") {
+          this.store.recordMissionEvent(
+            missionId,
+            "advisor.not_attached",
+            {
+              parentUnitId,
+              unitId: item.unitId,
+              code: copied.code ?? "advisor_pairing_rejected"
+            },
+            nowIso
+          );
+        }
       }
       return { ok: true, created: created.created, authorities };
     });

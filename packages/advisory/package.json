@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./guidance": {
+      "types": "./dist/advisor-guidance.d.ts",
+      "default": "./dist/advisor-guidance.js"
     }
   },
   "dependencies": {

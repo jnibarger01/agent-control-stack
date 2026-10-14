@@ -1,6 +1,8 @@
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
+import { missionUnitSubjectId } from "@agent-control-stack/advisory";
 import { ControlStackError, applyControlPlaneMigrations, redactValue, stableHash } from "@agent-control-stack/shared";
+import { advisorCompletionBlockReason } from "@agent-control-stack/work-items";
 import { appendFlightRecord, appendMissionEvent, evidenceBindingBody } from "./flight-recorder.js";
 import {
   recoveryBackoffMs,
@@ -920,6 +922,24 @@ export class CodingMissionStore {
     now: string = new Date().toISOString()
   ): void {
     this.transaction(() => {
+      const current = this.db
+        .prepare(`SELECT status, claim_token FROM coding_operations WHERE mission_id = ? AND operation_id = ?`)
+        .get(missionId, operationId) as { status: string; claim_token: string | null } | undefined;
+      if (
+        !current ||
+        current.claim_token !== claimToken ||
+        (current.status !== "running" && current.status !== "checkpointed" && current.status !== "unknown")
+      ) {
+        throw new ControlStackError("coding_mission_claim_conflict", "operation completion did not match the claim");
+      }
+      const advisorBlock = advisorCompletionBlockReason(
+        this.db,
+        missionId,
+        missionUnitSubjectId(missionId, operationId)
+      );
+      if (advisorBlock) {
+        throw new ControlStackError(advisorBlock, "before_completion advisor consultation is required");
+      }
       const resultRow = this.db
         .prepare(
           `UPDATE coding_operations
