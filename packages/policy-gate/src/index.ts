@@ -23,3 +23,4 @@ export * from "./managed-authority.js";
 export * from "./change-set-policy.js";
 export * from "./mission-runner.js";
 export * from "./mission-dispatch.js";
+export * from "./advisor-requirement.js";
