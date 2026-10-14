@@ -467,4 +467,18 @@ await test('fix 2: a failed persist leaves the record pending and unclaimable (p
   await env.daemon.stop();
 });
 
+await test('fix 3: a malformed sign counter is rejected, never treated as 0', () => {
+  const dir = fs.mkdtempSync(path.join(root, 'counters-'));
+  const file = path.join(dir, 'passkey-counters.json');
+  for (const bad of ['{"cred":"corrupt"}', '{"cred":-1}', '{"cred":1.5}', '{"cred":null}', '[]', 'null', '7']) {
+    fs.writeFileSync(file, bad);
+    const store = new FileSignCountStore(file);
+    assert.throws(() => store.get('cred'), /unreadable/, bad);
+    assert.throws(() => store.get('other'), /unreadable/, bad);
+    assert.throws(() => store.set('cred', 9), /unreadable/, bad);
+  }
+  fs.writeFileSync(file, '{"cred":5}');
+  assert.equal(new FileSignCountStore(file).get('cred'), 5);
+});
+
 console.log(`jace-commander passkey approval: ${passed} passed`);

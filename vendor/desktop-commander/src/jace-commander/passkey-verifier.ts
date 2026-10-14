@@ -94,9 +94,14 @@ export class FileSignCountStore implements JcSignCountStore {
 
   private read(): Record<string, number> {
     try {
-      const parsed = JSON.parse(fs.readFileSync(this.file, 'utf8')) as Record<string, unknown>;
+      const parsed = JSON.parse(fs.readFileSync(this.file, 'utf8')) as unknown;
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('malformed');
       const out: Record<string, number> = {};
-      for (const [k, v] of Object.entries(parsed)) if (Number.isSafeInteger(v) && (v as number) >= 0) out[k] = v as number;
+      for (const [k, v] of Object.entries(parsed)) {
+        // Any malformed counter fails closed; dropping it would lower the replay floor to 0.
+        if (!Number.isSafeInteger(v) || (v as number) < 0) throw new Error('malformed');
+        out[k] = v as number;
+      }
       return out;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
