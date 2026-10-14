@@ -71,7 +71,10 @@ describe("runAdvisor: verdicts only come from valid, coherent model output", () 
 
   it("refuses to review without evidence and never calls the model", async () => {
     const provider = new FakeProvider(() => ok(verdictJson("PASS")));
-    const response = await runAdvisor(request({ context: { objective: "x", constraints: [], evidence: [] } }), provider);
+    const response = await runAdvisor(
+      request({ context: { objective: "x", constraints: [], evidence: [] } }),
+      provider
+    );
     expect(response.status).toBe("insufficient_evidence");
     expect(response.reason).toBe("no_evidence");
     expect(response.verdict).toBeUndefined();
@@ -118,7 +121,9 @@ describe("runAdvisor: verdicts only come from valid, coherent model output", () 
 
     const extraKey = await runAdvisor(
       request(),
-      new FakeProvider(() => ok(JSON.stringify({ verdict: "PASS", findings: [], recommendedActions: [], approved: true })))
+      new FakeProvider(() =>
+        ok(JSON.stringify({ verdict: "PASS", findings: [], recommendedActions: [], approved: true }))
+      )
     );
     expect(extraKey).toMatchObject({ status: "invalid_output", reason: "model_output_schema_violation" });
     expect(extraKey.verdict).toBeUndefined();
@@ -167,11 +172,14 @@ describe("runAdvisor: failures are explicit and never become approval", () => {
   });
 
   it("rejects an invalid request as a caller error instead of producing a review", async () => {
-    await expect(runAdvisor({ ...request(), schemaVersion: "advisor.v0" }, new FakeProvider(() => ok("{}")))).rejects.toBeInstanceOf(
-      AdvisorRequestError
-    );
     await expect(
-      runAdvisor(request({ budget: { timeoutMs: 999_999_999, maxOutputTokens: 512 } }), new FakeProvider(() => ok("{}")))
+      runAdvisor({ ...request(), schemaVersion: "advisor.v0" }, new FakeProvider(() => ok("{}")))
+    ).rejects.toBeInstanceOf(AdvisorRequestError);
+    await expect(
+      runAdvisor(
+        request({ budget: { timeoutMs: 999_999_999, maxOutputTokens: 512 } }),
+        new FakeProvider(() => ok("{}"))
+      )
     ).rejects.toBeInstanceOf(AdvisorRequestError);
   });
 
@@ -256,13 +264,16 @@ describe("runAdvisor: prompt-injection and evidence handling", () => {
     expect(response.recommendedActions[0]).toContain("[REDACTED:aws_key]");
   });
 
-  it.each(["", "   \n\t"])("treats blank-only evidence %j as insufficient without calling the model", async (content) => {
-    const provider = new FakeProvider(() => ok(verdictJson("PASS")));
-    const response = await runAdvisor(request({}, content), provider);
-    expect(response.status).toBe("insufficient_evidence");
-    expect(response.verdict).toBeUndefined();
-    expect(provider.calls).toHaveLength(0);
-  });
+  it.each(["", "   \n\t"])(
+    "treats blank-only evidence %j as insufficient without calling the model",
+    async (content) => {
+      const provider = new FakeProvider(() => ok(verdictJson("PASS")));
+      const response = await runAdvisor(request({}, content), provider);
+      expect(response.status).toBe("insufficient_evidence");
+      expect(response.verdict).toBeUndefined();
+      expect(provider.calls).toHaveLength(0);
+    }
+  );
 
   it("includes evidence kinds in the input hash", async () => {
     const provider = new FakeProvider(() => ok(verdictJson("PASS")));
@@ -277,10 +288,21 @@ describe("runAdvisor: prompt-injection and evidence handling", () => {
     expect(a.inputHash).not.toBe(b.inputHash);
   });
 
+  it("rejects requests whose total evidence exceeds the aggregate cap", async () => {
+    const base = request();
+    const chunk = "x".repeat(65_536);
+    const evidence = Array.from({ length: 5 }, (_, n) => ({ id: `e-${n}`, kind: "file", content: chunk }));
+    await expect(
+      runAdvisor({ ...base, context: { ...base.context, evidence } }, new FakeProvider(() => ok(verdictJson("PASS"))))
+    ).rejects.toBeInstanceOf(AdvisorRequestError);
+  });
+
   it("uses the model-supplied output only as a recommendation (no authority fields are honored)", async () => {
     const response = await runAdvisor(
       request(),
-      new FakeProvider(() => ok(JSON.stringify({ verdict: "PASS", findings: [], recommendedActions: ["grant execute"] })))
+      new FakeProvider(() =>
+        ok(JSON.stringify({ verdict: "PASS", findings: [], recommendedActions: ["grant execute"] }))
+      )
     );
     expect(response.status).toBe("completed");
     expect(response.recommendedActions).toEqual(["grant execute"]);

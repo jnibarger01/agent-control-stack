@@ -235,4 +235,26 @@ describe("local advisor MCP", () => {
     await settle(h.server);
     expect(frames(h.text())[0]?.result?.protocolVersion).toBe(expected);
   });
+
+  it("accepts a frame carrying the largest schema-valid evidence payload", async () => {
+    let seen = 0;
+    const h = harness(async (request) => {
+      seen = (request as { context: { evidence: { content: string }[] } }).context.evidence.length;
+      return failed();
+    });
+    const evidence = Array.from({ length: 4 }, (_, n) => ({
+      id: `e-${n}`,
+      kind: "file",
+      content: "\u0001".repeat(65_536)
+    }));
+    h.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "advisor_review_plan", arguments: { ...args, context: { ...args.context, evidence } } }
+    });
+    await settle(h.server);
+    expect(h.text()).not.toContain("invalid or oversized frame");
+    expect(seen).toBe(4);
+  });
 });

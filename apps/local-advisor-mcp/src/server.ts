@@ -2,6 +2,7 @@ import type { Readable, Writable } from "node:stream";
 import {
   ADVISOR_SCHEMA_VERSION,
   AdvisorRequestError,
+  MAX_TOTAL_EVIDENCE_CHARS,
   advisorRequestSchema,
   type AdvisorOperation,
   type AdvisorResponse
@@ -10,7 +11,11 @@ import {
 /** MCP protocol versions this server understands. A supported requested version is echoed; otherwise PROTOCOL_VERSION is offered. */
 export const SUPPORTED_PROTOCOL_VERSIONS = ["2024-11-05", "2025-03-26", "2025-06-18"] as const;
 export const PROTOCOL_VERSION = "2024-11-05";
-const MAX_FRAME_BYTES = 256 * 1024;
+/**
+ * Sized to carry any schema-valid request: MAX_TOTAL_EVIDENCE_CHARS of evidence plus objective (4,000) and
+ * constraints (50 x 500), even when every character is JSON-escaped to 6 bytes (~1.7 MiB), with headroom.
+ */
+const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const LSP_HEADER = "content-length";
 
@@ -40,6 +45,7 @@ const REQUEST_PROPS = {
       evidence: {
         type: "array",
         maxItems: 64,
+        description: `Total content across all evidence items is limited to ${MAX_TOTAL_EVIDENCE_CHARS} characters.`,
         items: {
           type: "object",
           additionalProperties: false,

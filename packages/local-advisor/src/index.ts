@@ -13,6 +13,7 @@ export {
   ADVISOR_SCHEMA_VERSION,
   ADVISOR_STATUSES,
   AdvisorRequestError,
+  MAX_TOTAL_EVIDENCE_CHARS,
   advisorRequestSchema,
   advisorResponseSchema,
   modelReviewOutputSchema

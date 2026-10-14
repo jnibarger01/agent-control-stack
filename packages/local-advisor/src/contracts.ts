@@ -11,7 +11,13 @@ export const ADVISOR_OPERATIONS = ["review_plan", "diagnose_failure", "review_co
 export type AdvisorOperation = (typeof ADVISOR_OPERATIONS)[number];
 
 /** Operational status. Only `completed` may carry a review verdict. */
-export const ADVISOR_STATUSES = ["completed", "unavailable", "timeout", "invalid_output", "insufficient_evidence"] as const;
+export const ADVISOR_STATUSES = [
+  "completed",
+  "unavailable",
+  "timeout",
+  "invalid_output",
+  "insufficient_evidence"
+] as const;
 export type AdvisorStatus = (typeof ADVISOR_STATUSES)[number];
 
 export const ADVISOR_REASONS = [
@@ -34,6 +40,12 @@ export const EVIDENCE_KINDS = ["file", "log", "tool_result", "test_report", "dif
 const identifier = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u);
 const sha256Ref = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
 const boundedText = (max: number) => z.string().min(1).max(max);
+
+/**
+ * Aggregate cap on evidence content per request. Per-item limits alone (64 x 65,536) would allow ~4 MiB, far more
+ * than one MCP frame; this bound is what the transport is sized for.
+ */
+export const MAX_TOTAL_EVIDENCE_CHARS = 262_144;
 
 export const evidenceItemSchema = z
   .object({
@@ -68,10 +80,18 @@ export const advisorRequestObject = z
   .strict();
 
 export const advisorRequestSchema = advisorRequestObject.superRefine((request, ctx) => {
-    const ids = request.context.evidence.map((item) => item.id);
-    if (new Set(ids).size !== ids.length) {
-      ctx.addIssue({ code: "custom", path: ["context", "evidence"], message: "evidence ids must be unique" });
-    }
+  const ids = request.context.evidence.map((item) => item.id);
+  if (new Set(ids).size !== ids.length) {
+    ctx.addIssue({ code: "custom", path: ["context", "evidence"], message: "evidence ids must be unique" });
+  }
+  const total = request.context.evidence.reduce((sum, item) => sum + item.content.length, 0);
+  if (total > MAX_TOTAL_EVIDENCE_CHARS) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["context", "evidence"],
+      message: `total evidence content must not exceed ${MAX_TOTAL_EVIDENCE_CHARS} characters`
+    });
+  }
 });
 export type AdvisorRequest = z.infer<typeof advisorRequestSchema>;
 
