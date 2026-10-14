@@ -157,7 +157,9 @@ export class LocalAdvisorMcpServer {
     const sep = this.buffer.indexOf("\r\n\r\n");
     if (sep < 0) return null;
     const header = this.buffer.subarray(0, sep).toString("utf8");
-    const match = /content-length:\s*(\d+)/iu.exec(header);
+    // Exactly one Content-Length header whose value is all digits; anything else is refused.
+    const lengths = header.split("\r\n").filter((line) => /^content-length\s*:/iu.test(line));
+    const match = lengths.length === 1 ? /^content-length\s*:\s*(\d+)\s*$/iu.exec(lengths[0]!) : null;
     const len = match ? Number(match[1]) : NaN;
     if (!Number.isFinite(len) || len < 0 || len > MAX_FRAME_BYTES) {
       this.buffer = Buffer.alloc(0);
@@ -218,7 +220,8 @@ export class LocalAdvisorMcpServer {
         this.inflight.set(key, controller);
       }
       if (typeof method !== "string") {
-        if (!isNotification) this.send({ jsonrpc: "2.0", id: idValue as never, error: { code: -32600, message: "invalid request" } });
+        if (!isNotification)
+          this.send({ jsonrpc: "2.0", id: idValue as never, error: { code: -32600, message: "invalid request" } });
         return;
       }
       try {
@@ -239,7 +242,8 @@ export class LocalAdvisorMcpServer {
     switch (method) {
       case "initialize": {
         const requested = params.protocolVersion;
-        const compatible = typeof requested !== "string" || (SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).includes(requested);
+        const compatible =
+          typeof requested !== "string" || (SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).includes(requested);
         return {
           protocolVersion: PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
@@ -274,7 +278,8 @@ export class LocalAdvisorMcpServer {
     const args = params.arguments ?? {};
     const definition = TOOL_DEFINITIONS.find((toolDef) => toolDef.name === name);
     if (!definition) return toolError("UNKNOWN_TOOL", "unknown tool");
-    if (!args || typeof args !== "object" || Array.isArray(args)) return toolError("INVALID_REQUEST", "arguments must be an object");
+    if (!args || typeof args !== "object" || Array.isArray(args))
+      return toolError("INVALID_REQUEST", "arguments must be an object");
     const raw = args as Json;
     const request = {
       ...raw,
@@ -283,7 +288,10 @@ export class LocalAdvisorMcpServer {
     };
     const parsed = advisorRequestSchema.safeParse(request);
     if (!parsed.success) {
-      return toolError("INVALID_REQUEST", new AdvisorRequestError(parsed.error.issues.map((issue) => issue.message).join("; ")).message);
+      return toolError(
+        "INVALID_REQUEST",
+        new AdvisorRequestError(parsed.error.issues.map((issue) => issue.message).join("; ")).message
+      );
     }
     try {
       const response = await this.run(parsed.data, signal);
@@ -294,7 +302,8 @@ export class LocalAdvisorMcpServer {
       return { content: [{ type: "text", text }], structuredContent: response, isError: false };
     } catch (error) {
       if (error instanceof AdvisorRequestError) return toolError("INVALID_REQUEST", error.message);
-      const code = error instanceof Error && error.name === "ModelRouteError" ? "MODEL_NOT_INSTALLED" : "ADVISOR_FAILED";
+      const code =
+        error instanceof Error && error.name === "ModelRouteError" ? "MODEL_NOT_INSTALLED" : "ADVISOR_FAILED";
       return toolError(code, "the advisor did not produce a review");
     }
   }

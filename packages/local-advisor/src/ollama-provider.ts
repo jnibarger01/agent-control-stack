@@ -159,7 +159,9 @@ export class OllamaProvider implements AdvisorProvider {
 
   /** Reads the installed digest and refuses to continue unless it matches the expectation (when one is pinned). */
   private async verifyModel(signal: AbortSignal): Promise<`sha256:${string}`> {
-    const entry = (await readInstalled(this.fetchImpl, this.base, signal)).find((item) => matchesModel(item.name, this.options.model));
+    const entry = (await readInstalled(this.fetchImpl, this.base, signal)).find((item) =>
+      matchesModel(item.name, this.options.model)
+    );
     if (!entry) throw new ProviderError("model_not_installed", "model is not installed locally or reports no digest");
     if (this.options.expectedDigest !== undefined && entry.digest !== this.options.expectedDigest) {
       throw new ProviderError("digest_mismatch", "installed model digest does not match the pinned digest");
@@ -199,9 +201,9 @@ export class OllamaProvider implements AdvisorProvider {
  */
 export async function readBoundedJson(response: Response, maxBytes: number): Promise<unknown> {
   const declared = response.headers.get("content-length");
-  if (declared !== null && Number(declared) > maxBytes) {
+  if (declared !== null && (!/^\s*\d+\s*$/u.test(declared) || Number(declared) > maxBytes)) {
     await response.body?.cancel().catch(() => undefined);
-    throw new ProviderError("malformed_response", "endpoint response exceeds size limit");
+    throw new ProviderError("malformed_response", "endpoint response has an invalid or oversized content-length");
   }
   const chunks: Uint8Array[] = [];
   let total = 0;

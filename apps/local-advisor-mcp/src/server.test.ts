@@ -22,7 +22,9 @@ function failed(): AdvisorResponse {
   };
 }
 
-function harness(run: LocalAdvisorMcpServer extends never ? never : ConstructorParameters<typeof LocalAdvisorMcpServer>[2]) {
+function harness(
+  run: LocalAdvisorMcpServer extends never ? never : ConstructorParameters<typeof LocalAdvisorMcpServer>[2]
+) {
   const input = new PassThrough();
   const output = new PassThrough();
   const chunks: Buffer[] = [];
@@ -42,8 +44,11 @@ async function settle(server: LocalAdvisorMcpServer): Promise<void> {
   await server.idle();
 }
 
-function frames(text: string): Array<{ result?: { isError?: boolean; structuredContent?: AdvisorResponse; protocolVersion?: string } }> {
-  const out: Array<{ result?: { isError?: boolean; structuredContent?: AdvisorResponse; protocolVersion?: string } }> = [];
+function frames(
+  text: string
+): Array<{ result?: { isError?: boolean; structuredContent?: AdvisorResponse; protocolVersion?: string } }> {
+  const out: Array<{ result?: { isError?: boolean; structuredContent?: AdvisorResponse; protocolVersion?: string } }> =
+    [];
   let rest = text;
   while (rest.length > 0) {
     const sep = rest.indexOf("\r\n\r\n");
@@ -75,7 +80,9 @@ describe("local advisor MCP", () => {
     await settle(h.server);
     const [init, list] = frames(h.text());
     expect(init?.result?.protocolVersion).toBe(PROTOCOL_VERSION);
-    const tools = (list?.result as { tools?: { name: string; annotations?: { readOnlyHint?: boolean } }[] } | undefined)?.tools ?? [];
+    const tools =
+      (list?.result as { tools?: { name: string; annotations?: { readOnlyHint?: boolean } }[] } | undefined)?.tools ??
+      [];
     expect(tools.map((tool) => tool.name)).toEqual(TOOL_DEFINITIONS.map((tool) => tool.name));
     expect(tools.every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
   });
@@ -96,7 +103,12 @@ describe("local advisor MCP", () => {
       calls += 1;
       return failed();
     });
-    h.send({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "advisor_review_plan", arguments: { requestId: "nope" } } });
+    h.send({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: { name: "advisor_review_plan", arguments: { requestId: "nope" } }
+    });
     await settle(h.server);
     const [frame] = frames(h.text());
     expect(frame?.result?.isError).toBe(true);
@@ -112,7 +124,12 @@ describe("local advisor MCP", () => {
       });
       return failed();
     });
-    h.send({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "advisor_diagnose_failure", arguments: args } });
+    h.send({
+      jsonrpc: "2.0",
+      id: 9,
+      method: "tools/call",
+      params: { name: "advisor_diagnose_failure", arguments: args }
+    });
     await new Promise((resolve) => setTimeout(resolve, 30));
     h.send({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 9 } });
     await settle(h.server);
@@ -130,7 +147,12 @@ describe("local advisor MCP", () => {
       });
       return failed();
     });
-    const call = (id: unknown) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "advisor_review_plan", arguments: args } });
+    const call = (id: unknown) => ({
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: { name: "advisor_review_plan", arguments: args }
+    });
     h.send(call(1));
     await new Promise((resolve) => setTimeout(resolve, 20));
     h.send(call("1"));
@@ -152,5 +174,19 @@ describe("local advisor MCP", () => {
     h.send({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 1 } });
     await settle(h.server);
     expect(signals[0]?.aborted).toBe(true);
+  });
+
+  it.each(["abc", "12abc", "1e3"])("refuses a non-numeric Content-Length header %j", async (value) => {
+    let calls = 0;
+    const h = harness(async () => {
+      calls++;
+      return failed();
+    });
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" });
+    h.input.write(`Content-Length: ${value}\r\n\r\n${body}`);
+    await settle(h.server);
+    expect(h.text()).toContain("invalid or oversized frame");
+    expect(h.text()).not.toContain('"result"');
+    expect(calls).toBe(0);
   });
 });

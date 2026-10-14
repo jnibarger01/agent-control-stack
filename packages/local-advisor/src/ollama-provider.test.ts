@@ -87,7 +87,9 @@ describe("OllamaProvider: model identity", () => {
   });
 
   it("refuses generation when the installed digest differs from the pinned digest", async () => {
-    const fake = fakeFetch((url) => (url.pathname === "/api/tags" ? tags("qwen2.5-coder:7b", "d".repeat(64)) : chat("{}")));
+    const fake = fakeFetch((url) =>
+      url.pathname === "/api/tags" ? tags("qwen2.5-coder:7b", "d".repeat(64)) : chat("{}")
+    );
     const provider = new OllamaProvider({ model: "qwen2.5-coder:7b", expectedDigest: DIGEST, fetchImpl: fake.impl });
     await expect(provider.generate(input())).rejects.toMatchObject({ kind: "digest_mismatch" });
     expect(fake.seen.some((c) => c.url.pathname === "/api/chat")).toBe(false);
@@ -108,7 +110,12 @@ describe("OllamaProvider: failures, retries, cancellation", () => {
       chatCalls++;
       return new Response("boom", { status: 503 });
     });
-    const provider = new OllamaProvider({ model: "qwen2.5-coder:7b", fetchImpl: fake.impl, retries: 2, retryBaseDelayMs: 1 });
+    const provider = new OllamaProvider({
+      model: "qwen2.5-coder:7b",
+      fetchImpl: fake.impl,
+      retries: 2,
+      retryBaseDelayMs: 1
+    });
     await expect(provider.generate(input())).rejects.toMatchObject({ kind: "unavailable" });
     expect(chatCalls).toBe(3);
   });
@@ -120,7 +127,12 @@ describe("OllamaProvider: failures, retries, cancellation", () => {
       chatCalls++;
       return new Response("<html>", { status: 200 });
     });
-    const provider = new OllamaProvider({ model: "qwen2.5-coder:7b", fetchImpl: fake.impl, retries: 3, retryBaseDelayMs: 1 });
+    const provider = new OllamaProvider({
+      model: "qwen2.5-coder:7b",
+      fetchImpl: fake.impl,
+      retries: 3,
+      retryBaseDelayMs: 1
+    });
     await expect(provider.generate(input())).rejects.toMatchObject({ kind: "malformed_response" });
     expect(chatCalls).toBe(1);
   });
@@ -196,7 +208,9 @@ describe("OllamaProvider: response size caps", () => {
     const stream = endlessBody(new Uint8Array(64 * 1024).fill(0x20));
     const provider = new OllamaProvider({
       model: "qwen2.5-coder:7b",
-      fetchImpl: fakeFetch((url) => (url.pathname === "/api/tags" ? tags() : new Response(stream.body, { status: 200 }))).impl
+      fetchImpl: fakeFetch((url) =>
+        url.pathname === "/api/tags" ? tags() : new Response(stream.body, { status: 200 })
+      ).impl
     });
     await expect(provider.generate(input())).rejects.toMatchObject({ kind: "malformed_response" });
     expect(stream.state.cancelled).toBe(true);
@@ -213,11 +227,19 @@ describe("OllamaProvider: response size caps", () => {
   });
 
   it("rejects a declared content-length above the cap without reading", async () => {
-    const response = new Response("{}", { status: 200, headers: { "content-length": String(MAX_TAGS_RESPONSE_BYTES + 1) } });
+    const response = new Response("{}", {
+      status: 200,
+      headers: { "content-length": String(MAX_TAGS_RESPONSE_BYTES + 1) }
+    });
     await expect(readBoundedJson(response, MAX_TAGS_RESPONSE_BYTES)).rejects.toBeInstanceOf(ProviderError);
   });
 
   it("parses a body under the cap", async () => {
     await expect(readBoundedJson(new Response('{"ok":true}'), 1024)).resolves.toEqual({ ok: true });
+  });
+
+  it.each(["abc", "12abc", "-1", "1e3", ""])("refuses a non-numeric content-length %j", async (value) => {
+    const response = new Response("{}", { status: 200, headers: { "content-length": value } });
+    await expect(readBoundedJson(response, 1024)).rejects.toMatchObject({ kind: "malformed_response" });
   });
 });
