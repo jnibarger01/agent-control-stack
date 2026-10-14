@@ -256,6 +256,17 @@ describe("keyboard shortcuts (#13)", () => {
     expect(app.window.location.search).toBe("?item=wrk_a");
   });
 
+  it("shows the queue before focusing a row when j is pressed from another view", async () => {
+    const app = boot();
+    app.key("g", { target: app.document.body });
+    app.key("o", { target: app.document.body });
+    expect(app.document.body.dataset.activeView).toBe("overview");
+    app.key("j", { target: app.document.body });
+    await app.flush();
+    expect(app.document.body.dataset.activeView).toBe("queue");
+    expect(app.document.activeElement?.getAttribute("data-work-item")).toBe("wrk_a");
+  });
+
   it("skips filtered-out rows", async () => {
     const app = boot();
     const filter = app.document.querySelector("#queue-filter-text") as HTMLInputElement;
@@ -288,6 +299,10 @@ describe("keyboard shortcuts (#13)", () => {
 
   it("ignores shortcuts while typing or with modifiers", async () => {
     const app = boot();
+    // Reasons live in the approvals view; show it so the input can actually take focus.
+    app.key("g", { target: app.document.body });
+    app.key("a", { target: app.document.body });
+    expect(app.document.body.dataset.activeView).toBe("approvals");
     const reason = app.document.querySelector('[data-reason="wrk_b"]') as HTMLInputElement;
     reason.focus();
     app.key("j");

@@ -34,7 +34,9 @@ describe("Mission Control operational slices", () => {
           eventHash: "current"
         }
       ]
-    });
+    }, {}, { url: "https://acs.local/#audit" });
+    // The audit list lives in the audit view; it must be visible to take focus.
+    expect(app.document.body.dataset.activeView).toBe("audit");
     const button = app.document.querySelector("[data-inspect-audit]") as HTMLElement;
     button.focus();
     button.click();
