@@ -152,6 +152,16 @@ describe("redactText", () => {
       secret: jwt().split(".")[1]!
     },
     {
+      name: "base64 wrapped across lines",
+      input: b64(cat("gh", "p_", fill(36))).replace(/(.{20})/gu, "$1\n"),
+      secret: b64(cat("gh", "p_", fill(36))).slice(0, 20)
+    },
+    {
+      name: "base64 wrapped with CRLF",
+      input: b64(cat("gh", "p_", fill(36))).replace(/(.{16})/gu, "$1\r\n"),
+      secret: b64(cat("gh", "p_", fill(36))).slice(16, 32)
+    },
+    {
       name: "base64-wrapped github token",
       input: b64(cat("gh", "p_", fill(36))),
       secret: b64(cat("gh", "p_", fill(36)))
