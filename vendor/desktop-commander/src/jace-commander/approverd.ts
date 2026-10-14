@@ -445,10 +445,8 @@ export class Approverd {
       approverIdAssurance: 'self-asserted', invocationHash: record.invocationHash })) {
       return { ok: false, code: 'AUDIT_UNAVAILABLE' };
     }
-    record.status = action;
-    record.decidedAt = new Date(this.now()).toISOString();
-    record.approverId = message.approverId;
-    this.persist(record);
+    // Durable first: the live record changes only after its new state is on disk.
+    if (!this.commit(record, { status: action, decidedAt: new Date(this.now()).toISOString(), approverId: message.approverId })) return { ok: false, code: 'PERSIST_FAILED' };
     this.gate?.cancel(record.id);
     return { ok: true, approvalId: record.id, status: record.status };
   }
@@ -531,10 +529,7 @@ export class Approverd {
       approverIdAssurance: 'webauthn-uv', credentialId: accepted.credentialId, protocol: JC_DECIDE_PROTOCOL_VERSION, invocationHash: record.invocationHash })) {
       return { ok: false, code: 'AUDIT_UNAVAILABLE' };
     }
-    record.status = 'approved';
-    record.decidedAt = new Date(this.now()).toISOString();
-    record.approverId = accepted.operatorId;
-    this.persist(record);
+    if (!this.commit(record, { status: 'approved', decidedAt: new Date(this.now()).toISOString(), approverId: accepted.operatorId })) return { ok: false, code: 'PERSIST_FAILED' };
     return { ok: true, approvalId: record.id, status: record.status, approverId: accepted.operatorId, approverIdAssurance: 'webauthn-uv' };
   }
 

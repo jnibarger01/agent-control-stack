@@ -446,4 +446,25 @@ await test('fix 1: no passkey block refuses to start unless the explicit opt-out
   await assert.rejects(new Approverd({ ...config, allowSelfAssertedPrivileged: true }, { now }).start(), /refusing to start/);
 });
 
+await test('fix 2: a failed persist leaves the record pending and unclaimable (passkey and legacy decide)', async () => {
+  const env = await setup();
+  const b = await fresh(env);
+  blockPersist(env, b.approvalId);
+  const done = await complete(env, b, env.a.sign(b.webauthn.challenge));
+  assert.equal(done.code, 'PERSIST_FAILED', JSON.stringify(done));
+  assert.equal(statusOf(env, b.approvalId), 'pending');
+  assert.equal(authorizeExact(env, 'privileged_exec', show(env, b.approvalId).arguments).state, 'pending');
+  unblockPersist(env, b.approvalId);
+  // Legacy decide (a class outside the passkey set).
+  const w = authorizeExact(env, 'write_file', WRITE_ARGS);
+  blockPersist(env, w.approvalId);
+  assert.equal(legacyDecide(env, w.approvalId).code, 'PERSIST_FAILED');
+  assert.equal(statusOf(env, w.approvalId), 'pending');
+  assert.equal(authorizeExact(env, 'write_file', WRITE_ARGS).state, 'pending');
+  unblockPersist(env, w.approvalId);
+  assert.equal(legacyDecide(env, w.approvalId).ok, true);
+  assert.equal(authorizeExact(env, 'write_file', WRITE_ARGS).state, 'granted');
+  await env.daemon.stop();
+});
+
 console.log(`jace-commander passkey approval: ${passed} passed`);
