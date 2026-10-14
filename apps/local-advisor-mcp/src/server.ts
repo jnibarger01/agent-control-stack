@@ -18,6 +18,8 @@ export const PROTOCOL_VERSION = "2024-11-05";
 const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const LSP_HEADER = "content-length";
+/** Tool calls held at once (running or queued behind the provider semaphore). Further calls are refused, not queued. */
+export const MAX_PENDING_TOOL_CALLS = 8;
 
 export type AdvisorRunner = (request: unknown, signal: AbortSignal) => Promise<AdvisorResponse>;
 
@@ -115,6 +117,7 @@ export class LocalAdvisorMcpServer {
   private buffer = Buffer.alloc(0);
   private framing: "lsp" | "ndjson" | null = null;
   private pending = 0;
+  private toolCalls = 0;
   private readonly inflight = new Map<string, AbortController>();
   private stopped = false;
 
@@ -205,6 +208,7 @@ export class LocalAdvisorMcpServer {
     this.pending += 1;
     const controller = new AbortController();
     let key: string | null = null;
+    let countedToolCall = false;
     try {
       let msg: Json;
       try {
@@ -243,6 +247,19 @@ export class LocalAdvisorMcpServer {
           this.send({ jsonrpc: "2.0", id: idValue as never, error: { code: -32600, message: "invalid request" } });
         return;
       }
+      if (method === "tools/call") {
+        if (this.toolCalls >= MAX_PENDING_TOOL_CALLS) {
+          if (!isNotification)
+            this.send({
+              jsonrpc: "2.0",
+              id: idValue as never,
+              error: { code: -32000, message: "server busy: too many pending tool calls" }
+            });
+          return;
+        }
+        this.toolCalls += 1;
+        countedToolCall = true;
+      }
       try {
         const result = await this.dispatch(method, (msg.params ?? {}) as Json, controller.signal);
         if (!isNotification && result !== undefined) this.send({ jsonrpc: "2.0", id: idValue as never, result });
@@ -253,6 +270,7 @@ export class LocalAdvisorMcpServer {
       }
     } finally {
       if (key) this.inflight.delete(key);
+      if (countedToolCall) this.toolCalls -= 1;
       this.pending -= 1;
     }
   }

@@ -1,7 +1,7 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { type AdvisorResponse } from "@agent-control-stack/local-advisor";
-import { LocalAdvisorMcpServer, PROTOCOL_VERSION, TOOL_DEFINITIONS } from "./server.js";
+import { LocalAdvisorMcpServer, MAX_PENDING_TOOL_CALLS, PROTOCOL_VERSION, TOOL_DEFINITIONS } from "./server.js";
 
 const HASH = `sha256:${"ab".repeat(32)}`;
 
@@ -256,5 +256,33 @@ describe("local advisor MCP", () => {
     await settle(h.server);
     expect(h.text()).not.toContain("invalid or oversized frame");
     expect(seen).toBe(4);
+  });
+
+  it("refuses tool calls beyond the pending limit instead of queueing them without bound", async () => {
+    let started = 0;
+    const release: (() => void)[] = [];
+    const h = harness(async () => {
+      started++;
+      await new Promise<void>((resolve) => release.push(resolve));
+      return failed();
+    });
+    const total = MAX_PENDING_TOOL_CALLS + 3;
+    for (let n = 1; n <= total; n++) {
+      h.send({ jsonrpc: "2.0", id: n, method: "tools/call", params: { name: "advisor_review_plan", arguments: args } });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(started).toBe(MAX_PENDING_TOOL_CALLS);
+    const busy = (frames(h.text()) as Array<{ error?: { message?: string } }>).filter((f) =>
+      f.error?.message?.startsWith("server busy")
+    );
+    expect(busy).toHaveLength(3);
+    for (const done of release) done();
+    await settle(h.server);
+    // Capacity is released once calls finish.
+    h.send({ jsonrpc: "2.0", id: 99, method: "tools/call", params: { name: "advisor_review_plan", arguments: args } });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(started).toBe(MAX_PENDING_TOOL_CALLS + 1);
+    for (const done of release) done();
+    await settle(h.server);
   });
 });
