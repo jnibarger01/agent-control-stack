@@ -620,4 +620,16 @@ await test('F2: approverd-cli and the installer refuse Node < 20 with a clear me
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
+await test('F3: installer accepts only http://localhost:<port> as JC_PASSKEY_ORIGIN', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const here = path.dirname(new URL(import.meta.url).pathname);
+  const sh = fs.readFileSync(path.join(here, '..', 'deploy', 'jace-commander', 'install-approverd.sh'), 'utf8');
+  const check = sh.split('\n').find((l) => l.includes('"$PASSKEY_ORIGIN" =~'));
+  assert.ok(check, 'installer validates JC_PASSKEY_ORIGIN');
+  const ok = (origin) => spawnSync('bash', ['-c', `set -euo pipefail\nPASSKEY_ORIGIN="$1"\n${check.trim()}\necho PASSED`, 'x', origin], { encoding: 'utf8' }).stdout.includes('PASSED');
+  for (const o of ['http://localhost:7391', 'http://localhost:1']) assert.equal(ok(o), true, o);
+  for (const o of ['https://localhost:7391', 'http://localhost', 'http://127.0.0.1:7391', 'http://evil.com:7391', 'http://localhost.evil.com:7391', 'http://localhost:123456', 'http://localhost:7391/', 'http://LOCALHOST:7391', 'http://localhost:7391\n'])
+    assert.equal(ok(o), false, JSON.stringify(o));
+});
+
 console.log(`jace-commander passkey approval: ${passed} passed`);

@@ -112,7 +112,7 @@ else
   PASSKEY_RP_ID="${JC_PASSKEY_RP_ID:-localhost}"
   PASSKEY_ORIGIN="${JC_PASSKEY_ORIGIN:-http://localhost:7391}"
   [[ "$PASSKEY_RP_ID" =~ ^[a-z0-9.-]{1,253}$ ]] || { echo "invalid JC_PASSKEY_RP_ID" >&2; exit 1; }
-  [[ "$PASSKEY_ORIGIN" =~ ^https?://[a-z0-9.-]+(:[0-9]{1,5})?$ ]] || { echo "invalid JC_PASSKEY_ORIGIN" >&2; exit 1; }
+  [[ "$PASSKEY_ORIGIN" =~ ^http://localhost:[0-9]{1,5}$ ]] || { echo "invalid JC_PASSKEY_ORIGIN" >&2; exit 1; }
   PASSKEY_JSON="\"passkey\": { \"trustAnchorPath\": \"$PASSKEY_ANCHOR\", \"rpId\": \"$PASSKEY_RP_ID\", \"origin\": \"$PASSKEY_ORIGIN\" }"
   [[ -f "$PASSKEY_ANCHOR" ]] || echo "note: $PASSKEY_ANCHOR does not exist yet; privileged approvals fail closed until you register a passkey (jace-commander passkey-register)" >&2
 fi
