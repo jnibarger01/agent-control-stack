@@ -1,5 +1,9 @@
 #!/usr/bin/env node
-import { assertDirectLoopbackEgress, type AdvisorRequest } from "@agent-control-stack/local-advisor";
+import {
+  DEFAULT_OLLAMA_BASE_URL,
+  assertDirectLoopbackEgress,
+  type AdvisorRequest
+} from "@agent-control-stack/local-advisor";
 import { createAdvise } from "./advise.js";
 import { LocalAdvisorMcpServer } from "./server.js";
 
@@ -13,7 +17,11 @@ import { LocalAdvisorMcpServer } from "./server.js";
  *   ACS_LOCAL_ADVISOR_MIN_FREE_BYTES=<n>             refuse inference under memory pressure
  */
 // Fail closed at startup if env proxy mode could carry loopback advisor traffic to a proxy.
-assertDirectLoopbackEgress(process.env, process.execArgv);
+assertDirectLoopbackEgress(
+  process.env,
+  process.execArgv,
+  process.env.ACS_LOCAL_ADVISOR_BASE_URL ?? DEFAULT_OLLAMA_BASE_URL
+);
 
 const advise = createAdvise(process.env);
 

@@ -1,8 +1,18 @@
 /**
- * Node's built-in fetch can route requests through HTTP(S)_PROXY when env proxy mode is on
+ * Node's built-in fetch routes requests through HTTP(S)_PROXY when env proxy mode is on
  * (`NODE_USE_ENV_PROXY=1` or `--use-env-proxy`). The loopback check on the base URL does not stop that,
- * so the prompt could leave the machine via the proxy. Refuse to start in that configuration unless
- * NO_PROXY covers every loopback name.
+ * so a prompt could leave the machine through the proxy. Refuse to start in that configuration unless
+ * Node itself would bypass the proxy for the advisor's base URL.
+ *
+ * `nodeWouldProxy` mirrors Node 24's implementation exactly rather than guessing at NO_PROXY semantics:
+ *   - lib/internal/process/pre_execution.js `setupHttpProxy`: active only when `--use-env-proxy` is set
+ *     (NODE_USE_ENV_PROXY must equal "1", src/node_options.cc) and one of the proxy variables is non-empty.
+ *   - deps/undici/src/lib/dispatcher/env-http-proxy-agent.js: lowercase variables win via `??`
+ *     (`no_proxy ?? NO_PROXY`, `http_proxy ?? HTTP_PROXY`, `https_proxy ?? HTTPS_PROXY`), so a defined
+ *     but empty lowercase value still shadows the uppercase one. Entries split on `,` and whitespace; a
+ *     trailing `:<digits>` is a port that must equal the target port; a leading `.` or `*.` is stripped;
+ *     a host matches when equal or when it is a dot-suffix. `*` disables proxying only as the whole value.
+ *     The target host keeps IPv6 brackets, so only `[::1]` matches `[::1]`. No CIDR support.
  */
 export class EgressConfigError extends Error {
   constructor(message: string) {
@@ -11,45 +21,64 @@ export class EgressConfigError extends Error {
   }
 }
 
-const PROXY_VARS = ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"] as const;
-const LOOPBACK_NAMES = ["127.0.0.1", "localhost", "::1"] as const;
+type Env = Readonly<Record<string, string | undefined>>;
 
-function envProxyModeOn(env: Readonly<Record<string, string | undefined>>, execArgv: readonly string[]): boolean {
-  const flag = (value: string) => value === "--use-env-proxy" || value.startsWith("--use-env-proxy=");
-  if (env.NODE_USE_ENV_PROXY !== undefined && env.NODE_USE_ENV_PROXY !== "" && env.NODE_USE_ENV_PROXY !== "0") return true;
-  if (execArgv.some(flag)) return true;
-  return (env.NODE_OPTIONS ?? "").split(/\s+/u).some(flag);
+const DEFAULT_PORTS: Readonly<Record<string, number>> = { "http:": 80, "https:": 443 };
+
+export function envProxyModeOn(env: Env, execArgv: readonly string[]): boolean {
+  const flag = (value: string) => value === "--use-env-proxy";
+  const fromOptions = (env.NODE_OPTIONS ?? "").split(/\s+/u);
+  // Command-line and NODE_OPTIONS flags take effect over the env var; a later --no-use-env-proxy disables it.
+  const flags = [...fromOptions, ...execArgv].filter(
+    (value) => value === "--use-env-proxy" || value === "--no-use-env-proxy"
+  );
+  const last = flags.at(-1);
+  if (last !== undefined) return flag(last);
+  return env.NODE_USE_ENV_PROXY === "1";
 }
 
-function normalizeNoProxyEntry(entry: string): string {
-  let value = entry.trim().toLowerCase();
-  if (value.startsWith("[")) {
-    const end = value.indexOf("]");
-    return end > 0 ? value.slice(1, end) : value;
+function proxyFor(target: URL, env: Env): string | undefined {
+  const http = env.http_proxy ?? env.HTTP_PROXY;
+  if (target.protocol === "https:") {
+    const https = env.https_proxy ?? env.HTTPS_PROXY;
+    return https ? https : http ? http : undefined;
   }
-  if (value.startsWith(".")) value = value.slice(1);
-  // Strip a trailing :port, but not from a bare IPv6 address.
-  const colons = value.split(":").length - 1;
-  if (colons === 1) value = value.slice(0, value.indexOf(":"));
-  return value;
+  return http ? http : undefined;
 }
 
-export function noProxyCoversLoopback(noProxy: string | undefined): boolean {
-  const entries = new Set((noProxy ?? "").split(/[,\s]+/u).filter(Boolean).map(normalizeNoProxyEntry));
-  if (entries.has("*")) return true;
-  return LOOPBACK_NAMES.every((name) => entries.has(name) || (name === "127.0.0.1" && entries.has("127.0.0.0/8")));
+/** True when Node's env-proxy dispatcher would send a request for `target` to a proxy. */
+export function nodeWouldProxy(target: URL, env: Env): boolean {
+  if (!env.HTTP_PROXY && !env.HTTPS_PROXY && !env.http_proxy && !env.https_proxy) return false;
+  if (proxyFor(target, env) === undefined) return false;
+  const noProxy = env.no_proxy ?? env.NO_PROXY ?? "";
+  const entries = noProxy
+    .split(/[,\s]/u)
+    .filter((entry) => entry !== "")
+    .map((entry) => {
+      const parsed = /^(.+):(\d+)$/u.exec(entry);
+      return {
+        hostname: (parsed ? parsed[1]! : entry).replace(/^\*?\./u, "").toLowerCase(),
+        port: parsed ? Number.parseInt(parsed[2]!, 10) : 0
+      };
+    });
+  if (entries.length === 0) return true;
+  if (noProxy === "*") return false;
+  const hostname = target.host.replace(/:\d*$/u, "").toLowerCase();
+  const port = Number.parseInt(target.port, 10) || DEFAULT_PORTS[target.protocol] || 0;
+  for (const entry of entries) {
+    if (entry.port && entry.port !== port) continue;
+    if (hostname === entry.hostname) return false;
+    if (hostname.slice(-(entry.hostname.length + 1)) === `.${entry.hostname}`) return false;
+  }
+  return true;
 }
 
-/** Throws when env proxy mode could route loopback advisor traffic through a proxy. Never echoes env values. */
-export function assertDirectLoopbackEgress(
-  env: Readonly<Record<string, string | undefined>>,
-  execArgv: readonly string[] = []
-): void {
+/** Throws when env proxy mode would route traffic for `baseUrl` through a proxy. Never echoes env values. */
+export function assertDirectLoopbackEgress(env: Env, execArgv: readonly string[], baseUrl: string | URL): void {
   if (!envProxyModeOn(env, execArgv)) return;
-  if (!PROXY_VARS.some((name) => (env[name] ?? "") !== "")) return;
-  const noProxy = env.NO_PROXY ?? env.no_proxy;
-  if (noProxyCoversLoopback(noProxy)) return;
+  const target = baseUrl instanceof URL ? baseUrl : new URL(baseUrl);
+  if (!nodeWouldProxy(target, env)) return;
   throw new EgressConfigError(
-    "env proxy mode is on and NO_PROXY does not cover 127.0.0.1, localhost and ::1; refusing to start so advisor traffic cannot reach a proxy"
+    `env proxy mode is on and NO_PROXY does not exempt ${target.host}; refusing to start so advisor traffic cannot reach a proxy`
   );
 }
