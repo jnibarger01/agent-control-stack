@@ -1,6 +1,10 @@
 import { createReviewFinding, verifyReviewFindingHash, type ReviewFinding } from "@agent-control-stack/advisory";
 import type { AdvisorConsultationRecord } from "@agent-control-stack/work-items";
 import { type AdvisorResponse } from "./contracts.js";
+import { redactText } from "./redact.js";
+
+/** Every text that reaches a finding is redacted here too, whatever the caller already did. */
+const redacted = (text: string, max: number) => redactText(text).text.slice(0, max);
 
 export interface ReviewFindingBinding {
   /** Mission the caller sent to the advisor. Must equal `response.missionId`. */
@@ -44,12 +48,12 @@ export function projectReviewFinding(response: AdvisorResponse, binding: ReviewF
   return buildFinding(binding, {
     verdict: response.verdict,
     findings: response.findings.map((item) => ({
-      category: item.category,
+      category: redacted(item.category, 128),
       severity: item.severity,
-      summary: item.summary,
+      summary: redacted(item.summary, 2_000),
       evidenceRefs: [...item.evidenceRefs]
     })),
-    recommendedActions: [...response.recommendedActions]
+    recommendedActions: response.recommendedActions.map((action) => redacted(action, 500))
   });
 }
 
@@ -79,7 +83,7 @@ export function projectReviewFindingFromConsultation(
       {
         category: "advisor_consultation",
         severity: "info",
-        summary: record.guidanceText.slice(0, 2_000),
+        summary: redacted(record.guidanceText, 2_000),
         evidenceRefs: ["consultation"]
       }
     ],

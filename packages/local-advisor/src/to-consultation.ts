@@ -4,7 +4,6 @@
  * projectReviewFinding / advisor.recorded stay derived views at trust "asserted" and never feed
  * completion, authority, approvals, or receipts.
  */
-import { createHash } from "node:crypto";
 import type {
   AdvisorConsultationRecord,
   AdvisorFence,
@@ -14,6 +13,11 @@ import type {
 } from "@agent-control-stack/work-items";
 import { ControlStackError } from "@agent-control-stack/shared";
 import type { AdvisorOperation, AdvisorResponse } from "./contracts.js";
+import { redactText } from "./redact.js";
+import { ReviewBindingError } from "./to-review-finding.js";
+
+/** Text persisted to the consultation table is redacted here, independent of what the advisor already cleaned. */
+const redactSensitiveText = (text: string): string => redactText(text).text;
 
 const domain = { via: "domain_service" as const };
 
@@ -54,7 +58,7 @@ export function consultationDraftFromResponse(
   const inputTokens = response.usage.promptTokens ?? null;
   const outputTokens = response.usage.completionTokens ?? null;
   if (response.status === "completed" && response.verdict !== undefined) {
-    const guidance = guidanceFromCompleted(response);
+    const guidance = redactSensitiveText(guidanceFromCompleted(response));
     return {
       disposition: "reviewed",
       guidanceText: guidance,
@@ -69,7 +73,7 @@ export function consultationDraftFromResponse(
     return {
       disposition: "declined",
       guidanceText: null,
-      declineReason: response.reason ?? "insufficient_evidence",
+      declineReason: redactSensitiveText(response.reason ?? "insufficient_evidence"),
       errorCode: null,
       inputSha256,
       inputTokens,
@@ -95,6 +99,16 @@ export function consultationDraftFromResponse(
 export function recordLocalAdvisorConsultation(input: RecordLocalAdvisorConsultationInput): AdvisorConsultationRecord {
   if (!input.fence) {
     throw new ControlStackError("advisor_lease_stale", "consultation requires a fence the caller already holds");
+  }
+  // Never record advice about one mission against another mission or subject.
+  if (input.response.missionId !== input.missionId) {
+    throw new ReviewBindingError("advisor response mission does not match the recording mission");
+  }
+  if (input.fence.kind === "work_item" && input.fence.workItemId !== input.subjectId) {
+    throw new ReviewBindingError("recording subject does not match the work-item fence");
+  }
+  if (input.fence.kind === "mission_unit" && input.fence.missionId !== input.missionId) {
+    throw new ReviewBindingError("recording mission does not match the mission-claim fence");
   }
   const draft = consultationDraftFromResponse(input.response);
   return input.store.recordAdvisorConsultation(
@@ -146,9 +160,9 @@ function unavailableCode(response: AdvisorResponse): string {
 /** Strip the `sha256:` prefix local-advisor puts on hashes; the consultation table stores bare hex. */
 function bareSha256(value: string): string {
   const hex = value.startsWith("sha256:") ? value.slice("sha256:".length) : value;
+  // A non-hex input hash is refused, never re-hashed: re-hashing would bind the record to bytes nobody reviewed.
   if (!/^[a-f0-9]{64}$/u.test(hex)) {
-    // Keep the bytes stable even if a caller somehow handed us a non-hex tag.
-    return createHash("sha256").update(value, "utf8").digest("hex");
+    throw new ControlStackError("advisor_output_invalid", "advisor response input hash is not a sha256 digest");
   }
   return hex;
 }

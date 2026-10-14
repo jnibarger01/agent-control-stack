@@ -325,3 +325,17 @@ describe("runAdvisor: prompt-injection and evidence handling", () => {
     expect(Object.keys(response)).not.toContain("authorized");
   });
 });
+
+describe("runAdvisor: finding categories are redacted", () => {
+  it("never returns a credential placed in a finding category", async () => {
+    // Built at runtime so no credential-shaped literal lands in source.
+    const token = ["gh", "p_", "Qx7Lm2Rt9Kp4".repeat(3)].join("");
+    const provider = new FakeProvider(() =>
+      ok(verdictJson("NEEDS_CHANGES", [{ ...finding("medium"), category: `leak ${token}` }]))
+    );
+    const response = await runAdvisor(request(), provider);
+    expect(response.status).toBe("completed");
+    expect(JSON.stringify(response)).not.toContain(token);
+    expect(response.findings[0]?.category).toContain("[REDACTED:github_token]");
+  });
+});

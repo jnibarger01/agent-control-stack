@@ -5,7 +5,8 @@ import { advisorAuditView, SqliteWorkItemStore } from "@agent-control-stack/work
 import { afterEach, describe, expect, it } from "vitest";
 import { type AdvisorResponse } from "./contracts.js";
 import { consultationDraftFromResponse, recordLocalAdvisorConsultation } from "./to-consultation.js";
-import { projectReviewFindingFromConsultation } from "./to-review-finding.js";
+import { ReviewBindingError, projectReviewFinding, projectReviewFindingFromConsultation } from "./to-review-finding.js";
+import type { RecordAdvisorConsultationInput } from "@agent-control-stack/work-items";
 import { advisorTraceEventFromConsultation } from "./trace-event.js";
 import { isTrusted } from "@agent-control-stack/looptrace-query";
 
@@ -284,5 +285,103 @@ describe("consultation-derived views stay advisory", () => {
     expect(draft).toMatchObject({ disposition: "unavailable", errorCode: "advisor_unavailable", guidanceText: null });
     // A completed status with no verdict is not a review either.
     expect(consultationDraftFromResponse(response({ verdict: undefined })).disposition).toBe("unavailable");
+  });
+});
+
+describe("consultation input is redacted and bound to its mission", () => {
+  // Fake credentials are assembled at runtime so no secret-looking literal lands in source or history.
+  const token = ["gh", "p_", "Qx7Lm2Rt9Kp4".repeat(3)].join("");
+  const password = ["hunter", "22", "secretvalue"].join("");
+  const leaky = () =>
+    response({
+      missionId: "mission-1",
+      findings: [
+        {
+          category: `cat ${token}`,
+          severity: "medium",
+          summary: ["pass", "word=", password].join(""),
+          evidenceRefs: ["diff-1"]
+        }
+      ],
+      recommendedActions: [["export TOKEN", "=", token].join("")]
+    });
+  const fence = { kind: "work_item" as const, workItemId: "mission-1", leaseId: "l", workerId: "w", fencingEpoch: 0 };
+  const stub = () => {
+    const seen: RecordAdvisorConsultationInput[] = [];
+    return {
+      seen,
+      store: {
+        recordAdvisorConsultation: (input: RecordAdvisorConsultationInput) => {
+          seen.push(input);
+          return {
+            ...input,
+            consultationId: "adv_1",
+            consultationHash: "ef".repeat(32),
+            outputSha256: "12".repeat(32),
+            createdAt: "2026-10-14T00:00:00.000Z"
+          };
+        }
+      }
+    };
+  };
+  const base = {
+    subjectId: "mission-1",
+    missionId: "mission-1",
+    subjectKind: "work_item" as const,
+    executorModelId: "claude-sonnet-5",
+    advisorModelId: "claude-opus-5-5",
+    fence
+  };
+  const findingBinding = {
+    missionId: "mission-1",
+    workItemId: "mission-1",
+    inputHash: HASH,
+    attemptId: "attempt-1",
+    evidenceManifestHash: MANIFEST,
+    reviewerPrincipalId: "local-advisor"
+  };
+
+  it("never lets a credential from findings, actions or category reach the store input or the finding", () => {
+    const { seen, store } = stub();
+    const record = recordLocalAdvisorConsultation({ ...base, response: leaky(), store });
+    const persisted = JSON.stringify(seen);
+    for (const secret of [token, password]) {
+      expect(persisted).not.toContain(secret);
+      expect(JSON.stringify(projectReviewFindingFromConsultation(record, findingBinding))).not.toContain(secret);
+      expect(JSON.stringify(projectReviewFinding(leaky(), findingBinding))).not.toContain(secret);
+    }
+  });
+
+  it("redacts a decline reason before it is saved", () => {
+    const declined = response({
+      status: "insufficient_evidence",
+      reason: ["pass", "word=", password].join("") as never,
+      verdict: undefined,
+      findings: []
+    });
+    expect(consultationDraftFromResponse(declined).declineReason).not.toContain(password);
+  });
+
+  it.each([
+    ["response mission differs from the recording mission", { response: response({ missionId: "mission-2" }) }],
+    ["work-item fence differs from the subject", { response: leaky(), fence: { ...fence, workItemId: "work-9" } }],
+    [
+      "mission claim differs from the recording mission",
+      {
+        response: leaky(),
+        subjectKind: "mission_unit" as const,
+        fence: { kind: "mission_unit" as const, missionId: "mission-2", unitId: "u", workerId: "w", claimToken: "t" }
+      }
+    ]
+  ])("refuses to record when the %s", (_name, overrides) => {
+    const { seen, store } = stub();
+    expect(() => recordLocalAdvisorConsultation({ ...base, ...overrides, store })).toThrow(ReviewBindingError);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("rejects a non-hex input hash instead of re-hashing it", () => {
+    expect(() => consultationDraftFromResponse({ ...response(), inputHash: "not-a-hash" as never })).toThrow(
+      /sha256 digest/u
+    );
   });
 });

@@ -185,7 +185,7 @@ export async function runAdvisor(
         status: "completed",
         verdict: output.data.verdict as ReviewVerdict,
         findings: output.data.findings.map((finding) => ({
-          category: finding.category,
+          category: clean(finding.category, 128),
           severity: finding.severity,
           summary: clean(finding.summary, 2_000),
           evidenceRefs: finding.evidenceIds
