@@ -268,8 +268,9 @@ function moveQueueSelection(delta) {
   const current = rows.findIndex(function (row) { return row.dataset.workItem === selectedWorkItemId; });
   const next = current === -1 ? (delta > 0 ? 0 : rows.length - 1) : Math.min(rows.length - 1, Math.max(0, current + delta));
   const row = rows[next];
-  const view = document.body.dataset.activeView;
-  if (view !== 'queue' && view !== 'execution' && view !== 'overview') showView('queue');
+  // Rows live only in the queue view's panel; focusing them while that panel is
+  // display:none silently fails, so show the queue first from any other view.
+  if (document.body.dataset.activeView !== 'queue') showView('queue');
   row.focus({ preventScroll: false });
   selectWorkItem(row.dataset.workItem, { scroll: true, keepFocus: true });
 }
