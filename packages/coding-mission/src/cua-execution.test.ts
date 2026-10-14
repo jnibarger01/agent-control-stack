@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   CuaExecutionAdapter,
   PlaywrightCuaBrowser,
+  cuaSecretWorkItemId,
   missionCuaAuthority,
   secretBrokerCuaResolver,
   type CuaAuthorityRecheck,
@@ -743,11 +744,38 @@ describe("R4: typed secrets are broker-resolved references", () => {
     expect(value).toBe(BROKERED);
     const principal = JSON.stringify({
       workerId: "worker-1",
-      workItemId: "m1:u1",
+      workItemId: cuaSecretWorkItemId("m1", "u1"),
       attemptId: "att1",
       engineId: "browser"
     });
     expect(events).toEqual([`lease:APP_LOGIN:1:${principal}`, `inject:${principal}`, "revoke"]);
+  });
+});
+
+describe("R4: broker principal stays within the secret broker's 128-character limit", () => {
+  async function leasedWorkItemId(missionId: string, unitId: string): Promise<string> {
+    let workItemId = "";
+    const resolver = secretBrokerCuaResolver({
+      async lease(request) {
+        workItemId = request.principal.workItemId;
+        return {
+          injectInto(env: Record<string, string | undefined>) {
+            env.APP_LOGIN = BROKERED;
+          }
+        };
+      },
+      async revoke() {}
+    });
+    await resolver.resolve("APP_LOGIN", { workerId: "w", missionId, unitId, attemptId: "a", application: "browser" });
+    return workItemId;
+  }
+
+  it("uses a bounded, deterministic, collision-safe work-item id even for 128-character mission and unit ids", async () => {
+    const long = await leasedWorkItemId("m".repeat(128), "u".repeat(128));
+    expect(long.length).toBeLessThanOrEqual(128);
+    expect(await leasedWorkItemId("m".repeat(128), "u".repeat(128))).toBe(long);
+    expect(await leasedWorkItemId("a:b", "c")).not.toBe(await leasedWorkItemId("a", "b:c"));
+    expect(await leasedWorkItemId("m1", "u1")).not.toBe(await leasedWorkItemId("m1", "u2"));
   });
 });
 

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { ControlStackError, stableHash } from "@agent-control-stack/shared";
+import { ControlStackError, domainHash, stableHash } from "@agent-control-stack/shared";
 import {
   committedCuaReceipts,
   cuaActionHash,
@@ -108,6 +108,17 @@ export interface CuaSecretHandle {
   ): void;
 }
 
+export const CUA_SECRET_WORK_ITEM_HASH_DOMAIN = "acs.cua-secret-work-item.v1";
+
+/**
+ * The broker principal's work-item id for a CUA unit: a domain-separated SHA-256 of the (missionId, unitId) pair.
+ * Deterministic, 68 characters (inside the broker's 128-character identifier limit for any valid ids), and
+ * collision-safe: the pair is hashed as canonical JSON, so ("a:b", "c") and ("a", "b:c") differ.
+ */
+export function cuaSecretWorkItemId(missionId: string, unitId: string): string {
+  return `cua:${domainHash(CUA_SECRET_WORK_ITEM_HASH_DOMAIN, { missionId, unitId })}`;
+}
+
 /**
  * A CuaSecretResolver backed by the secret broker: lease the scope for this attempt, redeem it once into a private
  * object, and revoke the lease. `envName` maps a scope to the variable the broker injects it as (default: the scope).
@@ -120,7 +131,7 @@ export function secretBrokerCuaResolver(
     async resolve(secretRef, principal) {
       const leasePrincipal = {
         workerId: principal.workerId,
-        workItemId: `${principal.missionId}:${principal.unitId}`,
+        workItemId: cuaSecretWorkItemId(principal.missionId, principal.unitId),
         attemptId: principal.attemptId,
         engineId: principal.application
       };
