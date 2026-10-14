@@ -78,3 +78,35 @@ describe("R2: browser runtime in the authority schema", () => {
     expect(parse({ ...browser, allowedApplications: ["browser", "browser-profile-2", "chrome.work"] })).toBe(true);
   });
 });
+
+describe("browser grant scope: lookalike hosts and application names (S1)", () => {
+  it("rejects trailing-dot, non-ASCII and punycode-equivalent raw Unicode origins", () => {
+    for (const origin of [
+      "https://app.example.",
+      "https://app.example.:8443",
+      "https://bücher.example",
+      "https://аpp.example",
+      "https://APP.example",
+      "https://app.example:443"
+    ])
+      expect(parse({ ...browser, allowedOrigins: [origin] }), origin).toBe(false);
+    for (const origin of ["https://app.example:8443", "http://127.0.0.1:3000", "https://xn--bcher-kva.example"])
+      expect(parse({ ...browser, allowedOrigins: [origin] }), origin).toBe(true);
+  });
+
+  it("rejects non-ASCII (Unicode lookalike) application names and keeps rejecting globs", () => {
+    for (const application of [
+      "Сhrome",
+      "Chrome\u200b",
+      "Ｃhrome",
+      "Chrome*",
+      "Chr?me",
+      "[Cc]hrome",
+      "{a,b}",
+      "My App"
+    ])
+      expect(parse({ ...browser, allowedApplications: [application] }), application).toBe(false);
+    for (const application of ["Chrome", "Google-Chrome.app", "com.google.Chrome"])
+      expect(parse({ ...browser, allowedApplications: [application] }), application).toBe(true);
+  });
+});
