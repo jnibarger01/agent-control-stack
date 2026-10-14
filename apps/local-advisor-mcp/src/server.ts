@@ -209,6 +209,16 @@ export class LocalAdvisorMcpServer {
       const idValue = msg.id;
       const method = msg.method;
       const isNotification = idValue === undefined;
+      // JSON-RPC 2.0: an id is a string, a number, or null. Anything else is an invalid request.
+      if (
+        !isNotification &&
+        idValue !== null &&
+        typeof idValue !== "string" &&
+        !(typeof idValue === "number" && Number.isFinite(idValue))
+      ) {
+        this.send({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "invalid request id" } });
+        return;
+      }
       if (idValue !== undefined && idValue !== null) {
         const candidate = inflightKey(idValue);
         if (this.inflight.has(candidate)) {

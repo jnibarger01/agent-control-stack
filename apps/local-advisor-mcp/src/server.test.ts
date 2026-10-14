@@ -189,4 +189,27 @@ describe("local advisor MCP", () => {
     expect(h.text()).not.toContain('"result"');
     expect(calls).toBe(0);
   });
+
+  it.each([[{ a: 1 }], [[1]], [true]])(
+    "rejects a JSON-RPC id that is not a string, number or null (%j)",
+    async (badId) => {
+      let calls = 0;
+      const h = harness(async () => {
+        calls++;
+        return failed();
+      });
+      h.send({
+        jsonrpc: "2.0",
+        id: badId,
+        method: "tools/call",
+        params: { name: "advisor_review_plan", arguments: args }
+      });
+      h.send({ jsonrpc: "2.0", id: null, method: "ping" });
+      await settle(h.server);
+      const out = frames(h.text()) as Array<{ id?: unknown; error?: { message?: string }; result?: unknown }>;
+      expect(out[0]).toMatchObject({ id: null, error: { message: "invalid request id" } });
+      expect(out[1]).toMatchObject({ id: null, result: {} });
+      expect(calls).toBe(0);
+    }
+  );
 });
