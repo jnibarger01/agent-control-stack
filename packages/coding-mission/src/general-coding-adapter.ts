@@ -8,7 +8,7 @@ import {
   refuse,
   refusalResult,
   runWithinBudget,
-  scopeCovers,
+  physicalScopeCovers,
   type BoundaryAuthority,
   type BoundaryRefusal
 } from "./execution-boundary.js";
@@ -131,7 +131,7 @@ export class GeneralCodingExecutionAdapter implements WorkUnitExecutorAdapter {
     }
     // Resolve once and judge scope on that physical path, so the path pinned is exactly the one the scope check passed.
     const repository = physicalPath(task.repository);
-    if (repository === undefined || !scopeCovers(definition.scope, repository))
+    if (repository === undefined || !physicalScopeCovers(definition.scope, repository))
       return refuse("repository_out_of_scope");
     if (task.maxRuntimeMs > definition.limits.maxRuntimeMs) return refuse("runtime_exceeds_authority");
     // Pin the task to the physical path that was checked, so a symlink swapped later cannot redirect the executor.
