@@ -31,6 +31,8 @@ hash-chained audit log (a broken chain restores nothing). The approver name in t
 service uses its own `/var/lib/jace-commander-mcp` state directory; `/var/lib/jace-commander` (approver
 key/state, helper nonces) stays root-owned.
 
+With `passkey` configured in approverd (Jace's decision 2026-10-13), privileged approvals instead require a WebAuthn passkey with user verification and are audited as `webauthn-uv` with the authenticated principal; see [jace-commander-passkey-approvals.md](jace-commander-passkey-approvals.md).
+
 Install with `sudo deploy/jace-commander/install-approverd.sh` (a root action; the
 repo never runs it for you). It creates three distinct identities: the `jc` server
 account, the `jc-approverd` signer that alone holds the signing key, and your login,

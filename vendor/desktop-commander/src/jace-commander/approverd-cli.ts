@@ -20,7 +20,15 @@ function loadConfig(file: string): ApproverdConfig {
   return parsed as unknown as ApproverdConfig;
 }
 
+/** Minimum Node major: matches package.json engines and @simplewebauthn/server's requirement (#360 R/V F2). */
+const MIN_NODE_MAJOR = 20;
+
 async function main(argv: string[]): Promise<number> {
+  const nodeMajor = Number(/^(\d+)\./.exec(process.versions.node)?.[1]);
+  if (!Number.isInteger(nodeMajor) || nodeMajor < MIN_NODE_MAJOR) {
+    process.stderr.write(`approverd: Node.js >= ${MIN_NODE_MAJOR} is required (running ${process.versions.node}); refusing to start\n`);
+    return 1;
+  }
   const [command, flag, file] = argv;
   if ((command !== 'init' && command !== 'run') || flag !== '--config' || !file) {
     process.stderr.write('usage: approverd <init|run> --config <file>\n');
