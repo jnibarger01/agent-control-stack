@@ -207,6 +207,35 @@ describe("runAdvisor: prompt-injection and evidence handling", () => {
     expect(response.evidenceHashes["diff-1"]).toMatch(/^sha256:[a-f0-9]{64}$/u);
   });
 
+  it("redacts the objective and constraints before they reach the prompt", async () => {
+    const secret = "AKIA" + "QRSTUVWXYZ234567";
+    const token = "ghp" + "_" + "c".repeat(36);
+    const provider = new FakeProvider(() => ok(verdictJson("PASS")));
+    const base = request();
+    await runAdvisor(
+      { ...base, context: { ...base.context, objective: `Use ${secret} to deploy`, constraints: [`token ${token}`] } },
+      provider
+    );
+    const user = provider.calls[0]?.user ?? "";
+    expect(user).not.toContain(secret);
+    expect(user).not.toContain(token);
+    expect(user).toContain("[REDACTED:aws_key]");
+    expect(user).toContain("[REDACTED:github_token]");
+  });
+
+  it("hashes the redacted objective and constraints, not the raw secrets", async () => {
+    const provider = new FakeProvider(() => ok(verdictJson("PASS")));
+    const base = request();
+    const withSecret = (key: string) => ({
+      ...base,
+      context: { ...base.context, objective: `deploy with ${key}`, constraints: [`use ${key}`] }
+    });
+    const a = await runAdvisor(withSecret("AKIA" + "AAAAAAAAAAAAAAAA"), provider);
+    const b = await runAdvisor(withSecret("AKIA" + "BBBBBBBBBBBBBBBB"), provider);
+    // Different raw secrets that redact to the same text must yield the same input hash.
+    expect(a.inputHash).toBe(b.inputHash);
+  });
+
   it("uses the model-supplied output only as a recommendation (no authority fields are honored)", async () => {
     const response = await runAdvisor(
       request(),

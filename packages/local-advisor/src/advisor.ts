@@ -65,14 +65,16 @@ export async function runAdvisor(
     const redacted = redactText(item.content);
     return { id: item.id, kind: item.kind, text: redacted.text, sha256: sha256Ref(redacted.text) };
   });
+  const objective = redactText(request.context.objective).text;
+  const constraints = request.context.constraints.map((c) => redactText(c).text);
   const evidenceHashes = Object.fromEntries(evidence.map((item) => [item.id, item.sha256]));
   const inputHash = sha256Ref(
     canonicalJson({
       schemaVersion: ADVISOR_SCHEMA_VERSION,
       operation: request.operation,
       mission: request.mission,
-      objective: request.context.objective,
-      constraints: request.context.constraints,
+      objective,
+      constraints,
       evidence: evidence.map(({ id, sha256 }) => ({ id, sha256 }))
     })
   );
@@ -103,8 +105,8 @@ export async function runAdvisor(
   const nonce = randomNonce();
   const prompt = buildPrompt({
     operation: request.operation,
-    objective: request.context.objective,
-    constraints: request.context.constraints,
+    objective,
+    constraints,
     evidence,
     nonce
   });
