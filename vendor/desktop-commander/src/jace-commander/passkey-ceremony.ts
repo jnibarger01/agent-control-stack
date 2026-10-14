@@ -2,8 +2,8 @@
  * Human-side WebAuthn ceremony for `jace-commander approve` and `passkey-register` (Jace's decision 2026-10-13).
  *
  * WebAuthn needs a browser (or platform authenticator via the browser), so the CLI serves ONE minimal page
- * on the pinned origin (only http://localhost:<port> is supported here; https origins need an operator-run
- * TLS front end), opens nothing by itself, and prints the URL. The page calls navigator.credentials.get()
+ * on the pinned origin (only http://localhost:<port> is supported; approverd and passkey-register reject any
+ * other origin at config load, so no origin is ever accepted without a ceremony), opens nothing by itself, and prints the URL. The page calls navigator.credentials.get()
  * (or .create() for registration) with userVerification 'required' and POSTs the result back. The server
  * accepts exactly one result on an unguessable path, binds to the loopback interface only, and stops at the
  * deadline. Nothing here verifies anything: approverd verifies the assertion; the registration tool verifies

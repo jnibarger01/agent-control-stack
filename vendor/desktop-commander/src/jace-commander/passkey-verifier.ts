@@ -137,7 +137,7 @@ export interface JcPasskeyVerifierOptions {
   signCounts: JcSignCountStore;
 }
 
-/** Validates the pinned RP ID / origin pair. The origin's host must be the RP ID or a subdomain of it. */
+/** Validates the pinned RP ID / origin pair. The origin must be http://localhost:<port> (the only origin with a supported ceremony) and its host must be the RP ID or a subdomain of it. */
 export function assertPasskeyRelyingParty(rpId: unknown, origin: unknown): void {
   if (typeof rpId !== 'string' || !/^[a-z0-9.-]{1,253}$/.test(rpId)) throw new Error('passkey rpId must be a lowercase hostname');
   if (typeof origin !== 'string') throw new Error('passkey origin is required');
@@ -148,8 +148,8 @@ export function assertPasskeyRelyingParty(rpId: unknown, origin: unknown): void 
     throw new Error('passkey origin must be a URL');
   }
   if (url.origin !== origin) throw new Error('passkey origin must be a bare origin (scheme://host[:port])');
-  const local = url.hostname === 'localhost';
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) throw new Error('passkey origin must be https (or http://localhost)');
+  // Only origins with a supported human ceremony are accepted (see passkey-ceremony.ts localCeremonyPort).
+  if (url.protocol !== 'http:' || url.hostname !== 'localhost' || !url.port) throw new Error(`passkey origin must be http://localhost:<port>: it is the only origin with a supported passkey ceremony (the built-in local page); https and other hosts (including 127.0.0.1) are rejected (got ${origin})`);
   if (url.hostname !== rpId && !url.hostname.endsWith(`.${rpId}`)) throw new Error('passkey origin host must equal or be a subdomain of rpId');
 }
 

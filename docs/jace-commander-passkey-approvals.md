@@ -16,7 +16,7 @@ The `passkey` block is **required**: approverd refuses to start without it. Appr
 }
 ```
 
-The RP ID and origin are pinned here. The origin's host must be the RP ID or one of its subdomains, and the origin must be `https`, or `http://localhost`.
+The RP ID and origin are pinned here. The origin's host must be the RP ID or one of its subdomains, and the origin must be `http://localhost:<port>`. That is the only origin with a supported passkey ceremony (the built-in local page), so approverd and `passkey-register` reject every other origin at config load with a clear error, including `https` origins and `127.0.0.1`.
 
 ## Protocol (decide.sock, `protocol: "jc.decide.v2"`)
 
@@ -78,4 +78,4 @@ Run `JC_APPROVER_ID=jace jace-commander approve <id>` on a real terminal. `JC_AP
 4. Prints a one-time `http://localhost:7391/<token>` URL. Open it on the same machine and use the passkey.
 5. Sends the assertion.
 
-The page server binds 127.0.0.1 only. It accepts one result from the pinned origin and stops at the challenge deadline. Only `http://localhost:<port>` origins are supported by this built-in page; an `https` origin needs an operator-run TLS front end.
+The page server binds 127.0.0.1 only. It accepts one result from the pinned origin and stops at the challenge deadline. Only `http://localhost:<port>` origins are supported, and any other origin is rejected when the config is loaded.

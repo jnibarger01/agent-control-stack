@@ -12,9 +12,10 @@ import path from 'node:path';
 import { isoCBOR } from '@simplewebauthn/server/helpers';
 import { Approverd, ensureApproverKey } from '../dist/jace-commander/approverd.js';
 import { JcHumanAssertionGate, JC_DECIDE_PROTOCOL_VERSION } from '../dist/jace-commander/approval-protocol.js';
-import { FileSignCountStore, JcPasskeyVerifier, MemorySignCountStore, loadPasskeyTrustAnchor } from '../dist/jace-commander/passkey-verifier.js';
+import { FileSignCountStore, JcPasskeyVerifier, MemorySignCountStore, assertPasskeyRelyingParty, loadPasskeyTrustAnchor } from '../dist/jace-commander/passkey-verifier.js';
 import { APPROVE_EXIT, runApproveCommand } from '../dist/jace-commander/approve-cli.js';
 import net from 'node:net';
+import { localCeremonyPort } from '../dist/jace-commander/passkey-ceremony.js';
 import { readTraceFile } from '../dist/jace-commander/looptrace.js';
 
 let passed = 0;
@@ -369,6 +370,20 @@ await test('the gate validates its verifier and timeout (#356 d)', () => {
   assert.throws(() => new JcHumanAssertionGate({ verify: async () => false }, { verifierTimeoutMs: 30_001 }), RangeError);
   assert.throws(() => new Approverd({ runtimeId: RUNTIME, stateDir: root, keyPath: 'k', keyId: 'k', requestSocket: 'r', decideSocket: 'd', passkey: { trustAnchorPath: ANCHOR, rpId: RP_ID, origin: 'http://evil.example' } }));
   assert.throws(() => new Approverd({ runtimeId: RUNTIME, stateDir: root, keyPath: 'k', keyId: 'k', requestSocket: 'r', decideSocket: 'd', passkey: { trustAnchorPath: 'relative.json', rpId: RP_ID, origin: ORIGIN } }));
+});
+
+await test('passkey origins without a supported ceremony are rejected at config load (https, 127.0.0.1, no port)', () => {
+  const base = { runtimeId: RUNTIME, stateDir: os.tmpdir(), keyPath: 'k', keyId: 'k', requestSocket: 'r', decideSocket: 'd' };
+  const noCeremony = /only origin with a supported passkey ceremony/;
+  for (const [rpId, origin] of [['example.com', 'https://example.com'], ['example.com', 'https://approve.example.com:8443'], ['localhost', 'https://localhost:7391'], ['127.0.0.1', 'http://127.0.0.1:7391'], ['localhost', 'http://localhost']]) {
+    assert.throws(() => new Approverd({ ...base, passkey: { trustAnchorPath: ANCHOR, rpId, origin } }), noCeremony, `approverd accepted ${origin}`);
+    assert.throws(() => assertPasskeyRelyingParty(rpId, origin), noCeremony, `assertPasskeyRelyingParty accepted ${origin}`);
+    assert.throws(() => new JcPasskeyVerifier({ rpId, origin, loadTrustAnchor: () => ({}), signCounts: new MemorySignCountStore() }), noCeremony);
+  }
+  // Every origin config load accepts must also be one the ceremony can serve.
+  assertPasskeyRelyingParty(RP_ID, ORIGIN);
+  assert.equal(localCeremonyPort(ORIGIN), 7391);
+  new Approverd({ ...base, passkey: { trustAnchorPath: ANCHOR, rpId: RP_ID, origin: ORIGIN } });
 });
 
 await test('approve CLI: decide_begin, typed hash, browser ceremony, decide_complete over the real decide socket', async () => {

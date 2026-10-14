@@ -712,7 +712,7 @@ function assertRelyingPartyShape(rpId: unknown, origin: unknown): void {
     throw new TypeError('passkey origin must be a URL');
   }
   if (url.origin !== origin) throw new TypeError('passkey origin must be a bare origin');
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && url.hostname === 'localhost')) throw new TypeError('passkey origin must be https (or http://localhost)');
+  if (url.protocol !== 'http:' || url.hostname !== 'localhost' || !url.port) throw new TypeError(`passkey origin must be http://localhost:<port>: it is the only origin with a supported passkey ceremony (the built-in local page); https and other hosts (including 127.0.0.1) are rejected (got ${String(origin)})`);
   if (url.hostname !== rpId && !url.hostname.endsWith(`.${rpId}`)) throw new TypeError('passkey origin host must equal or be a subdomain of rpId');
 }
 
