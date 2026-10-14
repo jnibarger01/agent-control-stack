@@ -632,4 +632,16 @@ await test('F3: installer accepts only http://localhost:<port> as JC_PASSKEY_ORI
     assert.equal(ok(o), false, JSON.stringify(o));
 });
 
+await test('F4: FileSignCountStore rejects stored counters above 0xFFFFFFFF', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'jc-signcount-'));
+  const file = path.join(tmp, 'counts.json');
+  fs.writeFileSync(file, JSON.stringify({ a: 0xFFFFFFFF }));
+  assert.equal(new FileSignCountStore(file).get('a'), 0xFFFFFFFF);
+  for (const bad of [0x100000000, 2 ** 32 + 1, Number.MAX_SAFE_INTEGER]) {
+    fs.writeFileSync(file, JSON.stringify({ a: 1, b: bad }));
+    assert.throws(() => new FileSignCountStore(file).get('a'), /sign-count store unreadable/, String(bad));
+  }
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
 console.log(`jace-commander passkey approval: ${passed} passed`);

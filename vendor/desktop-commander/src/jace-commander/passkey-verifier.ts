@@ -99,7 +99,8 @@ export class FileSignCountStore implements JcSignCountStore {
       const out: Record<string, number> = {};
       for (const [k, v] of Object.entries(parsed)) {
         // Any malformed counter fails closed; dropping it would lower the replay floor to 0.
-        if (!Number.isSafeInteger(v) || (v as number) < 0) throw new Error('malformed');
+        // WebAuthn signCount is a uint32 (#360 R/V F4): anything above 0xFFFFFFFF is corruption.
+        if (!Number.isSafeInteger(v) || (v as number) < 0 || (v as number) > 0xFFFFFFFF) throw new Error('malformed');
         out[k] = v as number;
       }
       return out;
