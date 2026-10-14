@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { type AdvisorRequest } from "@agent-control-stack/local-advisor";
+import { assertDirectLoopbackEgress, type AdvisorRequest } from "@agent-control-stack/local-advisor";
 import { createAdvise } from "./advise.js";
 import { LocalAdvisorMcpServer } from "./server.js";
 
@@ -12,6 +12,9 @@ import { LocalAdvisorMcpServer } from "./server.js";
  *   ACS_LOCAL_ADVISOR_ROUTES=<json>                  overrides DEFAULT_MODEL_ROUTES when MODEL is unset
  *   ACS_LOCAL_ADVISOR_MIN_FREE_BYTES=<n>             refuse inference under memory pressure
  */
+// Fail closed at startup if env proxy mode could carry loopback advisor traffic to a proxy.
+assertDirectLoopbackEgress(process.env, process.execArgv);
+
 const advise = createAdvise(process.env);
 
 const server = new LocalAdvisorMcpServer(process.stdin, process.stdout, (request, signal) =>

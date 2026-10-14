@@ -25,6 +25,7 @@ export type { AdvisorProvider, GenerateInput, GenerateResult, ProviderErrorKind 
 export { DEFAULT_OLLAMA_BASE_URL, OllamaProvider, chatModelNames, listInstalledOllamaModels } from "./ollama-provider.js";
 export type { InstalledOllamaModel, OllamaProviderOptions } from "./ollama-provider.js";
 export { redactText } from "./redact.js";
+export { EgressConfigError, assertDirectLoopbackEgress, noProxyCoversLoopback } from "./egress.js";
 export {
   ADVISOR_MODEL_ROLES,
   DEFAULT_MODEL_ROUTES,
