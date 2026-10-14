@@ -7,7 +7,7 @@ import {
   type AdvisorResponse
 } from "@agent-control-stack/local-advisor";
 
-/** MCP protocol versions this server understands. It always answers with PROTOCOL_VERSION. */
+/** MCP protocol versions this server understands. A supported requested version is echoed; otherwise PROTOCOL_VERSION is offered. */
 export const SUPPORTED_PROTOCOL_VERSIONS = ["2024-11-05", "2025-03-26", "2025-06-18"] as const;
 export const PROTOCOL_VERSION = "2024-11-05";
 const MAX_FRAME_BYTES = 256 * 1024;
@@ -258,7 +258,8 @@ export class LocalAdvisorMcpServer {
         const compatible =
           typeof requested !== "string" || (SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).includes(requested);
         return {
-          protocolVersion: PROTOCOL_VERSION,
+          // MCP lifecycle: when the requested revision is supported, answer with that same revision.
+          protocolVersion: compatible && typeof requested === "string" ? requested : PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: "acs-local-advisor", version: "0.1.0", contract: ADVISOR_SCHEMA_VERSION },
           compatibility: { requested: requested ?? null, compatible, supported: SUPPORTED_PROTOCOL_VERSIONS },

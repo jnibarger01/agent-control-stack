@@ -79,7 +79,7 @@ describe("local advisor MCP", () => {
     h.send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
     await settle(h.server);
     const [init, list] = frames(h.text());
-    expect(init?.result?.protocolVersion).toBe(PROTOCOL_VERSION);
+    expect(init?.result?.protocolVersion).toBe("2025-03-26");
     const tools =
       (list?.result as { tools?: { name: string; annotations?: { readOnlyHint?: boolean } }[] } | undefined)?.tools ??
       [];
@@ -223,5 +223,16 @@ describe("local advisor MCP", () => {
     }
     await settle(h.server);
     expect(frames(h.text())[0]).toMatchObject({ id: 7, result: {} });
+  });
+
+  it.each([
+    ["2025-06-18", "2025-06-18"],
+    ["2024-11-05", "2024-11-05"],
+    ["1999-01-01", PROTOCOL_VERSION]
+  ])("answers initialize(%s) with %s", async (requested, expected) => {
+    const h = harness(async () => failed());
+    h.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: requested } });
+    await settle(h.server);
+    expect(frames(h.text())[0]?.result?.protocolVersion).toBe(expected);
   });
 });
