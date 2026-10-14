@@ -186,6 +186,12 @@ export class JcPasskeyVerifier implements JcHumanVerifier {
     if (!credential) return false;
     const handle = response.response.userHandle;
     if (handle !== undefined && handle !== null && handle !== credential.userHandle) return false;
+    // Explicit UP/UV flag check (#360 R/V F1). Never rely on the library alone: its advancedFIDOConfig
+    // branch skips the UP check. authenticatorData = rpIdHash(32) | flags(1) | signCount(4) | ...
+    const authData = Buffer.from(response.response.authenticatorData, 'base64url');
+    if (authData.length < 37) return false;
+    const flags = authData[32];
+    if ((flags & 0x01) === 0 || (flags & 0x04) === 0) return false; // UP and UV both required
     const before = this.options.signCounts.get(credential.credentialId);
     const result = await verifyAuthenticationResponse({
       response,
@@ -195,7 +201,6 @@ export class JcPasskeyVerifier implements JcHumanVerifier {
       expectedType: 'webauthn.get',
       credential: { id: credential.credentialId, publicKey: new Uint8Array(Buffer.from(credential.publicKey, 'base64url')), counter: before },
       requireUserVerification: true,
-      advancedFIDOConfig: { userVerification: 'required' },
     });
     if (result.verified !== true || result.authenticationInfo.userVerified !== true) return false;
     if (result.authenticationInfo.credentialID !== credential.credentialId) return false;

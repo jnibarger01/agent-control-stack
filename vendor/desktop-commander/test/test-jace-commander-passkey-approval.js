@@ -157,6 +157,14 @@ await test('UV=0 (and UP=0) assertions are denied', async () => {
   await env.daemon.stop();
 });
 
+await test('UP=0 with UV=1 is denied (user presence enforced, #360 R/V F1)', async () => {
+  const env = await setup();
+  const b = await fresh(env);
+  assert.equal((await complete(env, b, env.a.sign(b.webauthn.challenge, { up: false, uv: true }))).code, 'PASSKEY_DENIED');
+  assert.equal(statusOf(env, b.approvalId), 'pending');
+  await env.daemon.stop();
+});
+
 await test('wrong RP ID, wrong origin and wrong ceremony type are denied', async () => {
   const env = await setup();
   for (const opts of [{ rpId: 'evil.example' }, { origin: 'http://localhost:9999' }, { origin: 'https://localhost:7391' }, { type: 'webauthn.create' }]) {
