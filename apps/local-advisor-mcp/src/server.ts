@@ -18,6 +18,7 @@ export const PROTOCOL_VERSION = "2024-11-05";
 const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const LSP_HEADER = "content-length";
+const FIELD_PEEK = 64;
 const HEADER_START = /^[A-Za-z0-9!#$%&'*+.^_`|~-]$/u;
 const WHITESPACE = new Set([0x20, 0x09, 0x0d, 0x0a]);
 // A frame boundary we can trust after a rejected header: an empty line immediately followed by a Content-Length header.
@@ -165,11 +166,14 @@ export class LocalAdvisorMcpServer {
         let lead = 0;
         while (lead < this.buffer.length && WHITESPACE.has(this.buffer[lead]!)) lead++;
         if (lead > 0) this.buffer = this.buffer.subarray(lead);
-        const head = this.buffer.subarray(0, LSP_HEADER.length).toString("utf8").toLowerCase();
+        const head = this.buffer.subarray(0, FIELD_PEEK).toString("latin1");
         if (head.length === 0) return;
-        // Stdio may split a write anywhere: stay undecided while the prefix could still become "content-length".
-        if (head.length < LSP_HEADER.length && LSP_HEADER.startsWith(head)) return;
-        this.framing = head.startsWith(LSP_HEADER) ? "lsp" : "ndjson";
+        // LSP frames may start with any header field (e.g. Content-Type), not only Content-Length. A field name and
+        // ':' choose LSP; anything else (JSON) chooses NDJSON. Stdio may split a write anywhere, so stay undecided
+        // while the bytes are still an unterminated field name (bounded by the peek window).
+        if (/^[A-Za-z0-9!#$%&'*+.^_`|~-]+:/u.test(head)) this.framing = "lsp";
+        else if (/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/u.test(head) && head.length < FIELD_PEEK) return;
+        else this.framing = "ndjson";
       }
       const body = this.framing === "lsp" ? this.nextLspFrame() : this.nextLine();
       if (body === null) return;
@@ -211,17 +215,15 @@ export class LocalAdvisorMcpServer {
       // Never search the rejected frame's body for a header: that body is attacker-controlled and could carry a
       // smuggled frame. If every Content-Length agrees on a length within the limit, skip exactly that many body
       // bytes. Otherwise the body's extent is unknown, so discard until an empty line followed by a header.
-      const agreed = declared.length > 0 && declared.every((value) => value !== undefined && value === declared[0]);
-      const skip = agreed ? Number(declared[0]) : NaN;
-      if (Number.isFinite(skip) && skip <= MAX_FRAME_BYTES) {
+      // Any numeric Content-Length claims a body: skip exactly that many bytes (the largest, if they conflict), even
+      // when it is over the limit, so nothing inside it, including a planted "\r\n\r\nContent-Length", ever runs.
+      const numeric = declared.filter((value): value is string => value !== undefined).map(Number);
+      if (numeric.length > 0) {
         this.buffer = this.buffer.subarray(sep + 4);
-        this.skipBytes = skip;
+        this.skipBytes = Math.min(Math.max(...numeric), Number.MAX_SAFE_INTEGER);
       } else {
-        // With no length at all, no body was claimed, so the rejected header's own empty line is a boundary. An
-        // oversized or conflicting length claims a body we cannot measure; its bytes are never a trusted boundary.
-        this.buffer = this.buffer.subarray(
-          lengths.length === 0 || declared.every((v) => v === undefined) ? sep : sep + 4
-        );
+        // No length at all: no body was claimed, so the rejected header's own empty line is the next boundary.
+        this.buffer = this.buffer.subarray(sep);
         this.resyncing = true;
       }
       this.send({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "invalid or oversized frame" } });

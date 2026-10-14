@@ -368,4 +368,25 @@ describe("local advisor MCP", () => {
     expect(out.filter((f) => f.id !== null).map((f) => f.id)).toEqual([1, 2, 3]);
     expect(out.filter((f) => f.id === null).map((f) => f.error?.message)).toEqual(["invalid or oversized frame"]);
   });
+
+  it("never runs a frame planted after an empty line inside an oversized body", async () => {
+    const h = harness(async () => failed());
+    const planted = JSON.stringify({ jsonrpc: "2.0", id: "SMUGGLED", method: "tools/list" });
+    const body = `xx\r\n\r\nContent-Length: ${Buffer.byteLength(planted)}\r\n\r\n${planted}`;
+    h.input.write(`Content-Length: ${3 * 1024 * 1024}\r\n\r\n${body}`);
+    await settle(h.server);
+    const out = frames(h.text()) as Array<{ id?: unknown }>;
+    expect(out.some((f) => f.id === "SMUGGLED")).toBe(false);
+  });
+
+  it("chooses LSP framing for a first frame that starts with a non-Content-Length header", async () => {
+    const h = harness(async () => failed());
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 7, method: "ping" });
+    h.input.write("Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    h.input.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+    await settle(h.server);
+    const out = frames(h.text()) as Array<{ id?: unknown }>;
+    expect(out.map((f) => f.id)).toEqual([7]);
+  });
 });
