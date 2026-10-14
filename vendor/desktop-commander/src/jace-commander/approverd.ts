@@ -77,8 +77,16 @@ export interface ApproverdConfig {
   approvalTtlMs?: number;
   tokenTtlMs?: number;
   maxPending?: number;
-  /** Opt-in WebAuthn passkey approvals. Once set it is mandatory for `requiredRiskClasses` and fails closed. */
+  /**
+   * WebAuthn passkey approvals. REQUIRED: approverd refuses to start without it unless
+   * `allowSelfAssertedPrivileged: true` is set. `privileged` always requires a passkey; fails closed.
+   */
   passkey?: ApproverdPasskeyConfig;
+  /**
+   * Explicit opt-out: run WITHOUT a passkey block, so privileged approvals are self-asserted. Must be the
+   * literal `true`, may not be combined with `passkey`, and is recorded in the audit chain on every start.
+   */
+  allowSelfAssertedPrivileged?: boolean;
 }
 
 export interface ApproverdPasskeyConfig {
@@ -88,7 +96,7 @@ export interface ApproverdPasskeyConfig {
   rpId: string;
   /** Pinned expected origin, e.g. `http://localhost:7391`. */
   origin: string;
-  /** Risk classes whose approval requires a passkey; default ['privileged']. */
+  /** Extra risk classes whose approval requires a passkey. Always added to ['privileged'], never replaces it. */
   requiredRiskClasses?: string[];
   /** Verifier deadline (ms), default 10 s, max 30 s. */
   verifierTimeoutMs?: number;
@@ -225,12 +233,19 @@ export class Approverd {
     this.deps = deps;
     const passkey = config.passkey;
     this.passkeyConfigured = passkey !== undefined;
+    const optOut = config.allowSelfAssertedPrivileged;
+    if (optOut !== undefined && optOut !== true && optOut !== false) throw new TypeError('allowSelfAssertedPrivileged must be a boolean');
+    if (passkey === undefined && optOut !== true) {
+      throw new TypeError('approverd requires a `passkey` config block for privileged approvals; set allowSelfAssertedPrivileged:true to opt out explicitly (audited)');
+    }
+    if (passkey !== undefined && optOut === true) throw new TypeError('allowSelfAssertedPrivileged cannot be combined with a `passkey` block');
     if (passkey !== undefined) {
       if (!passkey || typeof passkey.trustAnchorPath !== 'string' || !path.isAbsolute(passkey.trustAnchorPath)) throw new TypeError('passkey.trustAnchorPath must be an absolute path');
       assertRelyingPartyShape(passkey.rpId, passkey.origin);
-      const classes = passkey.requiredRiskClasses ?? ['privileged'];
-      if (!Array.isArray(classes) || classes.length === 0 || !classes.every((c) => typeof c === 'string')) throw new TypeError('passkey.requiredRiskClasses must be a non-empty list');
-      this.passkeyClasses = new Set(classes);
+      const extra = passkey.requiredRiskClasses ?? [];
+      if (!Array.isArray(extra) || !extra.every((c) => typeof c === 'string')) throw new TypeError('passkey.requiredRiskClasses must be a list of risk classes');
+      // A union: `privileged` can never be configured (or misspelled) out of the passkey requirement.
+      this.passkeyClasses = new Set(['privileged', ...extra]);
     } else {
       this.passkeyClasses = new Set();
     }
@@ -265,6 +280,12 @@ export class Approverd {
     fs.mkdirSync(this.approvalsDir, { recursive: true, mode: 0o700 });
     this.privateKey = loadPrivateKey(this.config.keyPath);
     await this.initPasskey();
+    if (!this.config.passkey) {
+      // The opt-out is durable and visible: no audit entry, no start.
+      if (!this.auditAppend('risk_classified', { scope: 'approverd_config', riskClass: 'privileged', approverIdAssurance: 'self-asserted', optOut: 'allowSelfAssertedPrivileged' })) {
+        throw new Error('cannot audit allowSelfAssertedPrivileged; refusing to start');
+      }
+    }
     // The request group (the server identity) and the decide group (humans) must be disjoint,
     // or the model could reach decide.sock and approve its own requests.
     const requestGid = resolveGid(this.config.requestGroup);
@@ -530,7 +551,18 @@ export class Approverd {
     }
   }
 
-  private auditAppend(type: 'approval_requested' | 'approval_decision', payload: Record<string, unknown>): boolean {
+  /** Persists a copy with `changes`; only on success are they applied to the live record. */
+  private commit(record: ApprovalRecord, changes: Partial<ApprovalRecord>): boolean {
+    try {
+      this.persist({ ...record, ...changes });
+    } catch {
+      return false;
+    }
+    Object.assign(record, changes);
+    return true;
+  }
+
+  private auditAppend(type: 'approval_requested' | 'approval_decision' | 'risk_classified', payload: Record<string, unknown>): boolean {
     try {
       this.audit.append(type, payload, new Date(this.now()).toISOString());
       return true;

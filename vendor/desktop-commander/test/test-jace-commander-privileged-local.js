@@ -190,6 +190,7 @@ await test('end to end: privileged_exec under the local preset needs a human, th
   const daemonConfig = {
     runtimeId: RUNTIME, stateDir: path.join(base, 'state'), keyPath: approverKeyPath, keyId: approver.keyId,
     requestSocket: path.join(base, 'request', 'request.sock'), decideSocket: path.join(base, 'decide', 'decide.sock'),
+    allowSelfAssertedPrivileged: true, // legacy self-asserted path (explicit opt-out)
   };
   const daemon = new Approverd(daemonConfig);
   await daemon.start();

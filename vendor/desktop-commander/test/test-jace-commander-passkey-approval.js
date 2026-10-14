@@ -12,8 +12,9 @@ import path from 'node:path';
 import { isoCBOR } from '@simplewebauthn/server/helpers';
 import { Approverd, ensureApproverKey } from '../dist/jace-commander/approverd.js';
 import { JcHumanAssertionGate, JC_DECIDE_PROTOCOL_VERSION } from '../dist/jace-commander/approval-protocol.js';
-import { JcPasskeyVerifier, MemorySignCountStore, loadPasskeyTrustAnchor } from '../dist/jace-commander/passkey-verifier.js';
+import { FileSignCountStore, JcPasskeyVerifier, MemorySignCountStore, loadPasskeyTrustAnchor } from '../dist/jace-commander/passkey-verifier.js';
 import { APPROVE_EXIT, runApproveCommand } from '../dist/jace-commander/approve-cli.js';
+import net from 'node:net';
 import { readTraceFile } from '../dist/jace-commander/looptrace.js';
 
 let passed = 0;
@@ -82,7 +83,7 @@ function anchorIo(content, overrides = {}) {
 }
 
 let seq = 0;
-async function setup({ authenticators = [makeAuthenticator()], io, humanVerifier, approvalTtlMs, verifierTimeoutMs, anchorContent } = {}) {
+async function setup({ authenticators = [makeAuthenticator()], io, humanVerifier, approvalTtlMs, verifierTimeoutMs, anchorContent, requiredRiskClasses } = {}) {
   seq += 1;
   const base = path.join(root, `p${seq}`);
   const keyPath = path.join(base, 'key', 'approver.key');
@@ -92,13 +93,13 @@ async function setup({ authenticators = [makeAuthenticator()], io, humanVerifier
   const config = {
     runtimeId: RUNTIME, stateDir: path.join(base, 'state'), keyPath, keyId: keyInfo.keyId,
     requestSocket: path.join(base, 'request', 'request.sock'), decideSocket: path.join(base, 'decide', 'decide.sock'),
-    passkey: { trustAnchorPath: ANCHOR, rpId: RP_ID, origin: ORIGIN, ...(verifierTimeoutMs ? { verifierTimeoutMs } : {}) },
+    passkey: { trustAnchorPath: ANCHOR, rpId: RP_ID, origin: ORIGIN, ...(verifierTimeoutMs ? { verifierTimeoutMs } : {}), ...(requiredRiskClasses ? { requiredRiskClasses } : {}) },
     ...(approvalTtlMs ? { approvalTtlMs } : {}),
   };
   const trustAnchorIo = io ?? anchorIo(content);
   const daemon = new Approverd(config, { now, trustAnchorIo, ...(humanVerifier ? { humanVerifier: humanVerifier(trustAnchorIo) } : {}) });
   await daemon.start();
-  return { daemon, config, a: authenticators[0], authenticators };
+  return { daemon, config, a: authenticators[0], authenticators, trustAnchorIo };
 }
 
 const request = (env, tool = 'privileged_exec', args = PRIV) => env.daemon.handleRequestOp({ op: 'authorize', runtimeId: RUNTIME, tool, arguments: { ...args, argv: [...args.argv, `--n=${++seq}`] } });
@@ -387,6 +388,62 @@ await test('approve CLI: decide_begin, typed hash, browser ceremony, decide_comp
   assert.equal(code2, APPROVE_EXIT.failed);
   assert.equal(statusOf(env, q.approvalId), 'pending');
   await env.daemon.stop();
+});
+
+// ---- review fixes (#360 threads) ------------------------------------------------------
+
+const WRITE_ARGS = { path: '/work/x.txt', content: 'hi' };
+const authorizeExact = (env, tool, args) => env.daemon.handleRequestOp({ op: 'authorize', runtimeId: RUNTIME, tool, arguments: args });
+const legacyDecide = (env, id, decision = 'approve') => env.daemon.handleDecideOp({ op: 'decide', id, decision, confirmHash: show(env, id).invocationHash, approverId: 'jace' });
+const blockPersist = (env, id) => fs.mkdirSync(path.join(env.config.stateDir, 'approvals', `${id}.json.${process.pid}.tmp`), { recursive: true });
+const unblockPersist = (env, id) => fs.rmSync(path.join(env.config.stateDir, 'approvals', `${id}.json.${process.pid}.tmp`), { recursive: true });
+const recordFile = (env, id) => path.join(env.config.stateDir, 'approvals', `${id}.json`);
+async function restart(env) {
+  await env.daemon.stop();
+  const daemon = new Approverd(env.config, { now, trustAnchorIo: env.trustAnchorIo });
+  await daemon.start();
+  return { ...env, daemon };
+}
+
+await test('fix 1: requiredRiskClasses is a union with privileged, never a replacement', async () => {
+  const env = await setup({ requiredRiskClasses: ['mutate'] });
+  const p = request(env); // privileged_exec
+  assert.equal(legacyDecide(env, p.approvalId).code, 'PASSKEY_REQUIRED');
+  assert.equal(statusOf(env, p.approvalId), 'pending');
+  const w = authorizeExact(env, 'write_file', WRITE_ARGS); // mutate, widened in
+  assert.equal(legacyDecide(env, w.approvalId).code, 'PASSKEY_REQUIRED');
+  assert.equal(begin(env, p.approvalId).ok, true);
+  await env.daemon.stop();
+  // An empty or misspelled list still keeps privileged.
+  for (const requiredRiskClasses of [[], ['privilegd']]) {
+    const e = await setup({ requiredRiskClasses });
+    const q = request(e);
+    assert.equal(legacyDecide(e, q.approvalId).code, 'PASSKEY_REQUIRED', JSON.stringify(requiredRiskClasses));
+    await e.daemon.stop();
+  }
+});
+
+await test('fix 1: no passkey block refuses to start unless the explicit opt-out is set, and the opt-out is audited', async () => {
+  const base = path.join(root, `noconf${++seq}`);
+  const keyPath = path.join(base, 'key', 'approver.key');
+  const keyInfo = ensureApproverKey(keyPath, 'jc-approver-test');
+  const config = { runtimeId: RUNTIME, stateDir: path.join(base, 'state'), keyPath, keyId: keyInfo.keyId,
+    requestSocket: path.join(base, 'request', 'request.sock'), decideSocket: path.join(base, 'decide', 'decide.sock') };
+  assert.throws(() => new Approverd(config), /requires a `passkey` config block/);
+  assert.throws(() => new Approverd({ ...config, allowSelfAssertedPrivileged: false }), /requires a `passkey` config block/);
+  assert.throws(() => new Approverd({ ...config, allowSelfAssertedPrivileged: 'yes' }), TypeError);
+  assert.throws(() => new Approverd({ ...config, allowSelfAssertedPrivileged: true, passkey: { trustAnchorPath: ANCHOR, rpId: RP_ID, origin: ORIGIN } }), /cannot be combined/);
+  const daemon = new Approverd({ ...config, allowSelfAssertedPrivileged: true }, { now });
+  await daemon.start();
+  const events = readTraceFile(path.join(config.stateDir, 'audit.jsonl')).events;
+  assert.equal(events[0].type, 'risk_classified');
+  assert.equal(events[0].payload.optOut, 'allowSelfAssertedPrivileged');
+  assert.equal(events[0].payload.approverIdAssurance, 'self-asserted');
+  await daemon.stop();
+  // If the opt-out cannot be audited, approverd does not start.
+  fs.rmSync(path.join(config.stateDir, 'audit.jsonl'));
+  fs.mkdirSync(path.join(config.stateDir, 'audit.jsonl'));
+  await assert.rejects(new Approverd({ ...config, allowSelfAssertedPrivileged: true }, { now }).start(), /refusing to start/);
 });
 
 console.log(`jace-commander passkey approval: ${passed} passed`);

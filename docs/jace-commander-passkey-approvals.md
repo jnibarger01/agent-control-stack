@@ -4,14 +4,14 @@ Status: implemented and opt-in. Decided by Jace on 2026-10-13. Addresses the #35
 
 ## What it does
 
-When `passkey` is set in the approverd config, approving a **privileged** request requires a phishing-resistant WebAuthn passkey assertion with **user verification** (UV=1, which implies UP=1). You can widen this to more classes with `requiredRiskClasses`. Before this, `approverIdAssurance` was `self-asserted`; such approvals are now audited with the authenticated principal and `approverIdAssurance: 'webauthn-uv'`. Everything that existed before is unchanged: the socket groups, the TTY and typed-hash confirmation, the hash-chained audit, single-use claims and the 30 s tokens.
+The `passkey` block is **required**: approverd refuses to start without it. Approving a **privileged** request always requires a phishing-resistant WebAuthn passkey assertion with **user verification** (UV=1, which implies UP=1). `requiredRiskClasses` only *adds* classes to `privileged`; it can never remove it. The only way to run without passkeys is the explicit opt-out `"allowSelfAssertedPrivileged": true` (in place of the `passkey` block), which approverd records in its audit chain on every start and refuses to start if it cannot. Before this, `approverIdAssurance` was `self-asserted`; such approvals are now audited with the authenticated principal and `approverIdAssurance: 'webauthn-uv'`. Everything that existed before is unchanged: the socket groups, the TTY and typed-hash confirmation, the hash-chained audit, single-use claims and the 30 s tokens.
 
 ```json
 "passkey": {
   "trustAnchorPath": "/etc/jace-commander/passkeys.json",
   "rpId": "localhost",
   "origin": "http://localhost:7391",
-  "requiredRiskClasses": ["privileged"],
+  "requiredRiskClasses": ["mutate"],
   "verifierTimeoutMs": 10000
 }
 ```
@@ -45,13 +45,13 @@ If anything fails, approvals for passkey-required classes are impossible (fail c
 
 ## Installing
 
-approverd only loads `passkey-verifier.js` when `passkey` is configured, so a passkey-less approverd keeps its dependency-free `/opt/jace-commander` closure. If `passkey` is configured and the library is missing, approverd refuses to start, which fails closed. To enable passkeys, run as root (Jace):
+If `passkey` is configured and the library is missing, approverd refuses to start, which fails closed. Run `npm ci` and `npm run build` in `vendor/desktop-commander`, then as root (Jace):
 
 ```sh
-sudo deploy/jace-commander/install-approverd.sh   # also copies passkey-verifier.js and root-controlled-file.js
-sudo npm install --prefix /opt/jace-commander --omit=dev @simplewebauthn/server@14.0.3
-sudo chown -R root:root /opt/jace-commander/node_modules && sudo chmod -R go-w /opt/jace-commander/node_modules
+sudo deploy/jace-commander/install-approverd.sh
 ```
+
+The installer copies `passkey-verifier.js` and `root-controlled-file.js`, installs the pinned `@simplewebauthn/server` and its runtime dependencies root-owned under `/opt/jace-commander/node_modules` (from the repo's `node_modules`; nothing is fetched), and writes a `passkey` block (`JC_PASSKEY_RP_ID`, default `localhost`; `JC_PASSKEY_ORIGIN`, default `http://localhost:7391`). Until a passkey is registered, privileged approvals fail closed. `JC_ALLOW_SELF_ASSERTED_PRIVILEGED=1` writes the audited opt-out instead.
 
 ## Registration (needs Jace physically present; agents never register)
 
