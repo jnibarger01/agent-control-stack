@@ -597,4 +597,27 @@ await test('fix 5: Node engines match the WebAuthn library and the installer shi
   assert.doesNotThrow(() => new Approverd({ ...example, runtimeId: RUNTIME }));
 });
 
+
+await test('F2: approverd-cli and the installer refuse Node < 20 with a clear message', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const here = path.dirname(new URL(import.meta.url).pathname);
+  const cli = path.join(here, '..', 'dist', 'jace-commander', 'approverd-cli.js');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'jc-nodever-'));
+  const preload = path.join(tmp, 'fake18.mjs');
+  fs.writeFileSync(preload, "Object.defineProperty(process, 'versions', { value: { ...process.versions, node: '18.19.0' } });\n");
+  const old = spawnSync(process.execPath, ['--import', preload, cli, 'init', '--config', path.join(tmp, 'none.json')], { encoding: 'utf8' });
+  assert.equal(old.status, 1);
+  assert.match(old.stderr, /Node\.js >= 20 is required \(running 18\.19\.0\)/);
+  const cur = spawnSync(process.execPath, [cli, 'init', '--config', path.join(tmp, 'none.json')], { encoding: 'utf8' });
+  assert.doesNotMatch(cur.stderr, /Node\.js >= 20 is required/);
+  const sh = fs.readFileSync(path.join(here, '..', 'deploy', 'jace-commander', 'install-approverd.sh'), 'utf8');
+  const block = /# BEGIN node-version-check[\s\S]*?# END node-version-check/.exec(sh);
+  assert.ok(block, 'installer has the node version check');
+  const run = (ver) => { const fake = path.join(tmp, `node${ver}`); fs.writeFileSync(fake, `#!/bin/sh\necho ${ver}\n`, { mode: 0o755 });
+    return spawnSync('bash', ['-c', `set -euo pipefail\nnode_real=${fake}\n${block[0]}\necho PASSED`], { encoding: 'utf8' }); };
+  for (const v of ['18', '19', 'garbage']) { const r = run(v); assert.equal(r.status, 1, v); assert.match(r.stderr, /Node\.js >= 20 is required/); }
+  for (const v of ['20', '22']) assert.match(run(v).stdout, /PASSED/, v);
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
 console.log(`jace-commander passkey approval: ${passed} passed`);

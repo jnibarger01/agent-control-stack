@@ -23,6 +23,10 @@ id "$OPERATOR" >/dev/null
 node_real="$(readlink -f "$NODE_BIN")"
 [[ "$(stat -c %u "$node_real")" == 0 ]] || { echo "$node_real is not root-owned" >&2; exit 1; }
 [[ $(( 0$(stat -c %a "$node_real") & 022 )) -eq 0 ]] || { echo "$node_real is group/world-writable" >&2; exit 1; }
+# BEGIN node-version-check (#360 R/V F2): approverd and @simplewebauthn/server need Node >= 20.
+node_major="$("$node_real" -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+[[ "$node_major" =~ ^[0-9]+$ && "$node_major" -ge 20 ]] || { echo "Node.js >= 20 is required; $node_real reports major version '${node_major:-unknown}'" >&2; exit 1; }
+# END node-version-check
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 SRC="$REPO/dist"
