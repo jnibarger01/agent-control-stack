@@ -32,14 +32,6 @@ const PATTERNS: readonly { readonly name: string; readonly pattern: RegExp; read
   { name: "npm_token", pattern: /\bnpm_[A-Za-z0-9]{36,}/giu, replace: "[REDACTED:npm_token]" },
   { name: "google_api_key", pattern: /\bAIza[0-9A-Za-z_-]{35}/gu, replace: "[REDACTED:google_api_key]" },
   {
-    // The signature segment may be short or truncated; header and payload alone are enough to redact.
-    name: "jwt",
-    // Starts only at the beginning of a token run and bounds every segment, so a long run of segment characters with
-    // no '.' (e.g. "eyJ-" repeated) is scanned once instead of once per "eyJ" (quadratic backtracking).
-    pattern: /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,4096}\.[A-Za-z0-9_-]{8,4096}\.[A-Za-z0-9_-]{0,4096}/gu,
-    replace: "[REDACTED:jwt]"
-  },
-  {
     // The username may be empty and the password may itself contain '@', so match up to the last '@'.
     name: "url_password",
     pattern: /(?<![a-z0-9+.-])([a-z][a-z0-9+.-]{0,31}:\/\/[^\s:/@]{0,256}:)[^\s/?#]{1,256}@/giu,
@@ -51,13 +43,17 @@ const PATTERNS: readonly { readonly name: string; readonly pattern: RegExp; read
   {
     // Keys may be JSON-quoted ({"password": "..."}); quoted values may contain spaces.
     name: "quoted_assignment",
-    pattern: new RegExp(String.raw`(${KEY}["']?[ \t]{0,16}(?:[:=]|%3[ad])\s{0,16})(["'])[^"'\n]{1,256}\3`, "giu"),
+    // The value is matched atomically and in full: a capped value would leave the tail of a long secret behind.
+    pattern: new RegExp(String.raw`(${KEY}["']?[ \t]{0,16}(?:[:=]|%3[ad])\s{0,16})(["'])(?=([^"'\n]+))\4\3`, "giu"),
     replace: "$1$3[REDACTED:assignment]$3"
   },
   {
     // `%3D` / `%3A` cover percent-encoded query strings and form bodies (password%3D...).
     name: "assignment",
-    pattern: new RegExp(String.raw`(${KEY}["']?[ \t]{0,16}(?:[:=]|%3[ad])\s{0,16})(["']?)[^\s"',;]{4,256}\3`, "giu"),
+    pattern: new RegExp(
+      String.raw`(${KEY}["']?[ \t]{0,16}(?:[:=]|%3[ad])\s{0,16})(["']?)(?=([^\s"',;]{4,}))\4\3`,
+      "giu"
+    ),
     replace: "$1$3[REDACTED:assignment]$3"
   },
   { name: "home_path", pattern: /(?:\/home|\/Users)\/[^/\s]+/gu, replace: "~" },
@@ -76,8 +72,54 @@ export interface RedactionResult {
   readonly counts: Readonly<Record<string, number>>;
 }
 
+/**
+ * Whole runs of JWT alphabet plus '.', each taken atomically from the start of the run, so a run is scanned once no
+ * matter how long it is or how many "eyJ" it contains (no per-"eyJ" restart, no quadratic backtracking).
+ */
+const JWT_RUN = /(?<![A-Za-z0-9_.-])(?=([A-Za-z0-9_.-]+))\1/gu;
+
+/**
+ * Redacts every JWT (eyJ<header>.<payload>.<signature?>) inside a run in one linear pass. Segments are unbounded, so a
+ * huge segment cannot make the token leak; "eyJ" may sit mid-run (id-eyJ..., x_eyJ...). The signature segment may be
+ * empty or truncated; header and payload alone are enough to redact.
+ */
+function redactJwtRun(run: string): { text: string; count: number } {
+  if (!run.includes("eyJ")) return { text: run, count: 0 };
+  const pieces = run.split(".");
+  const out: string[] = [];
+  let count = 0;
+  let i = 0;
+  while (i < pieces.length) {
+    const piece = pieces[i] ?? "";
+    const at = piece.indexOf("eyJ");
+    const payload = pieces[i + 1];
+    if (at >= 0 && piece.length - at >= 11 && payload !== undefined && payload.length >= 8 && i + 2 < pieces.length) {
+      out.push(piece.slice(0, at) + "[REDACTED:jwt]");
+      count += 1;
+      i += 3;
+    } else {
+      out.push(piece);
+      i += 1;
+    }
+  }
+  return { text: out.join("."), count };
+}
+
+function redactJwts(input: string, counts: Record<string, number>): string {
+  if (!input.includes("eyJ")) return input;
+  let total = 0;
+  const text = input.replace(JWT_RUN, (run: string) => {
+    const { text: redacted, count } = redactJwtRun(run);
+    total += count;
+    return redacted;
+  });
+  if (total > 0) counts.jwt = (counts.jwt ?? 0) + total;
+  return text;
+}
+
 function applyPatterns(input: string, counts: Record<string, number>): string {
-  let text = input;
+  // JWTs first, so a token inside an assignment, cookie or query value is redacted whole before the value patterns run.
+  let text = redactJwts(input, counts);
   for (const { name, pattern, replace } of PATTERNS) {
     const matches = text.match(pattern)?.length ?? 0;
     if (matches > 0) {

@@ -205,7 +205,47 @@ describe("redactText", () => {
     const input = cat("ey", "J-").repeat(16_384);
     const started = performance.now();
     redactText(input);
-    // Was ~2.5 s before the jwt segments were bounded and anchored to the start of a token run.
+    // Was ~2.5 s before jwt matching was anchored to the start of a token run and taken in a single pass.
     expect(performance.now() - started).toBeLessThan(250);
+  });
+
+  describe("jwt with an oversized segment", () => {
+    // A 5 KB payload segment: a per-segment length cap once let such a token leak whole.
+    const bigJwt = () =>
+      [
+        b64url(JSON.stringify({ alg: "HS256", typ: "JWT" })),
+        b64url(JSON.stringify({ sub: fill(5_000) })),
+        fill(22)
+      ].join(".");
+    const contexts: [string, (t: string) => string][] = [
+      ["bare", (t) => t],
+      ["JSON id_token", (t) => cat('{"id', '_token":"', t, '"}')],
+      ["Cookie session=", (t) => cat("Cookie: session=", t, "; Path=/")],
+      ["?access_token=", (t) => cat("https://example.test/cb?access", "_token=", t, "&state=1")]
+    ];
+    it.each(contexts)("redacts every segment in full: %s", (_name, wrap) => {
+      const token = bigJwt();
+      const [header, payload, signature] = token.split(".") as [string, string, string];
+      const { text } = redactText(wrap(token));
+      for (const segment of [header, payload, signature]) expect(text).not.toContain(segment.slice(-24));
+      expect(text).not.toContain(payload.slice(4_096, 4_120));
+      expect(text).toMatch(/\[REDACTED:(?:jwt|assignment)\]/u);
+    });
+  });
+
+  it("redacts a jwt that directly follows a hyphen", () => {
+    const token = jwt();
+    const { text, counts } = redactText(cat("id-", token));
+    expect(text).toBe("id-[REDACTED:jwt]");
+    expect(counts.jwt).toBe(1);
+  });
+
+  it("redacts the full assignment value, not just a prefix", () => {
+    const value = fill(600);
+    for (const input of [cat("pass", "word=", value), cat('{"pass', 'word": "', value, '"}')]) {
+      const { text } = redactText(input);
+      expect(text).not.toContain(value.slice(-32));
+      expect(text).toContain("[REDACTED:assignment]");
+    }
   });
 });
