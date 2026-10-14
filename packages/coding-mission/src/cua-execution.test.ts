@@ -886,6 +886,38 @@ describe("R3: browser boundary", () => {
     expect(page.closed).toBe(true);
   });
 
+  it("closes only the pages its session created, never tabs that were open before it", async () => {
+    const { adapter, dispatch, page } = harness(
+      script([{ type: "navigate", url: `${ORIGIN}/inbox` }, { type: "click", selector: "#open" }])
+    );
+    const operatorTab = new FakePage();
+    operatorTab.current = "https://operator.example/";
+    page.fakeContext.extraPages.push(operatorTab);
+    const popup = new FakePage();
+    const original = page.locator.bind(page);
+    page.locator = (selector: string) => ({
+      ...original(selector),
+      click: async () => {
+        page.calls.push(`click:${selector}`);
+        page.fakeContext.popup(popup);
+      }
+    });
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({ outcome: "unknown" });
+    await Promise.resolve();
+    expect(page.closed).toBe(true);
+    expect(popup.closed).toBe(true);
+    expect(operatorTab.closed).toBe(false);
+  });
+
+  it("does not treat a tab that was open before the session as an escape", async () => {
+    const { adapter, dispatch, page } = harness(script([{ type: "navigate", url: `${ORIGIN}/inbox` }]));
+    const operatorTab = new FakePage();
+    page.fakeContext.extraPages.push(operatorTab);
+    await expect(adapter.execute(dispatch, undefined, LIVE)).resolves.toMatchObject({ outcome: "succeeded" });
+    expect(operatorTab.closed).toBe(false);
+    expect(page.closed).toBe(true);
+  });
+
   it("fails closed when the page exposes no browser context", async () => {
     const { adapter, dispatch, page, checkpoints } = harness(script([{ type: "observe" }]));
     (page as unknown as { context: unknown }).context = undefined;

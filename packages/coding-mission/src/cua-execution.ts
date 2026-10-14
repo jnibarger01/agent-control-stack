@@ -227,6 +227,10 @@ interface CuaSession {
   context: CuaBrowserContext;
   /** Set when any page other than the governed page appeared in the context (a popup or window.open). */
   foreignPage: boolean;
+  /** Pages already in the context when the session opened (a reused or persistent profile). Never closed or counted. */
+  preexisting: ReadonlySet<CuaPage>;
+  /** Pages that appeared in the context during the session. Closed with the session. */
+  created: Set<CuaPage>;
 }
 
 /** Opens a Playwright-shaped page and starts it at about:blank before any governed action. */
@@ -360,14 +364,23 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
   /** Open the governed page and enforce the origin allowlist on its whole context before any action. */
   private async openSession(origins: readonly string[], signal?: AbortSignal): Promise<CuaSession> {
     const page = await this.bounded(() => this.browser.open(this.application), signal);
-    const session: CuaSession = { page, context: undefined as unknown as CuaBrowserContext, foreignPage: false };
+    const session: CuaSession = {
+      page,
+      context: undefined as unknown as CuaBrowserContext,
+      foreignPage: false,
+      preexisting: new Set(),
+      created: new Set()
+    };
     try {
       if (typeof page.context !== "function") {
         throw new ControlStackError("cua_context_unavailable", "browser page exposes no context");
       }
       session.context = page.context();
+      // Snapshot the tabs that predate this session so cleanup and escape detection only consider pages it created.
+      session.preexisting = new Set(session.context.pages().filter((candidate) => candidate !== page));
       session.context.on("page", (opened) => {
-        if (opened === page) return;
+        if (opened === page || session.preexisting.has(opened)) return;
+        session.created.add(opened);
         session.foreignPage = true;
         void Promise.resolve()
           .then(() => opened.close())
@@ -400,16 +413,23 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     } catch {
       return true;
     }
-    return pages.some((candidate) => candidate !== session.page);
+    return pages.some((candidate) => candidate !== session.page && !session.preexisting.has(candidate));
   }
 
-  /** Close every page in the session, each bounded by the deadline. A close failure never replaces a result. */
+  /**
+   * Close the governed page and every page this session created, each bounded by the deadline. Tabs that were already
+   * open in a reused context are left alone. A close failure never replaces a result.
+   */
   private async closeSession(session: CuaSession): Promise<void> {
-    let pages: CuaPage[] = [session.page];
+    const pages = new Set<CuaPage>([session.page, ...session.created]);
     try {
-      if (session.context) pages = [session.page, ...session.context.pages().filter((p) => p !== session.page)];
+      if (session.context) {
+        for (const candidate of session.context.pages()) {
+          if (!session.preexisting.has(candidate)) pages.add(candidate);
+        }
+      }
     } catch {
-      // Fall back to the governed page alone.
+      // Fall back to the governed page and the pages seen being created.
     }
     for (const candidate of pages) {
       try {
