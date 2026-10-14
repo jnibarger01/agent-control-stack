@@ -60,7 +60,8 @@ approverd has no registration operation. Run this as yourself, at the machine:
 ```sh
 node vendor/desktop-commander/dist/jace-commander/passkey-register.js \
   --rp-id localhost --origin http://localhost:7391 --operator jace --out ~/passkeys.new.json \
-  [--from /etc/jace-commander/passkeys.json]     # keep existing keys
+  --from /etc/jace-commander/passkeys.json
+# Omit the --from line (and the trailing \ above it) for the first key; with it, existing keys are kept.
 # open the printed http://localhost:7391/<token> URL in a browser on this machine,
 # create the passkey (Touch ID / Windows Hello / security key with PIN)
 sudo install -o root -g root -m 0644 ~/passkeys.new.json /etc/jace-commander/passkeys.json
