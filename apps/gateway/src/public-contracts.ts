@@ -1,3 +1,4 @@
+import { advisorConsultRequestSchema } from "@agent-control-stack/advisory";
 import { directAgentNames } from "@agent-control-stack/machine-controller";
 import {
   missionDispatchInputSchema,
@@ -310,6 +311,7 @@ export const jsonRpcRequestSchema = z.object({
 });
 
 export const directAgentToolName = "test.agent.run" as const;
+export const advisorToolName = "consult_advisor" as const;
 export const dashboardToolNames = ["open_acs_dashboard", "get_execution_detail"] as const;
 export const portfolioToolNames = [
   "portfolio.get_summary",
@@ -322,6 +324,7 @@ export const portfolioToolNames = [
 ] as const;
 export const mcpToolNames = [
   ...workItemToolNames,
+  advisorToolName,
   ...dashboardToolNames,
   ...portfolioToolNames,
   directAgentToolName
@@ -329,6 +332,7 @@ export const mcpToolNames = [
 export type McpToolName = (typeof mcpToolNames)[number];
 export const remoteMcpToolNames = [
   ...workItemToolNames.filter((name) => name !== "approve_work_item"),
+  advisorToolName,
   ...dashboardToolNames,
   ...portfolioToolNames
 ];
@@ -366,13 +370,15 @@ export const gatewayMcpInputSchemas = {
   "portfolio.list_failures": portfolioLimitInputSchema,
   "portfolio.list_pending_work": portfolioLimitInputSchema,
   "portfolio.list_recent_progress": portfolioLimitInputSchema,
-  [directAgentToolName]: directAgentInputSchema
+  [directAgentToolName]: directAgentInputSchema,
+  [advisorToolName]: advisorConsultRequestSchema
 } satisfies Record<McpToolName, z.ZodType>;
 
 export function mcpRequiredScopes(name: McpToolName): McpScope[] {
   if (name === directAgentToolName) return ["acs:work:approve"];
   switch (name) {
     case "create_work_item":
+    case "consult_advisor":
       return ["acs:work:create"];
     case "get_work_item":
     case "list_work_items":
@@ -414,6 +420,8 @@ export function mcpToolAnnotations(name: McpToolName): Record<string, boolean> {
     case "cancel_work_item":
     case "reject_work_item":
       return { readOnlyHint: false, destructiveHint: true, openWorldHint: false };
+    case "consult_advisor":
+      return { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
     default:
       return { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
   }
@@ -428,6 +436,8 @@ export function mcpToolDescription(name: McpToolName): string {
       return "Open the read-only ACS Control Center with current health, executions, approvals, and operational findings.";
     case "get_execution_detail":
       return "Read authoritative detail and recent audit events for one ACS execution.";
+    case "consult_advisor":
+      return "Ask the configured advisor at one checkpoint. Guidance is evidence for the executor and is not approval or completion.";
     case "create_work_item":
       return "Create a governed work item and immediately evaluate it through the policy gate.";
     case "get_work_item":

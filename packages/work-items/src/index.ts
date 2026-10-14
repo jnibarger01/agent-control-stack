@@ -17,6 +17,28 @@ export * from "./actor-discovery.js";
 export * from "./state-machine.js";
 export * from "./store.js";
 export {
+  ADVISOR_COMPLETION_DISPOSITION_SQL,
+  advisorAuditView,
+  advisorCompletionBlockReason,
+  assertAdvisorConsultationLease,
+  copyAdvisorBinding,
+  disableAdvisorBinding,
+  enableAdvisorBinding,
+  insertAdvisorConsultation,
+  readAdvisorBinding,
+  readAdvisorBindingsForSubject
+} from "./advisor-consultation.js";
+export type {
+  AdvisorBinding,
+  AdvisorConsultationRecord,
+  AdvisorFence,
+  AdvisorLeaseAssertion,
+  CopyAdvisorBindingInput,
+  EnableAdvisorBindingInput,
+  MissionClaimFence,
+  RecordAdvisorConsultationInput
+} from "./advisor-consultation.js";
+export {
   normalizeTraceActorId,
   rawTraceProducerConfig,
   relayTraceOutbox,

@@ -1,4 +1,5 @@
 import { probeExecutableVersion } from "@agent-control-stack/agent-cli";
+import { createAdvisorModelCaller, openAdvisorFlightReader } from "./advisor-consultation.js";
 import { registerMissionDispatchRoutes } from "./mission-dispatch-routes.js";
 import { registerDashboardRoutes, eventReadOptions } from "./dashboard-routes.js";
 import {
@@ -1558,7 +1559,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       maxPendingWorkItems,
       portfolioClient,
       toolAllowlist: mcpToolAllowlist,
-      shutdownController
+      shutdownController,
+      advisor: {
+        caller: createAdvisorModelCaller(),
+        readFlight: openAdvisorFlightReader(dbPath)
+      }
     });
     if (result.wwwAuthenticate) {
       reply.header("WWW-Authenticate", result.wwwAuthenticate);

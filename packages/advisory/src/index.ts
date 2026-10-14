@@ -11,6 +11,32 @@
  */
 
 export { principalRoleSchema, assertAdvisoryReasoner } from "./roles.js";
+
+export {
+  ADVISOR_CONSULTATION_SCHEMA_VERSION,
+  ADVISOR_CHECKPOINTS,
+  ADVISOR_DISPOSITIONS,
+  ADVISOR_MODEL_IDS,
+  advisorConsultRequestSchema,
+  advisorCheckpointSchema,
+  advisorDispositionSchema,
+  resolveAdvisorModelId,
+  assertAdvisorPairing,
+  missionUnitSubjectId,
+  advisorOutputDigest,
+  advisorConsultationHash,
+  advisorCompletionBlock,
+  projectFlightForAdvisor
+} from "./advisor-consultation.js";
+export type {
+  AdvisorCheckpoint,
+  AdvisorDisposition,
+  AdvisorConsultRequest,
+  AdvisorModelId,
+  AdvisorPairing,
+  AdvisorConsultationView,
+  AdvisorFlightEvent
+} from "./advisor-consultation.js";
 export type { PrincipalRole } from "./roles.js";
 
 export {
