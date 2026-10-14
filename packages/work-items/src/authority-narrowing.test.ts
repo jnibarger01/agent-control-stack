@@ -124,3 +124,53 @@ describe("authority narrowing", () => {
     expect(authorityNarrowingViolations(parent(), leaf, NOW)).toEqual([]);
   });
 });
+
+describe("authority narrowing: browser origin and application scope", () => {
+  const A = "https://a.example";
+  const B = "https://b.example";
+  const C = "https://c.example";
+  const browser = (allowedOrigins: string[], allowedApplications: string[]) => ({
+    runtime: "browser" as const,
+    toolName: "cua" as const,
+    allowedOrigins,
+    allowedApplications
+  });
+  const withBrowser = (...tools: ReturnType<typeof browser>[]) => parent({ toolClasses: tools });
+
+  it("lets a child keep a strict subset of one parent browser entry's origins and applications", () => {
+    const p = withBrowser(browser([A, B], ["Chrome", "Firefox"]));
+    expect(authorityNarrowingViolations(p, withBrowser(browser([A], ["Chrome"])), NOW)).toEqual([]);
+    expect(authorityNarrowingViolations(p, withBrowser(browser([B, A], ["Firefox"])), NOW)).toEqual([]);
+    expect(authorityNarrowingViolations(p, withBrowser(browser([A, B], ["Chrome", "Firefox"])), NOW)).toEqual([]);
+  });
+
+  it("refuses a child that adds an origin or an application the parent entry does not hold", () => {
+    const p = withBrowser(browser([A, B], ["Chrome", "Firefox"]));
+    expect(authorityNarrowingViolations(p, withBrowser(browser([A, C], ["Chrome"])), NOW)).toEqual([
+      "tool browser:cua exceeds parent"
+    ]);
+    expect(authorityNarrowingViolations(p, withBrowser(browser([A], ["Chrome", "Safari"])), NOW)).toEqual([
+      "tool browser:cua exceeds parent"
+    ]);
+    expect(() => assertAuthorityNarrowed(p, withBrowser(browser([A, B, C], ["Chrome"])), NOW)).toThrow(
+      /authority escalation|not a subset/iu
+    );
+  });
+
+  it("refuses a child that combines two parent entries into scope neither entry granted", () => {
+    const p = withBrowser(browser([A], ["Chrome"]), browser([B], ["Firefox"]));
+    expect(authorityNarrowingViolations(p, withBrowser(browser([A, B], ["Chrome"])), NOW)).toEqual([
+      "tool browser:cua exceeds parent"
+    ]);
+    expect(authorityNarrowingViolations(p, withBrowser(browser([A], ["Firefox"])), NOW)).toEqual([
+      "tool browser:cua exceeds parent"
+    ]);
+  });
+
+  it("does not let a browser entry cover a commander tool", () => {
+    const p = withBrowser(browser([A], ["Chrome"]));
+    expect(
+      authorityNarrowingViolations(p, parent({ toolClasses: [{ runtime: "desktop_commander", toolName: "cua" }] }), NOW)
+    ).toEqual(["tool desktop_commander:cua exceeds parent"]);
+  });
+});
