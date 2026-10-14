@@ -780,6 +780,25 @@ describe("R3: browser boundary", () => {
     expect(page.closed).toBe(true);
   });
 
+  it.each([
+    ["another executor took the attempt lock", "UPDATE cua_execution_locks SET owner_id = 'usurper'"],
+    ["the attempt lock expired", "UPDATE cua_execution_locks SET expires_at = '2000-01-01T00:00:00.000Z'"]
+  ])("re-checks the execution lock before acting: a stale executor stops when %s", async (_name, steal) => {
+    const { adapter, dispatch, page, store } = harness(script([{ type: "observe" }]));
+    const browser = (adapter as unknown as { browser: CuaBrowserProvider }).browser;
+    const open = browser.open.bind(browser);
+    browser.open = async (application: string) => {
+      const opened = await open(application);
+      store.db.prepare(steal).run();
+      return opened;
+    };
+    await expect(adapter.execute(dispatch, undefined, LIVE)).rejects.toMatchObject({
+      code: "cua_execution_lock_lost"
+    });
+    expect(page.calls).not.toContain("screenshot");
+    expect(page.closed).toBe(true);
+  });
+
   it("bounds every browser call by a deadline and closes the page", async () => {
     const { adapter, dispatch, page, checkpoints } = harness(script([{ type: "observe" }]), "browser", {
       actionTimeoutMs: 30

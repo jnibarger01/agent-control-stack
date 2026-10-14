@@ -554,7 +554,7 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
       return this.failed(dispatch, "policy_denied", "cua_secret_unavailable", "no secret resolver is configured", []);
     }
 
-    this.assertFence(dispatch);
+    this.assertFence(dispatch, owner);
     let session: CuaSession | undefined;
     let page: CuaPage | undefined;
     let committedMutation = false;
@@ -624,9 +624,10 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
           }
         }
         try {
-          // Ownership is re-checked immediately before every browser action. A stale worker stops here, before acting.
+          // Ownership (claim, attempt, fence and execution lock) is re-checked and the lock renewed immediately before
+          // every browser action. A stale worker or an executor whose lock expired or was taken stops here, before acting.
           // The window between this check and the browser call cannot be closed; an effect inside it is uncertain.
-          this.assertFence(dispatch);
+          this.assertFence(dispatch, owner);
           // Authority is re-read after the browser is open and right before acting: opening can take long enough for a
           // grant to be revoked, expire or pass its deadline after the pre-plan check above. No action has run on this
           // checkpoint, but the browser was opened under it, so it is settled uncertain and the refusal is not retryable.
@@ -732,11 +733,36 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     };
   }
 
-  private assertFence(dispatch: DispatchEnvelope): void {
-    this.store.transaction(() => this.assertFenceInTransaction(dispatch));
+  /**
+   * The full fence, then a lease renewal, in one transaction. Run immediately before every browser action, so a stale
+   * executor (its claim, attempt, fencing token or execution lock gone or expired) stops before acting.
+   */
+  private assertFence(dispatch: DispatchEnvelope, owner: string): void {
+    this.store.transaction(() => {
+      this.assertFenceInTransaction(dispatch, owner);
+      this.renewLockInTransaction(dispatch, owner);
+    });
   }
 
-  private assertFenceInTransaction(dispatch: DispatchEnvelope): void {
+  /**
+   * Inside a transaction: the caller still holds the live claim, the started attempt and its fencing token, and still
+   * owns an unexpired execution lock for the attempt. Any mismatch throws before the caller can act or write.
+   */
+  private assertFenceInTransaction(dispatch: DispatchEnvelope, owner: string): void {
+    const lock = this.store.db
+      .prepare("SELECT owner_id, expires_at FROM cua_execution_locks WHERE attempt_id = ?")
+      .get(dispatch.attemptId) as { owner_id: string; expires_at: string } | undefined;
+    const now = Date.parse(this.now());
+    const expiresAt = lock ? Date.parse(lock.expires_at) : Number.NaN;
+    if (
+      !lock ||
+      lock.owner_id !== owner ||
+      !Number.isFinite(now) ||
+      !Number.isFinite(expiresAt) ||
+      !(expiresAt > now)
+    ) {
+      throw new ControlStackError("cua_execution_lock_lost", "this executor no longer owns a live CUA attempt lock");
+    }
     const unit = this.store.db
       .prepare(
         `SELECT status, claim_token, worker_id, attempt
@@ -798,7 +824,7 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
     hash: string
   ): "inserted" | "blocked" {
     return this.store.transaction(() => {
-      this.assertFenceInTransaction(dispatch);
+      this.assertFenceInTransaction(dispatch, owner);
       this.renewLockInTransaction(dispatch, owner);
       const existing = this.checkpoint(dispatch.attemptId, sequence);
       if (existing) return "blocked";
@@ -863,7 +889,7 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
       screenshotHash: effect.screenshotHash ?? null
     });
     this.store.transaction(() => {
-      this.assertFenceInTransaction(dispatch);
+      this.assertFenceInTransaction(dispatch, owner);
       this.renewLockInTransaction(dispatch, owner);
       const changed = this.store.db
         .prepare(
@@ -881,7 +907,7 @@ export class CuaExecutionAdapter implements WorkUnitExecutorAdapter {
 
   private settlePlanned(dispatch: DispatchEnvelope, owner: string): void {
     this.store.transaction(() => {
-      this.assertFenceInTransaction(dispatch);
+      this.assertFenceInTransaction(dispatch, owner);
       // Only the lock owner settles: a planned row left by an owner whose lock was released or expired.
       this.renewLockInTransaction(dispatch, owner);
       const planned = this.checkpoints(dispatch.attemptId).filter((row) => row.state === "planned");
