@@ -8,7 +8,9 @@
  */
 // Every quantifier that can run over a near-total character class is bounded: unbounded adjacent quantifiers
 // gated on a literal that a long input never contains backtrack quadratically (see packages/shared/src/redact.ts).
-const KEY = String.raw`(?:api[_-]?key|secret|token|passphrase|passw(?:or)?d|auth)[\w-]{0,64}`;
+// The key suffix is matched atomically (lookahead + backreference): its class is disjoint from what follows, so
+// backtracking into it can never help and only costs time on long word runs.
+const KEY = String.raw`(?:api[_-]?key|secret|token|passphrase|passw(?:or)?d|auth)(?=([\w-]{0,64}))\2`;
 
 const PATTERNS: readonly { readonly name: string; readonly pattern: RegExp; readonly replace: string }[] = [
   {
@@ -32,13 +34,15 @@ const PATTERNS: readonly { readonly name: string; readonly pattern: RegExp; read
   {
     // The signature segment may be short or truncated; header and payload alone are enough to redact.
     name: "jwt",
-    pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/gu,
+    // Starts only at the beginning of a token run and bounds every segment, so a long run of segment characters with
+    // no '.' (e.g. "eyJ-" repeated) is scanned once instead of once per "eyJ" (quadratic backtracking).
+    pattern: /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,4096}\.[A-Za-z0-9_-]{8,4096}\.[A-Za-z0-9_-]{0,4096}/gu,
     replace: "[REDACTED:jwt]"
   },
   {
     // The username may be empty and the password may itself contain '@', so match up to the last '@'.
     name: "url_password",
-    pattern: /\b([a-z][a-z0-9+.-]{0,31}:\/\/[^\s:/@]{0,256}:)[^\s/?#]{1,256}@/giu,
+    pattern: /(?<![a-z0-9+.-])([a-z][a-z0-9+.-]{0,31}:\/\/[^\s:/@]{0,256}:)[^\s/?#]{1,256}@/giu,
     replace: "$1[REDACTED:url_password]@"
   },
   { name: "basic_auth", pattern: /\b(Basic)\s+[A-Za-z0-9+/]{8,}=*/giu, replace: "$1 [REDACTED:basic_auth]" },
@@ -47,13 +51,13 @@ const PATTERNS: readonly { readonly name: string; readonly pattern: RegExp; read
   {
     // Keys may be JSON-quoted ({"password": "..."}); quoted values may contain spaces.
     name: "quoted_assignment",
-    pattern: new RegExp(String.raw`(${KEY}["']?[ \t]{0,16}[:=]\s{0,16})(["'])[^"'\n]{1,256}\2`, "giu"),
-    replace: "$1$2[REDACTED:assignment]$2"
+    pattern: new RegExp(String.raw`(${KEY}["']?[ \t]{0,16}[:=]\s{0,16})(["'])[^"'\n]{1,256}\3`, "giu"),
+    replace: "$1$3[REDACTED:assignment]$3"
   },
   {
     name: "assignment",
-    pattern: new RegExp(String.raw`(${KEY}["']?[ \t]{0,16}[:=]\s{0,16})(["']?)[^\s"',;]{4,256}\2`, "giu"),
-    replace: "$1$2[REDACTED:assignment]$2"
+    pattern: new RegExp(String.raw`(${KEY}["']?[ \t]{0,16}[:=]\s{0,16})(["']?)[^\s"',;]{4,256}\3`, "giu"),
+    replace: "$1$3[REDACTED:assignment]$3"
   },
   { name: "home_path", pattern: /(?:\/home|\/Users)\/[^/\s]+/gu, replace: "~" },
   { name: "home_path", pattern: /\b[A-Za-z]:\\Users\\[^\\\s]+/giu, replace: "~" },
@@ -81,12 +85,33 @@ function applyPatterns(input: string, counts: Record<string, number>): string {
   return text;
 }
 
+/** Cheap gate: decoded text without any credential marker cannot match a pattern, so skip the full pattern pass. */
+const CREDENTIAL_HINT =
+  /-----BEGIN|AKIA|ASIA|gh[pousr]_|github_pat_|xox|glpat-|npm_|AIza|eyJ|:\/\/|basic|bearer|sk-|pk-|api|secret|token|pass|auth|\/home|\/Users|\\Users|\/root/iu;
+
 /** True when `blob` decodes to printable text that itself contains a credential. */
+function decodeBase64(blob: string): string {
+  return Buffer.from(
+    blob
+      .replace(/[\r\n]/gu, "")
+      .replace(/-/gu, "+")
+      .replace(/_/gu, "/"),
+    "base64"
+  ).toString("utf8");
+}
+
 function base64HidesSecret(blob: string): boolean {
-  const decoded = Buffer.from(blob.replace(/-/gu, "+").replace(/_/gu, "/"), "base64").toString("utf8");
+  // Probe a short aligned prefix first: a huge binary blob is rejected without decoding all of it.
+  if (blob.length > 4096) {
+    const probe = decodeBase64(blob.replace(/[\r\n]/gu, "").slice(0, 4096));
+    if (probe.includes("\uFFFD") || probe.replace(/[^\x20-\x7E\t\r\n]/gu, "").length / probe.length < 0.95)
+      return false;
+  }
+  const decoded = decodeBase64(blob);
   if (decoded.length < 8 || decoded.includes("\uFFFD")) return false;
   const printable = decoded.replace(/[^\x20-\x7E\t\r\n]/gu, "").length;
   if (printable / decoded.length < 0.95) return false;
+  if (!CREDENTIAL_HINT.test(decoded.normalize("NFKC"))) return false;
   return applyPatterns(decoded.normalize("NFKC"), {}) !== decoded.normalize("NFKC");
 }
 

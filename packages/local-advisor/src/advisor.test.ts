@@ -297,6 +297,22 @@ describe("runAdvisor: prompt-injection and evidence handling", () => {
     ).rejects.toBeInstanceOf(AdvisorRequestError);
   });
 
+  it("honours the timeout budget at the full evidence cap with adversarial (jwt-like) evidence", async () => {
+    const provider = new FakeProvider(
+      (input) =>
+        new Promise<GenerateResult>((_resolve, reject) => {
+          input.signal.addEventListener("abort", () => reject(new ProviderError("aborted", "aborted")));
+        })
+    );
+    const base = request({ budget: { timeoutMs: 1_000, maxOutputTokens: 512 } });
+    // 4 x 64 KiB = MAX_TOTAL_EVIDENCE_CHARS. "eyJ-" repeated used to make redaction backtrack for ~11 s here.
+    const evidence = [0, 1, 2, 3].map((n) => ({ id: `e-${n}`, kind: "log", content: "eyJ-".repeat(16_384) }));
+    const started = performance.now();
+    const response = await runAdvisor({ ...base, context: { ...base.context, evidence } }, provider);
+    expect(response.status).toBe("timeout");
+    expect(performance.now() - started).toBeLessThan(2_500);
+  });
+
   it("uses the model-supplied output only as a recommendation (no authority fields are honored)", async () => {
     const response = await runAdvisor(
       request(),

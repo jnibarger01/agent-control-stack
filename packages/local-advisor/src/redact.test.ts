@@ -178,11 +178,22 @@ describe("redactText", () => {
     ["scheme-like run without @", () => "Ab3+".repeat(50_000)],
     ["unterminated quoted value", () => cat("pass", 'word = "', "a b ".repeat(50_000))],
     ["repeated key words", () => "token".repeat(40_000)],
-    ["url with no @", () => cat("postgres", "://a:", "b".repeat(200_000))]
+    ["url with no @", () => cat("postgres", "://a:", "b".repeat(200_000))],
+    ["jwt-like run without dots", () => cat("ey", "J-").repeat(50_000)],
+    ["scheme-like run of jwt prefixes", () => cat("ey", "J_").repeat(50_000)],
+    ["long base64 run", () => "QUJD".repeat(50_000)]
   ])("stays linear on adversarial input: %s", (_name, build) => {
     const input = build();
     const started = performance.now();
     redactText(input);
     expect(performance.now() - started).toBeLessThan(2_000);
+  });
+
+  it("redacts a 64 KiB jwt-like run without quadratic backtracking", () => {
+    const input = cat("ey", "J-").repeat(16_384);
+    const started = performance.now();
+    redactText(input);
+    // Was ~2.5 s before the jwt segments were bounded and anchored to the start of a token run.
+    expect(performance.now() - started).toBeLessThan(250);
   });
 });
