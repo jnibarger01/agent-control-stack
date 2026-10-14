@@ -264,6 +264,19 @@ describe("runAdvisor: prompt-injection and evidence handling", () => {
     expect(provider.calls).toHaveLength(0);
   });
 
+  it("includes evidence kinds in the input hash", async () => {
+    const provider = new FakeProvider(() => ok(verdictJson("PASS")));
+    const base = request();
+    const withKind = (kind: string) => ({
+      ...base,
+      context: { ...base.context, evidence: [{ id: "diff-1", kind, content: "return a - b" }] }
+    });
+    const a = await runAdvisor(withKind("other"), provider);
+    const b = await runAdvisor(withKind("test_report"), provider);
+    expect(a.evidenceHashes).toEqual(b.evidenceHashes);
+    expect(a.inputHash).not.toBe(b.inputHash);
+  });
+
   it("uses the model-supplied output only as a recommendation (no authority fields are honored)", async () => {
     const response = await runAdvisor(
       request(),

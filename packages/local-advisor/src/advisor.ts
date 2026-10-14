@@ -75,7 +75,8 @@ export async function runAdvisor(
       mission: request.mission,
       objective,
       constraints,
-      evidence: evidence.map(({ id, sha256 }) => ({ id, sha256 }))
+      // Every inference-relevant evidence field: the prompt includes the kind, so the fingerprint must too.
+      evidence: evidence.map(({ id, kind, sha256 }) => ({ id, kind, sha256 }))
     })
   );
 
