@@ -65,8 +65,13 @@ export function physicalPath(path: string): string | undefined {
 
 /** Containment is judged on physical paths, so a symlink inside a scope cannot carry a path outside it. */
 export function scopeCovers(scope: AutonomousAuthorityDefinition["scope"], target: string): boolean {
-  const path = physicalPath(target);
-  if (path === undefined) return false;
+  const p = physicalPath(target);
+  return p !== undefined && physicalScopeCovers(scope, p);
+}
+
+/** Judges an already-resolved physical path against the scope without resolving it again. */
+export function physicalScopeCovers(scope: AutonomousAuthorityDefinition["scope"], physical: string): boolean {
+  const path = physical;
   return scope.some((allowed) => {
     if (allowed.kind !== "repository" && allowed.kind !== "path") return false;
     if (!isAbsolute(allowed.id)) return false;
