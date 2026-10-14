@@ -177,9 +177,25 @@ export const NON_RETRYABLE_FAILURES: ReadonlySet<FailureCategory> = new Set([
 // Discriminated, typed payloads. Each carries only the fields the executor class needs to be admitted and routed.
 export type WorkUnitPayload =
   | { kind: "planning"; goal: string }
-  | { kind: "coding"; instructions?: string; files?: string[] }
+  | {
+      kind: "coding";
+      instructions?: string;
+      files?: string[];
+      /** General-mission contract (see general-coding.ts). Optional here so legacy coding payloads keep parsing. */
+      repository?: string;
+      baseSha?: string;
+      maxRuntimeMs?: number;
+      maxFiles?: number;
+    }
   | { kind: "shell"; argv: string[]; cwd?: string }
-  | { kind: "tool"; toolName: string; argsHash?: string }
+  | {
+      kind: "tool";
+      toolName: string;
+      argsHash?: string;
+      /** Desktop Commander call contract (see dc-tool-call.ts). Optional here so legacy tool payloads keep parsing. */
+      arguments?: Record<string, unknown>;
+      maxRuntimeMs?: number;
+    }
   | { kind: "desktop"; objective: string }
   | {
       kind: "cua";
@@ -201,6 +217,8 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const isString = (value: unknown, max = 4096): value is string =>
   typeof value === "string" && value.length > 0 && value.length <= max;
+const isBoundedInteger = (value: unknown, max: number): value is number =>
+  typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= max;
 const isStringList = (value: unknown, max = 256): value is string[] =>
   Array.isArray(value) && value.length <= max && value.every((entry) => isString(entry));
 
@@ -304,9 +322,9 @@ export function parseWorkUnitPayload(kind: WorkUnitKind, value: unknown): WorkUn
   if (!isRecord(value)) return invalid("must be an object");
   const allowed: Record<WorkUnitKind, readonly string[]> = {
     planning: ["goal"],
-    coding: ["instructions", "files"],
+    coding: ["instructions", "files", "repository", "baseSha", "maxRuntimeMs", "maxFiles"],
     shell: ["argv", "cwd"],
-    tool: ["toolName", "argsHash"],
+    tool: ["toolName", "argsHash", "arguments", "maxRuntimeMs"],
     desktop: ["objective"],
     cua: ["objective", "allowedApplications", "allowedOrigins", "actions"],
     verification: ["targetUnitId"],
@@ -326,10 +344,20 @@ export function parseWorkUnitPayload(kind: WorkUnitKind, value: unknown): WorkUn
       if (value.instructions !== undefined && !isString(value.instructions, 16384))
         return invalid("has bad instructions");
       if (value.files !== undefined && !isStringList(value.files)) return invalid("has bad files");
+      if (value.repository !== undefined && !isString(value.repository, 1024)) return invalid("has bad repository");
+      if (value.baseSha !== undefined && !(typeof value.baseSha === "string" && /^[a-f0-9]{40}$/u.test(value.baseSha)))
+        return invalid("has bad baseSha");
+      if (value.maxRuntimeMs !== undefined && !isBoundedInteger(value.maxRuntimeMs, 86_400_000))
+        return invalid("has bad maxRuntimeMs");
+      if (value.maxFiles !== undefined && !isBoundedInteger(value.maxFiles, 1000)) return invalid("has bad maxFiles");
       return {
         kind,
         ...(value.instructions === undefined ? {} : { instructions: value.instructions as string }),
-        ...(value.files === undefined ? {} : { files: value.files as string[] })
+        ...(value.files === undefined ? {} : { files: value.files as string[] }),
+        ...(value.repository === undefined ? {} : { repository: value.repository as string }),
+        ...(value.baseSha === undefined ? {} : { baseSha: value.baseSha as string }),
+        ...(value.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: value.maxRuntimeMs as number }),
+        ...(value.maxFiles === undefined ? {} : { maxFiles: value.maxFiles as number })
       };
     case "shell":
       if (!isStringList(value.argv, 128) || (value.argv as string[]).length === 0) return invalid("requires argv");
@@ -342,10 +370,26 @@ export function parseWorkUnitPayload(kind: WorkUnitKind, value: unknown): WorkUn
     case "tool":
       if (!isString(value.toolName, 128)) return invalid("requires toolName");
       if (value.argsHash !== undefined && !isString(value.argsHash, 128)) return invalid("has bad argsHash");
+      if (value.arguments !== undefined) {
+        // Plain JSON only, and bounded: the arguments are stored, hashed and replayed.
+        if (!isRecord(value.arguments)) return invalid("has bad arguments");
+        let encoded: string | undefined;
+        try {
+          encoded = JSON.stringify(value.arguments);
+        } catch {
+          encoded = undefined;
+        }
+        if (encoded === undefined || encoded.length > 32_768) return invalid("has bad arguments");
+      }
+      if (value.maxRuntimeMs !== undefined && !isBoundedInteger(value.maxRuntimeMs, 86_400_000)) {
+        return invalid("has bad maxRuntimeMs");
+      }
       return {
         kind,
         toolName: value.toolName,
-        ...(value.argsHash === undefined ? {} : { argsHash: value.argsHash as string })
+        ...(value.argsHash === undefined ? {} : { argsHash: value.argsHash as string }),
+        ...(value.arguments === undefined ? {} : { arguments: value.arguments }),
+        ...(value.maxRuntimeMs === undefined ? {} : { maxRuntimeMs: value.maxRuntimeMs as number })
       };
     case "desktop":
       if (!isString(value.objective, 8192)) return invalid("requires objective");

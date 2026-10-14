@@ -234,9 +234,14 @@ export function deadlineResult(dispatch: DispatchEnvelope, now: string): ResultE
   };
 }
 
+/** The live claim a dispatch ran under. An adapter that fences at the execution boundary checks it against durable state. */
+export interface ExecutionClaim {
+  claimToken: string;
+}
+
 export interface WorkUnitExecutorAdapter {
   readonly lane: ExecutorLane;
-  execute(dispatch: DispatchEnvelope, signal?: AbortSignal): Promise<ResultEnvelope>;
+  execute(dispatch: DispatchEnvelope, signal?: AbortSignal, claim?: ExecutionClaim): Promise<ResultEnvelope>;
 }
 
 export class CoderExecutionAdapter implements WorkUnitExecutorAdapter {
@@ -727,7 +732,8 @@ export class WorkUnitExecutionLedger {
         if (row.report_hash === reportHash) return { applied: "duplicate" };
         return { applied: "rejected_invalid", reason: "attempt already has a different terminal report" };
       }
-      const unit = this.store.workUnits(row.mission_id).find((candidate) => candidate.unitId === row.unit_id);
+      // Only the claim columns: a unit whose stored payload no longer parses must still be failed and released here.
+      const unit = this.store.workUnitClaim(row.mission_id, row.unit_id);
       if (
         !unit ||
         unit.status !== "running" ||
