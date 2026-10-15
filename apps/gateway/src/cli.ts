@@ -1,6 +1,7 @@
 import { ProductionConfigError, reportProductionConfigFailure } from "./production-config.js";
 import { startGateway } from "./server.js";
 import { installGracefulShutdown, resolveDrainTimeoutMs, resolveShutdownTimeoutMs } from "./lifecycle.js";
+import { resolveLeaseReaperIntervalMs } from "./lease-reaper.js";
 
 const DEFAULT_ACTOR_DISCOVERY_INTERVAL_MS = 60_000;
 
@@ -16,7 +17,10 @@ function resolveActorDiscoveryIntervalMs(env: NodeJS.ProcessEnv = process.env): 
 }
 
 try {
-  const app = await startGateway({ actorDiscovery: { intervalMs: resolveActorDiscoveryIntervalMs() } });
+  const app = await startGateway({
+    actorDiscovery: { intervalMs: resolveActorDiscoveryIntervalMs() },
+    leaseReaper: { intervalMs: resolveLeaseReaperIntervalMs() }
+  });
   const hooks = app.acsShutdown;
   installGracefulShutdown(app, {
     timeoutMs: resolveShutdownTimeoutMs(),
