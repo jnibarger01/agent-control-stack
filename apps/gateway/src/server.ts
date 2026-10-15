@@ -131,6 +131,7 @@ import {
 import { z, ZodError } from "zod";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { AgentRunService, agentDispatchConfigFromEnv, type AgentDispatchConfig } from "./agent-runs.js";
+import { startLeaseReaper } from "./lease-reaper.js";
 import { registerAgentRoutes } from "./agent-routes.js";
 import {
   McpClientService,
@@ -284,6 +285,13 @@ export interface GatewayOptions {
    * a heartbeat and every agent expires to offline after the TTL. 0 or absent disables the loop.
    */
   actorDiscovery?: { intervalMs: number } & Partial<DiscoverLocalActorsDeps>;
+  /**
+   * Reap expired attempt leases on this cadence. Without it, expiry only
+   * converges opportunistically (permit acquisition, readiness probes,
+   * shutdown drain): an idle gateway never reaps. 0 or absent disables the
+   * loop. Env: ACS_LEASE_REAPER_INTERVAL_MS.
+   */
+  leaseReaper?: { intervalMs: number };
   /** `observe` (default) or `require_label`. Defaults to ACS_MCP_CLIENT_POLICY. */
   mcpClientPolicy?: McpClientPolicy;
   /** Agent CLI dispatch settings. Defaults to the ACS_AGENT_* environment (off unless enabled). */
@@ -4542,7 +4550,22 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   }, 30_000);
   adminExpirySweep.unref();
+
+  // Fixed-cadence lease reaper: without it, failExpiredLeases only runs
+  // opportunistically (permit acquisition, readiness probes, shutdown drain)
+  // and an idle gateway never reaps. 0 or absent disables the loop.
+  const leaseReaperConfig = options.leaseReaper;
+  const leaseReaper =
+    leaseReaperConfig && leaseReaperConfig.intervalMs > 0
+      ? startLeaseReaper({
+          failExpiredLeases: () => workItems.failExpiredLeases(),
+          intervalMs: leaseReaperConfig.intervalMs,
+          onError: (error) => app.log.warn({ err: error }, "lease reaper sweep failed")
+        })
+      : undefined;
+
   app.addHook("onClose", async () => {
+    leaseReaper?.stop();
     clearInterval(adminExpirySweep);
     if (ownsDcScheduler) dcScheduler.close();
     executionAdmission.shutdown();
@@ -5465,7 +5488,7 @@ export function renderLoginPage(redirectTo = "/"): string {
 }
 
 export async function startGateway(
-  startOptions: Pick<GatewayOptions, "actorDiscovery"> = {}
+  startOptions: Pick<GatewayOptions, "actorDiscovery" | "leaseReaper"> = {}
 ): Promise<FastifyInstance> {
   validateProductionConfig();
   const listen = gatewayListenConfig();
@@ -5474,7 +5497,8 @@ export async function startGateway(
   const app = buildGateway({
     dbPath,
     ...(codingMissionPorts ? { codingMissionPorts } : {}),
-    ...(startOptions.actorDiscovery ? { actorDiscovery: startOptions.actorDiscovery } : {})
+    ...(startOptions.actorDiscovery ? { actorDiscovery: startOptions.actorDiscovery } : {}),
+    ...(startOptions.leaseReaper ? { leaseReaper: startOptions.leaseReaper } : {})
   });
   await app.listen(listen);
   return app;
