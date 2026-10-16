@@ -38,6 +38,7 @@ describe("Jace Commander split read/write containment (ACS signing boundary)", (
     expect(() => check("move_file", { from: join(home, "notes.txt"), to: join(projects, "x") })).toThrow();
     expect(() => check("edit_block", { path: join(home, "notes.txt"), old: "text", new: "other" })).toThrow();
     expect(() => check("git_add", { repo: home, paths: ["notes.txt"] })).toThrow();
+    expect(() => check("git_status", { repo: home })).toThrow();
   });
   it("fails closed for unrestricted execution even with cwd in projects", () => {
     expect(() => check("start_process", { argv: ["/usr/bin/node", "--version"], cwd: projects })).toThrow(/unavailable/);

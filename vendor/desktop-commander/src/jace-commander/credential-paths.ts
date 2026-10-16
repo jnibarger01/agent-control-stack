@@ -12,7 +12,7 @@
 import path from 'node:path';
 
 export const RESTRICTED_PATH =
-  /(^|\/)(\.env(\.|$)|\.git\/config$|id_rsa$|id_ed25519$|\.ssh(\/|$)|\.gnupg(\/|$)|\.aws\/credentials$|\.aws\/config$|\.kube\/config$|\.npmrc$|\.netrc$|credentials(\.json)?$|token(\.json)?$|\.docker\/config\.json$)/i;
+  /(^|\/)(\.env(\.|$)|\.git\/config$|id_rsa$|id_ed25519$|\.ssh(\/|$)|\.gnupg(\/|$)|\.aws\/credentials$|\.aws\/config$|\.kube\/config$|\.npmrc$|\.netrc$|credentials(\.json)?$|token(\.json)?$|\.docker\/config\.json$|\.config\/agent-control-stack(\/|$)|\.local\/share\/keyrings(\/|$)|\.config\/(google-chrome|chromium|BraveSoftware|microsoft-edge)(\/|$)|\.mozilla(\/|$))/i;
 
 export const CREDENTIAL_BASENAME =
   /^(\.env(\..*)?|.*\.env|\.netrc|\.npmrc|\.pgpass|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|credentials(\.json)?|token(\.json)?|.*\.pem|.*\.key)$/i;

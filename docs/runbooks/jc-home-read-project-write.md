@@ -4,7 +4,7 @@
 
 - Allow **ordinary managed filesystem reads** inside the canonical home directory (`/home/jacen`), including projects.
 - Deny filesystem reads **outside home** through JC's managed filesystem tools.
-- Restrict JC filesystem writes and Git mutations to `/home/jacen/projects`, with existing ACS authorization/approval.
+- Restrict **all Git tools** (even reads that may refresh metadata) and JC filesystem writes to `/home/jacen/projects`, with existing ACS authorization/approval.
 - Keep credential and service-state directories inaccessible. Preserve canonical path and symlink checks.
 - Importing a text file can use distinct `read_file` and `write_file` authorizations; this is **not** a general binary-safe copy operation. The `move_file` tool changes the source and is not an import.
 

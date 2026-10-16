@@ -94,7 +94,8 @@ export function containJaceCommanderInvocation(
     "write_file", "create_directory", "move_file", "edit_block",
     "git_add", "git_commit", "git_fetch", "git_push"
   ]);
-  const active = writeTools.has(invocation.toolName) && containment.writeRoots !== undefined
+  // Even git status/diff may refresh index metadata. Keep ALL git operations in projects.
+  const active = (writeTools.has(invocation.toolName) || invocation.toolName.startsWith("git_")) && containment.writeRoots !== undefined
     ? { allowedRoots: containment.writeRoots, deniedRoots: containment.deniedRoots }
     : containment;
   for (const name of invocation.policy.pathArguments) {

@@ -67,7 +67,9 @@ export function defaultDeniedRoots(stateDir: string, home = os.homedir()): strin
     stateDir,
     '/etc/jace-commander',
     ...['.ssh', '.gnupg', '.aws', '.azure', '.kube', '.docker', '.config/gcloud',
-      '.config/desktop-commander-mcp-gateway', '.config/dc-relay', '.desktop-commander']
+      '.config/desktop-commander-mcp-gateway', '.config/dc-relay', '.desktop-commander',
+      '.config/agent-control-stack', '.local/share/keyrings', '.config/google-chrome',
+      '.config/chromium', '.config/BraveSoftware', '.config/microsoft-edge', '.mozilla']
       .map((relative) => path.join(home, relative)),
   ];
 }

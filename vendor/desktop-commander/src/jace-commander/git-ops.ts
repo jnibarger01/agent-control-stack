@@ -44,7 +44,8 @@ async function git(repo: string, args: string[], maxBuffer = 1024 * 1024): Promi
 async function repoRoot(requested: unknown, policy: JcFsPolicy, writable = false): Promise<string> {
   const contained = containJcPath(requested, policy);
   const top = (await git(contained, ['rev-parse', '--show-toplevel'])).trim();
-  return writable ? containJcWritePath(top, policy) : containJcPath(top, policy);
+  // Read-only Git commands may still refresh metadata; never run them on home-only repos.
+  return (writable || policy.writeRoots !== undefined) ? containJcWritePath(top, policy) : containJcPath(top, policy);
 }
 
 function relativePath(input: unknown): string {

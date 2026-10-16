@@ -27,7 +27,7 @@ export interface ContainmentConfig {
 // Credential / system paths are denied regardless of allow roots. Mirrors the
 // pattern in packages/policy-gate/src/rules.ts and machine-controller/src/path.ts.
 const restrictedPathPattern =
-  /(^|\/)(\.env(\.|$)|\.git\/config$|id_rsa$|id_ed25519$|\.ssh(\/|$)|\.gnupg(\/|$)|\.aws\/credentials$|\.aws\/config$|\.kube\/config$|\.npmrc$|\.netrc$|credentials(\.json)?$|token(\.json)?$|\.docker\/config\.json$)/i;
+  /(^|\/)(\.env(\.|$)|\.git\/config$|id_rsa$|id_ed25519$|\.ssh(\/|$)|\.gnupg(\/|$)|\.aws\/credentials$|\.aws\/config$|\.kube\/config$|\.npmrc$|\.netrc$|credentials(\.json)?$|token(\.json)?$|\.docker\/config\.json$|\.config\/agent-control-stack(\/|$)|\.local\/share\/keyrings(\/|$)|\.config\/(google-chrome|chromium|BraveSoftware|microsoft-edge)(\/|$)|\.mozilla(\/|$))/i;
 
 export interface ContainedPath {
   requested: string;
