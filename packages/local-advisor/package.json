@@ -15,7 +15,7 @@
     "@agent-control-stack/advisory": "0.1.0",
     "@agent-control-stack/looptrace-query": "0.1.0",
     "@agent-control-stack/model-broker": "0.1.0",
-    "zod": "^4.6.5",
+    "zod": "^4.6.7",
     "@agent-control-stack/work-items": "0.1.0",
     "@agent-control-stack/shared": "0.1.0"
   }
