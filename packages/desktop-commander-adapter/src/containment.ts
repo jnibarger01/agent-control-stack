@@ -19,6 +19,8 @@ import { ControlStackError } from "@agent-control-stack/shared";
 
 export interface ContainmentConfig {
   allowedRoots: readonly string[];
+  /** Optional, narrower mutation boundary. Unset preserves legacy containment. */
+  writeRoots?: readonly string[];
   deniedRoots: readonly string[];
 }
 

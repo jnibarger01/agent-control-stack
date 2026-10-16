@@ -83,12 +83,26 @@ export function containJaceCommanderInvocation(
   invocation: JaceCommanderInvocation,
   containment: ContainmentConfig
 ): void {
+  // Arbitrary executables and the root helper are not constrained by cwd.
+  // Fail closed when read access is wider than the write boundary.
+  if (containment.writeRoots !== undefined &&
+      (invocation.toolName === "start_process" || invocation.toolName === "privileged_exec")) {
+    throw new ControlStackError("jace_commander_path_not_allowed",
+      "process execution is unavailable with split read/write roots until OS confinement is implemented");
+  }
+  const writeTools = new Set([
+    "write_file", "create_directory", "move_file", "edit_block",
+    "git_add", "git_commit", "git_fetch", "git_push"
+  ]);
+  const active = writeTools.has(invocation.toolName) && containment.writeRoots !== undefined
+    ? { allowedRoots: containment.writeRoots, deniedRoots: containment.deniedRoots }
+    : containment;
   for (const name of invocation.policy.pathArguments) {
     const value = invocation.arguments[name];
     const paths = Array.isArray(value) ? value : [value];
     for (const requested of paths) {
       try {
-        containPath(containment, requested as string);
+        containPath(active, requested as string);
       } catch (error) {
         const code = error instanceof ControlStackError ? error.code : "desktop_commander_path_invalid";
         throw new ControlStackError(
