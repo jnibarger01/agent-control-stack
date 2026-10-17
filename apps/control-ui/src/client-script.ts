@@ -4,6 +4,7 @@ import { codingMissionPanelSource } from "./coding-mission-panel.js";
 import { operationsClientSource } from "./operations-client.js";
 import { CONFIRM_COPY } from "./approval-actions.js";
 import { auditTimelineClientSource } from "./audit-timeline.js";
+import { timeTravelScrubberClientSource } from "./time-travel-scrubber.js";
 import { composerClientSource } from "./composer.js";
 import { liveDashboardClientSource } from "./live-dashboard.js";
 import { operatorWorkflowClientSource } from "./operator-workflow.js";
@@ -194,6 +195,7 @@ ${redactionClientSource()}
 ${workItemControlsClientSource()}
 ${liveDashboardClientSource()}
 ${auditTimelineClientSource()}
+${timeTravelScrubberClientSource()}
 ${systemProbesClientSource()}
 ${operatorWorkflowClientSource()}
 ${auditRowsClientSource()}

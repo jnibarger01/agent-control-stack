@@ -13,6 +13,7 @@ import {
   DEFAULT_EVENT_LIMIT,
   MAX_DASHBOARD_FINISHED_LIMIT,
   MAX_EVENT_LIMIT,
+  readMissionTimeTravel,
   type ReadEventsOptions,
   type RegisteredTunnelSession,
   type SqliteExecutionReadStore,
@@ -40,6 +41,16 @@ export const dashboardQuerySchema = z
 export const dashboardEventsQuerySchema = z.object({
   beforeSequence: z.coerce.number().int().positive().optional(),
   limit: z.coerce.number().int().positive().optional()
+});
+
+/** Upper bound matches the work-items time-travel projection ceiling (2000 events). */
+const MAX_TIME_TRAVEL_EVENTS = 2000;
+
+// Read-only replay query. Validation is also enforced by readMissionTimeTravel;
+// this schema only rejects malformed input early with a 400.
+export const dashboardMissionTimeTravelQuerySchema = z.object({
+  asOfSequence: z.coerce.number().int().nonnegative().optional(),
+  maxEvents: z.coerce.number().int().min(1).max(MAX_TIME_TRAVEL_EVENTS).optional()
 });
 
 export function reportedExecutionBackend(): "dry_run" | "desktop_commander" | undefined {
@@ -243,6 +254,25 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardRou
     reply.header("cache-control", "no-store");
     return { at: new Date().toISOString(), metrics: metrics.summary() };
   });
+
+  // Read-only mission replay. The projection never executes or authorizes
+  // historical actions (sideEffects: "disabled") and verifies the full audit chain.
+  app.get<{ Params: { id: string } }>(
+    "/dashboard/missions/:id/time-travel",
+    { preHandler: requireRead },
+    async (request, reply) => {
+      try {
+        const query = dashboardMissionTimeTravelQuerySchema.parse(request.query ?? {});
+        reply.header("cache-control", "no-store");
+        return readMissionTimeTravel(workItems, request.params.id, {
+          ...(query.asOfSequence === undefined ? {} : { asOfSequence: query.asOfSequence }),
+          ...(query.maxEvents === undefined ? {} : { maxEvents: query.maxEvents })
+        });
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
 
   app.get("/dashboard/events", { preHandler: requireRead }, async (request, reply) => {
     try {

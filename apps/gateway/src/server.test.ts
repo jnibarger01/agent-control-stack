@@ -889,6 +889,63 @@ describe("mission control gateway", () => {
     }
   });
 
+  it("serves a read-only mission replay that verifies the chain and rejects bad input", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-api-time-travel-"));
+    const dbPath = join(dir, "control.db");
+    const seed = new SqliteWorkItemStore(dbPath);
+    const workItem = seed.create({
+      title: "Replay check",
+      requester: "user",
+      intent: "verify mission replay",
+      requestedActions: [{ kind: "manual", description: "bound" }],
+      risk: "low"
+    });
+    seed.recordPolicyDecision({
+      workItemId: workItem.id,
+      actionHash: "hash-replay-1",
+      decision: "deny",
+      reason: "replay fixture",
+      matchedRules: ["deny:replay"],
+      context: {}
+    });
+    seed.close();
+
+    const anonymousApp = buildGateway({ dbPath, logger: false, auth: testAuth });
+    const app = buildTestGateway({ dbPath, logger: false });
+    const url = `/dashboard/missions/${workItem.id}/time-travel`;
+
+    try {
+      const anonymous = await anonymousApp.inject({ method: "GET", url });
+      const latest = await app.inject({ method: "GET", url });
+      const earliest = await app.inject({ method: "GET", url: `${url}?asOfSequence=1` });
+      const invalidCutoff = await app.inject({ method: "GET", url: `${url}?asOfSequence=abc` });
+      const overlarge = await app.inject({ method: "GET", url: `${url}?maxEvents=999999` });
+      const unknown = await app.inject({ method: "GET", url: "/dashboard/missions/wrk_missing/time-travel" });
+
+      expect(anonymous.statusCode).toBe(401);
+
+      expect(latest.statusCode).toBe(200);
+      expect(latest.headers["cache-control"]).toBe("no-store");
+      const snapshot = latest.json();
+      expect(snapshot.schemaVersion).toBe("acs.mission-time-travel.v1");
+      expect(snapshot.integrity).toBe("full-chain-verified");
+      expect(snapshot.sideEffects).toBe("disabled");
+      expect(snapshot.events.length).toBeGreaterThan(0);
+
+      expect(earliest.statusCode).toBe(200);
+      expect(earliest.json().events.length).toBeLessThanOrEqual(snapshot.events.length);
+
+      expect(invalidCutoff.statusCode).toBe(400);
+      expect(overlarge.statusCode).toBe(400);
+      // Unknown missions must never surface as a server error.
+      expect(unknown.statusCode).toBeLessThan(500);
+    } finally {
+      await app.close();
+      await anonymousApp.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("serves the attributed agent registry API", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-agent-registry-api-"));
     const dbPath = join(dir, "control.db");
