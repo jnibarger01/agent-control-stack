@@ -251,6 +251,14 @@ export async function mcpAccessTokenOutcome(
       ? PERMANENT_REFRESH_ERRORS.get(token.error)
       : undefined;
     if (permanent) {
+      // Compare-and-swap: another process sharing this state directory may have refreshed (and rotated) in the meantime.
+      // Its token is good and ours was rejected only because it was already spent, so do not overwrite its credential.
+      const current = loadMcpToken(stateDir);
+      if (current && current.refreshToken !== refreshToken) {
+        return current.expiresAt - Date.now() > 60_000
+          ? { kind: 'token', accessToken: current.accessToken }
+          : { kind: 'unavailable', reason: 'credential was refreshed by another process; retry' };
+      }
       // Remember the verdict so every later call (and a status check) says "reconnect" without another round trip.
       const { refreshToken: _dead, ...rest } = stored;
       saveMcpToken(stateDir, { ...rest, reauthRequired: { reason: permanent, at: new Date().toISOString() } });

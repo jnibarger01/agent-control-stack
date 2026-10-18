@@ -45,19 +45,15 @@ const MAX_SUBJECTS = 20;
 export const MCP_AUTH_KINDS = ["granted", "refreshed", "refresh_failed", "token_rejected", "revoked"] as const;
 export type McpAuthKind = (typeof MCP_AUTH_KINDS)[number];
 /** The authorization is gone; only a new sign-in can restore it. */
-export const MCP_AUTH_PERMANENT_REASONS = [
-  "refresh_rejected",
-  "refresh_expired",
-  "refresh_reused",
-  "revoked",
-  "invalid_client"
-] as const;
+export const MCP_AUTH_PERMANENT_REASONS = ["refresh_rejected", "refresh_expired", "refresh_reused", "revoked"] as const;
 export type McpAuthFailureReason = (typeof MCP_AUTH_PERMANENT_REASONS)[number];
 /** Reported for visibility but deliberately NOT a reason to reconnect. */
 export const MCP_AUTH_TRANSIENT_REASONS = [
   "temporarily_unavailable",
   "access_token_expired",
-  "insufficient_scope"
+  "insufficient_scope",
+  // Describes the caller (a wrong or missing secret), not the client's authorization: anyone holding a leaked token can cause it.
+  "invalid_client"
 ] as const;
 export type McpAuthState = "ok" | "reauth_required";
 
@@ -77,6 +73,8 @@ export interface McpAuthEventInput {
   reason?: string;
   /** When the refresh token this event leaves the client holding stops working. */
   refreshExpiresAt?: string;
+  /** When the edge observed the outcome. Reports travel on separate connections, so arrival order is not event order. */
+  observedAt?: string;
 }
 
 export interface McpClientClaims {
@@ -380,16 +378,19 @@ export class McpClientService {
       if (subject && !state.subjects.includes(subject) && state.subjects.length < MAX_SUBJECTS)
         state.subjects.push(subject);
       const auth = state.auth;
+      // Order by when the edge observed the outcome, not by arrival: a late failure must not undo a newer success.
+      const observed = typeof body.observedAt === "string" ? Date.parse(body.observedAt) : NaN;
+      const at = Number.isFinite(observed) ? observed : ms;
       if (kind === "granted" || kind === "refreshed") {
-        auth.lastSuccessMs = Math.max(auth.lastSuccessMs ?? 0, ms);
-        delete auth.failure;
+        auth.lastSuccessMs = Math.max(auth.lastSuccessMs ?? 0, at);
+        if (auth.failure && (auth.lastFailureMs ?? 0) <= at) delete auth.failure;
         const expires = typeof body.refreshExpiresAt === "string" ? Date.parse(body.refreshExpiresAt) : NaN;
-        if (Number.isFinite(expires)) auth.refreshExpiresMs = expires;
+        if (Number.isFinite(expires)) auth.refreshExpiresMs = Math.max(auth.refreshExpiresMs ?? 0, expires);
       } else if (kind === "refresh_failed" || kind === "revoked") {
         const reason = MCP_AUTH_PERMANENT_REASONS.find((r) => r === body.reason);
-        if (reason) {
+        if (reason && at > (auth.lastSuccessMs ?? 0)) {
           auth.failure = reason;
-          auth.lastFailureMs = Math.max(auth.lastFailureMs ?? 0, ms);
+          auth.lastFailureMs = Math.max(auth.lastFailureMs ?? 0, at);
         }
       }
     } else if (event.name === MCP_CLIENT_EVENTS.labelled) {
@@ -575,6 +576,12 @@ export class McpClientService {
     }
     const subject = sanitizeClaim(input.subject, 128);
     const expires = input.refreshExpiresAt ? Date.parse(input.refreshExpiresAt) : NaN;
+    const observed = input.observedAt ? Date.parse(input.observedAt) : NaN;
+    // Trust the edge's clock only when it agrees with ours to within ten minutes; otherwise use arrival time.
+    const observedAt =
+      Number.isFinite(observed) && Math.abs(observed - this.now()) <= 10 * 60_000
+        ? new Date(observed).toISOString()
+        : undefined;
     this.store.recordSystemEvent({
       name: MCP_CLIENT_EVENTS.authEvent,
       body: {
@@ -583,7 +590,8 @@ export class McpClientService {
         ...(subject ? { subject } : {}),
         kind: input.kind,
         ...(reason ? { reason } : {}),
-        ...(Number.isFinite(expires) ? { refreshExpiresAt: new Date(expires).toISOString() } : {})
+        ...(Number.isFinite(expires) ? { refreshExpiresAt: new Date(expires).toISOString() } : {}),
+        ...(observedAt ? { observedAt } : {})
       },
       attributes: { "mcp.client_id": clientId, "mcp.lane": input.lane, "mcp.auth_kind": input.kind }
     });

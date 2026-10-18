@@ -19,7 +19,7 @@ import { ClientInfoCache, createClientObserver, extractClientInfo } from './clie
 import { localRoutingFromEnv, stripAuthorityMeta } from './jc-routing.js';
 import { managedModeFromEnv, jcModeFromEnv, identityAttribution, capabilityTransport, acsPost, isToolsCall, dcRuntimeIdentityFromState, issueRuntimeBootstrap, completeRuntimeBootstrap, injectRuntimeBootstrap } from './managed.js';
 import { dcBridgeReady } from './readiness.js';
-import { bearerChallenge, classifyBearer, createAuthEventReporter, resolveRefresh } from './auth-health.js';
+import { REPORTABLE_REFRESH_FAILURES, bearerChallenge, classifyBearer, createAuthEventReporter, equalSecrets, resolveRefresh } from './auth-health.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -44,7 +44,7 @@ const GATEWAY_EXECUTION_TOKEN = process.env.GATEWAY_EXECUTION_TOKEN || ''; // op
 const EDGE_TEST_MODE = process.env.EDGE_TEST_MODE === '1';
 const testTtl = (name, fallback) => {
   const v = Number.parseInt(process.env[name] || '', 10);
-  return EDGE_TEST_MODE && Number.isFinite(v) && v > 0 ? v : fallback;
+  return EDGE_TEST_MODE && Number.isFinite(v) && v > 0 ? Math.min(v, 86_400) : fallback; // lab only, capped at one day
 };
 const ACCESS_TTL_S = testTtl('EDGE_TEST_ACCESS_TTL_S', 3600);
 const REFRESH_TTL_S = testTtl('EDGE_TEST_REFRESH_TTL_S', 30 * 24 * 3600);
@@ -163,9 +163,19 @@ const loadJson = (f, d) => { try { return JSON.parse(fs.readFileSync(f, 'utf8'))
 // replaces a pre-existing file that was created with looser permissions.
 const saveJson = (f, o) => {
   const tmp = `${f}.${process.pid}.tmp`;
-  const fd = fs.openSync(tmp, 'w', 0o600);
-  try { fs.writeSync(fd, JSON.stringify(o, null, 2)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  fs.rmSync(tmp, { force: true }); // never write through a stale file or a planted symlink; 'wx' below refuses both
+  const fd = fs.openSync(tmp, 'wx', 0o600);
+  try {
+    fs.fchmodSync(fd, 0o600);
+    fs.writeSync(fd, JSON.stringify(o, null, 2));
+    fs.fsyncSync(fd);
+  } catch (error) {
+    fs.closeSync(fd); fs.rmSync(tmp, { force: true }); // do not leave plaintext tokens behind on ENOSPC etc.
+    throw error;
+  }
+  fs.closeSync(fd);
   fs.renameSync(tmp, f);
+  try { const dfd = fs.openSync(path.dirname(f), 'r'); try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); } } catch { /* best effort: durability of the rename */ }
 };
 const clients = loadJson(clientsFile, {});   // client_id -> {redirect_uris, scope, token_endpoint_auth_method, client_secret?}
 const refreshTokens = loadJson(tokensFile, {}); // jti -> {client_id, exp, active}
@@ -517,7 +527,7 @@ async function handleToken(req, res, body, laneHint = null) {
       return jsonError(res, 400, 'invalid_target', 'authorization code belongs to a different OAuth lane');
     const client = await resolveClient(client_id || g.client_id);
     if (!client || (client_id && client_id !== g.client_id)) return jsonError(res, 400, 'invalid_grant', 'client mismatch');
-    if (client.client_secret && client_secret !== client.client_secret) return jsonError(res, 401, 'invalid_client', 'client auth failed');
+    if (client.client_secret && !equalSecrets(client.client_secret, client_secret)) return jsonError(res, 401, 'invalid_client', 'client auth failed');
     if (redirect_uri !== g.redirect_uri) return jsonError(res, 400, 'invalid_grant', 'redirect_uri mismatch');
     if (!code_verifier) return jsonError(res, 400, 'invalid_request', 'code_verifier required');
     const expect = b64u(crypto.createHash('sha256').update(code_verifier).digest());
@@ -532,6 +542,12 @@ async function handleToken(req, res, body, laneHint = null) {
     // Authenticate the client first (RFC 6749 section 6): a confidential client's refresh token alone is not enough.
     const known = Object.hasOwn(refreshTokens, refresh_token) ? refreshTokens[refresh_token] : undefined;
     const refreshClient = known ? await resolveClient(known.client_id) : null;
+    // A record whose own client is gone from clients.json must not fall back to "public client". https ids are CIMD
+    // documents, which never carry a secret, so an unreachable metadata host must not turn into a refusal.
+    if (known && !refreshClient && !/^https:\/\//.test(String(known.client_id))) {
+      console.log(`auth: refresh refused reason=client_unknown client=${String(known.client_id).slice(0, 64)}`);
+      return jsonError(res, 400, 'invalid_grant', 'invalid refresh token');
+    }
     const resolved = resolveRefresh(refreshTokens, refresh_token, now(), {
       clientSecret: refreshClient && refreshClient.client_secret,
       presentedSecret: client_secret,
@@ -539,8 +555,9 @@ async function handleToken(req, res, body, laneHint = null) {
     });
     const rejectedLane = known ? laneForGrant(known) : null;
     if (resolved.ok === false) {
-      // A superseded token is a stale duplicate from a client that has moved on: refused, but not reported as a problem.
-      if (rejectedLane && resolved.clientId && resolved.reason !== 'refresh_superseded') reportAuth(rejectedLane.name, { clientId: resolved.clientId, subject: 'jacen' }, 'refresh_failed', resolved.reason);
+      // Every refusal leaves a trace (reason, lane, client; never a token), whether or not reporting to ACS is on.
+      console.log(`auth: refresh refused reason=${resolved.reason} lane=${rejectedLane ? rejectedLane.name : '-'} client=${String(resolved.clientId || client_id || '-').slice(0, 64)}`);
+      if (rejectedLane && resolved.clientId && REPORTABLE_REFRESH_FAILURES.has(resolved.reason)) reportAuth(rejectedLane.name, { clientId: resolved.clientId, subject: 'jacen' }, 'refresh_failed', resolved.reason);
       if (resolved.reason === 'invalid_client') return jsonError(res, 401, 'invalid_client', 'client auth failed');
       return jsonError(res, 400, 'invalid_grant', 'invalid refresh token');
     }
@@ -560,7 +577,14 @@ async function handleToken(req, res, body, laneHint = null) {
   return jsonError(res, 400, 'unsupported_grant_type', 'supported: authorization_code, refresh_token');
 }
 
+// Dynamic client registration is unauthenticated; bound its rate so a flood cannot starve /mcp (each write is a full, fsynced rewrite).
+const registrations = [];
+const REGISTER_LIMIT_PER_MIN = 60;
 async function handleRegister(req, res, body, lane = DC_OAUTH_LANE) {
+  const t0 = Date.now();
+  while (registrations.length && t0 - registrations[0] > 60_000) registrations.shift();
+  if (registrations.length >= REGISTER_LIMIT_PER_MIN) return jsonError(res, 429, 'temporarily_unavailable', 'too many registrations; retry later', { 'Retry-After': '30' });
+  registrations.push(t0);
   let meta;
   try { meta = JSON.parse(body.toString('utf8')); } catch { return jsonError(res, 400, 'invalid_client_metadata', 'body must be JSON'); }
   const uris = meta.redirect_uris;

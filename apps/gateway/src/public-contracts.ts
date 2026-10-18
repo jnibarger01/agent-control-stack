@@ -214,7 +214,8 @@ export const mcpAuthEventBodySchema = z
         "insufficient_scope"
       ])
       .optional(),
-    refreshExpiresAt: z.string().datetime().optional()
+    refreshExpiresAt: z.string().datetime().optional(),
+    observedAt: z.string().datetime().optional()
   })
   .strict();
 

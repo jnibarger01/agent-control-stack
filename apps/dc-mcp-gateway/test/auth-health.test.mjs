@@ -13,7 +13,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { bearerChallenge, classifyBearer, resolveRefresh } from '../auth-health.js';
+import { DUPLICATE_REFRESH_WINDOW_S, REPORTABLE_REFRESH_FAILURES, bearerChallenge, classifyBearer, resolveRefresh } from '../auth-health.js';
 
 const KEY = 'k'.repeat(32);
 const ISSUER = 'https://gw.test';
@@ -96,15 +96,23 @@ test('refresh: a confidential client must authenticate; a stolen refresh token a
 
 // --- Rotation is strict. There is no retry or cached-response path (it was removed). ---
 
-test('strict rotation: any reuse of a rotated token is refresh_reused, even moments later and even for the authenticated owner', () => {
-  const rotated = rec({ active: false, rotatedAt: NOW - 1 });
+test('strict rotation: reuse of a rotated token is refused, even for the authenticated owner', () => {
+  const rotated = rec({ active: false, rotatedAt: NOW - 60, successor: 'next' });
+  const records = { r1: rotated, next: rec({ active: true }) };
   const opts = { clientSecret: SECRET, presentedSecret: SECRET };
-  assert.deepEqual(resolveRefresh({ r1: rotated }, 'r1', NOW, opts), { ok: false, reason: 'refresh_reused', clientId: 'client-chatgpt' });
+  assert.deepEqual(resolveRefresh(records, 'r1', NOW, opts), { ok: false, reason: 'refresh_reused', clientId: 'client-chatgpt' });
   // Legacy options and stale cached-response fields have no effect.
-  const legacy = rec({ active: false, rotatedAt: NOW - 1, replay: { response: { access_token: 'A2', refresh_token: 'R2' } } });
-  const result = resolveRefresh({ r1: legacy }, 'r1', NOW, { ...opts, idempotentRetry: true });
+  const legacy = { r1: rec({ active: false, rotatedAt: NOW - 60, replay: { response: { access_token: 'A2', refresh_token: 'R2' } } }) };
+  const result = resolveRefresh(legacy, 'r1', NOW, { ...opts, idempotentRetry: true });
   assert.deepEqual(result, { ok: false, reason: 'refresh_reused', clientId: 'client-chatgpt' });
   assert.equal(result.response, undefined);
+});
+
+test('refresh: a duplicate arriving within seconds of the rotation is refused but is not a lost authorization', () => {
+  const records = { r1: rec({ active: false, rotatedAt: NOW - 2, successor: 'next' }), next: rec({ active: true }) };
+  assert.deepEqual(resolveRefresh(records, 'r1', NOW), { ok: false, reason: 'refresh_superseded', clientId: 'client-chatgpt' });
+  records.r1.rotatedAt = NOW - DUPLICATE_REFRESH_WINDOW_S - 1;
+  assert.equal(resolveRefresh(records, 'r1', NOW).reason, 'refresh_reused');
 });
 
 test('refresh: a rotated token is never resurrected when expired or revoked', () => {
@@ -124,4 +132,9 @@ test('refresh: reuse of a token whose successor is already in use is a stale dup
   // Successor still unused: ambiguous (duplicate request vs lost response), so it stays a reuse.
   const ambiguous = { old: records.old, next: rec({ active: true }) };
   assert.equal(resolveRefresh(ambiguous, 'old', NOW).reason, 'refresh_reused');
+});
+
+test('only failures that mean the client\'s own authorization is gone are reportable (a stranger must not be able to flag it)', () => {
+  assert.deepEqual([...REPORTABLE_REFRESH_FAILURES].sort(), ['refresh_expired', 'refresh_reused', 'revoked']);
+  for (const reason of ['invalid_client', 'client_mismatch', 'refresh_superseded', 'refresh_unknown']) assert.equal(REPORTABLE_REFRESH_FAILURES.has(reason), false, reason);
 });

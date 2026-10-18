@@ -47,6 +47,11 @@ describe("ingress separates 'sign in again' from 'try again later'", () => {
   it.each([
     ["JWKS fetch timeout", new errors.JWKSTimeout()],
     ["network failure", new TypeError("fetch failed")],
+    ["no matching key (also what an empty key set during an outage produces)", new errors.JWKSNoMatchingKey()],
+    [
+      "JWKS endpoint answered 5xx / HTML (jose generic error)",
+      new errors.JOSEError("Expected 200 OK from the JSON Web Key Set HTTP response")
+    ],
     ["unexpected verifier error", new Error("boom")]
   ])("%s is a 503 with Retry-After and NO authentication challenge", async (_name, error) => {
     const handler = createMcpIngressHandler({

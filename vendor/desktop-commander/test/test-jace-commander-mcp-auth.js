@@ -123,6 +123,21 @@ await test('concurrent callers share one refresh (rotation-safe) and one verdict
   assert.equal(calls.token, 1);
 });
 
+await test('a cross-process race never destroys the winner\'s credential (compare-and-swap)', async () => {
+  const dir = stateDir();
+  // While our refresh is rejected as spent, "another process" has already stored its rotated credential.
+  const { fetchImpl } = edge({
+    token: () => {
+      fs.writeFileSync(mcpTokenPath(dir), JSON.stringify({ mcpUrl: MCP, clientId: 'cid', accessToken: 'winner-access', refreshToken: 'winner-refresh', expiresAt: Date.now() + 3_600_000 }));
+      return json(400, { error: 'invalid_grant' });
+    },
+  });
+  assert.deepEqual(await mcpAccessTokenOutcome(MCP, dir, {}, fetchImpl), { kind: 'token', accessToken: 'winner-access' });
+  const stored = loadMcpToken(dir);
+  assert.equal(stored.refreshToken, 'winner-refresh');
+  assert.equal(stored.reauthRequired, undefined);
+});
+
 await test('JC_MCP_TOKEN still overrides everything', async () => {
   assert.equal(await mcpAccessToken(MCP, stateDir(), { JC_MCP_TOKEN: 'env-token' }, fetch), 'env-token');
 });

@@ -8,7 +8,13 @@
 import crypto from "node:crypto";
 import { sanitizeClaim } from "./client-attribution.js";
 
-const equalSecrets = (a, b) => {
+/**
+ * A refresh that arrives this soon after the token was rotated is almost certainly a double-submitted request from a client
+ * that already holds the successor, not a lost authorization. It is refused like any reuse but is not reported as a problem.
+ */
+export const DUPLICATE_REFRESH_WINDOW_S = 10;
+
+export const equalSecrets = (a, b) => {
   if (typeof a !== "string" || typeof b !== "string" || a.length === 0 || b.length === 0) return false;
   const x = crypto.createHash("sha256").update(a).digest();
   const y = crypto.createHash("sha256").update(b).digest();
@@ -97,19 +103,18 @@ export function resolveRefresh(records, token, nowSec, options = {}) {
   // from a client that lost the response, so it stays `refresh_reused`.
   const successor = typeof record.successor === "string" && Object.hasOwn(records, record.successor) ? records[record.successor] : undefined;
   if (successor && successor.active === false) return { ok: false, reason: "refresh_superseded", clientId };
+  if (typeof record.rotatedAt === "number" && nowSec - record.rotatedAt <= DUPLICATE_REFRESH_WINDOW_S) {
+    return { ok: false, reason: "refresh_superseded", clientId };
+  }
   return { ok: false, reason: "refresh_reused", clientId };
 }
 
-/** Failure reasons the edge may report to ACS. Anything else is dropped rather than guessed. */
-export const REPORTABLE_FAILURES = new Set([
-  "refresh_unknown",
-  "refresh_expired",
-  "refresh_reused",
-  "revoked",
-  "invalid_client",
-  "temporarily_unavailable",
-  "access_token_expired"
-]);
+/**
+ * Refresh refusals worth telling ACS about: the client's own authorization is gone. A wrong secret, a mismatched client_id and
+ * stale duplicates describe the CALLER (anyone holding a leaked token can cause them), so they are logged but never reported,
+ * which keeps a stranger from flagging the real client.
+ */
+export const REPORTABLE_REFRESH_FAILURES = new Set(["refresh_expired", "refresh_reused", "revoked"]);
 
 /** Map an edge-side reason to the ACS auth-event vocabulary. `refresh_unknown` is ACS's `refresh_rejected`. */
 export function acsReason(reason) {
@@ -137,6 +142,7 @@ export function createAuthEventReporter({ enabled = false, post, timeoutMs = 1_5
       if (!clientId) return false;
       const subject = sanitizeClaim(identity.subject, 128);
       const mapped = reason ? acsReason(reason) : undefined;
+      const observedAt = new Date(now()).toISOString();
       // Success is always worth sending; a repeated identical rejection is throttled.
       const key = `${lane}|${clientId}|${kind}|${mapped ?? ""}`;
       const t = now();
@@ -155,7 +161,8 @@ export function createAuthEventReporter({ enabled = false, post, timeoutMs = 1_5
         ...(subject ? { subject } : {}),
         kind,
         ...(mapped ? { reason: mapped } : {}),
-        ...(refreshExpiresAt ? { refreshExpiresAt } : {})
+        ...(refreshExpiresAt ? { refreshExpiresAt } : {}),
+        observedAt
       };
       const result = await Promise.race([
         post("/mcp-clients/auth-event", payload),

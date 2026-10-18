@@ -275,10 +275,14 @@ describe("reauthentication detection, end to end", () => {
     expect(view.summary.reauthRequired).toBe(1);
   });
 
-  it("a reused (already rotated) refresh token is flagged, and the other client stays healthy", async () => {
+  it("a stale reuse of an old refresh token (lost response) is flagged, and the other client stays healthy", async () => {
     const acs = await startAcs();
-    const edge = await startEdge(acs.url, { R1: record("chatgpt"), R2: record("claude") });
-    expect((await edge.refresh("R1", "chatgpt")).status).toBe(200);
+    // R1 was rotated ten minutes ago and its successor R1b has not been used: a client that lost the refresh response.
+    const edge = await startEdge(acs.url, {
+      R1: record("chatgpt", { active: false, rotatedAt: nowS() - 600, successor: "R1b" }),
+      R1b: record("chatgpt"),
+      R2: record("claude")
+    });
     expect((await connectedAppSession(edge, "claude", jwt("claude", { exp: nowS() - 5 }), "R2")).reconnectNeeded).toBe(
       false
     );

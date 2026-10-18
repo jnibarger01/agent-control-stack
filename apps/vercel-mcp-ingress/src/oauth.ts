@@ -54,11 +54,23 @@ export function createOauthBearerAuthorizer(options: OauthBearerAuthorizerOption
  * network failure, an unexpected error) is a 503 with Retry-After and no challenge, so an outage can never look like
  * expired authorization. The description is fixed text; verifier details are never echoed.
  */
-const SERVICE_ERROR_CODES = new Set(["ERR_JWKS_TIMEOUT", "ERR_JWKS_INVALID"]);
+/**
+ * Only these jose errors are a verdict on the TOKEN. Everything else, including `ERR_JOSE_GENERIC` (what jose throws when the
+ * JWKS endpoint answers 404/500/502 or an HTML error page) and "no matching key" (which an empty key set during an outage also
+ * produces), is a failure to reach a verdict: 503, never "sign in again". Both deny; only the client's reaction differs.
+ */
+const TOKEN_VERDICT_CODES = new Set([
+  "ERR_JWT_EXPIRED",
+  "ERR_JWT_CLAIM_VALIDATION_FAILED",
+  "ERR_JWS_SIGNATURE_VERIFICATION_FAILED",
+  "ERR_JWS_INVALID",
+  "ERR_JWT_INVALID",
+  "ERR_JOSE_ALG_NOT_ALLOWED"
+]);
 export const AUTH_RETRY_AFTER_SECONDS = 5;
 
 function classifyVerifierFailure(error: unknown, resourceMetadataUrl: string): IngressAuthResult {
-  if (error instanceof errors.JOSEError && !SERVICE_ERROR_CODES.has(error.code)) {
+  if (error instanceof errors.JOSEError && TOKEN_VERDICT_CODES.has(error.code)) {
     const description =
       error instanceof errors.JWTExpired ? "the access token expired" : "the access token is not valid";
     return {

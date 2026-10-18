@@ -76,7 +76,7 @@ describe("MCP client authentication health", () => {
     });
   });
 
-  it.each(["refresh_rejected", "refresh_expired", "refresh_reused", "revoked", "invalid_client"] as const)(
+  it.each(["refresh_rejected", "refresh_expired", "refresh_reused", "revoked"] as const)(
     "a permanent failure (%s) requires reauthentication",
     (reason) => {
       const h = harness();
@@ -174,5 +174,41 @@ describe("MCP client authentication health", () => {
     const body = JSON.stringify(h.events.map((e) => e.body));
     expect(body.length).toBeLessThan(1_500);
     expect(body).not.toMatch(/refresh_token|access_token|Bearer /u);
+  });
+
+  it("invalid_client describes the caller, not the client's authorization, so it never flags the client", () => {
+    const h = harness();
+    h.service.recordAuthEvent({ ...base, kind: "granted" });
+    expect(h.service.recordAuthEvent({ ...base, kind: "refresh_failed", reason: "invalid_client" })).toEqual({
+      recorded: false
+    });
+    expect(h.view()?.auth.state).toBe("ok");
+  });
+
+  it("orders by when the edge observed the outcome: a late failure never undoes a newer success, a late success never clears a newer failure", () => {
+    const h = harness();
+    const t = (offsetMs: number) => new Date(T0 + offsetMs).toISOString();
+    h.service.recordAuthEvent({ ...base, kind: "refreshed", observedAt: t(2_000) });
+    // Observed BEFORE that success but delivered after it (separate fire-and-forget connections).
+    h.service.recordAuthEvent({ ...base, kind: "refresh_failed", reason: "refresh_reused", observedAt: t(1_000) });
+    expect(h.view()?.auth.state).toBe("ok");
+    h.service.recordAuthEvent({ ...base, kind: "refresh_failed", reason: "refresh_reused", observedAt: t(3_000) });
+    expect(h.view()?.auth.state).toBe("reauth_required");
+    h.service.recordAuthEvent({ ...base, kind: "refreshed", observedAt: t(2_500) });
+    expect(h.view()?.auth.state).toBe("reauth_required");
+    h.service.recordAuthEvent({ ...base, kind: "granted", observedAt: t(4_000) });
+    expect(h.view()?.auth.state).toBe("ok");
+  });
+
+  it("ignores an edge clock that disagrees with ours by more than ten minutes", () => {
+    const h = harness();
+    h.service.recordAuthEvent({ ...base, kind: "granted" });
+    h.service.recordAuthEvent({
+      ...base,
+      kind: "refresh_failed",
+      reason: "revoked",
+      observedAt: new Date(T0 - 3 * HOUR).toISOString()
+    });
+    expect(h.view()?.auth.state).toBe("reauth_required");
   });
 });
