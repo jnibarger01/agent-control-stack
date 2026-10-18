@@ -1,6 +1,6 @@
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import { createRemoteJWKSet, errors, jwtVerify } from "jose";
 import { createBridgeAuthorizationAad, sealBridgeAuthorization } from "@agent-control-stack/vercel-bridge-contract";
-import type { IngressAuthorizer } from "./handler.js";
+import type { IngressAuthorizer, IngressAuthResult } from "./handler.js";
 
 export interface OauthBearerAuthorizerOptions {
   issuer: string;
@@ -36,11 +36,8 @@ export function createOauthBearerAuthorizer(options: OauthBearerAuthorizerOption
     const token = match[1];
     try {
       await verifyToken(token);
-    } catch {
-      return {
-        ok: false,
-        wwwAuthenticate: `${discoveryChallenge(options.resourceMetadataUrl)}, error="invalid_token"`
-      };
+    } catch (error) {
+      return classifyVerifierFailure(error, options.resourceMetadataUrl);
     }
 
     const aad = createBridgeAuthorizationAad(context);
@@ -49,6 +46,28 @@ export function createOauthBearerAuthorizer(options: OauthBearerAuthorizerOption
       auth: sealBridgeAuthorization(`Bearer ${token}`, options.bridgePublicKeyPem, aad)
     };
   };
+}
+
+/**
+ * "Sign in again" versus "try again later". Only a token the verifier actually judged unusable is a 401 invalid_token
+ * (RFC 6750), which makes a client refresh or reconnect. Anything that stops us reaching a verdict (key fetch timeout,
+ * network failure, an unexpected error) is a 503 with Retry-After and no challenge, so an outage can never look like
+ * expired authorization. The description is fixed text; verifier details are never echoed.
+ */
+const SERVICE_ERROR_CODES = new Set(["ERR_JWKS_TIMEOUT", "ERR_JWKS_INVALID"]);
+export const AUTH_RETRY_AFTER_SECONDS = 5;
+
+function classifyVerifierFailure(error: unknown, resourceMetadataUrl: string): IngressAuthResult {
+  if (error instanceof errors.JOSEError && !SERVICE_ERROR_CODES.has(error.code)) {
+    const description =
+      error instanceof errors.JWTExpired ? "the access token expired" : "the access token is not valid";
+    return {
+      ok: false,
+      status: 401,
+      wwwAuthenticate: `${discoveryChallenge(resourceMetadataUrl)}, error="invalid_token", error_description="${description}"`
+    };
+  }
+  return { ok: false, status: 503, retryAfterSeconds: AUTH_RETRY_AFTER_SECONDS };
 }
 
 function createJwtVerifier(input: {
