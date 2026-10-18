@@ -6,6 +6,7 @@
  * It plays the human at the consent page of the LAB edge only (the passphrase is the lab's throwaway one), then delivers the
  * authorization code to the client's own redirect URI. Refuses any non-loopback authorize URL.
  */
+import { URLSearchParams } from 'node:url';
 const [authorizeUrl, passphrase, mode] = process.argv.slice(2);
 if (!authorizeUrl || !passphrase) { console.error('usage: oauth-lab-consent.mjs <authorize-url> <passphrase>'); process.exit(2); }
 const url = new URL(authorizeUrl);
