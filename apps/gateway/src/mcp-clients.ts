@@ -388,7 +388,7 @@ export class McpClientService {
         if (Number.isFinite(expires)) auth.refreshExpiresMs = Math.max(auth.refreshExpiresMs ?? 0, expires);
       } else if (kind === "refresh_failed" || kind === "revoked") {
         const reason = MCP_AUTH_PERMANENT_REASONS.find((r) => r === body.reason);
-        if (reason && at > (auth.lastSuccessMs ?? 0)) {
+        if (reason && at >= (auth.lastSuccessMs ?? 0)) {
           auth.failure = reason;
           auth.lastFailureMs = Math.max(auth.lastFailureMs ?? 0, at);
         }
