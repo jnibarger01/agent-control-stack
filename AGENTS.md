@@ -44,6 +44,7 @@ This is a TypeScript and Node.js monorepo.
 * `packages/policy-gate/`: authorization, policy evaluation, execution mode, and approval enforcement.
 * `packages/execution-admission/`, `packages/execution-controller/`, `packages/secret-broker/`, `packages/sandbox/`, `packages/workspace-manager/`: capacity, execution control, secrets, isolation, and workspaces.
 * `packages/evidence/`, `packages/verification/`, `packages/result-validation/`, `packages/publication/`, `packages/recovery/`: trace evidence, verification, result checks, PR-only publication, and recovery.
+* `packages/outcome-engine/`: read-only verified assessment of pull request readiness; a verdict is evidence, never approval (ADR 0028). It records only `outcome.*` audit events and must not import execution, approval, publication or app code.
 * `packages/jev-advisor/`: advisory-only Jev observer (ADR 0020). Importable only from the allow-listed files in `eslint.config.js`.
 * `packages/desktop-commander-adapter/`, `packages/dc-tool-manifest/`, `packages/jc-tool-manifest/`, `packages/vercel-bridge-contract/`: Desktop Commander and Jace Commander adapters and manifests.
 * `packages/coding-harness/`, `packages/coding-mission/`, `packages/engine-adapter/`, `packages/acp-adapter/`, `packages/machine-controller/`, `packages/actor-router/`, `packages/moa-orchestrator/`: mission and engine orchestration.
