@@ -19,6 +19,7 @@ import { ClientInfoCache, createClientObserver, extractClientInfo } from './clie
 import { localRoutingFromEnv, stripAuthorityMeta } from './jc-routing.js';
 import { managedModeFromEnv, jcModeFromEnv, identityAttribution, capabilityTransport, acsPost, isToolsCall, dcRuntimeIdentityFromState, issueRuntimeBootstrap, completeRuntimeBootstrap, injectRuntimeBootstrap } from './managed.js';
 import { dcBridgeReady } from './readiness.js';
+import { bearerChallenge, classifyBearer, createAuthEventReporter, resolveRefresh } from './auth-health.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -38,8 +39,16 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const CONSENT_PASSPHRASE = process.env.CONSENT_PASSPHRASE || '';
 const SIGNING_KEY = process.env.SIGNING_KEY || ''; // hex
 const GATEWAY_EXECUTION_TOKEN = process.env.GATEWAY_EXECUTION_TOKEN || ''; // optional; enables executor identity attestation
-const ACCESS_TTL_S = 3600;
-const REFRESH_TTL_S = 30 * 24 * 3600;
+// Token lifetimes are fixed in production. The override exists only for disposable compatibility labs and is honoured
+// only with EDGE_TEST_MODE=1; it is announced loudly at startup so it can never be on by accident.
+const EDGE_TEST_MODE = process.env.EDGE_TEST_MODE === '1';
+const testTtl = (name, fallback) => {
+  const v = Number.parseInt(process.env[name] || '', 10);
+  return EDGE_TEST_MODE && Number.isFinite(v) && v > 0 ? v : fallback;
+};
+const ACCESS_TTL_S = testTtl('EDGE_TEST_ACCESS_TTL_S', 3600);
+const REFRESH_TTL_S = testTtl('EDGE_TEST_REFRESH_TTL_S', 30 * 24 * 3600);
+if (EDGE_TEST_MODE) console.warn(`gateway: EDGE_TEST_MODE=1 (access ttl ${ACCESS_TTL_S}s, refresh ttl ${REFRESH_TTL_S}s). NOT FOR PRODUCTION.`);
 const CODE_TTL_S = 300;
 const MAX_BODY = 2 * 1024 * 1024; // 2 MB
 const rawInitializeAcsTimeout = Number.parseInt(process.env.MCP_INITIALIZE_ACS_TIMEOUT_MS || "400", 10);
@@ -149,7 +158,15 @@ function laneForClientResource(client, resource) {
 const clientsFile = path.join(DATA_DIR, 'clients.json');
 const tokensFile = path.join(DATA_DIR, 'tokens.json');
 const loadJson = (f, d) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return d; } };
-const saveJson = (f, o) => { fs.writeFileSync(f, JSON.stringify(o, null, 2), { mode: 0o600 }); };
+// Atomic and always 0600: write a private temp file, then rename over the target. A crash can never leave a truncated
+// tokens.json (which would silently forget every refresh token and force every client to reconnect), and rename
+// replaces a pre-existing file that was created with looser permissions.
+const saveJson = (f, o) => {
+  const tmp = `${f}.${process.pid}.tmp`;
+  const fd = fs.openSync(tmp, 'w', 0o600);
+  try { fs.writeSync(fd, JSON.stringify(o, null, 2)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  fs.renameSync(tmp, f);
+};
 const clients = loadJson(clientsFile, {});   // client_id -> {redirect_uris, scope, token_endpoint_auth_method, client_secret?}
 const refreshTokens = loadJson(tokensFile, {}); // jti -> {client_id, exp, active}
 const cimdCache = new Map();                  // client_id URL -> metadata doc
@@ -463,6 +480,31 @@ function issueTokens(grant, lane = DC_OAUTH_LANE) {
   return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TTL_S, refresh_token: rjti, scope: grant.scope };
 }
 
+// ---- Authentication health (ADR 0027) ----
+// OAuth correctness (challenges, refresh classification) is always on. Only the REPORT to ACS is behind
+// ACS_MCP_AUTH_EVENTS=1 (default off). Refresh-token rotation is strict and has no retry/cache path.
+const AUTH_EVENTS = process.env.ACS_MCP_AUTH_EVENTS === '1';
+const authReporters = new Map();
+function authReporterFor(laneName) {
+  const managed = laneName === 'jc' ? JC : MANAGED;
+  let reporter = authReporters.get(laneName);
+  if (!reporter) {
+    const reporting = managed && managed.enabled ? { ...managed, timeoutMs: Math.min(managed.timeoutMs || 1500, 1500) } : null;
+    reporter = createAuthEventReporter({
+      enabled: AUTH_EVENTS && Boolean(reporting),
+      post: (route, payload) => acsPost(reporting, route, payload),
+      onError: (error) => console.warn(`gateway: auth event (${laneName}) failed: ${error && error.message ? error.message : 'error'}`),
+    });
+    authReporters.set(laneName, reporter);
+  }
+  return reporter;
+}
+/** Fire-and-forget. Never awaited, never throws, never changes a response. */
+function reportAuth(laneName, identity, kind, reason, refreshExpiresAt) {
+  try { void authReporterFor(laneName).report({ lane: laneName, identity, kind, reason, refreshExpiresAt }); } catch { /* reporting is best-effort */ }
+}
+const isoFromSec = (sec) => new Date(sec * 1000).toISOString();
+
 async function handleToken(req, res, body, laneHint = null) {
   const p = Object.fromEntries(new URLSearchParams(body.toString('utf8')).entries());
   const { grant_type, code, code_verifier, redirect_uri, client_id, client_secret, refresh_token, resource } = p;
@@ -482,17 +524,37 @@ async function handleToken(req, res, body, laneHint = null) {
     const a = Buffer.from(expect); const b = Buffer.from(g.code_challenge);
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return jsonError(res, 400, 'invalid_grant', 'PKCE verification failed');
     if (resource && resource !== lane.resource) return jsonError(res, 400, 'invalid_target', 'resource mismatch');
-    return send(res, 200, issueTokens(g, lane), { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' });
+    const issued = issueTokens(g, lane);
+    reportAuth(lane.name, { clientId: g.client_id, subject: 'jacen' }, 'granted', undefined, isoFromSec(refreshTokens[issued.refresh_token].exp));
+    return send(res, 200, issued, { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' });
   }
   if (grant_type === 'refresh_token') {
-    const rec = refreshTokens[refresh_token];
-    if (!rec || !rec.active || rec.exp < now()) return jsonError(res, 400, 'invalid_grant', 'invalid refresh token');
+    // Authenticate the client first (RFC 6749 section 6): a confidential client's refresh token alone is not enough.
+    const known = Object.hasOwn(refreshTokens, refresh_token) ? refreshTokens[refresh_token] : undefined;
+    const refreshClient = known ? await resolveClient(known.client_id) : null;
+    const resolved = resolveRefresh(refreshTokens, refresh_token, now(), {
+      clientSecret: refreshClient && refreshClient.client_secret,
+      presentedSecret: client_secret,
+      presentedClientId: client_id,
+    });
+    const rejectedLane = known ? laneForGrant(known) : null;
+    if (resolved.ok === false) {
+      // A superseded token is a stale duplicate from a client that has moved on: refused, but not reported as a problem.
+      if (rejectedLane && resolved.clientId && resolved.reason !== 'refresh_superseded') reportAuth(rejectedLane.name, { clientId: resolved.clientId, subject: 'jacen' }, 'refresh_failed', resolved.reason);
+      if (resolved.reason === 'invalid_client') return jsonError(res, 401, 'invalid_client', 'client auth failed');
+      return jsonError(res, 400, 'invalid_grant', 'invalid refresh token');
+    }
+    const rec = resolved.record;
     const lane = laneForGrant(rec);
     if (!lane || (laneHint && (lane.resource !== laneHint.resource || lane.issuer !== laneHint.issuer)))
       return jsonError(res, 400, 'invalid_target', 'refresh token belongs to a different OAuth lane');
     if (resource && resource !== lane.resource) return jsonError(res, 400, 'invalid_target', 'resource mismatch');
     rec.active = false;
+    rec.rotatedAt = now();
     const t = issueTokens({ client_id: rec.client_id, scope: rec.scope }, lane);
+    rec.successor = t.refresh_token;
+    saveJson(tokensFile, refreshTokens);
+    reportAuth(lane.name, { clientId: rec.client_id, subject: 'jacen' }, 'refreshed', undefined, isoFromSec(refreshTokens[t.refresh_token].exp));
     return send(res, 200, t, { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' });
   }
   return jsonError(res, 400, 'unsupported_grant_type', 'supported: authorization_code, refresh_token');
@@ -533,16 +595,19 @@ async function handleRegister(req, res, body, lane = DC_OAUTH_LANE) {
 const CHALLENGE = () => 'Bearer resource_metadata="' + ISSUER + '/.well-known/oauth-protected-resource", scope="mcp"';
 const JC_CHALLENGE = () => 'Bearer resource_metadata="' + ISSUER + '/.well-known/oauth-protected-resource/jc/mcp", scope="mcp"';
 
+function checkAuthDetailed(req, expectedResource = RESOURCE, expectedIssuer = ISSUER) {
+  return classifyBearer(req.headers['authorization'] || '', { signingKey: SIGNING_KEY, issuer: expectedIssuer, resource: expectedResource, nowSec: now() });
+}
 function checkAuth(req, expectedResource = RESOURCE, expectedIssuer = ISSUER) {
-  const h = req.headers['authorization'] || '';
-  const m = /^Bearer\s+(.+)$/i.exec(h);
-  if (!m) return null;
-  const payload = verifyJwt(m[1].trim());
-  if (!payload) return null;
-  if (payload.iss !== expectedIssuer) return null;
-  const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-  if (!aud.includes(expectedResource)) return null;
-  return payload;
+  const result = checkAuthDetailed(req, expectedResource, expectedIssuer);
+  return result.ok ? result.payload : null;
+}
+/** 401 with the right RFC 6750 challenge; reports an attributable rejection (verified signature only). */
+function rejectBearer(res, laneName, result, baseChallenge) {
+  // Only an expired token is worth telling ACS about (it is renewable, so it never raises a warning by itself). Wrong
+  // audience / issuer are configuration or cross-lane mistakes and are not authentication health.
+  if (result.clientId && result.reason === 'expired') reportAuth(laneName, { clientId: result.clientId, subject: result.subject }, 'token_rejected', result.reason);
+  return send(res, 401, { error: 'unauthorized' }, { 'WWW-Authenticate': bearerChallenge(baseChallenge, result.reason) });
 }
 
 // ---------------------------------------------------------------------------
@@ -819,10 +884,11 @@ const server = http.createServer(async (req, res) => {
 
     // ---- MCP proxy (auth required, all methods) ----
     if (pathName === '/mcp') {
-      const auth = checkAuth(req);
+      const authResult = checkAuthDetailed(req);
+      const auth = authResult.ok ? authResult.payload : null;
       if (!auth) {
-        log(req.method, '/mcp', 401, 'auth required');
-        return send(res, 401, { error: 'unauthorized' }, { 'WWW-Authenticate': CHALLENGE() });
+        log(req.method, '/mcp', 401, `auth required (${authResult.reason})`);
+        return rejectBearer(res, 'dc', authResult, CHALLENGE());
       }
       let body = req.method === 'POST' || req.method === 'PUT' ? await readBody(req) : null;
       if (MANAGED.enabled && req.method === 'POST') {
@@ -894,10 +960,11 @@ const server = http.createServer(async (req, res) => {
 
     // ---- Jace Commander MCP proxy (auth required; ACS-managed only) ----
     if (pathName === '/jc/mcp' && JC.enabled) {
-      const auth = checkAuth(req, JC_RESOURCE, JC_ISSUER);
+      const authResult = checkAuthDetailed(req, JC_RESOURCE, JC_ISSUER);
+      const auth = authResult.ok ? authResult.payload : null;
       if (!auth) {
-        log(req.method, '/jc/mcp', 401, 'auth required');
-        return send(res, 401, { error: 'unauthorized' }, { 'WWW-Authenticate': JC_CHALLENGE() });
+        log(req.method, '/jc/mcp', 401, `auth required (${authResult.reason})`);
+        return rejectBearer(res, 'jc', authResult, JC_CHALLENGE());
       }
       let body = req.method === 'POST' || req.method === 'PUT' ? await readBody(req) : null;
       if (req.method === 'POST') {
