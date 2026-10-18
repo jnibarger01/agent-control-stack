@@ -9,7 +9,8 @@
  *   - a stub MCP upstream (initialize, tools/list, ping) so connectors can validate and stay connected
  * It never touches production data, tokens, keys or services, and refuses to run if pointed at them.
  *
- * Usage:  node scripts/oauth-compat-lab.mjs [--access-ttl 120] [--refresh-ttl 900] [--public-origin https://lab.example]
+ * Usage:  node scripts/oauth-compat-lab.mjs [--access-ttl 120] [--refresh-ttl 900] [--public-origin https://lab.example] [--dir <existing lab dir>]
+ *   --dir restarts an earlier lab (same secrets, tokens and audit log) so you can stop it, edit `edge-data/tokens.json`, and start again.
  *   Without --public-origin the edge is only reachable on loopback (fine for Claude Code / local clients).
  *   ChatGPT needs a public HTTPS origin: start your own tunnel to the printed edge port, then pass its URL here.
  *   Exposing the lab edge publicly is your decision; the consent page is gated by the printed one-time passphrase.
@@ -39,12 +40,19 @@ for (const [name, v] of Object.entries({ ACS_DB_PATH: process.env.ACS_DB_PATH, D
 }
 if (!(ACCESS_TTL >= 30 && REFRESH_TTL > ACCESS_TTL)) { console.error('need --access-ttl >= 30 and --refresh-ttl > --access-ttl'); process.exit(2); }
 
-const lab = fs.mkdtempSync(path.join(os.tmpdir(), 'acs-oauth-lab-'));
+const existing = arg('dir', '');
+if (existing && !(path.dirname(path.resolve(existing)) === os.tmpdir() && path.basename(existing).startsWith('acs-oauth-lab-'))) {
+  console.error('--dir must be an acs-oauth-lab-* directory created by this script under the system temp dir'); process.exit(2);
+}
+const lab = existing ? path.resolve(existing) : fs.mkdtempSync(path.join(os.tmpdir(), 'acs-oauth-lab-'));
 fs.chmodSync(lab, 0o700);
 const secret = () => crypto.randomBytes(24).toString('hex');
-const bridgeToken = `lab-bridge-${secret()}`;
-const operatorToken = `lab-operator-${secret()}`;
-const passphrase = `lab-${crypto.randomBytes(6).toString('hex')}`;
+const secretsFile = path.join(lab, 'lab.json');
+const secrets = existing
+  ? JSON.parse(fs.readFileSync(secretsFile, 'utf8'))
+  : { bridgeToken: `lab-bridge-${secret()}`, operatorToken: `lab-operator-${secret()}`, passphrase: `lab-${crypto.randomBytes(6).toString('hex')}`, signingKey: crypto.randomBytes(32).toString('hex') };
+if (!existing) fs.writeFileSync(secretsFile, JSON.stringify(secrets), { mode: 0o600 });
+const { bridgeToken, operatorToken, passphrase, signingKey } = secrets;
 const evidence = fs.createWriteStream(path.join(lab, 'evidence.jsonl'), { flags: 'a', mode: 0o600 });
 const note = (kind, data) => evidence.write(`${JSON.stringify({ at: new Date().toISOString(), kind, ...data })}\n`);
 
@@ -87,7 +95,7 @@ start('acs', process.execPath, ['apps/gateway/dist/cli.js'], {
   ])
 });
 start('edge', process.execPath, ['apps/dc-mcp-gateway/server.js'], {
-  GATEWAY_PORT: String(EDGE_PORT), PUBLIC_ORIGIN: publicOrigin, CONSENT_PASSPHRASE: passphrase, SIGNING_KEY: crypto.randomBytes(32).toString('hex'),
+  GATEWAY_PORT: String(EDGE_PORT), PUBLIC_ORIGIN: publicOrigin, CONSENT_PASSPHRASE: passphrase, SIGNING_KEY: signingKey,
   DATA_DIR: path.join(lab, 'edge-data'), UPSTREAM: upstreamUrl, JC_ENABLED: '1', JC_UPSTREAM: upstreamUrl,
   ACS_GATEWAY_URL: `http://127.0.0.1:${ACS_PORT}`, ACS_JC_GATEWAY_TOKEN: bridgeToken,
   EDGE_TEST_MODE: '1', EDGE_TEST_ACCESS_TTL_S: String(ACCESS_TTL), EDGE_TEST_REFRESH_TTL_S: String(REFRESH_TTL), ACS_MCP_AUTH_EVENTS: '1'
