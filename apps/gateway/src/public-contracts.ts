@@ -192,6 +192,32 @@ export const mcpObservationBodySchema = z
   })
   .strict();
 
+/**
+ * Edge-to-ACS report of an OAuth outcome for a verified client (ADR 0027). Attribution only. Carries no token
+ * material: `reason` is a closed vocabulary and `refreshExpiresAt` is a timestamp.
+ */
+export const mcpAuthEventBodySchema = z
+  .object({
+    lane: z.enum(["jc", "dc"]),
+    clientId: z.string().min(1).max(256),
+    subject: z.string().min(1).max(256).optional(),
+    kind: z.enum(["granted", "refreshed", "refresh_failed", "token_rejected", "revoked"]),
+    reason: z
+      .enum([
+        "refresh_rejected",
+        "refresh_expired",
+        "refresh_reused",
+        "revoked",
+        "invalid_client",
+        "temporarily_unavailable",
+        "access_token_expired",
+        "insufficient_scope"
+      ])
+      .optional(),
+    refreshExpiresAt: z.string().datetime().optional()
+  })
+  .strict();
+
 export const mcpClientLabelBodySchema = z
   .object({
     clientId: z.string().min(1).max(256),
@@ -962,6 +988,14 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     operationId: "observeMcpClient",
     summary: "Edge bridge reports a verified client connection (bridge identity only).",
     requestSchema: mcpObservationBodySchema,
+    successStatus: 202
+  },
+  {
+    method: "post",
+    path: "/mcp-clients/auth-event",
+    operationId: "reportMcpClientAuthEvent",
+    summary: "Edge bridge reports an OAuth outcome for a verified client (bridge identity only).",
+    requestSchema: mcpAuthEventBodySchema,
     successStatus: 202
   },
   {

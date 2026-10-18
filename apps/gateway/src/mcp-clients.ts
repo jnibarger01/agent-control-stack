@@ -21,6 +21,7 @@ export type McpClientPolicy = "observe" | "require_label";
 
 export const MCP_CLIENT_EVENTS = {
   seen: "mcp_client.seen",
+  authEvent: "mcp_client.auth_event",
   labelled: "mcp_client.labelled",
   labelCleared: "mcp_client.label_cleared"
 } as const;
@@ -34,6 +35,49 @@ export const MAX_LABELLED_CLIENTS = 500;
 const SEEN_DEDUPE_MS = 30_000;
 const MAX_CLAIMS = 5;
 const MAX_SUBJECTS = 20;
+
+/**
+ * Authentication health (ADR 0027). The edge, which issues and verifies the OAuth tokens, reports outcomes; ACS only
+ * records them. "Reauthentication required" means the client's authorization is gone and only the user reconnecting can
+ * restore it. Everything else (idle time, outages, a dropped connection, an expired but refreshable access token,
+ * missing permissions) leaves a client `ok`.
+ */
+export const MCP_AUTH_KINDS = ["granted", "refreshed", "refresh_failed", "token_rejected", "revoked"] as const;
+export type McpAuthKind = (typeof MCP_AUTH_KINDS)[number];
+/** The authorization is gone; only a new sign-in can restore it. */
+export const MCP_AUTH_PERMANENT_REASONS = [
+  "refresh_rejected",
+  "refresh_expired",
+  "refresh_reused",
+  "revoked",
+  "invalid_client"
+] as const;
+export type McpAuthFailureReason = (typeof MCP_AUTH_PERMANENT_REASONS)[number];
+/** Reported for visibility but deliberately NOT a reason to reconnect. */
+export const MCP_AUTH_TRANSIENT_REASONS = [
+  "temporarily_unavailable",
+  "access_token_expired",
+  "insufficient_scope"
+] as const;
+export type McpAuthState = "ok" | "reauth_required";
+
+export interface McpClientAuthView {
+  state: McpAuthState;
+  /** Last time the client was issued or refreshed a token. */
+  lastSuccessAt?: string;
+  lastFailureAt?: string;
+  failureReason?: McpAuthFailureReason;
+}
+
+export interface McpAuthEventInput {
+  lane: McpLane;
+  clientId: string;
+  subject?: string;
+  kind: McpAuthKind;
+  reason?: string;
+  /** When the refresh token this event leaves the client holding stops working. */
+  refreshExpiresAt?: string;
+}
 
 export interface McpClientClaims {
   name?: string;
@@ -62,6 +106,7 @@ export interface McpClientView {
   lastTool?: string;
   lastMethod?: string;
   live: boolean;
+  auth: McpClientAuthView;
 }
 
 export interface McpLegacyCaller {
@@ -79,6 +124,8 @@ export interface McpClientSummary {
   labelled: number;
   unrecognized: number;
   liveUnrecognized: number;
+  /** Clients whose authorization is gone and that need the user to reconnect. */
+  reauthRequired: number;
   policy: McpClientPolicy;
 }
 
@@ -95,6 +142,7 @@ interface ClientState {
   denied: number;
   lastTool?: string;
   lastMethod?: string;
+  auth: { lastSuccessMs?: number; lastFailureMs?: number; failure?: McpAuthFailureReason; refreshExpiresMs?: number };
 }
 
 const PRINTABLE = /[^\x20-\x7e]/gu;
@@ -200,6 +248,7 @@ export class McpClientService {
       MCP_CLIENT_EVENTS.labelled,
       MCP_CLIENT_EVENTS.labelCleared,
       MCP_CLIENT_EVENTS.seen,
+      MCP_CLIENT_EVENTS.authEvent,
       "connector.requested"
     ]) {
       let before: number | undefined;
@@ -237,7 +286,8 @@ export class McpClientService {
         lastSeenMs: ms,
         connects: 0,
         issued: 0,
-        denied: 0
+        denied: 0,
+        auth: {}
       };
       this.clients.set(clientId, state);
     }
@@ -317,6 +367,31 @@ export class McpClientService {
       state.connects += 1;
       const method = sanitizeClaim(body.method, 64);
       if (method) state.lastMethod = method;
+    } else if (event.name === MCP_CLIENT_EVENTS.authEvent) {
+      const clientId = body.clientId;
+      const kind = MCP_AUTH_KINDS.find((k) => k === body.kind);
+      if (!isValidClientId(clientId) || !kind) return;
+      const state = this.state(clientId, ms);
+      // Auth outcomes attribute a lane and subject but never count as the client being "seen": a failure must not
+      // make a dead client look live.
+      const lane = body.lane === "dc" ? "dc" : body.lane === "jc" ? "jc" : undefined;
+      if (lane) state.lanes.add(lane);
+      const subject = sanitizeClaim(body.subject, 128);
+      if (subject && !state.subjects.includes(subject) && state.subjects.length < MAX_SUBJECTS)
+        state.subjects.push(subject);
+      const auth = state.auth;
+      if (kind === "granted" || kind === "refreshed") {
+        auth.lastSuccessMs = Math.max(auth.lastSuccessMs ?? 0, ms);
+        delete auth.failure;
+        const expires = typeof body.refreshExpiresAt === "string" ? Date.parse(body.refreshExpiresAt) : NaN;
+        if (Number.isFinite(expires)) auth.refreshExpiresMs = expires;
+      } else if (kind === "refresh_failed" || kind === "revoked") {
+        const reason = MCP_AUTH_PERMANENT_REASONS.find((r) => r === body.reason);
+        if (reason) {
+          auth.failure = reason;
+          auth.lastFailureMs = Math.max(auth.lastFailureMs ?? 0, ms);
+        }
+      }
     } else if (event.name === MCP_CLIENT_EVENTS.labelled) {
       const clientId = body.clientId;
       const kind = MCP_CLIENT_KINDS.find((k) => k === body.kind);
@@ -346,7 +421,10 @@ export class McpClientService {
   private enforceCap(): void {
     const unlabelled = [...this.clients.values()].filter((c) => !c.label);
     if (unlabelled.length <= MAX_TRACKED_CLIENTS) return;
-    unlabelled.sort((a, b) => a.lastSeenMs - b.lastSeenMs);
+    // Clients that need reauthentication are what the operator must act on, so they are evicted last.
+    unlabelled.sort(
+      (a, b) => Number(Boolean(a.auth.failure)) - Number(Boolean(b.auth.failure)) || a.lastSeenMs - b.lastSeenMs
+    );
     for (const state of unlabelled.slice(0, unlabelled.length - MAX_TRACKED_CLIENTS))
       this.clients.delete(state.clientId);
   }
@@ -362,6 +440,7 @@ export class McpClientService {
     return [...this.clients.values()]
       .map((state): McpClientView => {
         const suggested = suggestKind(state.claims);
+        const auth = this.authView(state, now);
         return {
           clientId: state.clientId,
           status: state.label ? "labelled" : "unrecognized",
@@ -385,10 +464,28 @@ export class McpClientService {
           denied: state.denied,
           ...(state.lastTool ? { lastTool: state.lastTool } : {}),
           ...(state.lastMethod ? { lastMethod: state.lastMethod } : {}),
-          live: now - state.lastSeenMs <= MCP_CLIENT_LIVE_WINDOW_MS
+          live: now - state.lastSeenMs <= MCP_CLIENT_LIVE_WINDOW_MS,
+          auth
         };
       })
       .sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt));
+  }
+
+  /**
+   * `reauth_required` is set only by a permanent failure the edge reported, or by a refresh token that has genuinely
+   * expired with no renewal since. It is never derived from how long a client has been quiet.
+   */
+  private authView(state: ClientState, now: number): McpClientAuthView {
+    const { lastSuccessMs, lastFailureMs, failure, refreshExpiresMs } = state.auth;
+    const expired = !failure && refreshExpiresMs !== undefined && now > refreshExpiresMs;
+    const reason: McpAuthFailureReason | undefined = failure ?? (expired ? "refresh_expired" : undefined);
+    const failureMs = failure ? lastFailureMs : expired ? refreshExpiresMs : undefined;
+    return {
+      state: reason ? "reauth_required" : "ok",
+      ...(lastSuccessMs !== undefined ? { lastSuccessAt: iso(lastSuccessMs) } : {}),
+      ...(reason && failureMs !== undefined ? { lastFailureAt: iso(failureMs) } : {}),
+      ...(reason ? { failureReason: reason } : {})
+    };
   }
 
   legacyCallers(): McpLegacyCaller[] {
@@ -405,6 +502,7 @@ export class McpClientService {
       labelled: clients.length - unrecognized.length,
       unrecognized: unrecognized.length,
       liveUnrecognized: unrecognized.filter((c) => c.live).length,
+      reauthRequired: clients.filter((c) => c.auth.state === "reauth_required").length,
       policy: this.policy
     };
   }
@@ -453,6 +551,41 @@ export class McpClientService {
         ...(claims.userAgent ? { userAgent: claims.userAgent } : {})
       },
       attributes: { "mcp.client_id": clientId, "mcp.lane": input.lane }
+    });
+    return { recorded: true };
+  }
+
+  /**
+   * Record an authentication outcome the edge reported. Attribution only: it never labels a client, never lifts
+   * `require_label`, and carries no token material. Reasons that cannot be tied to a verified client (bad signature,
+   * malformed token) and unknown fields are dropped rather than stored.
+   */
+  recordAuthEvent(input: McpAuthEventInput): { recorded: boolean } {
+    const clientId = canonicalClientId(input.clientId);
+    if (!clientId || !MCP_AUTH_KINDS.includes(input.kind)) return { recorded: false };
+    let reason: string | undefined;
+    if (input.kind === "refresh_failed") {
+      reason = [...MCP_AUTH_PERMANENT_REASONS, "temporarily_unavailable"].find((r) => r === input.reason);
+      if (!reason) return { recorded: false };
+    } else if (input.kind === "token_rejected") {
+      reason = ["access_token_expired", "insufficient_scope"].find((r) => r === input.reason);
+      if (!reason) return { recorded: false };
+    } else if (input.kind === "revoked") {
+      reason = "revoked";
+    }
+    const subject = sanitizeClaim(input.subject, 128);
+    const expires = input.refreshExpiresAt ? Date.parse(input.refreshExpiresAt) : NaN;
+    this.store.recordSystemEvent({
+      name: MCP_CLIENT_EVENTS.authEvent,
+      body: {
+        lane: input.lane,
+        clientId,
+        ...(subject ? { subject } : {}),
+        kind: input.kind,
+        ...(reason ? { reason } : {}),
+        ...(Number.isFinite(expires) ? { refreshExpiresAt: new Date(expires).toISOString() } : {})
+      },
+      attributes: { "mcp.client_id": clientId, "mcp.lane": input.lane, "mcp.auth_kind": input.kind }
     });
     return { recorded: true };
   }
