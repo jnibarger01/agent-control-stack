@@ -89,7 +89,7 @@ export function Shell({ overview, stream, children, title, subtitle }: { overvie
             })}
           </ul>
         </nav>
-        <p className="mt-6 hidden px-1 text-xs leading-relaxed text-faint lg:block">Approvals and execution controls use the same authenticated routes as the classic console, which remains available at the root. <Kbd>Ctrl</Kbd> <Kbd>K</Kbd> jumps to a page.</p>
+        <p className="mt-6 hidden px-1 text-xs leading-relaxed text-faint lg:block">Approvals and execution controls use the same authenticated routes as the classic console, which stays available at <a className="text-accent hover:underline" href="/legacy">/legacy</a>. <Kbd>Ctrl</Kbd> <Kbd>K</Kbd> jumps to a page.</p>
       </aside>
       <div className="min-w-0">
         <StaleBanner show={stream === "stale"} />

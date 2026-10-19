@@ -243,3 +243,23 @@ Verification evidence: `scripts/verify-mission-control-web.mjs` passes 20 checks
 - Workspace allocation is intentionally absent from the trace: ACS does not persist a per-work-item allocation lookup, and the host path is sensitive. It will appear once a canonical safe label exists.
 - Queue filters and search apply to the loaded window and say so; status totals are labelled exact (store) or window-only.
 - Harness: 39 real-gateway checks (queue filtering via URL, real dry-run trace, not-found, axe on command/queue/trace in both themes at four widths).
+
+### PR 3 (implemented): Approvals and Execution with server-authorized actions
+
+Mutations call the existing routes unchanged (a diff against the merge-base shows no change to the POST handlers, `credentials.ts`, `policy-gate` or `work-items`). A dedicated reviewer's findings were checked against the source and fixed: a retry double-submit window, a thin confirm dialog, a misleading "approved" message for multi-action items, a 500 on malformed percent-encoding, rate-limit markers that were inert for GETs, and no cross-origin check on cookie-authenticated writes (a same-site, other-port page could send the cookie). A replay of `approve` still appends a second `approval.granted` audit event (pre-existing, grants nothing, tracked as a separate task).
+
+### PR 4 (implemented): Agents, Executors, Connectors
+
+List and detail pages on the existing JSON routes with client schemas that pick only rendered fields (endpoint, actor ids, input schemas and key material cannot reach the DOM). Executor and connector nodes join the agent network; a lease held by an executor is drawn from the executor. No force layout: the two-lane layout still reads cleanly, so the dependency stays deferred.
+
+### PR 5 (implemented): Metrics, Audit, Policy, System
+
+`GET /api/mission-control/audit` returns server-redacted, bounded, newest-first events with strict query validation and backward pagination. Policy is read-only and shows recorded `policy.decided` events; there is no rule editor and no explain form yet. 146 real-browser checks cover all eleven destinations.
+
+### PR 6 (implemented): React app as the default
+
+`ACS_MC_WEB_DEFAULT=1` hands authenticated `GET /` to `/next/`; `/legacy` is always the classic console; the login page carries a safe `next` target; the default silently falls back to the classic console if the app is not built. Rollback is unsetting a flag (docs/runbooks/mission-control-web.md).
+
+### PR 7 (prepared, deliberately not executed)
+
+Section 6.2 gates removal on one full release cycle with no rollback use, and section 1 requires rollback capability. Deleting the classic console would remove that capability, and a release cycle cannot elapse inside a build session. What is done: the legacy-use counter (`acs_mc_legacy_console_requests_total`), the retirement criteria and the exact removal scope, in the runbook. The deletion itself needs the gate to be met or an explicit decision to waive it.

@@ -8,7 +8,7 @@ export function Failure({ error, what = "Mission Control data" }: { error: unkno
       <div role="alert" className="mx-auto max-w-lg rounded-card border border-line bg-surface p-8 text-center">
         <h2 className="text-lg font-semibold">Sign in required</h2>
         <p className="mt-2 text-sm text-muted">Your session is missing or expired. Sign in through the console, then return to this page.</p>
-        <a href="/" className="mt-4 inline-block rounded-ctl bg-accent px-4 py-2 text-sm font-medium text-accent-ink">Open the console to sign in</a>
+        <a href="/?next=%2Fnext%2F" className="mt-4 inline-block rounded-ctl bg-accent px-4 py-2 text-sm font-medium text-accent-ink">Open the console to sign in</a>
       </div>
     );
   }

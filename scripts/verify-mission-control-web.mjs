@@ -88,7 +88,7 @@ const app = buildGateway({
   moa: false,
   // The sweep loads hundreds of pages a minute. The limiter itself is covered by its own gateway test.
   rateLimit: { windowMs: 60_000, maxRequests: 100_000 },
-  missionControlWeb: { enabled: true, distDir }
+  missionControlWeb: { enabled: true, distDir, defaultRoot: true }
 });
 const origin = await app.listen({ host: "127.0.0.1", port: 0 });
 let appClosed = false;
@@ -309,7 +309,11 @@ try {
     await table.waitFor();
     const firstCount = await table.locator("tbody tr").count();
     await page.getByLabel("Event name (exact)").fill("work_item.created");
-    await page.getByRole("button", { name: /Inspect event \d+, work_item\.created/ }).first().waitFor();
+    await page.getByText(/Showing \d+ of \d+ loaded events/).waitFor(); // no longer "Updating results…"
+    await page.waitForFunction(() => {
+      const cells = [...document.querySelectorAll("table tbody tr td:nth-child(3)")];
+      return cells.length > 0 && cells.every((c) => (c.textContent ?? "").trim() === "work_item.created");
+    });
     const names = await table.locator("tbody tr td:nth-child(3)").allTextContents();
     if (!names.length || names.some((n) => n.trim() !== "work_item.created")) throw Error("name filter must query the log: " + JSON.stringify(names.slice(0, 3)));
     await page.getByRole("button", { name: /Inspect event \d+, work_item\.created/ }).first().click();
@@ -349,12 +353,17 @@ try {
     if (Math.min(...after.map(Number)) >= Math.min(...before.map(Number))) throw Error("paging did not reach older events");
   });
 
-  await check("Legacy console at / is unaffected", async () => {
+  await check("Legacy console at /legacy is unaffected, and / hands off to the React app", async () => {
     const p2 = await context.newPage();
-    await p2.goto(origin + "/");
+    await p2.goto(origin + "/legacy");
     await p2.waitForFunction(() => document.querySelector(".live")?.dataset.state === "live");
     if ((await p2.locator(".mission-card").count()) < 6) throw Error("legacy board missing");
+    await p2.goto(origin + "/");
+    await p2.waitForURL(/\/next\/?(#.*)?$/);
+    await p2.getByRole("heading", { name: "Command", level: 1 }).waitFor();
     await p2.close();
+    const bare = await context.request.get(origin + "/", { maxRedirects: 0 });
+    if (bare.status() !== 302 || !String(bare.headers().location).endsWith("/next/")) throw Error("expected 302 to /next/, got " + bare.status());
   });
 
   const sweepQueue = await (await context.request.get(origin + "/api/mission-control/queue")).json();
@@ -510,6 +519,19 @@ try {
     await p.goto(origin + "/next/");
     await p.getByRole("heading", { name: "Sign in required" }).waitFor();
     if ((await p.content()).includes("Inspect execution admission")) throw Error("data leaked to anonymous page");
+    // The sign-in link opens the real login page (no redirect loop) and returns to the React app.
+    await p.getByRole("link", { name: "Open the console to sign in" }).click();
+    const form = p.locator("#login-form");
+    await form.waitFor();
+    if (!/\/(\?next=.*)?$/.test(new URL(p.url()).pathname + new URL(p.url()).search)) throw Error("unexpected login URL " + p.url());
+    await form.locator("input[name=token]").fill("wrong-token");
+    await form.getByRole("button", { name: "Sign in" }).click();
+    await form.locator("output").getByText("Unauthorized").waitFor();
+    await form.locator("input[name=token]").fill(token);
+    await form.getByRole("button", { name: "Sign in" }).click();
+    await p.waitForURL(/\/next\/?(#.*)?$/);
+    await p.getByRole("heading", { name: "Needs you" }).waitFor();
+    await p.locator("header [role=status]").getByText("Live").waitFor();
     await anon.close();
   });
 
