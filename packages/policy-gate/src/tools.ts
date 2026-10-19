@@ -144,6 +144,15 @@ function gateApprovalInTransaction(
     throw new ControlStackError("work_item_not_found", `work item not found: ${parsed.id}`);
   }
 
+  // Reject an already-granted action before policy evaluation records a decision.
+  // This stays inside the transaction so a replay cannot renew approval or append audit events.
+  if (store.hasApproval(workItem.id, parsed.actionHash)) {
+    throw new ControlStackError(
+      "approval_already_granted",
+      `approval already granted for action hash: ${parsed.actionHash}`
+    );
+  }
+
   const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, workItem, parsed.approvedBy, "approve");
   if (decision.decision === "deny") {
     return { decision, workItem, approvals: [] };

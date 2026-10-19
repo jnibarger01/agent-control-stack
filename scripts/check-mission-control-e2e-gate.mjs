@@ -95,7 +95,10 @@ for (const [label, pattern] of [
   ["server-enforced approve flow", /Approve through the UI: reason required, one POST, server state changes/u],
   ["read-only credential cannot act", /Read-only credential sees approvals but every control is disabled/u],
   ["deny flow", /Deny through the UI rejects the work item server-side/u],
-  ["dismiss sends nothing", /Escape dismisses a confirmation without sending anything/u]
+  ["dismiss sends nothing", /Escape dismisses a confirmation without sending anything/u],
+  ["registry pages with honest status", /Agents, Executors and Connectors pages show real registry data with honest status/u],
+  ["executor and connector network nodes", /Agent network includes executor and connector nodes without inventing edges/u],
+  ["cookie session and cross-site write refusal", /Cookie-only session: the SPA works, same-origin writes pass, cross-site writes are refused/u]
 ]) {
   check(`web harness still covers ${label}`, pattern.test(webHarness));
 }

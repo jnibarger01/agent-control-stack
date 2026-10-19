@@ -1,10 +1,22 @@
 import {
+  parseAgentDetail,
+  parseAgentsList,
   parseApprovalsReadModel,
+  parseConnectorDetail,
+  parseConnectorsList,
+  parseExecutorDetail,
+  parseExecutorsList,
   parseExecutionReadModel,
   parseOverviewReadModel,
   parseQueueReadModel,
   parseTraceReadModel,
+  type AgentDetail,
   type ApprovalsReadModel,
+  type Connector,
+  type ConnectorDetail,
+  type Executor,
+  type ExecutorDetail,
+  type RegistryAgent,
   type ExecutionReadModel,
   type OverviewReadModel,
   type Parsed,
@@ -82,7 +94,7 @@ export const fetchExecution = (fetcher: typeof fetch = fetch, signal?: AbortSign
 export type ActionKind = "approve" | "deny" | "unblock" | "cancel" | "retry";
 export const ACTION_PATH: Record<ActionKind, string> = { approve: "approve", deny: "reject", unblock: "unblock", cancel: "cancel", retry: "retry" };
 
-export type ActionResult = { ok: true; status: number } | { ok: false; status: number; message: string };
+export type ActionResult = { ok: true; status: number; workItemStatus?: string } | { ok: false; status: number; message: string };
 
 /**
  * Sends one operator action to the gateway's existing route. The session cookie
@@ -105,7 +117,12 @@ export async function postWorkItemAction(
       headers: { "content-type": "application/json", accept: "application/json" },
       body: JSON.stringify(payload)
     });
-    if (res.ok) return { ok: true, status: res.status };
+    if (res.ok) {
+      // The returned work item status says what actually happened (for example an item with several
+      // gated actions stays `needs_approval` after one is approved).
+      const body = (await res.json().catch(() => ({}))) as { workItem?: { status?: unknown } };
+      return { ok: true, status: res.status, ...(typeof body.workItem?.status === "string" ? { workItemStatus: body.workItem.status } : {}) };
+    }
     const body = (await res.json().catch(() => ({}))) as { error?: unknown; code?: unknown };
     const detail = typeof body.error === "string" ? body.error : typeof body.code === "string" ? body.code : "";
     const message = res.status === 401 ? "Your session expired. Sign in again through the console." : detail ? detail.slice(0, 240) : `The gateway refused this action (${res.status}).`;
@@ -114,3 +131,18 @@ export async function postWorkItemAction(
     return { ok: false, status: 0, message: "Could not reach the gateway. Nothing was changed." };
   }
 }
+
+/* ───────────── registry pages: existing JSON routes, client-picked fields only ───────────── */
+
+export const fetchAgents = async (fetcher: typeof fetch = fetch, signal?: AbortSignal): Promise<RegistryAgent[]> =>
+  (await fetchContract("/api/agents", parseAgentsList, fetcher, signal)).agents;
+export const fetchAgent = (id: string, fetcher: typeof fetch = fetch, signal?: AbortSignal): Promise<AgentDetail> =>
+  fetchContract(`/api/agents/${encodeURIComponent(id)}`, parseAgentDetail, fetcher, signal);
+export const fetchExecutors = async (fetcher: typeof fetch = fetch, signal?: AbortSignal): Promise<Executor[]> =>
+  (await fetchContract("/api/executors", parseExecutorsList, fetcher, signal)).executors;
+export const fetchExecutor = (id: string, fetcher: typeof fetch = fetch, signal?: AbortSignal): Promise<ExecutorDetail> =>
+  fetchContract(`/api/executors/${encodeURIComponent(id)}`, parseExecutorDetail, fetcher, signal);
+export const fetchConnectors = async (fetcher: typeof fetch = fetch, signal?: AbortSignal): Promise<Connector[]> =>
+  (await fetchContract("/api/connectors", parseConnectorsList, fetcher, signal)).connectors;
+export const fetchConnector = (id: string, fetcher: typeof fetch = fetch, signal?: AbortSignal): Promise<ConnectorDetail> =>
+  fetchContract(`/api/connectors/${encodeURIComponent(id)}`, parseConnectorDetail, fetcher, signal);

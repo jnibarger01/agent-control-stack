@@ -71,7 +71,14 @@ export function registerMissionControlWeb(app: FastifyInstance, options: Mission
       app.log.error({ root }, "mission control web is enabled but not built");
       return reply.code(503).type("application/json").send({ error: "mission_control_web_not_built" });
     }
-    const requested = decodeURIComponent((request.params as { "*": string })["*"] ?? "");
+    // Fastify has already percent-decoded the wildcard. A second decode can throw on input like %25zz,
+    // which must be a plain 404 and never a 500.
+    let requested: string;
+    try {
+      requested = decodeURIComponent((request.params as { "*": string })["*"] ?? "");
+    } catch {
+      return reply.code(404).send({ error: "not_found" });
+    }
     const candidate = resolve(root, requested === "" ? "index.html" : requested);
     // Contain to the dist directory; anything else is a 404, never a read.
     const contained = candidate === root || candidate.startsWith(root + sep);

@@ -85,7 +85,7 @@ export const expiringLeaseSchema = z
 export const networkNodeSchema = z
   .object({
     id: z.string().min(1),
-    kind: z.enum(["agent", "work_item"]),
+    kind: z.enum(["agent", "executor", "connector", "work_item"]),
     label: z.string().max(200),
     liveness: livenessSchema.optional(),
     /** Agent role / kind, or work-item status. */

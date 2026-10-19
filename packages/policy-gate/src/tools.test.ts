@@ -168,6 +168,48 @@ describe("policy-gated work item tools", () => {
     }
   });
 
+  it("rejects an already-granted approval without recording duplicate policy or approval audit events", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-tools-approval-replay-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const policy = createPolicyEngine();
+    const tools = createWorkItemTools(store, policy);
+
+    try {
+      const workItem = tools.create_work_item({
+        title: "Read a high-risk path",
+        requester: "user",
+        requesterSubject: "user",
+        intent: "verify approval replay audit invariants",
+        requestedActions: [{ kind: "fs.read", description: "read", params: { paths: ["/tmp"] } }],
+        risk: "high"
+      });
+      const evaluation = policy.evaluateWorkItem(workItem, "qa-operator", "approve")[0];
+      expect(evaluation?.decision.decision).toBe("require_approval");
+      const approval = { id: workItem.id, approvedBy: "qa-operator", reason: "approved", actionHash: evaluation!.actionHash };
+
+      expect(tools.approve_work_item(approval).workItem.status).toBe("approved");
+      const beforeReplay = store.readEvents();
+      expect(beforeReplay.filter((e) => e.name === "approval.granted")).toHaveLength(1);
+
+      let replayError: unknown;
+      try {
+        tools.approve_work_item({ ...approval, reason: "replay" });
+      } catch (error) {
+        replayError = error;
+      }
+      expect(replayError).toMatchObject({ code: "approval_already_granted" });
+
+      const afterReplay = store.readEvents();
+      expect(afterReplay).toEqual(beforeReplay);
+      expect(afterReplay.filter((e) => e.name === "approval.granted")).toHaveLength(1);
+      expect(afterReplay.filter((e) => e.name === "execution_plan_approval.granted")).toHaveLength(1);
+      expect(store.get(workItem.id)?.status).toBe("approved");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("re-denies blocked work on unblock and records the decision", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-unblock-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));

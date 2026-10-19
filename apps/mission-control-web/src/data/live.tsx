@@ -1,13 +1,14 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AuthRequiredError, NotFoundError, SchemaError, fetchApprovals, fetchExecution, fetchOverview, fetchQueue, fetchTrace } from "./api";
+import { AuthRequiredError, NotFoundError, SchemaError, fetchAgent, fetchAgents, fetchApprovals, fetchConnector, fetchConnectors, fetchExecution, fetchExecutor, fetchExecutors, fetchOverview, fetchQueue, fetchTrace } from "./api";
 import { useEventStream, type EventSourceFactory, type StreamState } from "./stream";
 
 export const ROOT_KEY = ["mission-control"] as const;
 export const OVERVIEW_KEY = [...ROOT_KEY, "overview"] as const;
 export const QUEUE_KEY = [...ROOT_KEY, "queue"] as const;
 export const traceKey = (id: string) => [...ROOT_KEY, "trace", id] as const;
-const COALESCE_MS = 750;
+// One refetch per second at most keeps a busy event stream under the gateway's per-route read budget.
+const COALESCE_MS = 1000;
 
 const StreamContext = createContext<StreamState>("connecting");
 export const useStreamState = () => useContext(StreamContext);
@@ -57,3 +58,9 @@ export const useQueue = () => useQuery({ queryKey: QUEUE_KEY, queryFn: ({ signal
 export const useTrace = (id: string) => useQuery({ queryKey: traceKey(id), queryFn: ({ signal }) => fetchTrace(id, fetch, signal), ...shared });
 export const useApprovals = () => useQuery({ queryKey: [...ROOT_KEY, "approvals"], queryFn: ({ signal }) => fetchApprovals(fetch, signal), ...shared });
 export const useExecution = () => useQuery({ queryKey: [...ROOT_KEY, "execution"], queryFn: ({ signal }) => fetchExecution(fetch, signal), ...shared });
+export const useAgents = () => useQuery({ queryKey: [...ROOT_KEY, "agents"], queryFn: ({ signal }) => fetchAgents(fetch, signal), ...shared });
+export const useAgent = (id: string) => useQuery({ queryKey: [...ROOT_KEY, "agent", id], queryFn: ({ signal }) => fetchAgent(id, fetch, signal), ...shared });
+export const useExecutors = () => useQuery({ queryKey: [...ROOT_KEY, "executors"], queryFn: ({ signal }) => fetchExecutors(fetch, signal), ...shared });
+export const useExecutor = (id: string) => useQuery({ queryKey: [...ROOT_KEY, "executor", id], queryFn: ({ signal }) => fetchExecutor(id, fetch, signal), ...shared });
+export const useConnectors = () => useQuery({ queryKey: [...ROOT_KEY, "connectors"], queryFn: ({ signal }) => fetchConnectors(fetch, signal), ...shared });
+export const useConnector = (id: string) => useQuery({ queryKey: [...ROOT_KEY, "connector", id], queryFn: ({ signal }) => fetchConnector(id, fetch, signal), ...shared });
