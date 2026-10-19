@@ -91,7 +91,11 @@ for (const [label, pattern] of [
   ["stale state after stream loss", /Stream loss shows a stale banner/u],
   ["no sensitive data in the browser", /Sensitive data never reaches the browser/u],
   ["accessibility in both themes", /Accessible and no horizontal overflow/u],
-  ["legacy console unaffected", /Legacy console at \/ is unaffected/u]
+  ["legacy console unaffected", /Legacy console at \/ is unaffected/u],
+  ["server-enforced approve flow", /Approve through the UI: reason required, one POST, server state changes/u],
+  ["read-only credential cannot act", /Read-only credential sees approvals but every control is disabled/u],
+  ["deny flow", /Deny through the UI rejects the work item server-side/u],
+  ["dismiss sends nothing", /Escape dismisses a confirmation without sending anything/u]
 ]) {
   check(`web harness still covers ${label}`, pattern.test(webHarness));
 }

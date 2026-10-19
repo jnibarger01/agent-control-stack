@@ -1,10 +1,12 @@
 import { Route, Routes, useLocation, useParams } from "react-router";
-import { LiveProvider, useOverview, useQueue, useStreamState, useTrace } from "./data/live";
+import { LiveProvider, useApprovals, useExecution, useOverview, useQueue, useStreamState, useTrace } from "./data/live";
 import type { EventSourceFactory } from "./data/stream";
 import { clockTime } from "./design/format";
 import { EmptyState } from "./design/primitives";
 import { QueryBoundary } from "./design/QueryBoundary";
 import { CommandPage } from "./features/command/CommandPage";
+import { ApprovalsPage } from "./features/approvals/ApprovalsPage";
+import { ExecutionPage } from "./features/execution/ExecutionPage";
 import { QueuePage } from "./features/queue/QueuePage";
 import { TracePage } from "./features/trace/TracePage";
 import { Shell } from "./shell/Shell";
@@ -18,6 +20,14 @@ function QueueRoute() {
   const query = useQueue();
   return <QueryBoundary query={query} what="Work queue">{(data) => <QueuePage data={data} />}</QueryBoundary>;
 }
+function ApprovalsRoute() {
+  const query = useApprovals();
+  return <QueryBoundary query={query} what="Approvals">{(data) => <ApprovalsPage data={data} />}</QueryBoundary>;
+}
+function ExecutionRoute() {
+  const query = useExecution();
+  return <QueryBoundary query={query} what="Execution">{(data) => <ExecutionPage data={data} />}</QueryBoundary>;
+}
 function TraceRoute() {
   const { id = "" } = useParams();
   const query = useTrace(id);
@@ -27,6 +37,8 @@ function TraceRoute() {
 function titleFor(pathname: string): string {
   if (pathname.startsWith("/queue/")) return "Execution trace";
   if (pathname.startsWith("/queue")) return "Work Queue";
+  if (pathname.startsWith("/approvals")) return "Approvals";
+  if (pathname.startsWith("/execution")) return "Execution";
   if (pathname === "/") return "Command";
   return "Not found";
 }
@@ -43,6 +55,8 @@ function Frame() {
         <Route path="/" element={<CommandRoute />} />
         <Route path="/queue" element={<QueueRoute />} />
         <Route path="/queue/:id" element={<TraceRoute />} />
+        <Route path="/approvals" element={<ApprovalsRoute />} />
+        <Route path="/execution" element={<ExecutionRoute />} />
         <Route path="*" element={<EmptyState title="Page not found">Use the navigation to pick a page.</EmptyState>} />
       </Routes>
     </Shell>

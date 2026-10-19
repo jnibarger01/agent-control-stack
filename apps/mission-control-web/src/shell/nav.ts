@@ -12,8 +12,8 @@ export interface NavItem {
 export const NAV_ITEMS: NavItem[] = [
   { key: "overview", label: "Command", route: "/", description: "Live overview of agents, work and health" },
   { key: "queue", label: "Work Queue", route: "/queue", description: "All work items, plans and execution traces" },
-  { key: "execution", label: "Execution", classic: "/#execution", description: "Attempts, leases and throughput" },
-  { key: "approvals", label: "Approvals", classic: "/#approvals", description: "Work waiting on a human" },
+  { key: "execution", label: "Execution", route: "/execution", description: "Attempts, leases and throughput" },
+  { key: "approvals", label: "Approvals", route: "/approvals", description: "Work waiting on a human" },
   { key: "agents", label: "Agents", classic: "/#agents", description: "Registered agents and heartbeats" },
   { key: "executors", label: "Executors", classic: "/#executors", description: "Execution bridges and runtimes" },
   { key: "connectors", label: "Connectors", classic: "/#connectors", description: "Connector registry and sessions" },

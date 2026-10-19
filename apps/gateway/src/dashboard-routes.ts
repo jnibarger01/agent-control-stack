@@ -7,6 +7,8 @@ import {
   toMissionControlAttemptLease,
   toOverviewReadModel,
   toQueueReadModel,
+  toApprovalsReadModel,
+  toExecutionReadModel,
   toTraceReadModel,
   type ApprovalActionOption,
   type MissionControlViewModel
@@ -230,6 +232,16 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardRou
     }
   );
 
+  /** What this credential may do, so the UI avoids offering a control that is certain to be refused. Never authority. */
+  function viewerFor(request: FastifyRequest) {
+    const credential = auth ? gatewayCredentialForRequest(request, auth) : undefined;
+    const operatorish = Boolean(credential && (credential.roles.includes("operator") || credential.roles.includes("service")));
+    return {
+      canApprove: operatorish && Boolean(credential?.scopes.includes("acs:approve")),
+      canWrite: operatorish && Boolean(credential?.scopes.includes("acs:write"))
+    };
+  }
+
   app.get(
     "/api/mission-control/queue",
     { preHandler: requireRead, config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
@@ -237,6 +249,32 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardRou
       try {
         reply.header("cache-control", "no-store");
         return toQueueReadModel(missionControlViewModel(request));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.get(
+    "/api/mission-control/approvals",
+    { preHandler: requireRead, config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      try {
+        reply.header("cache-control", "no-store");
+        return toApprovalsReadModel(missionControlViewModel(request), viewerFor(request));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.get(
+    "/api/mission-control/execution",
+    { preHandler: requireRead, config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      try {
+        reply.header("cache-control", "no-store");
+        return toExecutionReadModel(missionControlViewModel(request), viewerFor(request));
       } catch (error) {
         return sendError(reply, error);
       }

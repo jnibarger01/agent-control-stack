@@ -1,7 +1,11 @@
 import {
+  parseApprovalsReadModel,
+  parseExecutionReadModel,
   parseOverviewReadModel,
   parseQueueReadModel,
   parseTraceReadModel,
+  type ApprovalsReadModel,
+  type ExecutionReadModel,
   type OverviewReadModel,
   type Parsed,
   type QueueReadModel,
@@ -37,6 +41,8 @@ export class SchemaError extends Error {
 
 export const OVERVIEW_URL = "/api/mission-control/overview";
 export const QUEUE_URL = "/api/mission-control/queue";
+export const APPROVALS_URL = "/api/mission-control/approvals";
+export const EXECUTION_URL = "/api/mission-control/execution";
 export const traceUrl = (id: string) => `/api/mission-control/work-items/${encodeURIComponent(id)}/trace`;
 
 async function fetchContract<T>(url: string, parse: (input: unknown) => Parsed<T>, fetcher: typeof fetch, signal?: AbortSignal): Promise<T> {
@@ -66,3 +72,45 @@ export const fetchQueue = (fetcher: typeof fetch = fetch, signal?: AbortSignal):
   fetchContract(QUEUE_URL, parseQueueReadModel, fetcher, signal);
 export const fetchTrace = (id: string, fetcher: typeof fetch = fetch, signal?: AbortSignal): Promise<TraceReadModel> =>
   fetchContract(traceUrl(id), parseTraceReadModel, fetcher, signal);
+export const fetchApprovals = (fetcher: typeof fetch = fetch, signal?: AbortSignal): Promise<ApprovalsReadModel> =>
+  fetchContract(APPROVALS_URL, parseApprovalsReadModel, fetcher, signal);
+export const fetchExecution = (fetcher: typeof fetch = fetch, signal?: AbortSignal): Promise<ExecutionReadModel> =>
+  fetchContract(EXECUTION_URL, parseExecutionReadModel, fetcher, signal);
+
+/* ───────────── operator actions: existing authenticated routes, unchanged ───────────── */
+
+export type ActionKind = "approve" | "deny" | "unblock" | "cancel" | "retry";
+export const ACTION_PATH: Record<ActionKind, string> = { approve: "approve", deny: "reject", unblock: "unblock", cancel: "cancel", retry: "retry" };
+
+export type ActionResult = { ok: true; status: number } | { ok: false; status: number; message: string };
+
+/**
+ * Sends one operator action to the gateway's existing route. The session cookie
+ * (HttpOnly, SameSite=Strict) authenticates; the gateway alone decides whether the
+ * action is permitted and returns its reason, which is shown verbatim (bounded, escaped by React).
+ */
+export async function postWorkItemAction(
+  kind: ActionKind,
+  workItemId: string,
+  input: { reason?: string; actionHash?: string },
+  fetcher: typeof fetch = fetch
+): Promise<ActionResult> {
+  const payload: Record<string, string> = {};
+  if (kind !== "unblock" && input.reason) payload.reason = input.reason;
+  if (kind === "approve" && input.actionHash) payload.actionHash = input.actionHash;
+  try {
+    const res = await fetcher(`/work-items/${encodeURIComponent(workItemId)}/${ACTION_PATH[kind]}`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify(payload)
+    });
+    if (res.ok) return { ok: true, status: res.status };
+    const body = (await res.json().catch(() => ({}))) as { error?: unknown; code?: unknown };
+    const detail = typeof body.error === "string" ? body.error : typeof body.code === "string" ? body.code : "";
+    const message = res.status === 401 ? "Your session expired. Sign in again through the console." : detail ? detail.slice(0, 240) : `The gateway refused this action (${res.status}).`;
+    return { ok: false, status: res.status, message };
+  } catch {
+    return { ok: false, status: 0, message: "Could not reach the gateway. Nothing was changed." };
+  }
+}
