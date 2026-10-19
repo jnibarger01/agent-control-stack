@@ -1,11 +1,17 @@
 /**
  * Governed child processes. argv[0] is an absolute executable, never a shell.
+ * Each argv entry is one argument; nothing is interpreted.
+ *
+ * Output is retained per stream with ABSOLUTE offsets, so a client that stored
+ * its cursor can resume after truncation or a reconnect and learns how many
+ * bytes it missed. Every child runs in its own process group, so timeouts and
+ * kill_process stop the whole pipeline, not just the first process.
+ *
  * The CLI does not spawn; it calls these handlers through /jc/mcp.
  *
  * ACS approval binds the exact argv, cwd and timeoutMs through the signed
- * invocation hash, and the approval summary ACS shows the approver
- * (jaceCommanderApprovalSummary in packages/desktop-commander-adapter) lists
- * that argv (secret-looking values redacted), cwd and timeoutMs.
+ * invocation hash. The approval summary (jaceCommanderApprovalSummary in
+ * packages/desktop-commander-adapter) shows that text redacted for display only.
  * kill_process approvals show only the session id / pid: ACS never sees a
  * session's argv, which lives in this process.
  * The shell refusal below is defense in depth, not a sandbox: an approved
@@ -15,41 +21,103 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { jcChildEnv } from './child-env.js';
 import { containJcPath, type JcFsPolicy } from './filesystem.js';
 import { IntegrationError } from './integrations.js';
 
+/** Retained characters per stream. Older output is dropped; offsets stay absolute. */
 const MAX_OUTPUT = 256 * 1024;
 const MAX_SESSIONS = 32;
 const MAX_TIMEOUT_MS = 600_000;
+const DEFAULT_TIMEOUT_MS = 30_000;
 const KILL_GRACE_MS = 5_000;
+/** After the leader exits, how long to wait for stdio to close before settling anyway (a descendant may hold the pipes). */
+const STREAM_CLOSE_GRACE_MS = 2_000;
+/** How long a finished session stays readable before it is pruned. */
+const FINISHED_RETENTION_MS = 10 * 60_000;
+/** Longest `waitMs` a read may long-poll for new output. */
+const MAX_WAIT_MS = 30_000;
 const DENIED_BASE = new Set([
   'sh', 'bash', 'dash', 'zsh', 'ksh', 'mksh', 'ash', 'fish', 'csh', 'tcsh', 'rbash',
   'sudo', 'su', 'doas', 'pkexec', 'env', 'busybox',
 ]);
 
+/**
+ * One stream's retained tail. `end` is the absolute offset just past the last
+ * character written, so a cursor is always `end` at the time it was read.
+ * Offsets count decoded UTF-16 code units; a multibyte character split across
+ * chunks is held by the decoder until it completes.
+ */
+export class OutputBuffer {
+  private text = '';
+  private base = 0;
+  private readonly decoder = new StringDecoder('utf8');
+
+  write(chunk: Buffer): void {
+    this.append(this.decoder.write(chunk));
+  }
+
+  finish(): void {
+    this.append(this.decoder.end());
+  }
+
+  get end(): number {
+    return this.base + this.text.length;
+  }
+
+  /** Text from `from` to the end. `skipped` counts characters lost before the retained tail. */
+  read(from: number): { text: string; offset: number; nextOffset: number; skipped: number } {
+    const start = Math.min(Math.max(from, this.base), this.end);
+    return {
+      text: this.text.slice(start - this.base),
+      offset: start,
+      nextOffset: this.end,
+      skipped: Math.max(0, this.base - from),
+    };
+  }
+
+  private append(piece: string): void {
+    this.text += piece;
+    if (this.text.length > MAX_OUTPUT) {
+      const drop = this.text.length - MAX_OUTPUT;
+      this.text = this.text.slice(drop);
+      this.base += drop;
+    }
+  }
+}
+
+type SessionKind = 'process';
+type SessionState = 'running' | 'exited' | 'failed';
+
 interface Session {
   sessionId: string;
+  kind: SessionKind;
   pid: number;
   argv: string[];
   cwd: string;
-  stdout: string;
-  stderr: string;
+  timeoutMs: number;
+  startedAt: number;
+  finishedAt: number | undefined;
+  stdout: OutputBuffer;
+  stderr: OutputBuffer;
   exitCode: number | null;
   signal: string | null;
+  state: SessionState;
+  timedOut: boolean;
+  error: string | undefined;
   child: ChildProcessWithoutNullStreams;
+  /** Resolves when stdio has closed (output is final), or the spawn failed. */
+  done: Promise<void>;
+  /** Wakes long-polling readers on new output or exit. */
+  wakers: Array<() => void>;
 }
 
 export interface ProcessRegistry {
   start(args: Record<string, unknown>, policy: JcFsPolicy): Record<string, unknown>;
-  output(args: Record<string, unknown>): Record<string, unknown>;
+  output(args: Record<string, unknown>): Promise<Record<string, unknown>>;
   list(): Record<string, unknown>;
   kill(args: Record<string, unknown>): Record<string, unknown>;
-}
-
-function append(current: string, chunk: Buffer): string {
-  const next = current + chunk.toString('utf8');
-  return next.length > MAX_OUTPUT ? next.slice(next.length - MAX_OUTPUT) : next;
 }
 
 function resolveExecutable(executable: string): string {
@@ -64,17 +132,192 @@ function resolveExecutable(executable: string): string {
   if (DENIED_BASE.has(path.basename(executable)) || DENIED_BASE.has(path.basename(real))) {
     throw new IntegrationError('command_denied', 'shells and privilege tools cannot be started through start_process');
   }
+  try {
+    fs.accessSync(real, fs.constants.X_OK);
+  } catch {
+    throw new IntegrationError('not_executable', 'argv[0] is not executable');
+  }
   return real;
+}
+
+function parseTimeout(value: unknown): number {
+  const timeoutMs = value === undefined ? DEFAULT_TIMEOUT_MS : value;
+  if (typeof timeoutMs !== 'number' || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
+    throw new IntegrationError('invalid_argument', `timeoutMs must be an integer from 1 to ${MAX_TIMEOUT_MS}`);
+  }
+  return timeoutMs;
+}
+
+function parseCursor(value: unknown, name: string): number {
+  if (value === undefined) return 0;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new IntegrationError('invalid_argument', `${name} must be a non-negative integer`);
+  }
+  return value;
+}
+
+function parseWait(value: unknown): number {
+  if (value === undefined) return 0;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > MAX_WAIT_MS) {
+    throw new IntegrationError('invalid_argument', `waitMs must be an integer from 0 to ${MAX_WAIT_MS}`);
+  }
+  return value;
+}
+
+/** Signals the whole process group. Falls back to the leader if the group is already gone. */
+function signalGroup(session: Session, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-session.pid, signal);
+  } catch {
+    try {
+      session.child.kill(signal);
+    } catch {
+      // Already gone; nothing left to signal.
+    }
+  }
+}
+
+function wake(session: Session): void {
+  const wakers = session.wakers.splice(0);
+  for (const waker of wakers) waker();
 }
 
 export function createProcessRegistry(): ProcessRegistry {
   const sessions = new Map<string, Session>();
 
-  function makeRoom(): void {
+  function prune(now: number): void {
+    for (const [id, session] of sessions) {
+      if (session.finishedAt !== undefined && now - session.finishedAt > FINISHED_RETENTION_MS) sessions.delete(id);
+    }
+  }
+
+  function makeRoom(now: number): void {
+    prune(now);
     if (sessions.size < MAX_SESSIONS) return;
-    const finished = [...sessions.values()].find((session) => session.exitCode !== null || session.signal !== null);
-    if (!finished) throw new IntegrationError('too_many_processes', `at most ${MAX_SESSIONS} managed processes may run at once`);
-    sessions.delete(finished.sessionId);
+    const oldestFinished = [...sessions.values()]
+      .filter((session) => session.state !== 'running')
+      .sort((a, b) => (a.finishedAt ?? 0) - (b.finishedAt ?? 0))[0];
+    if (!oldestFinished) throw new IntegrationError('too_many_processes', `at most ${MAX_SESSIONS} managed processes may run at once`);
+    sessions.delete(oldestFinished.sessionId);
+  }
+
+  /** Spawns one governed session. The caller has already validated and contained every argument. */
+  function launch(kind: SessionKind, argv: string[], executable: string, args: string[], cwd: string, timeoutMs: number): Session {
+    const now = Date.now();
+    makeRoom(now);
+    // detached: the child leads its own process group, so the whole pipeline can be signalled.
+    const child = spawn(executable, args, { cwd, env: jcChildEnv(), shell: false, stdio: 'pipe', detached: true });
+    // Attached before anything else: a failed spawn emits 'error' asynchronously, and an unhandled
+    // 'error' event would crash the server. The session handler below takes over once one exists.
+    child.on('error', () => undefined);
+    if (!child.pid) throw new IntegrationError('start_failed', 'process did not start');
+    // No stdin: a command that reads input gets EOF instead of hanging until its timeout.
+    child.stdin.end();
+    let resolveDone: () => void = () => undefined;
+    const done = new Promise<void>((resolve) => { resolveDone = resolve; });
+    const session: Session = {
+      sessionId: `proc_${randomBytes(8).toString('hex')}`,
+      kind,
+      pid: child.pid,
+      argv,
+      cwd,
+      timeoutMs,
+      startedAt: now,
+      finishedAt: undefined,
+      stdout: new OutputBuffer(),
+      stderr: new OutputBuffer(),
+      exitCode: null,
+      signal: null,
+      state: 'running',
+      timedOut: false,
+      error: undefined,
+      child,
+      done,
+      wakers: [],
+    };
+    child.stdout.on('data', (chunk: Buffer) => { session.stdout.write(chunk); wake(session); });
+    child.stderr.on('data', (chunk: Buffer) => { session.stderr.write(chunk); wake(session); });
+    // A spawn failure (EACCES, ENOEXEC, a vanished cwd) arrives as an 'error' event. Without a
+    // listener it is an uncaught exception that takes the whole server down.
+    child.on('error', (error: NodeJS.ErrnoException) => {
+      session.state = 'failed';
+      session.error = error.code ?? 'spawn_failed';
+      session.finishedAt = Date.now();
+      clearTimeout(timer);
+      wake(session);
+      resolveDone();
+    });
+    // 'running' ends only when stdio has closed: until then a reader could see the exit and miss
+    // the last chunk. If a descendant keeps the pipes open, settle after a grace period anyway.
+    let settled = false;
+    const settle = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(closeFallback);
+      session.stdout.finish();
+      session.stderr.finish();
+      if (session.state === 'running') {
+        session.state = 'exited';
+        session.finishedAt = Date.now();
+      }
+      wake(session);
+      resolveDone();
+    };
+    let closeFallback: NodeJS.Timeout | undefined;
+    child.on('exit', (code, signal) => {
+      session.exitCode = code;
+      session.signal = signal;
+      clearTimeout(timer);
+      closeFallback = setTimeout(settle, STREAM_CLOSE_GRACE_MS);
+      closeFallback.unref();
+      wake(session);
+    });
+    child.on('close', settle);
+    const timer = setTimeout(() => {
+      session.timedOut = true;
+      terminate(session);
+    }, timeoutMs);
+    sessions.set(session.sessionId, session);
+    return session;
+  }
+
+  function summary(session: Session): Record<string, unknown> {
+    return {
+      sessionId: session.sessionId,
+      kind: session.kind,
+      pid: session.pid,
+      cwd: session.cwd,
+      argv: session.argv,
+      state: session.state,
+      running: session.state === 'running',
+      exitCode: session.exitCode,
+      signal: session.signal,
+      timedOut: session.timedOut,
+    };
+  }
+
+  function readOutput(session: Session, stdoutOffset: number, stderrOffset: number): Record<string, unknown> {
+    const out = session.stdout.read(stdoutOffset);
+    const err = session.stderr.read(stderrOffset);
+    return {
+      ...summary(session),
+      ...(session.error !== undefined ? { error: session.error } : {}),
+      stdout: out.text,
+      stdoutOffset: out.offset,
+      stdoutNextOffset: out.nextOffset,
+      stdoutSkipped: out.skipped,
+      stderr: err.text,
+      stderrOffset: err.offset,
+      stderrNextOffset: err.nextOffset,
+      stderrSkipped: err.skipped,
+      truncated: out.skipped > 0 || err.skipped > 0 || session.stdout.end > MAX_OUTPUT || session.stderr.end > MAX_OUTPUT,
+    };
+  }
+
+  function requireSession(sessionId: unknown): Session {
+    const session = sessions.get(String(sessionId ?? ''));
+    if (!session) throw new IntegrationError('not_found', 'session not found');
+    return session;
   }
 
   return {
@@ -90,68 +333,39 @@ export function createProcessRegistry(): ProcessRegistry {
       });
       const executable = resolveExecutable(argv[0]!);
       const cwd = containJcPath(args.cwd, policy);
-      const timeoutMs = args.timeoutMs === undefined ? 30_000 : args.timeoutMs;
-      if (typeof timeoutMs !== 'number' || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
-        throw new IntegrationError('invalid_argument', `timeoutMs must be an integer from 1 to ${MAX_TIMEOUT_MS}`);
+      const timeoutMs = parseTimeout(args.timeoutMs);
+      const session = launch('process', argv, executable, argv.slice(1), cwd, timeoutMs);
+      return { sessionId: session.sessionId, pid: session.pid, cwd, argv, timeoutMs, kind: 'process' };
+    },
+
+    async output(args) {
+      const session = requireSession(args.sessionId);
+      const stdoutOffset = parseCursor(args.offset, 'offset');
+      const stderrOffset = parseCursor(args.stderrOffset, 'stderrOffset');
+      const waitMs = parseWait(args.waitMs);
+      if (waitMs > 0 && session.state === 'running' && session.stdout.end === stdoutOffset && session.stderr.end === stderrOffset) {
+        await new Promise<void>((resolve) => {
+          const waker = (): void => { clearTimeout(timer); resolve(); };
+          // Drop our waker on timeout too; otherwise a client that long-polls a quiet session grows the list without bound.
+          const timer = setTimeout(() => {
+            session.wakers = session.wakers.filter((item) => item !== waker);
+            resolve();
+          }, waitMs);
+          session.wakers.push(waker);
+        });
       }
-      makeRoom();
-      const child = spawn(executable, argv.slice(1), { cwd, env: jcChildEnv(), shell: false, stdio: 'pipe' });
-      if (!child.pid) throw new IntegrationError('start_failed', 'process did not start');
-      const session: Session = {
-        sessionId: `proc_${randomBytes(8).toString('hex')}`,
-        pid: child.pid,
-        argv,
-        cwd,
-        stdout: '',
-        stderr: '',
-        exitCode: null,
-        signal: null,
-        child,
-      };
-      child.stdout.on('data', (chunk: Buffer) => { session.stdout = append(session.stdout, chunk); });
-      child.stderr.on('data', (chunk: Buffer) => { session.stderr = append(session.stderr, chunk); });
-      const timer = setTimeout(() => terminate(session), timeoutMs);
-      child.on('exit', (code, signal) => {
-        session.exitCode = code;
-        session.signal = signal;
-        clearTimeout(timer);
-      });
-      sessions.set(session.sessionId, session);
-      return { sessionId: session.sessionId, pid: session.pid, cwd, argv, timeoutMs };
+      return readOutput(session, stdoutOffset, stderrOffset);
     },
-    output(args) {
-      const session = sessions.get(String(args.sessionId ?? ''));
-      if (!session) throw new IntegrationError('not_found', 'session not found');
-      const offset = typeof args.offset === 'number' ? args.offset : 0;
-      return {
-        sessionId: session.sessionId,
-        pid: session.pid,
-        exitCode: session.exitCode,
-        signal: session.signal,
-        running: session.exitCode === null && session.signal === null,
-        stdout: session.stdout.slice(offset),
-        stderr: session.stderr.slice(offset),
-        truncated: session.stdout.length >= MAX_OUTPUT || session.stderr.length >= MAX_OUTPUT,
-      };
-    },
+
     list() {
-      return {
-        processes: [...sessions.values()].map((session) => ({
-          sessionId: session.sessionId,
-          pid: session.pid,
-          cwd: session.cwd,
-          argv: session.argv,
-          exitCode: session.exitCode,
-          signal: session.signal,
-          running: session.exitCode === null && session.signal === null,
-        })),
-      };
+      return { processes: [...sessions.values()].map(summary) };
     },
+
     kill(args) {
       const session = [...sessions.values()].find((item) =>
         item.sessionId === args.sessionId || (typeof args.pid === 'number' && item.pid === args.pid));
       if (!session) throw new IntegrationError('not_found', 'managed process not found');
-      if (session.exitCode !== null || session.signal !== null) {
+      if (session.state !== 'running') {
         return { sessionId: session.sessionId, pid: session.pid, alreadyExited: true };
       }
       terminate(session);
@@ -160,10 +374,12 @@ export function createProcessRegistry(): ProcessRegistry {
   };
 }
 
+/** SIGTERM the group now; SIGKILL it after the grace period if the leader is still alive. */
 function terminate(session: Session): void {
-  session.child.kill('SIGTERM');
+  if (session.state !== 'running') return;
+  signalGroup(session, 'SIGTERM');
   const escalate = setTimeout(() => {
-    if (session.exitCode === null && session.signal === null) session.child.kill('SIGKILL');
+    if (session.state === 'running') signalGroup(session, 'SIGKILL');
   }, KILL_GRACE_MS);
   escalate.unref();
   session.child.once('exit', () => clearTimeout(escalate));

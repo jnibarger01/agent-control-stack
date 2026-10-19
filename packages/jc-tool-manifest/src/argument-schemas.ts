@@ -20,6 +20,10 @@ const ABSOLUTE = z
   .min(1)
   .max(4096)
   .refine((value) => isAbsolute(value) && !value.includes("\0"), "must be an absolute path");
+const CONTEXT_ID = z.string().min(1).max(64);
+const CONTEXT_TRUST = z.enum(["operator", "repo", "tool-output", "external"]);
+const CONTEXT_PRIORITY = z.number().int().min(0).max(100);
+const SHA256_HEX = z.string().regex(/^[a-f0-9]{64}$/u);
 
 /** Upper bounds shared by schema validation and the JC runtime's own output caps. */
 export const JC_FS_LIMITS = Object.freeze({
@@ -57,6 +61,7 @@ export const JC_TOOL_NAMES = Object.freeze([
   "move_file",
   "edit_block",
   "start_process",
+  "context_pack",
   "read_process_output",
   "kill_process",
   "list_processes",
@@ -169,9 +174,28 @@ export const JC_TOOL_ARGUMENT_SCHEMAS: Readonly<Record<JcToolName, z.ZodType>> =
     cwd: ABSOLUTE,
     timeoutMs: z.number().int().min(1).max(600_000).optional()
   }),
+  context_pack: z.strictObject({
+    files: z.array(ABSOLUTE).max(16).optional(),
+    pins: z.record(z.string(), SHA256_HEX).optional(),
+    fileTrust: CONTEXT_TRUST.optional(),
+    inline: z
+      .array(
+        z.strictObject({
+          id: CONTEXT_ID,
+          text: z.string().max(65_536),
+          trust: CONTEXT_TRUST,
+          priority: CONTEXT_PRIORITY.optional()
+        })
+      )
+      .max(16)
+      .optional(),
+    budgetTokens: z.number().int().min(1).max(200_000).optional()
+  }),
   read_process_output: z.strictObject({
     sessionId: ID,
-    offset: z.number().int().min(0).optional()
+    offset: z.number().int().min(0).optional(),
+    stderrOffset: z.number().int().min(0).optional(),
+    waitMs: z.number().int().min(0).max(30_000).optional()
   }),
   list_processes: z.strictObject({}),
   kill_process: z.strictObject({ sessionId: ID.optional(), pid: z.number().int().positive().optional() }),

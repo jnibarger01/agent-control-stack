@@ -62,10 +62,10 @@ const refused = (result, expected) => {
 
 const file = path.join(root, 'note.txt');
 
-await test('tools/list is exactly the manifest (36 tools, no list_sessions alias)', async () => {
+await test('tools/list is exactly the manifest (37 tools, no list_sessions alias)', async () => {
   const tools = await client.listTools();
   assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), JC_MANIFEST.tools.map((tool) => tool.name).sort());
-  assert.equal(tools.tools.length, 36);
+  assert.equal(tools.tools.length, 37);
   assert.ok(!tools.tools.some((tool) => tool.name === 'list_sessions'));
 });
 
@@ -220,8 +220,8 @@ await test('jc_doctor reports manifest/handler parity, verifier, served path, an
   const doctor = await call('jc_doctor', {});
   okResult(doctor);
   const report = doctor.structuredContent;
-  assert.equal(report.toolCount, 36);
-  assert.equal(report.liveHandlerCount, 36);
+  assert.equal(report.toolCount, 37);
+  assert.equal(report.liveHandlerCount, 37);
   const check = (name) => report.checks.find((item) => item.name === name);
   assert.equal(check('manifest').ok, true);
   assert.equal(check('capability verification').ok, true);

@@ -30,13 +30,13 @@ async function test(name, fn) {
 }
 const names = JC_MANIFEST.tools.map((tool) => tool.name);
 
-await test('managed preset resolves every tool to acs-capability; standalone to 24 local + 12 refused', () => {
+await test('managed preset resolves every tool to acs-capability; standalone to 25 local + 12 refused', () => {
   const managed = createAuthorizerResolver('managed');
   assert.ok(managed.routes().every((route) => route.authorizer === 'acs-capability'));
-  assert.equal(managed.routes().length, 36);
+  assert.equal(managed.routes().length, 37);
   assert.equal(managed.usesAcs(), true);
   const standalone = createAuthorizerResolver('standalone');
-  assert.equal(standalone.routes().filter((route) => route.authorizer === 'local').length, 24);
+  assert.equal(standalone.routes().filter((route) => route.authorizer === 'local').length, 25);
   assert.equal(standalone.routes().filter((route) => route.authorizer === 'refused').length, 12);
   assert.equal(standalone.usesAcs(), false);
   assert.equal(createAuthorizerResolver('local').routes().every((route) => route.authorizer === 'local'), true);
