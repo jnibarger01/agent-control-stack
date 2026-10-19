@@ -234,3 +234,12 @@ Verification evidence: `scripts/verify-mission-control-web.mjs` passes 20 checks
 - Lockfile: `package-lock.json` was out of sync on this branch (fixed in its own commit).
 - CI pins npm 11.17.0; npm 12 mangles this lock. Lock edits must use `npx -y npm@11.17.0`.
 - The legacy `verify-mission-control.mjs` still fails its execution-mode `admin` step (pre-existing; admin mode retirement plan).
+
+### PR 2 (implemented): Work Queue and execution trace, read-only
+
+- `GET /api/mission-control/queue` and `GET /api/mission-control/work-items/:id/trace` (both `requireRead`, `no-store`, contract-validated by the SPA). Both are pure projections (`toQueueReadModel`, `toTraceReadModel`) over reads the legacy console already performs; no new store methods.
+- Trace stages: request, policy, plan, admission, approval, attempt, lease, result. Policy and approval are projected from audit events and flagged **derived**. A plan without a persisted admission renders "Plan not admitted". Plan step params, allowed-command lists, host paths and free-form results are never forwarded (allowed commands are a count).
+- Correction found by the real-gateway run: `work_item.approved` also fires for policy auto-allowed low-risk work, so it counts as a human grant only when the admission says approval was required. Regression-tested.
+- Workspace allocation is intentionally absent from the trace: ACS does not persist a per-work-item allocation lookup, and the host path is sensitive. It will appear once a canonical safe label exists.
+- Queue filters and search apply to the loaded window and say so; status totals are labelled exact (store) or window-only.
+- Harness: 39 real-gateway checks (queue filtering via URL, real dry-run trace, not-found, axe on command/queue/trace in both themes at four widths).
