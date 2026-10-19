@@ -68,6 +68,34 @@ for (const [label, pattern] of [
   check(`harness still covers ${label}`, pattern.test(harness));
 }
 
+// 4b. The React app (/next/) has its own harness with the same obligations.
+const webHarnessPath = path.join(root, "scripts", "verify-mission-control-web.mjs");
+const webHarness = readFileSync(webHarnessPath, "utf8");
+check(
+  "web harness is wired into package scripts",
+  typeof pkg.scripts?.["test:mission-control-web-e2e"] === "string",
+  "missing scripts.test:mission-control-web-e2e"
+);
+for (const variable of ["ACS_UI_EVIDENCE_DIR", "ACS_PLAYWRIGHT_MODULE", "ACS_BROWSER_EXECUTABLE"]) {
+  check(`web harness honours ${variable}`, webHarness.includes(variable));
+}
+check(
+  "web harness closes the gateway exactly once",
+  [...webHarness.matchAll(/await app\.close\(\)/gu)].length === 1 && /if \(appClosed\) return;/u.test(webHarness)
+);
+for (const [label, pattern] of [
+  ["strict CSP", /strict CSP/u],
+  ["live SSE refresh", /Live update: a new work item appears via SSE/u],
+  ["fail-closed on invalid contract", /Schema-invalid response fails closed/u],
+  ["unauthenticated access", /Unauthenticated: API rejects/u],
+  ["stale state after stream loss", /Stream loss shows a stale banner/u],
+  ["no sensitive data in the browser", /Sensitive data never reaches the browser/u],
+  ["accessibility in both themes", /Accessible and no horizontal overflow/u],
+  ["legacy console unaffected", /Legacy console at \/ is unaffected/u]
+]) {
+  check(`web harness still covers ${label}`, pattern.test(webHarness));
+}
+
 // 5. Optionally execute the harness for real.
 if (process.env.ACS_UI_E2E === "1") {
   process.stdout.write("ACS_UI_E2E=1: running the Mission Control browser harness\n");
@@ -79,6 +107,11 @@ if (process.env.ACS_UI_E2E === "1") {
       env: { ...process.env, ACS_UI_EVIDENCE_DIR: evidence }
     });
     if (run.status !== 0) failures.push(`harness exited with status ${run.status}`);
+    const webRun = spawnSync(process.execPath, [webHarnessPath], {
+      stdio: "inherit",
+      env: { ...process.env, ACS_UI_EVIDENCE_DIR: evidence }
+    });
+    if (webRun.status !== 0) failures.push(`web harness exited with status ${webRun.status}`);
   }
 } else {
   process.stdout.write(

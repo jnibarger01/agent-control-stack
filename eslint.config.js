@@ -13,6 +13,20 @@ export default tseslint.config(
     }
   },
   {
+    // Mission Control Web renders only through React's escaping. No raw HTML injection, ever.
+    files: ["apps/mission-control-web/src/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "JSXAttribute[name.name='dangerouslySetInnerHTML']",
+          message: "dangerouslySetInnerHTML is forbidden in Mission Control Web (security rule)."
+        },
+        { selector: "MemberExpression[property.name='innerHTML']", message: "innerHTML is forbidden in Mission Control Web." }
+      ]
+    }
+  },
+  {
     // ADR 0020: Jev is advisory evidence only. Only the shadow hook and the observation worker
     // may touch the adapter; everything else (authority packages, apps) must not import it.
     files: ["**/*.{ts,tsx,js,mjs,cjs}"],
