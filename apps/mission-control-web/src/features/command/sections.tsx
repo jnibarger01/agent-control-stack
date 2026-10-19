@@ -223,7 +223,7 @@ export function InfrastructureStrip({ data }: { data: OverviewReadModel }) {
   const i = data.infrastructure;
   if (!i) return <Unavailable what="Infrastructure summary" />;
   return (
-    <Card title="Infrastructure" subtitle="Executors and connectors appear as nodes in the network once their pages are migrated.">
+    <Card title="Infrastructure" subtitle="Counts only. Executors and connectors are also drawn in the agent network above; open their pages for detail.">
       <DataTable
         caption="Registered infrastructure"
         rows={[
