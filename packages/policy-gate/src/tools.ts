@@ -149,7 +149,18 @@ function gateApprovalInTransaction(
   // approver is still authorized and the hash still matches a required action) but record
   // nothing: no second policy.decided / approval.granted, and no refreshed approval expiry.
   // Anything else (deny, unknown hash, expired or consumed approval) takes the normal path.
-  if (workItem.status === "approved" && store.hasApproval(workItem.id, parsed.actionHash)) {
+  // A different approver is a real update, not a replay: in particular a human must still
+  // be able to supersede an acs:admin approval (grantExecutionPlanApproval invalidates it).
+  const existingPlan = store.getCurrentExecutionPlan(workItem.id);
+  const existingPlanApproval = existingPlan
+    ? store.getExecutionPlanApproval(workItem.id, existingPlan.planHash, parsed.actionHash)
+    : undefined;
+  if (
+    workItem.status === "approved" &&
+    existingPlanApproval?.status === "granted" &&
+    existingPlanApproval.approvedByActorId === parsed.approvedBy &&
+    store.hasApproval(workItem.id, parsed.actionHash)
+  ) {
     const replayEvaluations = policy.evaluateWorkItem(workItem, parsed.approvedBy, "approve");
     const replayDecision = policy.summarize(replayEvaluations);
     const replayMatches = approvalRequired(replayEvaluations).some(
