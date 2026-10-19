@@ -121,10 +121,10 @@ export function Observability({ data }: { data: OverviewReadModel }) {
   );
 }
 
-export function TelemetryPanel({ telemetry: t, admission: a }: { telemetry: OverviewReadModel["observability"]["telemetry"]; admission: OverviewReadModel["observability"]["admission"] }) {
+export function TelemetryPanel({ telemetry: t, admission: a, hiddenTable = true }: { telemetry: OverviewReadModel["observability"]["telemetry"]; admission: OverviewReadModel["observability"]["admission"]; hiddenTable?: boolean }) {
   return (
     <div className="space-y-5">
-      {t ? <Throughput throughput={t.throughput} /> : <Unavailable what="Throughput" reason="telemetry_absent" />}
+      {t ? <Throughput throughput={t.throughput} hiddenTable={hiddenTable} /> : <Unavailable what="Throughput" reason="telemetry_absent" />}
       <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
         <Metric label="Avg run time" value={t ? formatDuration(t.averageRunMs) : "unknown"} />
         <Metric label="Avg queue time" value={t ? formatDuration(t.averageQueueMs) : "unknown"} />
@@ -147,13 +147,13 @@ function Metric({ label, value }: { label: string; value: string }) {
   return <div><dt className="text-xs text-muted">{label}</dt><dd className="mt-0.5 text-lg font-semibold tabular-nums">{value}</dd></div>;
 }
 
-function Throughput({ throughput }: { throughput: Array<{ at: string; started: number; completed: number; failed: number }> }) {
+function Throughput({ throughput, hiddenTable }: { throughput: Array<{ at: string; started: number; completed: number; failed: number }>; hiddenTable: boolean }) {
   const max = Math.max(1, ...throughput.map((b) => Math.max(b.completed, b.failed, b.started)));
   const W = 24;
   const H = 110;
   return (
     <div>
-      <svg viewBox={`0 0 ${throughput.length * W} ${H + 14}`} className="w-full" role="img" aria-label="Hourly attempts: completed and failed over the last 24 hours. A table of the same numbers follows.">
+      <svg viewBox={`0 0 ${throughput.length * W} ${H + 14}`} className="w-full" role="img" aria-label={hiddenTable ? "Hourly attempts: completed and failed over the last 24 hours. A table of the same numbers follows." : "Hourly attempts: completed and failed over the last 24 hours. See the table below."}>
         {throughput.map((b, i) => {
           const hc = (b.completed / max) * H;
           const hf = (b.failed / max) * H;
@@ -168,11 +168,11 @@ function Throughput({ throughput }: { throughput: Array<{ at: string; started: n
         <line x1={0} x2={throughput.length * W} y1={H} y2={H} stroke="var(--line-strong)" />
       </svg>
       <p className="mt-1 flex gap-4 text-xs text-muted"><span><span aria-hidden="true" className="mr-1 inline-block h-2 w-2 rounded-sm bg-accent" />Completed</span><span><span aria-hidden="true" className="mr-1 inline-block h-2 w-2 rounded-sm bg-bad" />Failed</span></p>
-      <table className="sr-only">
+      {hiddenTable && <table className="sr-only">
         <caption>Hourly attempts</caption>
         <thead><tr><th scope="col">Hour</th><th scope="col">Started</th><th scope="col">Completed</th><th scope="col">Failed</th></tr></thead>
         <tbody>{throughput.map((b) => <tr key={b.at}><th scope="row">{clockTime(b.at)}</th><td>{b.started}</td><td>{b.completed}</td><td>{b.failed}</td></tr>)}</tbody>
-      </table>
+      </table>}
     </div>
   );
 }

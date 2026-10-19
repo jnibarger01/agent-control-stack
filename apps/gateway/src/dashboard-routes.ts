@@ -8,6 +8,7 @@ import {
   toOverviewReadModel,
   toQueueReadModel,
   toApprovalsReadModel,
+  toAuditReadModel,
   toExecutionReadModel,
   toTraceReadModel,
   type ApprovalActionOption,
@@ -260,6 +261,38 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardRou
       try {
         reply.header("cache-control", "no-store");
         return toQueueReadModel(missionControlViewModel(request));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  const auditQuerySchema = z
+    .object({
+      limit: z.coerce.number().int().min(1).max(200).default(100),
+      beforeSequence: z.coerce.number().int().min(1).optional(),
+      name: z.string().min(1).max(160).optional(),
+      workItemId: z.string().min(1).max(200).optional(),
+      agentId: z.string().min(1).max(200).optional()
+    })
+    .strict();
+
+  app.get(
+    "/api/mission-control/audit",
+    { preHandler: requireRead, config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      try {
+        const q = auditQuerySchema.parse(request.query ?? {});
+        reply.header("cache-control", "no-store");
+        const events = workItems.readEvents({
+          limit: q.limit,
+          // Page backwards from the newest event: readEvents defaults to oldest-first.
+          beforeSequence: q.beforeSequence ?? Number.MAX_SAFE_INTEGER,
+          ...(q.name ? { name: q.name } : {}),
+          ...(q.workItemId ? { workItemId: q.workItemId } : {}),
+          ...(q.agentId ? { agentId: q.agentId } : {})
+        });
+        return toAuditReadModel(events, q.limit);
       } catch (error) {
         return sendError(reply, error);
       }

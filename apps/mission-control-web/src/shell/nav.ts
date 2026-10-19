@@ -17,8 +17,8 @@ export const NAV_ITEMS: NavItem[] = [
   { key: "agents", label: "Agents", route: "/agents", description: "Registered agents and heartbeats" },
   { key: "executors", label: "Executors", route: "/executors", description: "Execution bridges and runtimes" },
   { key: "connectors", label: "Connectors", route: "/connectors", description: "Connector registry and sessions" },
-  { key: "metrics", label: "Metrics", classic: "/#metrics", description: "Persisted telemetry" },
-  { key: "audit", label: "Audit", classic: "/#audit", description: "Immutable event log" },
-  { key: "policy", label: "Policy", classic: "/#policy", description: "Rules and recent decisions" },
-  { key: "system", label: "System", classic: "/#system", description: "Readiness and probes" }
+  { key: "metrics", label: "Metrics", route: "/metrics", description: "Persisted telemetry" },
+  { key: "audit", label: "Audit", route: "/audit", description: "Immutable event log" },
+  { key: "policy", label: "Policy", route: "/policy", description: "Rules and recent decisions" },
+  { key: "system", label: "System", route: "/system", description: "Readiness and probes" }
 ];

@@ -2,6 +2,7 @@ import {
   parseAgentDetail,
   parseAgentsList,
   parseApprovalsReadModel,
+  parseAuditReadModel,
   parseConnectorDetail,
   parseConnectorsList,
   parseExecutorDetail,
@@ -12,6 +13,7 @@ import {
   parseTraceReadModel,
   type AgentDetail,
   type ApprovalsReadModel,
+  type AuditReadModel,
   type Connector,
   type ConnectorDetail,
   type Executor,
@@ -146,3 +148,30 @@ export const fetchConnectors = async (fetcher: typeof fetch = fetch, signal?: Ab
   (await fetchContract("/api/connectors", parseConnectorsList, fetcher, signal)).connectors;
 export const fetchConnector = (id: string, fetcher: typeof fetch = fetch, signal?: AbortSignal): Promise<ConnectorDetail> =>
   fetchContract(`/api/connectors/${encodeURIComponent(id)}`, parseConnectorDetail, fetcher, signal);
+
+/* ───────────── audit and system probes ───────────── */
+
+export interface AuditFilters { name?: string; workItemId?: string; agentId?: string; beforeSequence?: number; limit?: number }
+export function auditUrl(f: AuditFilters): string {
+  const q = new URLSearchParams();
+  q.set("limit", String(f.limit ?? 100));
+  if (f.name) q.set("name", f.name);
+  if (f.workItemId) q.set("workItemId", f.workItemId);
+  if (f.agentId) q.set("agentId", f.agentId);
+  if (f.beforeSequence !== undefined) q.set("beforeSequence", String(f.beforeSequence));
+  return `/api/mission-control/audit?${q.toString()}`;
+}
+export const fetchAudit = (f: AuditFilters, fetcher: typeof fetch = fetch, signal?: AbortSignal): Promise<AuditReadModel> =>
+  fetchContract(auditUrl(f), parseAuditReadModel, fetcher, signal);
+
+export interface ProbeResult { path: string; ok: boolean; status: number | null; checkedAt: string }
+/** Real probe of an existing health route. Never inferred: a network failure is `status: null`. */
+export async function probe(path: string, fetcher: typeof fetch = fetch): Promise<ProbeResult> {
+  const checkedAt = new Date().toISOString();
+  try {
+    const res = await fetcher(path, { cache: "no-store", credentials: "same-origin" });
+    return { path, ok: res.ok, status: res.status, checkedAt };
+  } catch {
+    return { path, ok: false, status: null, checkedAt };
+  }
+}

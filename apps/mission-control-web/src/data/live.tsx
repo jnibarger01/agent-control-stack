@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, type ReactNode } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AuthRequiredError, NotFoundError, SchemaError, fetchAgent, fetchAgents, fetchApprovals, fetchConnector, fetchConnectors, fetchExecution, fetchExecutor, fetchExecutors, fetchOverview, fetchQueue, fetchTrace } from "./api";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type AuditFilters, AuthRequiredError, NotFoundError, SchemaError, fetchAgent, fetchAgents, fetchAudit, fetchApprovals, fetchConnector, fetchConnectors, fetchExecution, fetchExecutor, fetchExecutors, fetchOverview, fetchQueue, fetchTrace } from "./api";
 import { useEventStream, type EventSourceFactory, type StreamState } from "./stream";
 
 export const ROOT_KEY = ["mission-control"] as const;
@@ -64,3 +64,5 @@ export const useExecutors = () => useQuery({ queryKey: [...ROOT_KEY, "executors"
 export const useExecutor = (id: string) => useQuery({ queryKey: [...ROOT_KEY, "executor", id], queryFn: ({ signal }) => fetchExecutor(id, fetch, signal), ...shared });
 export const useConnectors = () => useQuery({ queryKey: [...ROOT_KEY, "connectors"], queryFn: ({ signal }) => fetchConnectors(fetch, signal), ...shared });
 export const useConnector = (id: string) => useQuery({ queryKey: [...ROOT_KEY, "connector", id], queryFn: ({ signal }) => fetchConnector(id, fetch, signal), ...shared });
+// Keep the previous results on screen while a new filter loads, so typing never blanks the page.
+export const useAudit = (filters: AuditFilters) => useQuery({ queryKey: [...ROOT_KEY, "audit", filters], queryFn: ({ signal }) => fetchAudit(filters, fetch, signal), placeholderData: keepPreviousData, ...shared });
