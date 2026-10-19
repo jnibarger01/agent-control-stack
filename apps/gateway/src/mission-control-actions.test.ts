@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseApprovalsReadModel, parseExecutionReadModel } from "@agent-control-stack/mission-control-contract";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
+import { isCrossOriginCookieWrite } from "./csrf-guard.js";
+import { sessionCookieName, sessionCookieValue } from "./credentials.js";
 import { buildGateway } from "./server.js";
 
 const OPERATOR = "o".repeat(48);
@@ -97,14 +99,17 @@ describe("approvals and execution read models + the real mutation routes", () =>
       const hash = list.items.find((i: { id: string }) => i.id === highRiskId).actions[0].actionHash;
       const body = { reason: "first approval", actionHash: hash };
       expect((await app.inject({ method: "POST", url: `/work-items/${highRiskId}/approve`, headers: bearer(OPERATOR), payload: body })).statusCode).toBe(200);
-      await app.inject({ method: "POST", url: `/work-items/${highRiskId}/approve`, headers: bearer(OPERATOR), payload: { ...body, reason: "replay" } });
+      const beforeReplay = (await app.inject({ method: "GET", url: `/work-items/${highRiskId}`, headers: bearer(OPERATOR) })).json() as { events: Array<{ name: string }> };
+      const replay = await app.inject({ method: "POST", url: `/work-items/${highRiskId}/approve`, headers: bearer(OPERATOR), payload: { ...body, reason: "replay" } });
+      expect(replay.statusCode).toBe(409);
+      expect(replay.json().code).toBe("approval_already_granted");
       const detail = (await app.inject({ method: "GET", url: `/work-items/${highRiskId}`, headers: bearer(OPERATOR) })).json() as { workItem: { status: string }; events: Array<{ name: string }> };
       expect(detail.workItem.status).toBe("approved");
-      expect(detail.events.some((e) => e.name === "approval.granted")).toBe(true);
+      expect(detail.events.filter((e) => e.name === "approval.granted")).toHaveLength(1);
       expect(detail.events.some((e) => e.name === "work_item.approved")).toBe(true);
-      // The binding authority record (the execution-plan approval) is granted exactly once.
-      // NOTE: a replay currently also appends a second `approval.granted` audit event (pre-existing
-      // server behaviour, tracked separately); it grants nothing, so it is deliberately not asserted here.
+      // A rejected replay must not append a policy decision or any other audit event.
+      expect(detail.events).toHaveLength(beforeReplay.events.length);
+      expect(detail.events.filter((e) => e.name === "policy.decided")).toHaveLength(beforeReplay.events.filter((e) => e.name === "policy.decided").length);
       expect(detail.events.filter((e) => e.name === "execution_plan_approval.granted")).toHaveLength(1);
       expect(detail.events.filter((e) => e.name === "work_item.approved")).toHaveLength(1);
     } finally {
@@ -119,6 +124,64 @@ describe("approvals and execution read models + the real mutation routes", () =>
       expect(wrong.statusCode).toBeGreaterThanOrEqual(400);
       const list = (await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(OPERATOR) })).json();
       expect(list.items.some((i: { id: string }) => i.id === highRiskId)).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+
+  describe("cross-origin protection for cookie-authenticated writes", () => {
+    const cookieFor = (app: ReturnType<typeof gateway>) => {
+      void app;
+      const op = credentials[0]!;
+      return `${sessionCookieName}=${sessionCookieValue({ token: OPERATOR, actor: "qa-operator", actorId: "operator", credentials }, op as never)}`;
+    };
+
+    it("pure decision: only cookie-only unsafe writes that declare themselves cross-origin are refused", () => {
+      const cookie = `${sessionCookieName}=x`;
+      expect(isCrossOriginCookieWrite("POST", { cookie, "sec-fetch-site": "cross-site" })).toBe(true);
+      expect(isCrossOriginCookieWrite("POST", { cookie, "sec-fetch-site": "same-site" })).toBe(true); // other port/subdomain of the same site
+      expect(isCrossOriginCookieWrite("POST", { cookie, "sec-fetch-site": "same-origin" })).toBe(false);
+      expect(isCrossOriginCookieWrite("POST", { cookie, "sec-fetch-site": "none" })).toBe(false);
+      expect(isCrossOriginCookieWrite("POST", { cookie, origin: "http://evil.localhost:9", host: "127.0.0.1:3000" })).toBe(true);
+      expect(isCrossOriginCookieWrite("POST", { cookie, origin: "http://127.0.0.1:3000", host: "127.0.0.1:3000" })).toBe(false);
+      expect(isCrossOriginCookieWrite("POST", { cookie, origin: "not a url", host: "h" })).toBe(true);
+      expect(isCrossOriginCookieWrite("POST", { cookie })).toBe(false); // non-browser client sends neither header
+      expect(isCrossOriginCookieWrite("GET", { cookie, "sec-fetch-site": "cross-site" })).toBe(false); // reads are not writes
+      expect(isCrossOriginCookieWrite("POST", { "sec-fetch-site": "cross-site", authorization: "Bearer t" })).toBe(false); // bearer is not ambient
+      expect(isCrossOriginCookieWrite("POST", { "sec-fetch-site": "cross-site" })).toBe(false); // no cookie, nothing ambient to abuse
+    });
+
+    it("the real gateway refuses a cross-site cookie write with 403 csrf_origin_mismatch and still serves same-origin", async () => {
+      const app = gateway();
+      try {
+        const cookie = cookieFor(app);
+        const cross = await app.inject({ method: "POST", url: `/work-items/${highRiskId}/cancel`, headers: { cookie, "sec-fetch-site": "cross-site", "content-type": "text/plain" }, payload: "{}" });
+        expect(cross.statusCode).toBe(403);
+        expect(cross.json().code).toBe("csrf_origin_mismatch");
+        const same = await app.inject({ method: "POST", url: `/work-items/${highRiskId}/cancel`, headers: { cookie, "sec-fetch-site": "same-origin", "content-type": "application/json" }, payload: JSON.stringify({ reason: "same origin" }) });
+        expect(same.statusCode).toBe(200);
+      } finally {
+        await app.close();
+      }
+    });
+
+    it("a bearer-authenticated write is not affected by browser fetch metadata", async () => {
+      const app = gateway();
+      try {
+        const res = await app.inject({ method: "POST", url: `/work-items/${highRiskId}/cancel`, headers: { ...bearer(OPERATOR), "sec-fetch-site": "cross-site" }, payload: { reason: "bearer" } });
+        expect(res.statusCode).toBe(200);
+      } finally {
+        await app.close();
+      }
+    });
+  });
+
+  it("the mission-control read routes are covered by the real rate limiter", async () => {
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, moa: false, auth: { token: OPERATOR, actor: "qa-operator", actorId: "operator", credentials }, rateLimit: { windowMs: 60_000, maxRequests: 2 } });
+    try {
+      const codes: number[] = [];
+      for (let i = 0; i < 4; i++) codes.push((await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(OPERATOR) })).statusCode);
+      expect(codes).toEqual([200, 200, 429, 429]);
     } finally {
       await app.close();
     }

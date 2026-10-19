@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Link } from "react-router";
 import type { NetworkNode, OverviewReadModel } from "@agent-control-stack/mission-control-contract";
 import { Card, DataTable, EmptyState, StatusPill, Unavailable, type Tone } from "../../design/primitives";
 import { relativeTime } from "../../design/format";
@@ -31,6 +32,7 @@ export function AgentNetwork({ data }: { data: OverviewReadModel }) {
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n] as const)), [nodes]);
   const selectedNode = selected ? byId.get(selected) : undefined;
   const agentCount = nodes.filter((n) => n.kind === "agent").length;
+  const laneCount = nodes.filter((n) => n.kind !== "work_item").length;
   const bindingCount = edges.length;
 
   const dim = (id: string) => (near && !near.has(id) ? 0.28 : 1);
@@ -50,12 +52,12 @@ export function AgentNetwork({ data }: { data: OverviewReadModel }) {
     <Card
       id="agent-network"
       title="Agent network"
-      subtitle={`${agentCount} agent${agentCount === 1 ? "" : "s"} · ${bindingCount} proven binding${bindingCount === 1 ? "" : "s"}. Links appear only where ACS holds a lease or a reported task.`}
+      subtitle={`${agentCount} agent${agentCount === 1 ? "" : "s"}${laneCount > agentCount ? `, ${laneCount - agentCount} executor/connector` : ""} · ${bindingCount} proven binding${bindingCount === 1 ? "" : "s"}. Links appear only where ACS holds a lease or a reported task.`}
       action={header}
     >
       {data.sections.network.status !== "ok" ? (
         <Unavailable what="Agent network" {...(data.sections.network.reason ? { reason: data.sections.network.reason } : {})} />
-      ) : agentCount === 0 ? (
+      ) : laneCount === 0 ? (
         <EmptyState title="No agents registered">Register an agent and send a heartbeat; it will appear here with its real liveness.</EmptyState>
       ) : (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_260px]">
@@ -83,20 +85,25 @@ export function AgentNetwork({ data }: { data: OverviewReadModel }) {
                     );
                   })}
                   <g aria-hidden="true" pointerEvents="none">
-                    {layout.agents.filter(({ node }) => node.liveness === "online").map(({ node, x, y }) => (
+                    {layout.lane.filter(({ node }) => node.liveness === "online").map(({ node, x, y }) => (
                       <circle key={node.id} cx={x} cy={y} r={9} fill="var(--ok)" opacity={near && !near.has(node.id) ? 0.1 : 1} className="acs-pulse" />
                     ))}
                   </g>
-                  {layout.agents.map(({ node, x, y }) => {
+                  {layout.lane.map(({ node, x, y }) => {
                     const l = live(node);
-                    const isUnknown = node.liveness === undefined || node.liveness === "unknown";
+                    const isUnknown = node.kind === "agent" && (node.liveness === undefined || node.liveness === "unknown");
+                    const accent = node.kind === "executor" ? "var(--cyan)" : node.kind === "connector" ? "var(--violet)" : l.color;
+                    const label =
+                      node.kind === "agent"
+                        ? `${node.label}, agent, ${l.text}${bindingFor(node.id, data) ? `, bound to ${bindingFor(node.id, data)}` : ", no active binding"}`
+                        : `${node.label}, ${node.kind}, ${node.detail ?? "unknown"}`;
                     return (
                       <g
                         key={node.id}
                         role="button"
                         tabIndex={0}
                         aria-pressed={selected === node.id}
-                        aria-label={`${node.label}, agent, ${l.text}${bindingFor(node.id, data) ? `, bound to ${bindingFor(node.id, data)}` : ", no active binding"}`}
+                        aria-label={label}
                         onClick={() => setSelected(selected === node.id ? null : node.id)}
                         onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSelected(selected === node.id ? null : node.id); } }}
                         onMouseEnter={() => setHovered(node.id)}
@@ -107,9 +114,15 @@ export function AgentNetwork({ data }: { data: OverviewReadModel }) {
                         style={{ cursor: "pointer", transition: "opacity .25s" }}
                       >
                         <text x={x - 20} y={y + 4} textAnchor="end" fontSize="13" fill="var(--ink)" clipPath="url(#clip-agent)">{node.label}</text>
-                        <circle cx={x} cy={y} r={9} fill={isUnknown ? "var(--surface)" : l.color} stroke={isUnknown ? "var(--faint)" : l.color} strokeWidth={2} strokeDasharray={isUnknown ? "3 3" : undefined} fillOpacity={isUnknown ? 1 : 0.9} />
-                        {isUnknown && <text x={x} y={y + 4} textAnchor="middle" fontSize="11" fill="var(--faint)" aria-hidden="true">?</text>}
-                        {selected === node.id && <circle cx={x} cy={y} r={14} fill="none" stroke="var(--accent)" strokeWidth={2} />}
+                        {node.kind === "agent" && (
+                          <>
+                            <circle cx={x} cy={y} r={9} fill={isUnknown ? "var(--surface)" : l.color} stroke={isUnknown ? "var(--faint)" : l.color} strokeWidth={2} strokeDasharray={isUnknown ? "3 3" : undefined} fillOpacity={isUnknown ? 1 : 0.9} />
+                            {isUnknown && <text x={x} y={y + 4} textAnchor="middle" fontSize="11" fill="var(--faint)" aria-hidden="true">?</text>}
+                          </>
+                        )}
+                        {node.kind === "executor" && <rect x={x - 9} y={y - 9} width={18} height={18} rx={4} fill="var(--surface-3)" stroke={accent} strokeWidth={2} />}
+                        {node.kind === "connector" && <path d={`M ${x} ${y - 11} L ${x + 11} ${y} L ${x} ${y + 11} L ${x - 11} ${y} Z`} fill="var(--surface-3)" stroke={accent} strokeWidth={2} />}
+                        {selected === node.id && <circle cx={x} cy={y} r={15} fill="none" stroke="var(--accent)" strokeWidth={2} />}
                       </g>
                     );
                   })}
@@ -148,6 +161,8 @@ export function AgentNetwork({ data }: { data: OverviewReadModel }) {
               {Object.values(LIVENESS).map((l) => (
                 <li key={l.text} className="flex items-center gap-1.5"><span aria-hidden="true" className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: l.color }} />{l.text}</li>
               ))}
+              <li className="flex items-center gap-1.5"><span aria-hidden="true" className="inline-block h-2.5 w-2.5 rounded-[3px] border-2" style={{ borderColor: "var(--cyan)" }} />Executor</li>
+              <li className="flex items-center gap-1.5"><span aria-hidden="true" className="inline-block h-2.5 w-2.5 rotate-45 border-2" style={{ borderColor: "var(--violet)" }} />Connector</li>
               <li>Solid link: active lease (highest fencing epoch). Dashed: task reported by the agent.</li>
             </ul>
           </div>
@@ -175,7 +190,7 @@ function Details({ node, data, onSelect }: { node: NetworkNode; data: OverviewRe
   return (
     <div className="space-y-3">
       <div>
-        <p className="text-xs uppercase tracking-wider text-muted">{node.kind === "agent" ? "Agent" : "Work item"}</p>
+        <p className="text-xs uppercase tracking-wider text-muted">{node.kind === "work_item" ? "Work item" : node.kind[0]!.toUpperCase() + node.kind.slice(1)}</p>
         <p className="mt-0.5 font-semibold break-words">{node.label}</p>
       </div>
       {node.kind === "agent" ? (
@@ -188,7 +203,11 @@ function Details({ node, data, onSelect }: { node: NetworkNode; data: OverviewRe
           </dl>
         </>
       ) : (
-        <StatusPill tone="neutral">{(node.detail ?? "unknown").replace(/_/g, " ")}</StatusPill>
+        <>
+          <StatusPill tone="neutral">{(node.detail ?? "unknown").replace(/_/g, " ")}</StatusPill>
+          {node.kind === "executor" && <p className="text-xs text-muted">Configured is not the same as healthy. See <Link to="/executors" className="text-accent hover:underline">Executors</Link>.</p>}
+          {node.kind === "connector" && <p className="text-xs text-muted">See <Link to="/connectors" className="text-accent hover:underline">Connectors</Link> for sessions.</p>}
+        </>
       )}
       <div>
         <p className="text-xs uppercase tracking-wider text-muted">Connections</p>

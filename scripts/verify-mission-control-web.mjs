@@ -9,7 +9,7 @@
 //
 // Playwright is not a repo dependency. Provide it with ACS_PLAYWRIGHT_MODULE
 // (module path) and optionally ACS_BROWSER_EXECUTABLE.
-import { randomBytes } from "node:crypto";
+import { randomBytes, generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -43,6 +43,14 @@ for (const [i, name, role] of [
   store.createRegistryAgent({ id, name, kind: "integration-test", acpRole: role, actorId: "qa-operator" });
   store.recordAgentHeartbeat(id, { status: i === 2 ? "BUSY" : "AVAILABLE", currentTask: i === 2 ? "Inspect queue admission" : undefined, actorId: "qa-operator" });
 }
+const { publicKey } = generateKeyPairSync("ed25519");
+store.registerConnector({
+  id: "qa-connector",
+  displayName: "QA audit integration",
+  publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
+  allowedScopes: ["acs:work:read"],
+  actorId: "qa-operator"
+});
 const tools = createWorkItemTools(store, createPolicyEngine());
 const titles = ["Inspect execution admission", "Review policy boundaries", "Verify audit event routing", "Inspect registry capabilities", "Check connector scopes", "Read runtime heartbeat", "Compare readiness checks", "Inspect queue latency", "Review deployment request", "Review storage mutation"];
 const ids = [];
@@ -189,7 +197,7 @@ try {
 
   await check("Unmigrated pages link to the classic console (nothing disappears)", async () => {
     const hrefs = await page.locator("nav a[href^='/#']").evaluateAll((els) => els.map((e) => e.getAttribute("href")));
-    for (const h of ["/#agents", "/#executors", "/#connectors", "/#metrics", "/#audit", "/#policy", "/#system"]) {
+    for (const h of ["/#metrics", "/#audit", "/#policy", "/#system"]) {
       if (!hrefs.includes(h)) throw Error("missing classic link " + h);
     }
   });
@@ -237,6 +245,57 @@ try {
     await page.getByText("Work item not found").waitFor();
   });
 
+  await check("Agents, Executors and Connectors pages show real registry data with honest status", async () => {
+    await page.goto(origin + "/next/#/agents");
+    const agents = page.getByRole("table", { name: "Registered agents" });
+    await agents.waitFor();
+    for (const name of ["Integration reviewer", "Runtime investigator", "Control plane coordinator"]) await agents.getByRole("link", { name }).waitFor();
+    // an agent with no heartbeat evidence is never shown as online
+    const neverHeard = agents.locator("tbody tr", { hasText: "Codex CLI" });
+    if (await neverHeard.count()) {
+      const t = ((await neverHeard.first().textContent()) ?? "").toLowerCase();
+      if (t.includes("available") || t.includes("online")) throw Error("agent without heartbeat shown as live");
+    }
+    await agents.getByRole("link", { name: "Runtime investigator" }).click();
+    await page.getByRole("heading", { name: "Runtime investigator", level: 2 }).waitFor();
+    await page.getByRole("heading", { name: "Capabilities" }).waitFor();
+    await page.getByRole("link", { name: "← Back to agents" }).click();
+
+    await page.goto(origin + "/next/#/executors");
+    const ex = page.getByRole("table", { name: "Execution bridges" });
+    await ex.waitFor();
+    await page.getByText(/Configured is not the same as healthy/).first().waitFor();
+    await ex.getByRole("link", { name: "Desktop Commander" }).click();
+    await page.getByRole("heading", { name: "Desktop Commander", level: 2 }).waitFor();
+    await page.getByRole("heading", { name: "Attested runtimes" }).waitFor();
+
+    await page.goto(origin + "/next/#/connectors");
+    const cn = page.getByRole("table", { name: "Registered connectors" });
+    await cn.waitFor();
+    await cn.getByRole("link", { name: "QA audit integration" }).click();
+    await page.getByRole("heading", { name: "QA audit integration", level: 2 }).waitFor();
+    await page.getByRole("heading", { name: "Tunnel sessions" }).waitFor();
+    const html = await page.content();
+    if (/BEGIN PUBLIC KEY|publicKeyPem/.test(html)) throw Error("key material reached the DOM");
+  });
+
+  await check("Agent network includes executor and connector nodes without inventing edges", async () => {
+    await page.goto(origin + "/next/#/");
+    const net = page.locator("#agent-network");
+    await net.waitFor();
+    await net.getByRole("button", { name: /QA audit integration, connector/ }).waitFor();
+    await net.getByRole("button", { name: /Desktop Commander, executor/ }).waitFor();
+    const api = await (await context.request.get(origin + "/api/mission-control/overview")).json();
+    for (const e of api.network.edges) if (e.from.startsWith("connector:") || e.to.startsWith("connector:")) throw Error("invented connector edge");
+  });
+
+  await check("Missing registry entries show not-found", async () => {
+    for (const path of ["agents/nope", "executors/nope", "connectors/nope"]) {
+      await page.goto(origin + "/next/#/" + path);
+      await page.getByText(/not found/i).first().waitFor();
+    }
+  });
+
   await check("Legacy console at / is unaffected", async () => {
     const p2 = await context.newPage();
     await p2.goto(origin + "/");
@@ -252,7 +311,13 @@ try {
     ["queue", "/next/#/queue", () => page.getByRole("table", { name: "Work items" }).waitFor()],
     ["trace", "/next/#/queue/" + encodeURIComponent(traceTarget.id), () => page.getByRole("list", { name: "Execution trace stages" }).waitFor()],
     ["approvals", "/next/#/approvals", () => page.getByRole("list", { name: /Work waiting on a human/ }).waitFor()],
-    ["execution", "/next/#/execution", () => page.getByRole("table", { name: "Execution attempts" }).waitFor()]
+    ["execution", "/next/#/execution", () => page.getByRole("table", { name: "Execution attempts" }).waitFor()],
+    ["agents", "/next/#/agents", () => page.getByRole("table", { name: "Registered agents" }).waitFor()],
+    ["agent", "/next/#/agents/qa-agent-2", () => page.getByRole("heading", { name: "Capabilities" }).waitFor()],
+    ["executors", "/next/#/executors", () => page.getByRole("table", { name: "Execution bridges" }).waitFor()],
+    ["executor", "/next/#/executors/acs-dc-bridge", () => page.getByRole("heading", { name: "Attested runtimes" }).waitFor()],
+    ["connectors", "/next/#/connectors", () => page.getByRole("table", { name: "Registered connectors" }).waitFor()],
+    ["connector", "/next/#/connectors/qa-connector", () => page.getByRole("heading", { name: "Tunnel sessions" }).waitFor()]
   ];
   for (const theme of ["dark", "light"]) {
     for (const [width, height] of [[1440, 900], [1024, 800], [768, 900], [390, 844]]) {
@@ -357,6 +422,27 @@ try {
     await page.getByRole("dialog").waitFor({ state: "hidden" });
     page.removeAllListeners("request");
     if (posts.length) throw Error("Escape must not send anything");
+  });
+
+  await check("Cookie-only session: the SPA works, same-origin writes pass, cross-site writes are refused", async () => {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } }); // no Authorization header at all
+    const login = await ctx.request.post(origin + "/session/login", { data: { token } });
+    if (login.status() !== 204) throw Error("session login failed: " + login.status());
+    const p = await ctx.newPage();
+    await p.goto(origin + "/next/#/queue");
+    await p.getByRole("table", { name: "Work items" }).waitFor();
+    await p.locator("header [role=status]").getByText("Live").waitFor(); // SSE works on the cookie alone
+    const created = await p.evaluate(async () => {
+      const r = await fetch("/work-items", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify({ title: "Cookie write probe", intent: "same-origin cookie write", target: { cwd: "/tmp" }, requestedActions: [], risk: "low" }) });
+      return r.status;
+    });
+    if (created !== 201) throw Error("same-origin cookie write should pass, got " + created);
+    const cross = await ctx.request.post(origin + "/work-items", { headers: { "sec-fetch-site": "cross-site", "content-type": "text/plain" }, data: "{}" });
+    const body = await cross.json();
+    if (cross.status() !== 403 || body.code !== "csrf_origin_mismatch") throw Error("cross-site cookie write must be refused, got " + cross.status() + " " + JSON.stringify(body));
+    const sameSite = await ctx.request.post(origin + "/work-items", { headers: { "sec-fetch-site": "same-site", "content-type": "text/plain" }, data: "{}" });
+    if (sameSite.status() !== 403) throw Error("same-site (other port) cookie write must be refused, got " + sameSite.status());
+    await ctx.close();
   });
 
   await check("Unauthenticated: API rejects and the SPA shows sign-in, never data", async () => {

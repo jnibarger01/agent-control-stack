@@ -42,7 +42,7 @@ describe("Approvals", () => {
     mountAt("/approvals", { approvals: approvalsFixture() });
     await screen.findByRole("list", { name: /Work waiting on a human/ });
     expect(screen.getAllByText("over SLA").length).toBeGreaterThan(0);
-    expect(screen.getByText(/Policy denies approving your own high-risk request/)).toBeTruthy();
+    expect(screen.getByText(/For example, policy denies approving your own high-risk request/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Approve fs.write for Review deployment request" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Unblock Check connector scopes" })).toBeTruthy();
   });
@@ -146,5 +146,58 @@ describe("Execution", () => {
     mountAt("/execution", { execution: executionFixture({ viewer: { canApprove: false, canWrite: false } }) });
     const retry = await screen.findByRole("button", { name: "Retry Review policy boundaries" });
     expect((retry as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe("action safety (security review findings)", () => {
+  it("closes immediately after success and never waits on the refetch (no second-submit window)", async () => {
+    let approvalsCalls = 0;
+    const posts: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST") { posts.push(url); return new Response(JSON.stringify({ workItem: { status: "approved" } }), { status: 200 }); }
+        if (url.includes("/approvals")) {
+          approvalsCalls += 1;
+          if (approvalsCalls > 1) return new Promise<Response>(() => undefined); // refetch hangs forever
+          return new Response(JSON.stringify(approvalsFixture()), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        return new Response(JSON.stringify(overviewFixture()), { status: 200, headers: { "content-type": "application/json" } });
+      })
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/approvals"]}><App streamFactory={live} /></MemoryRouter></QueryClientProvider>);
+    const btn = await screen.findByRole("button", { name: "Approve fs.write for Review deployment request" });
+    await waitFor(() => expect((btn as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(btn);
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox"), { target: { value: "ok" } });
+    await act(async () => { fireEvent.click(within(dialog).getByRole("button", { name: "Approve" })); });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull()); // closed although the refetch never returns
+    expect(posts).toHaveLength(1);
+  });
+
+  it("does not claim 'approved' when the item still needs more approvals", async () => {
+    mountAt("/approvals", { approvals: approvalsFixture(), postResponse: () => new Response(JSON.stringify({ workItem: { status: "needs_approval" } }), { status: 200 }) });
+    const btn = await screen.findByRole("button", { name: "Approve fs.write for Review deployment request" });
+    await waitFor(() => expect((btn as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(btn);
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox"), { target: { value: "first of two" } });
+    await act(async () => { fireEvent.click(within(dialog).getByRole("button", { name: "Approve" })); });
+    expect(await screen.findByText(/still needs more approvals/)).toBeTruthy();
+    expect(screen.queryByText(/“Review deployment request” approved\./)).toBeNull();
+  });
+
+  it("shows enough for informed consent: requester, intent, what the action does and the full hash", async () => {
+    mountAt("/approvals", { approvals: approvalsFixture() });
+    const btn = await screen.findByRole("button", { name: "Approve fs.write for Review deployment request" });
+    await waitFor(() => expect((btn as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(btn);
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("Ship the release")).toBeTruthy();
+    expect(within(dialog).getByText("write config")).toBeTruthy();
+    expect(within(dialog).getByText("user")).toBeTruthy();
+    expect(within(dialog).getByText("d".repeat(64))).toBeTruthy();
   });
 });

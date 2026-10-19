@@ -127,7 +127,26 @@ export function toOverviewReadModel(model: MissionControlViewModel): OverviewRea
   const edges: NetworkEdge[] = [];
   const edgeKeys = new Set<string>();
   const workById = new Map(model.workItems.map((i) => [i.id, i] as const));
+  const executorIds = new Set((model.executorSummaries ?? []).map((e) => e.id));
+  for (const executor of model.executorSummaries ?? []) {
+    nodes.set(`executor:${executor.id}`, {
+      id: `executor:${executor.id}`,
+      kind: "executor",
+      label: text(executor.displayName, 200),
+      detail: executor.configured ? `configured · ${text(executor.status, 60)}` : `not configured · ${text(executor.status, 60)}`
+    });
+  }
+  for (const connector of model.connectorSummaries ?? []) {
+    nodes.set(`connector:${connector.id}`, {
+      id: `connector:${connector.id}`,
+      kind: "connector",
+      label: text(connector.displayName, 200),
+      detail: `${text(connector.status, 40)} · ${Math.max(0, Math.floor(connector.activeSessionCount))} active session${connector.activeSessionCount === 1 ? "" : "s"}`
+    });
+  }
   const agentNode = (id: string): NetworkNode => {
+    // A lease held by an executor identity is drawn from that executor, never from a lookalike agent.
+    if (executorIds.has(id)) return nodes.get(`executor:${id}`)!;
     const key = `agent:${id}`;
     let node = nodes.get(key);
     if (!node) {
