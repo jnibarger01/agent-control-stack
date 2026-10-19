@@ -1,5 +1,5 @@
 import { Route, Routes, useLocation, useParams } from "react-router";
-import { LiveProvider, useApprovals, useExecution, useOverview, useQueue, useStreamState, useTrace } from "./data/live";
+import { LiveProvider, useAgent, useAgents, useApprovals, useConnector, useConnectors, useExecution, useExecutor, useExecutors, useOverview, useQueue, useStreamState, useTrace } from "./data/live";
 import type { EventSourceFactory } from "./data/stream";
 import { clockTime } from "./design/format";
 import { EmptyState } from "./design/primitives";
@@ -7,6 +7,7 @@ import { QueryBoundary } from "./design/QueryBoundary";
 import { CommandPage } from "./features/command/CommandPage";
 import { ApprovalsPage } from "./features/approvals/ApprovalsPage";
 import { ExecutionPage } from "./features/execution/ExecutionPage";
+import { AgentDetailPage, AgentsPage, ConnectorDetailPage, ConnectorsPage, ExecutorDetailPage, ExecutorsPage } from "./features/registry/pages";
 import { QueuePage } from "./features/queue/QueuePage";
 import { TracePage } from "./features/trace/TracePage";
 import { Shell } from "./shell/Shell";
@@ -28,6 +29,33 @@ function ExecutionRoute() {
   const query = useExecution();
   return <QueryBoundary query={query} what="Execution">{(data) => <ExecutionPage data={data} />}</QueryBoundary>;
 }
+function AgentsRoute() {
+  const query = useAgents();
+  return <QueryBoundary query={query} what="Agents">{(agents) => <AgentsPage agents={agents} />}</QueryBoundary>;
+}
+function AgentRoute() {
+  const { id = "" } = useParams();
+  const query = useAgent(id);
+  return <QueryBoundary query={query} what="Agent">{(data) => <AgentDetailPage data={data} />}</QueryBoundary>;
+}
+function ExecutorsRoute() {
+  const query = useExecutors();
+  return <QueryBoundary query={query} what="Executors">{(executors) => <ExecutorsPage executors={executors} />}</QueryBoundary>;
+}
+function ExecutorRoute() {
+  const { id = "" } = useParams();
+  const query = useExecutor(id);
+  return <QueryBoundary query={query} what="Executor">{(data) => <ExecutorDetailPage data={data} />}</QueryBoundary>;
+}
+function ConnectorsRoute() {
+  const query = useConnectors();
+  return <QueryBoundary query={query} what="Connectors">{(connectors) => <ConnectorsPage connectors={connectors} />}</QueryBoundary>;
+}
+function ConnectorRoute() {
+  const { id = "" } = useParams();
+  const query = useConnector(id);
+  return <QueryBoundary query={query} what="Connector">{(data) => <ConnectorDetailPage data={data} />}</QueryBoundary>;
+}
 function TraceRoute() {
   const { id = "" } = useParams();
   const query = useTrace(id);
@@ -39,6 +67,12 @@ function titleFor(pathname: string): string {
   if (pathname.startsWith("/queue")) return "Work Queue";
   if (pathname.startsWith("/approvals")) return "Approvals";
   if (pathname.startsWith("/execution")) return "Execution";
+  if (pathname.startsWith("/agents/")) return "Agent";
+  if (pathname.startsWith("/agents")) return "Agents";
+  if (pathname.startsWith("/executors/")) return "Executor";
+  if (pathname.startsWith("/executors")) return "Executors";
+  if (pathname.startsWith("/connectors/")) return "Connector";
+  if (pathname.startsWith("/connectors")) return "Connectors";
   if (pathname === "/") return "Command";
   return "Not found";
 }
@@ -57,6 +91,12 @@ function Frame() {
         <Route path="/queue/:id" element={<TraceRoute />} />
         <Route path="/approvals" element={<ApprovalsRoute />} />
         <Route path="/execution" element={<ExecutionRoute />} />
+        <Route path="/agents" element={<AgentsRoute />} />
+        <Route path="/agents/:id" element={<AgentRoute />} />
+        <Route path="/executors" element={<ExecutorsRoute />} />
+        <Route path="/executors/:id" element={<ExecutorRoute />} />
+        <Route path="/connectors" element={<ConnectorsRoute />} />
+        <Route path="/connectors/:id" element={<ConnectorRoute />} />
         <Route path="*" element={<EmptyState title="Page not found">Use the navigation to pick a page.</EmptyState>} />
       </Routes>
     </Shell>

@@ -166,6 +166,17 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardRou
       events,
       registeredAgents,
       agents: projectedAgents,
+      executorSummaries: (getExecutorSummaries() as Array<{ id: string; displayName: string; configured: boolean; status: string }>).map(
+        (e) => ({ id: e.id, displayName: e.displayName, configured: e.configured, status: e.status })
+      ),
+      connectorSummaries: connectors.map((connector) => ({
+        id: connector.id,
+        displayName: connector.displayName,
+        status: connector.status,
+        activeSessionCount: tunnelSessions.filter(
+          (session) => session.connectorId === connector.id && projectTunnelSession(session, heartbeatTtlMs).effectiveStatus === "active"
+        ).length
+      })),
       infrastructure: {
         agents: {
           registered: registeredAgents.length,

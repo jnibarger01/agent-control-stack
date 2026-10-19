@@ -13,6 +13,10 @@ export interface ActionSpec {
   /** Policy action fingerprint; required to approve one bounded action. */
   actionHash?: string;
   actionKind?: string;
+  /** What the gated action does, in the policy's words. Shown so approval is informed. */
+  actionDescription?: string;
+  requester?: string;
+  intent?: string;
 }
 
 interface Copy { verb: string; heading: string; dismiss: string; reasonRequired: boolean; reasonLabel: string; done: string; danger: boolean }
@@ -23,6 +27,13 @@ export const ACTION_COPY: Record<ActionKind, Copy> = {
   cancel: { verb: "Cancel work item", heading: "Cancel this work item?", dismiss: "Keep work item", reasonRequired: true, reasonLabel: "Reason for cancelling", done: "cancelled", danger: true },
   retry: { verb: "Retry as new item", heading: "Retry this work item as a new item?", dismiss: "Go back", reasonRequired: true, reasonLabel: "Reason for retrying", done: "retried as a new item", danger: false }
 };
+
+function outcomeMessage(spec: ActionSpec, copy: Copy, workItemStatus: string | undefined): string {
+  if (spec.kind === "approve" && workItemStatus && workItemStatus !== "approved") {
+    return `Approval recorded for “${spec.title}”, but it still needs more approvals (status: ${workItemStatus.replace(/_/g, " ")}).`;
+  }
+  return `“${spec.title}” ${copy.done}.`;
+}
 
 /**
  * Confirmation is mandatory for every action (stricter than the classic console, which only
@@ -56,12 +67,14 @@ export function ConfirmDialog({ spec, onClose, onDone }: { spec: ActionSpec; onC
     setPending(true);
     setError(null);
     const result = await postWorkItemAction(spec.kind, spec.workItemId, { reason: reason.trim(), ...(spec.actionHash ? { actionHash: spec.actionHash } : {}) });
-    inFlight.current = false;
-    setPending(false);
     if (result.ok) {
-      await client.invalidateQueries({ queryKey: ROOT_KEY });
-      onDone(`“${spec.title}” ${copy.done}.`);
+      // Stay locked after success: the dialog closes immediately and must never allow a second POST
+      // (a retry would otherwise create another work item). Refresh in the background.
+      void client.invalidateQueries({ queryKey: ROOT_KEY });
+      onDone(outcomeMessage(spec, copy, result.workItemStatus));
     } else {
+      inFlight.current = false;
+      setPending(false);
       setError(result.message);
     }
   }, [canConfirm, client, copy.done, onDone, reason, spec]);
@@ -74,9 +87,12 @@ export function ConfirmDialog({ spec, onClose, onDone }: { spec: ActionSpec; onC
           <div className="flex justify-between gap-3"><dt className="text-muted">Work item</dt><dd className="text-right font-medium">{spec.title}</dd></div>
           <div className="flex justify-between gap-3"><dt className="text-muted">Identifier</dt><dd className="font-mono text-xs">{shortId(spec.workItemId, 12)}</dd></div>
           <div className="flex justify-between gap-3"><dt className="text-muted">Risk</dt><dd><StatusPill tone={spec.risk === "high" || spec.risk === "critical" ? "bad" : spec.risk === "medium" ? "warn" : "neutral"} glyph="◆">{spec.risk}</StatusPill></dd></div>
-          {spec.actionKind && <div className="flex justify-between gap-3"><dt className="text-muted">Action</dt><dd className="font-mono text-xs">{spec.actionKind}</dd></div>}
-          {spec.actionHash && <div className="flex justify-between gap-3"><dt className="text-muted">Action hash</dt><dd className="font-mono text-xs">{shortId(spec.actionHash, 12)}</dd></div>}
+          {spec.requester && <div className="flex justify-between gap-3"><dt className="text-muted">Requested by</dt><dd className="text-right">{spec.requester}</dd></div>}
+          {spec.actionKind && <div className="flex justify-between gap-3"><dt className="text-muted">Action</dt><dd className="text-right font-mono text-xs">{spec.actionKind}</dd></div>}
         </dl>
+        {spec.intent && <p className="mt-3 rounded-ctl bg-surface-2 px-3 py-2 text-sm"><span className="block text-xs text-muted">Stated intent</span>{spec.intent}</p>}
+        {spec.actionDescription && <p className="mt-2 rounded-ctl bg-surface-2 px-3 py-2 text-sm"><span className="block text-xs text-muted">What this action does</span>{spec.actionDescription}</p>}
+        {spec.actionHash && <p className="mt-2 text-xs text-muted">Action hash <code className="select-all break-all font-mono text-ink">{spec.actionHash}</code></p>}
         {copy.reasonRequired && (
           <label className="mt-4 block text-sm">
             <span className="text-muted">{copy.reasonLabel}</span>

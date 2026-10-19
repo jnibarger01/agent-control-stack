@@ -169,3 +169,25 @@ describe("parseOverviewReadModel fail-closed", () => {
     expect(parseOverviewReadModel("<html>").ok).toBe(false);
   });
 });
+
+describe("executor and connector nodes", () => {
+  const withInfra = (over: Partial<MissionControlViewModel> = {}) =>
+    model({ executorSummaries: [{ id: "acs-dc-bridge", displayName: "Desktop Commander", configured: false, status: "unconfigured" }], connectorSummaries: [{ id: "c1", displayName: "QA connector", status: "active", activeSessionCount: 2 }], ...over });
+
+  it("adds executor and connector nodes without implying liveness or inventing edges", () => {
+    const out = toOverviewReadModel(withInfra());
+    const ex = out.network.nodes.find((n) => n.id === "executor:acs-dc-bridge");
+    const co = out.network.nodes.find((n) => n.id === "connector:c1");
+    expect(ex).toMatchObject({ kind: "executor", detail: "not configured · unconfigured" });
+    expect(ex?.liveness).toBeUndefined();
+    expect(co).toMatchObject({ kind: "connector", detail: "active · 2 active sessions" });
+    expect(out.network.edges.filter((e) => e.from.startsWith("connector:") || e.to.startsWith("connector:"))).toEqual([]);
+    expect(parseOverviewReadModel(JSON.parse(JSON.stringify(out))).ok).toBe(true);
+  });
+
+  it("draws a lease held by an executor identity from the executor node, not a lookalike agent", () => {
+    const out = toOverviewReadModel(withInfra({ agents: [], attemptLeasesByWorkItem: { w1: [lease({ leaseId: "lx", workItemId: "w1", workerId: "acs-dc-bridge", fencingEpoch: 4 })] } }));
+    expect(out.network.edges).toEqual([{ from: "executor:acs-dc-bridge", to: "work:w1", kind: "active_lease", fencingEpoch: 4 }]);
+    expect(out.network.nodes.some((n) => n.id === "agent:acs-dc-bridge")).toBe(false);
+  });
+});

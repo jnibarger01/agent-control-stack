@@ -2,6 +2,7 @@ import { probeExecutableVersion } from "@agent-control-stack/agent-cli";
 import { advisorPortFromEnv } from "./advisor-consultation.js";
 import { registerMissionDispatchRoutes } from "./mission-dispatch-routes.js";
 import { registerDashboardRoutes, eventReadOptions } from "./dashboard-routes.js";
+import { registerCsrfGuard } from "./csrf-guard.js";
 import { registerMissionControlWeb, type MissionControlWebOptions } from "./mission-control-web.js";
 import {
   CodingMissionController,
@@ -978,6 +979,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     acpAdapterConfig === false || !acpAdapterConfig
       ? undefined
       : new ReadonlyAcpAdapter({ ...acpAdapterConfig, store: workItems });
+  registerCsrfGuard(app);
   app.addHook("preHandler", async (request, reply) => {
     requestStartTimes.set(request, performance.now());
     if (!isRateLimitedRoute(request.url) || (request.method === "GET" && !isRateLimitedGetRoute(request.url))) return;
@@ -5310,6 +5312,7 @@ function isRateLimitedRoute(url: string): boolean {
   const path = url.split("?", 1)[0];
   return (
     path === "/mcp" ||
+    path.startsWith("/api/mission-control/") ||
     path === "/execution-mode" ||
     path === "/authority" ||
     path === "/session/login" ||
@@ -5342,6 +5345,8 @@ function isRateLimitedGetRoute(url: string): boolean {
   // /device/verify rate limiting is enforced in-handler (see registerDeviceAuthRoutes).
   const path = url.split("?", 1)[0];
   return (
+    // Each read composes the whole dashboard view model (several store reads plus policy evaluation).
+    path.startsWith("/api/mission-control/") ||
     path === "/execution-mode" ||
     path === "/authority" ||
     path === "/api/mcp-clients" ||

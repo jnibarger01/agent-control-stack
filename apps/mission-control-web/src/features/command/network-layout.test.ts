@@ -11,9 +11,14 @@ describe("layoutNetwork", () => {
 
   it("puts bound agents first and never invents edges", () => {
     const layout = layoutNetwork(nodes, edges);
-    expect(layout.agents.map((a) => a.node.id)).toEqual(["agent:a1", "agent:a2"]);
+    expect(layout.lane.map((a) => a.node.id)).toEqual(["agent:a1", "agent:a2"]);
     expect(layout.edges).toHaveLength(1);
     expect(layout.edges[0]?.edge).toEqual(edges[0]);
+  });
+
+  it("groups executors and connectors after agents, and unbound after bound", () => {
+    const extra = [...nodes, { id: "connector:c", kind: "connector" as const, label: "Conn" }, { id: "executor:e", kind: "executor" as const, label: "Exec" }, { id: "agent:z", kind: "agent" as const, label: "Zed", liveness: "online" as const }];
+    expect(layoutNetwork(extra, edges).lane.map((a) => a.node.id)).toEqual(["agent:a1", "agent:z", "agent:a2", "executor:e", "connector:c"]);
   });
 
   it("drops an edge whose endpoint is not drawn instead of fabricating a node", () => {

@@ -14,13 +14,15 @@ export interface PlacedEdge {
 export interface NetworkLayout {
   width: number;
   height: number;
-  agents: PlacedNode[];
+  /** Left lane: agents, then executors, then connectors. Work items are on the right. */
+  lane: PlacedNode[];
   works: PlacedNode[];
   edges: PlacedEdge[];
   agentX: number;
   workX: number;
 }
 
+const KIND_ORDER: Record<NetworkNode["kind"], number> = { agent: 0, executor: 1, connector: 2, work_item: 3 };
 const LIVENESS_ORDER: Record<Liveness, number> = { online: 0, stale: 1, observed: 2, offline: 3, unknown: 4 };
 const WORK_STATUS_ORDER = ["running", "approved", "needs_approval", "blocked", "quarantined", "pending_policy", "draft", "failed", "succeeded"];
 
@@ -44,10 +46,11 @@ export function layoutNetwork(nodes: NetworkNode[], edges: NetworkEdge[], width 
     bound.add(e.to);
   }
   const agentNodes = nodes
-    .filter((n) => n.kind === "agent")
+    .filter((n) => n.kind !== "work_item")
     .sort(
       (a, b) =>
         Number(bound.has(b.id)) - Number(bound.has(a.id)) ||
+        KIND_ORDER[a.kind] - KIND_ORDER[b.kind] ||
         LIVENESS_ORDER[a.liveness ?? "unknown"] - LIVENESS_ORDER[b.liveness ?? "unknown"] ||
         a.label.localeCompare(b.label) ||
         a.id.localeCompare(b.id)
@@ -62,9 +65,9 @@ export function layoutNetwork(nodes: NetworkNode[], edges: NetworkEdge[], width 
     .filter((n) => n.kind === "work_item")
     .sort((a, b) => minAgentRow(a.id) - minAgentRow(b.id) || stageRank(a) - stageRank(b) || a.label.localeCompare(b.label) || a.id.localeCompare(b.id));
 
-  const agents = agentNodes.map((node, i) => ({ node, x: AGENT_X, y: PAD + i * ROW_GAP + ROW_GAP / 2 }));
+  const lane = agentNodes.map((node, i) => ({ node, x: AGENT_X, y: PAD + i * ROW_GAP + ROW_GAP / 2 }));
   const works = workNodes.map((node, i) => ({ node, x: workX, y: PAD + i * ROW_GAP + ROW_GAP / 2 }));
-  const pos = new Map<string, PlacedNode>([...agents, ...works].map((p) => [p.node.id, p] as const));
+  const pos = new Map<string, PlacedNode>([...lane, ...works].map((p) => [p.node.id, p] as const));
   const placedEdges: PlacedEdge[] = [];
   for (const edge of edges) {
     const a = pos.get(edge.from);
@@ -75,8 +78,8 @@ export function layoutNetwork(nodes: NetworkNode[], edges: NetworkEdge[], width 
     const mid = (x1 + x2) / 2;
     placedEdges.push({ edge, d: `M ${x1} ${a.y} C ${mid} ${a.y}, ${mid} ${w.y}, ${x2} ${w.y}`, midX: mid, midY: (a.y + w.y) / 2 });
   }
-  const rows = Math.max(agents.length, works.length, 1);
-  return { width, height: PAD * 2 + rows * ROW_GAP, agents, works, edges: placedEdges, agentX: AGENT_X, workX };
+  const rows = Math.max(lane.length, works.length, 1);
+  return { width, height: PAD * 2 + rows * ROW_GAP, lane, works, edges: placedEdges, agentX: AGENT_X, workX };
 }
 
 /** Node ids highlighted when `focus` is hovered/selected: itself plus real neighbours only. */

@@ -6,7 +6,7 @@ import { useControlGate, useWorkItemActions, type ActionSpec } from "../actions/
 
 function ItemCard({ item, viewer, open }: { item: ApprovalItem; viewer: ApprovalsReadModel["viewer"]; open: (spec: ActionSpec) => void }) {
   const approve = useControlGate(viewer.canApprove, "approve");
-  const base = { workItemId: item.id, title: item.title, risk: item.risk };
+  const base = { workItemId: item.id, title: item.title, risk: item.risk, intent: item.intent, ...(item.requester ? { requester: item.requester } : {}) };
   const noApprovable = item.status === "needs_approval" && item.actions.length === 0;
   return (
     <li className={`rounded-card border bg-surface p-5 shadow-[var(--shadow)] ${item.overSla ? "border-warn/50" : "border-line"}`}>
@@ -30,11 +30,11 @@ function ItemCard({ item, viewer, open }: { item: ApprovalItem; viewer: Approval
           {item.actions.map((a) => (
             <div key={a.actionHash} className="flex flex-wrap items-center justify-between gap-3 rounded-ctl border border-line bg-surface-2 px-3 py-2">
               <p className="min-w-0 text-sm"><span className="font-mono font-medium">{a.kind}</span> <span className="text-muted">{a.description}</span> <IdChip id={a.actionHash} /></p>
-              <button type="button" disabled={approve.disabled} onClick={() => open({ ...base, kind: "approve", actionHash: a.actionHash, actionKind: a.kind })} aria-label={`Approve ${a.kind} for ${item.title}`} className="rounded-ctl bg-accent px-3 py-1.5 text-sm font-medium text-accent-ink disabled:cursor-not-allowed disabled:opacity-50">Approve</button>
+              <button type="button" disabled={approve.disabled} onClick={() => open({ ...base, kind: "approve", actionHash: a.actionHash, actionKind: a.kind, actionDescription: a.description })} aria-label={`Approve ${a.kind} for ${item.title}`} className="rounded-ctl bg-accent px-3 py-1.5 text-sm font-medium text-accent-ink disabled:cursor-not-allowed disabled:opacity-50">Approve</button>
             </div>
           ))}
           {noApprovable && (
-            <p className="rounded-ctl border border-dashed border-line-strong px-3 py-2 text-sm text-muted">No approvable action is available to this credential. Policy denies approving your own high-risk request; a different approver is needed.</p>
+            <p className="rounded-ctl border border-dashed border-line-strong px-3 py-2 text-sm text-muted">No approvable action is available to this credential. For example, policy denies approving your own high-risk request, in which case a different approver is needed.</p>
           )}
         </div>
       )}

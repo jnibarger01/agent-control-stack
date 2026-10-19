@@ -118,6 +118,20 @@ describe("mission control web hosting and overview endpoint", () => {
     }
   });
 
+  it("malformed percent-encoding is a 400/404, never a 500", async () => {
+    const app = gateway({ enabled: true, distDir: dist });
+    try {
+      for (const url of ["/next/%25zz", "/next/%E0%A4%A", "/next/%2500", "/next/%25252e%25252e%25252fsecret.txt"]) {
+        const res = await app.inject({ method: "GET", url });
+        expect([200, 400, 404], url).toContain(res.statusCode);
+        expect(res.body, url).not.toContain("outside");
+        expect(res.body, url).not.toContain("URI malformed");
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
   it("fails closed with 503 when enabled but not built", async () => {
     const app = gateway({ enabled: true, distDir: join(dir, "nope") });
     try {
