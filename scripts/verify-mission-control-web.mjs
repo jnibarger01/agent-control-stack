@@ -86,6 +86,8 @@ const app = buildGateway({
     ]
   },
   moa: false,
+  // The sweep loads hundreds of pages a minute. The limiter itself is covered by its own gateway test.
+  rateLimit: { windowMs: 60_000, maxRequests: 100_000 },
   missionControlWeb: { enabled: true, distDir }
 });
 const origin = await app.listen({ host: "127.0.0.1", port: 0 });
@@ -195,11 +197,12 @@ try {
     await page.getByRole("dialog", { name: "Go to page" }).waitFor({ state: "hidden" });
   });
 
-  await check("Unmigrated pages link to the classic console (nothing disappears)", async () => {
-    const hrefs = await page.locator("nav a[href^='/#']").evaluateAll((els) => els.map((e) => e.getAttribute("href")));
-    for (const h of ["/#metrics", "/#audit", "/#policy", "/#system"]) {
-      if (!hrefs.includes(h)) throw Error("missing classic link " + h);
+  await check("All eleven destinations are native routes and the classic console stays reachable", async () => {
+    const hrefs = await page.locator("nav a").evaluateAll((els) => els.map((e) => e.getAttribute("href")));
+    for (const route of ["/", "/queue", "/execution", "/approvals", "/agents", "/executors", "/connectors", "/metrics", "/audit", "/policy", "/system"]) {
+      if (!hrefs.includes("#" + route)) throw Error("missing native route " + route + " in " + JSON.stringify(hrefs));
     }
+    if (hrefs.length !== 11) throw Error("expected exactly eleven destinations, got " + hrefs.length);
   });
 
   await check("Work Queue shows real items, filters by status and links to a real trace", async () => {
@@ -296,6 +299,56 @@ try {
     }
   });
 
+  await check("Metrics, Audit, Policy and System show real persisted data", async () => {
+    await page.goto(origin + "/next/#/metrics");
+    await page.getByRole("heading", { name: "What is not measured" }).waitFor();
+    await page.getByRole("table", { name: "Hourly attempts" }).waitFor();
+
+    await page.goto(origin + "/next/#/audit");
+    const table = page.getByRole("table", { name: "Audit events, newest first" });
+    await table.waitFor();
+    const firstCount = await table.locator("tbody tr").count();
+    await page.getByLabel("Event name (exact)").fill("work_item.created");
+    await page.getByRole("button", { name: /Inspect event \d+, work_item\.created/ }).first().waitFor();
+    const names = await table.locator("tbody tr td:nth-child(3)").allTextContents();
+    if (!names.length || names.some((n) => n.trim() !== "work_item.created")) throw Error("name filter must query the log: " + JSON.stringify(names.slice(0, 3)));
+    await page.getByRole("button", { name: /Inspect event \d+, work_item\.created/ }).first().click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByText("Attributes (redacted)").waitFor();
+    await dialog.getByText("Event hash").waitFor();
+    const text = (await dialog.textContent()) ?? "";
+    if (text.includes(token)) throw Error("token in audit detail");
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
+    await page.getByLabel("Event name (exact)").fill("");
+    if (firstCount < 5) throw Error("expected a populated audit log");
+
+    await page.goto(origin + "/next/#/policy");
+    await page.getByRole("table", { name: "Recent policy decisions" }).waitFor();
+    await page.getByText(/Policy rules cannot be edited here/).waitFor();
+    const policyText = (await page.getByRole("table", { name: "Recent policy decisions" }).textContent()) ?? "";
+    if (!/(allow|require approval|deny)/i.test(policyText)) throw Error("no decision recorded in the policy table");
+
+    await page.goto(origin + "/next/#/system");
+    await page.getByRole("heading", { name: "Live probes" }).waitFor();
+    await page.getByText(/\/healthz/).waitFor();
+    await page.getByText(/ok · HTTP 200/).first().waitFor();
+  });
+
+  await check("Audit paginates older events without duplicating any", async () => {
+    await page.goto(origin + "/next/#/audit");
+    const table = page.getByRole("table", { name: "Audit events, newest first" });
+    await table.waitFor();
+    const more = page.getByRole("button", { name: "Load older events" });
+    if (!(await more.count())) return; // whole log fits one page
+    const before = (await table.locator("tbody tr td:nth-child(1)").allTextContents()).map((t) => t.trim());
+    await more.click();
+    await page.waitForFunction((n) => document.querySelectorAll("table tbody tr").length > n, before.length);
+    const after = (await table.locator("tbody tr td:nth-child(1)").allTextContents()).map((t) => t.trim());
+    if (new Set(after).size !== after.length) throw Error("duplicate sequences after paging");
+    if (Math.min(...after.map(Number)) >= Math.min(...before.map(Number))) throw Error("paging did not reach older events");
+  });
+
   await check("Legacy console at / is unaffected", async () => {
     const p2 = await context.newPage();
     await p2.goto(origin + "/");
@@ -317,7 +370,11 @@ try {
     ["executors", "/next/#/executors", () => page.getByRole("table", { name: "Execution bridges" }).waitFor()],
     ["executor", "/next/#/executors/acs-dc-bridge", () => page.getByRole("heading", { name: "Attested runtimes" }).waitFor()],
     ["connectors", "/next/#/connectors", () => page.getByRole("table", { name: "Registered connectors" }).waitFor()],
-    ["connector", "/next/#/connectors/qa-connector", () => page.getByRole("heading", { name: "Tunnel sessions" }).waitFor()]
+    ["connector", "/next/#/connectors/qa-connector", () => page.getByRole("heading", { name: "Tunnel sessions" }).waitFor()],
+    ["metrics", "/next/#/metrics", () => page.getByRole("heading", { name: "What is not measured" }).waitFor()],
+    ["audit", "/next/#/audit", () => page.getByRole("table", { name: "Audit events, newest first" }).waitFor()],
+    ["policy", "/next/#/policy", () => page.getByRole("table", { name: "Recent policy decisions" }).waitFor()],
+    ["system", "/next/#/system", () => page.getByRole("heading", { name: "Live probes" }).waitFor()]
   ];
   for (const theme of ["dark", "light"]) {
     for (const [width, height] of [[1440, 900], [1024, 800], [768, 900], [390, 844]]) {

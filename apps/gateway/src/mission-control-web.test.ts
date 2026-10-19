@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { parseOverviewReadModel, parseQueueReadModel, parseTraceReadModel } from "@agent-control-stack/mission-control-contract";
+import { parseAuditReadModel, parseOverviewReadModel, parseQueueReadModel, parseTraceReadModel } from "@agent-control-stack/mission-control-contract";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { buildGateway } from "./server.js";
 import { MISSION_CONTROL_WEB_CSP } from "./mission-control-web.js";
@@ -178,6 +178,38 @@ describe("mission control web hosting and overview endpoint", () => {
       expect(res.body).not.toContain("/home/private/repo");
       const missing = await app.inject({ method: "GET", url: "/api/mission-control/work-items/does-not-exist/trace", headers: auth });
       expect(missing.statusCode).toBe(404);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("audit requires authentication, validates its query strictly, filters and paginates", async () => {
+    const app = gateway();
+    try {
+      expect((await app.inject({ method: "GET", url: "/api/mission-control/audit" })).statusCode).toBe(401);
+      for (const bad of ["limit=1000", "limit=0", "bogus=1", "beforeSequence=-1"]) {
+        expect((await app.inject({ method: "GET", url: `/api/mission-control/audit?${bad}`, headers: auth })).statusCode, bad).toBe(400);
+      }
+      for (const title of ["audit probe one", "audit probe two"]) {
+        const created = await app.inject({ method: "POST", url: "/work-items", headers: auth, payload: { title, intent: "make events", target: { cwd: "/tmp" }, requestedActions: [], risk: "low" } });
+        expect(created.statusCode).toBe(201);
+      }
+      const page1 = await app.inject({ method: "GET", url: "/api/mission-control/audit?limit=1", headers: auth });
+      expect(page1.headers["cache-control"]).toBe("no-store");
+      const p1 = parseAuditReadModel(page1.json());
+      expect(p1.ok).toBe(true);
+      if (!p1.ok) return;
+      expect(p1.value.events).toHaveLength(1);
+      const before = p1.value.nextBefore;
+      expect(before).not.toBeNull();
+      const page2 = parseAuditReadModel((await app.inject({ method: "GET", url: `/api/mission-control/audit?limit=1&beforeSequence=${before}`, headers: auth })).json());
+      expect(page2.ok && page2.value.events[0]!.sequence).toBeLessThan(p1.value.events[0]!.sequence);
+      const named = parseAuditReadModel((await app.inject({ method: "GET", url: "/api/mission-control/audit?name=work_item.created", headers: auth })).json());
+      expect(named.ok && named.value.events.every((e) => e.name === "work_item.created")).toBe(true);
+      expect(named.ok && named.value.events.length).toBeGreaterThan(0);
+      const byItem = parseAuditReadModel((await app.inject({ method: "GET", url: `/api/mission-control/audit?workItemId=${seededId}`, headers: auth })).json());
+      expect(byItem.ok && byItem.value.events.every((e) => e.attributes["work_item.id"] === seededId)).toBe(true);
+      expect(page1.body).not.toContain("/home/private/repo");
     } finally {
       await app.close();
     }

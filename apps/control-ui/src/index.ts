@@ -159,3 +159,4 @@ export { toQueueReadModel } from "./read-model/queue.js";
 export { toTraceReadModel, type TraceInput } from "./read-model/trace.js";
 export { toApprovalsReadModel } from "./read-model/approvals.js";
 export { toExecutionReadModel } from "./read-model/execution.js";
+export { toAuditReadModel } from "./read-model/audit.js";
