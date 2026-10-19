@@ -75,4 +75,37 @@ describe("approve_work_item replay", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("a different approver is not a replay: a human still supersedes an acs:admin approval", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-approval-replay-admin-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const policy = createPolicyEngine();
+    const tools = createWorkItemTools(store, policy);
+
+    try {
+      const workItem = tools.create_work_item({
+        title: "Admin then human",
+        requester: "user",
+        intent: "verify a human approval supersedes an admin approval",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "fs.write", description: "write", params: { paths: ["src/index.ts"] } }],
+        risk: "high"
+      });
+      const actionHash = policy.evaluateWorkItem(workItem, "qa-operator", "approve")[0]!.actionHash;
+      tools.approve_work_item({ id: workItem.id, approvedBy: "acs:admin", reason: "admin", actionHash });
+      const granted = () => store.readEvents().filter((event) => event.name === "approval.granted").length;
+      const before = granted();
+
+      tools.approve_work_item({ id: workItem.id, approvedBy: "qa-operator", reason: "human", actionHash });
+
+      expect(granted()).toBe(before + 1);
+      const plan = store.getCurrentExecutionPlan(workItem.id)!;
+      expect(store.getExecutionPlanApproval(workItem.id, plan.planHash, actionHash)?.approvedByActorId).toBe(
+        "qa-operator"
+      );
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
