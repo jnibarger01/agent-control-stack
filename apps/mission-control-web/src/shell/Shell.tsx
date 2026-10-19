@@ -71,8 +71,9 @@ export function Shell({ overview, stream, children, title, subtitle }: { overvie
               return (
                 <li key={item.key}>
                   {item.route ? (
-                    <NavLink to={item.route} end className={({ isActive }) => `${base} ${isActive ? "bg-accent-soft font-medium text-ink shadow-[inset_2px_0_0_var(--accent)]" : "text-muted hover:bg-surface-2 hover:text-ink"}`}>
+                    <NavLink to={item.route} end={item.route === "/"} className={({ isActive }) => `${base} ${isActive ? "bg-accent-soft font-medium text-ink shadow-[inset_2px_0_0_var(--accent)]" : "text-muted hover:bg-surface-2 hover:text-ink"}`}>
                       <span>{item.label}</span>
+                      {count ? <span className="rounded-full bg-warn-soft px-1.5 text-xs font-medium text-warn" aria-label={`${count} need attention`}>{count}</span> : null}
                     </NavLink>
                   ) : (
                     <a href={item.classic} className={`${base} text-muted hover:bg-surface-2 hover:text-ink`}>

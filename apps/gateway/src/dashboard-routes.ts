@@ -6,6 +6,8 @@ import {
   renderDashboardFragments,
   toMissionControlAttemptLease,
   toOverviewReadModel,
+  toQueueReadModel,
+  toTraceReadModel,
   type ApprovalActionOption,
   type MissionControlViewModel
 } from "@agent-control-stack/control-ui";
@@ -222,6 +224,43 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardRou
       try {
         reply.header("cache-control", "no-store");
         return toOverviewReadModel(missionControlViewModel(request));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.get(
+    "/api/mission-control/queue",
+    { preHandler: requireRead, config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      try {
+        reply.header("cache-control", "no-store");
+        return toQueueReadModel(missionControlViewModel(request));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/mission-control/work-items/:id/trace",
+    { preHandler: requireRead, config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      try {
+        const id = request.params.id;
+        const workItem = workItems.get(id);
+        if (!workItem) return reply.code(404).send({ error: "work item not found" });
+        reply.header("cache-control", "no-store");
+        return toTraceReadModel({
+          workItem,
+          plan: workItems.getCurrentExecutionPlan(id),
+          admission: executionReads.listCurrentPlanAdmissionsForWorkItems([id]).get(id),
+          attempts: executionReads.listExecutionAttempts(id),
+          leases: executionReads.listAttemptLeases(id).map(toMissionControlAttemptLease),
+          events: workItems.readEvents(eventReadOptions(request.query, { workItemId: id })),
+          now: new Date()
+        });
       } catch (error) {
         return sendError(reply, error);
       }

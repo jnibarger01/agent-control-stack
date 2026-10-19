@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, type ReactNode } from "react";
+import { Link } from "react-router";
 import { cn } from "./cn";
 import { shortId } from "./format";
 
@@ -53,7 +54,7 @@ export function Card({ title, subtitle, action, children, className, id, tone }:
   );
 }
 
-export function Stat({ label, value, note, tone, href }: { label: string; value: ReactNode; note?: ReactNode; tone?: Tone; href?: string }) {
+export function Stat({ label, value, note, tone, href, to }: { label: string; value: ReactNode; note?: ReactNode; tone?: Tone; href?: string; to?: string }) {
   const body = (
     <>
       <span className="text-xs font-medium uppercase tracking-wider text-muted">{label}</span>
@@ -62,7 +63,9 @@ export function Stat({ label, value, note, tone, href }: { label: string; value:
     </>
   );
   const cls = "block rounded-card border border-line bg-surface p-4 shadow-[var(--shadow)] transition-colors";
-  return href ? (
+  return to ? (
+    <Link to={to} className={cn(cls, "hover:border-accent/50")}>{body}</Link>
+  ) : href ? (
     <a href={href} className={cn(cls, "hover:border-accent/50")}>{body}</a>
   ) : (
     <div className={cls}>{body}</div>
@@ -75,7 +78,7 @@ export function IdChip({ id }: { id: string }) {
     <button
       type="button"
       title={`${id} (click to copy)`}
-      aria-label={`Copy identifier ${id}`}
+      aria-label={`${shortId(id)}, copy full identifier`}
       onClick={() => {
         void navigator.clipboard?.writeText(id).catch(() => undefined);
       }}

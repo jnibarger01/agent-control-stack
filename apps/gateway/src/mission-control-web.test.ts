@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { parseOverviewReadModel } from "@agent-control-stack/mission-control-contract";
+import { parseOverviewReadModel, parseQueueReadModel, parseTraceReadModel } from "@agent-control-stack/mission-control-contract";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { buildGateway } from "./server.js";
 import { MISSION_CONTROL_WEB_CSP } from "./mission-control-web.js";
@@ -13,6 +13,7 @@ const auth = { Authorization: `Bearer ${TOKEN}` };
 describe("mission control web hosting and overview endpoint", () => {
   let dir: string;
   let dist: string;
+  let seededId: string;
   let savedToken: string | undefined;
   let savedFlag: string | undefined;
 
@@ -28,7 +29,7 @@ describe("mission control web hosting and overview endpoint", () => {
     writeFileSync(join(dist, "assets", "app-abc123.js"), "console.log(1)");
     writeFileSync(join(dir, "secret.txt"), "outside");
     const store = new SqliteWorkItemStore(join(dir, "control.db"));
-    store.create({ title: "Seed item", requester: "user", intent: "Inspect", target: { cwd: "/home/private/repo" }, requestedActions: [], risk: "low" });
+    seededId = store.create({ title: "Seed item", requester: "user", intent: "Inspect", target: { cwd: "/home/private/repo" }, requestedActions: [], risk: "low" }).id;
     store.close();
   });
 
@@ -123,6 +124,46 @@ describe("mission control web hosting and overview endpoint", () => {
       const res = await app.inject({ method: "GET", url: "/next/" });
       expect(res.statusCode).toBe(503);
       expect(res.json()).toEqual({ error: "mission_control_web_not_built" });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("queue and trace require authentication", async () => {
+    const app = gateway();
+    try {
+      expect((await app.inject({ method: "GET", url: "/api/mission-control/queue" })).statusCode).toBe(401);
+      expect((await app.inject({ method: "GET", url: `/api/mission-control/work-items/${seededId}/trace` })).statusCode).toBe(401);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("queue returns a contract-valid sanitized model", async () => {
+    const app = gateway();
+    try {
+      const res = await app.inject({ method: "GET", url: "/api/mission-control/queue", headers: auth });
+      expect(res.statusCode).toBe(200);
+      expect(res.headers["cache-control"]).toBe("no-store");
+      const parsed = parseQueueReadModel(res.json());
+      expect(parsed.ok && parsed.value.items.some((i) => i.id === seededId)).toBe(true);
+      expect(res.body).not.toContain("/home/private/repo");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("trace returns a contract-valid model for a real item and 404 for a missing one", async () => {
+    const app = gateway();
+    try {
+      const res = await app.inject({ method: "GET", url: `/api/mission-control/work-items/${seededId}/trace`, headers: auth });
+      expect(res.statusCode).toBe(200);
+      const parsed = parseTraceReadModel(res.json());
+      expect(parsed.ok).toBe(true);
+      expect(parsed.ok && parsed.value.stages.map((s) => s.key)).toEqual(["request", "policy", "plan", "admission", "approval", "attempt", "lease", "result"]);
+      expect(res.body).not.toContain("/home/private/repo");
+      const missing = await app.inject({ method: "GET", url: "/api/mission-control/work-items/does-not-exist/trace", headers: auth });
+      expect(missing.statusCode).toBe(404);
     } finally {
       await app.close();
     }

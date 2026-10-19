@@ -180,9 +180,52 @@ try {
 
   await check("Unmigrated pages link to the classic console (nothing disappears)", async () => {
     const hrefs = await page.locator("nav a[href^='/#']").evaluateAll((els) => els.map((e) => e.getAttribute("href")));
-    for (const h of ["/#queue", "/#execution", "/#approvals", "/#agents", "/#executors", "/#connectors", "/#metrics", "/#audit", "/#policy", "/#system"]) {
+    for (const h of ["/#execution", "/#approvals", "/#agents", "/#executors", "/#connectors", "/#metrics", "/#audit", "/#policy", "/#system"]) {
       if (!hrefs.includes(h)) throw Error("missing classic link " + h);
     }
+  });
+
+  await check("Work Queue shows real items, filters by status and links to a real trace", async () => {
+    await page.locator("nav").getByRole("link", { name: /Work Queue/ }).click();
+    const table = page.getByRole("table", { name: "Work items" });
+    await table.waitFor();
+    for (const title of ["Inspect execution admission", "Review deployment request"]) await table.getByText(title).first().waitFor();
+    const api = await (await context.request.get(origin + "/api/mission-control/queue")).json();
+    const doneCount = api.counts.byStatus.succeeded;
+    if (!(doneCount >= 1)) throw Error("fixture should have succeeded items");
+    await page.getByRole("button", { name: /^succeeded/ }).click();
+    await page.getByText(/Showing \d+ of \d+ loaded/).waitFor();
+    if ((await table.locator("tbody tr").count()) < 1) throw Error("no succeeded rows");
+    if (!page.url().includes("status=succeeded")) throw Error("filter not reflected in the URL");
+    await page.getByRole("button", { name: "All", exact: true }).click();
+    // honesty: the approval item is a drafted/admitted plan state, never an invented one
+    const planText = (await table.textContent()) ?? "";
+    if (!/(Admitted|Plan not admitted|No plan)/.test(planText)) throw Error("plan state missing");
+  });
+
+  await check("Execution trace reflects the persisted dry-run execution", async () => {
+    const api = await (await context.request.get(origin + "/api/mission-control/queue")).json();
+    const done = api.items.find((i) => i.status === "succeeded" && i.attempt);
+    if (!done) throw Error("no succeeded item with an attempt");
+    await page.goto(origin + "/next/#/queue/" + encodeURIComponent(done.id));
+    const stages = page.getByRole("list", { name: "Execution trace stages" });
+    await stages.waitFor();
+    for (const label of ["Request", "Policy decision", "Execution plan", "Admission", "Human approval", "Execution attempt", "Lease and fencing", "Result"]) {
+      await stages.getByRole("heading", { name: label }).waitFor();
+    }
+    await stages.getByText("Policy did not require approval.").waitFor(); // auto-allowed work is never shown as a human grant
+    await page.getByRole("heading", { name: "Attempts and leases" }).waitFor();
+    await page.getByText(/Attempt #1/).first().waitFor();
+    await page.getByText("Dry run").first().waitFor().catch(() => undefined);
+    const html = await page.content();
+    for (const bad of ["acs-e2e-private-repo", "tokenHash", token, "/tmp"]) if (html.includes(bad)) throw Error("trace leak: " + bad);
+    await page.getByRole("link", { name: "← Back to work queue" }).click();
+    await page.getByRole("table", { name: "Work items" }).waitFor();
+  });
+
+  await check("Missing work item shows not-found, never a blank page", async () => {
+    await page.goto(origin + "/next/#/queue/wrk_does_not_exist");
+    await page.getByText("Work item not found").waitFor();
   });
 
   await check("Legacy console at / is unaffected", async () => {
@@ -193,13 +236,23 @@ try {
     await p2.close();
   });
 
+  const sweepQueue = await (await context.request.get(origin + "/api/mission-control/queue")).json();
+  const traceTarget = sweepQueue.items.find((i) => i.status === "succeeded" && i.attempt) ?? sweepQueue.items[0];
+  const sweepPages = [
+    ["command", "/next/#/", () => page.getByRole("heading", { name: "Needs you" }).waitFor()],
+    ["queue", "/next/#/queue", () => page.getByRole("table", { name: "Work items" }).waitFor()],
+    ["trace", "/next/#/queue/" + encodeURIComponent(traceTarget.id), () => page.getByRole("list", { name: "Execution trace stages" }).waitFor()]
+  ];
   for (const theme of ["dark", "light"]) {
     for (const [width, height] of [[1440, 900], [1024, 800], [768, 900], [390, 844]]) {
-      await check(`Accessible and no horizontal overflow: ${theme} @ ${width}`, async () => {
+     for (const [pageName, path, pageReady] of sweepPages) {
+      await check(`Accessible and no horizontal overflow: ${pageName} ${theme} @ ${width}`, async () => {
         await page.evaluate((t) => window.localStorage.setItem("acs-theme", t), theme);
         await page.setViewportSize({ width, height });
+        await page.goto(origin + path);
         await page.reload();
-        await ready();
+        await page.getByRole("heading", { level: 1 }).waitFor();
+        await pageReady();
         await page.locator("header [role=status]").getByText("Live").waitFor();
         const overflowing = await page.evaluate(() =>
           document.documentElement.scrollWidth > innerWidth + 2
@@ -210,9 +263,10 @@ try {
             : []
         );
         if (overflowing.length) throw Error("horizontal overflow: " + overflowing.join(" | "));
-        await axeScan(`${theme}@${width}`);
-        await page.screenshot({ path: join(out, `command-${theme}-${width}.png`), fullPage: width >= 1024 });
+        await axeScan(`${pageName}-${theme}@${width}`);
+        await page.screenshot({ path: join(out, `${pageName}-${theme}-${width}.png`), fullPage: width >= 1024 });
       });
+     }
     }
   }
   await page.evaluate(() => window.localStorage.removeItem("acs-theme"));

@@ -238,3 +238,4 @@ export function parseOverviewReadModel(input: unknown): ParseResult {
   const first = result.error.issues[0];
   return { ok: false, reason: `schema_invalid:${first?.path.join(".") ?? ""}` };
 }
+export * from "./queue-trace.js";
