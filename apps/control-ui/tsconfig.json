@@ -5,6 +5,15 @@
     "outDir": "dist",
     "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
-  "include": ["src/**/*.ts"],
-  "references": [{ "path": "../../packages/work-items" }]
+  "include": [
+    "src/**/*.ts"
+  ],
+  "references": [
+    {
+      "path": "../../packages/work-items"
+    },
+    {
+      "path": "../../packages/mission-control-contract"
+    }
+  ]
 }
