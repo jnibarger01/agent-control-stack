@@ -2,7 +2,7 @@ import { probeExecutableVersion } from "@agent-control-stack/agent-cli";
 import { registerMissionDispatchRoutes } from "./mission-dispatch-routes.js";
 import { registerDashboardRoutes, eventReadOptions } from "./dashboard-routes.js";
 import { registerCsrfGuard } from "./csrf-guard.js";
-import { registerMissionControlWeb, type MissionControlWebOptions } from "./mission-control-web.js";
+import { missionControlWebDefaultRoot, registerMissionControlWeb, type MissionControlWebOptions } from "./mission-control-web.js";
 import {
   CodingMissionController,
   codingMissionPortsFromEnv,
@@ -1011,8 +1011,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const workItemIdempotency = new SqliteMoaIdempotencyStore(dbPath);
   const requireRead = async (request: FastifyRequest, reply: FastifyReply) => {
     if (!hasReadAccess(request, auth)) {
-      if (request.routeOptions.url === "/" && auth) {
-        reply.code(401).type("text/html").send(renderLoginPage());
+      const loginRoute = request.routeOptions.url;
+      if ((loginRoute === "/" || loginRoute === "/legacy" || loginRoute === "/legacy/") && auth) {
+        // `next` only ever lands on a same-origin path (renderLoginPage rejects anything else).
+        const next = (request.query as { next?: unknown } | undefined)?.next;
+        reply.code(401).type("text/html").send(typeof next === "string" ? renderLoginPage(next) : renderLoginPage());
         return reply;
       }
       sendReadAccessError(reply, auth);
@@ -1387,6 +1390,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     projectTunnelSession: (session, ttl) => projectTunnelSession(session, ttl),
     validateRegisteredAgentPromptTarget: (store, input) => validateRegisteredAgentPromptTarget(store, input),
     requireRead,
+    missionControlWebDefaultRoot: () => missionControlWebDefaultRoot(options.missionControlWeb),
     sendError
   });
 
