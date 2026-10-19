@@ -26,6 +26,7 @@ if (!existsSync(join(distDir, "index.html"))) throw Error("apps/mission-control-
 const dir = mkdtempSync(join(tmpdir(), "acs-mcweb-e2e-"));
 const dbPath = join(dir, "control.db");
 const token = randomBytes(32).toString("hex");
+const readerToken = randomBytes(32).toString("hex");
 const out = process.env.ACS_UI_EVIDENCE_DIR || join(dir, "evidence");
 mkdirSync(out, { recursive: true });
 
@@ -67,7 +68,15 @@ for (let i = 0; i < 3; i++) {
 const app = buildGateway({
   dbPath,
   logger: false,
-  auth: { token, actor: "qa-operator", actorId: "qa-operator" },
+  auth: {
+    token,
+    actor: "qa-operator",
+    actorId: "qa-operator",
+    credentials: [
+      { id: "operator", token, actor: "qa-operator", actorId: "qa-operator", roles: ["operator"], scopes: ["acs:read", "acs:write", "acs:approve"] },
+      { id: "reader", token: readerToken, actor: "qa-operator", actorId: "qa-reader", roles: ["operator"], scopes: ["acs:read"] }
+    ]
+  },
   moa: false,
   missionControlWeb: { enabled: true, distDir }
 });
@@ -180,7 +189,7 @@ try {
 
   await check("Unmigrated pages link to the classic console (nothing disappears)", async () => {
     const hrefs = await page.locator("nav a[href^='/#']").evaluateAll((els) => els.map((e) => e.getAttribute("href")));
-    for (const h of ["/#execution", "/#approvals", "/#agents", "/#executors", "/#connectors", "/#metrics", "/#audit", "/#policy", "/#system"]) {
+    for (const h of ["/#agents", "/#executors", "/#connectors", "/#metrics", "/#audit", "/#policy", "/#system"]) {
       if (!hrefs.includes(h)) throw Error("missing classic link " + h);
     }
   });
@@ -241,7 +250,9 @@ try {
   const sweepPages = [
     ["command", "/next/#/", () => page.getByRole("heading", { name: "Needs you" }).waitFor()],
     ["queue", "/next/#/queue", () => page.getByRole("table", { name: "Work items" }).waitFor()],
-    ["trace", "/next/#/queue/" + encodeURIComponent(traceTarget.id), () => page.getByRole("list", { name: "Execution trace stages" }).waitFor()]
+    ["trace", "/next/#/queue/" + encodeURIComponent(traceTarget.id), () => page.getByRole("list", { name: "Execution trace stages" }).waitFor()],
+    ["approvals", "/next/#/approvals", () => page.getByRole("list", { name: /Work waiting on a human/ }).waitFor()],
+    ["execution", "/next/#/execution", () => page.getByRole("table", { name: "Execution attempts" }).waitFor()]
   ];
   for (const theme of ["dark", "light"]) {
     for (const [width, height] of [[1440, 900], [1024, 800], [768, 900], [390, 844]]) {
@@ -271,6 +282,82 @@ try {
   }
   await page.evaluate(() => window.localStorage.removeItem("acs-theme"));
   await page.setViewportSize({ width: 1440, height: 900 });
+
+  await check("Execution page shows real dry-run attempts and labels them simulated", async () => {
+    await page.goto(origin + "/next/#/execution");
+    const table = page.getByRole("table", { name: "Execution attempts" });
+    await table.waitFor();
+    await page.getByText(/Dry run: attempts below are simulated/).waitFor();
+    if ((await table.locator("tbody tr").count()) < 3) throw Error("expected three dry-run attempts");
+    if (await table.getByRole("button", { name: /^Retry / }).count()) throw Error("retry offered for non-failed attempts");
+  });
+
+  await check("Read-only credential sees approvals but every control is disabled with a reason", async () => {
+    const ro = await browser.newContext({ extraHTTPHeaders: { authorization: "Bearer " + readerToken }, viewport: { width: 1280, height: 900 } });
+    const p = await ro.newPage();
+    await p.goto(origin + "/next/#/approvals");
+    await p.getByRole("list", { name: /Work waiting on a human/ }).waitFor();
+    await p.getByText("Read only").waitFor();
+    const buttons = p.getByRole("button", { name: /^(Approve|Deny|Unblock) / });
+    if ((await buttons.count()) < 1) throw Error("no controls rendered");
+    for (let i = 0; i < (await buttons.count()); i++) if (!(await buttons.nth(i).isDisabled())) throw Error("control enabled for a read-only credential");
+    await p.getByText(/does not have approval permission/).first().waitFor();
+    const direct = await ro.request.post(origin + "/work-items/" + ids[8] + "/reject", { data: { reason: "reader must be refused" } });
+    if (direct.status() !== 403) throw Error("server must refuse a reader, got " + direct.status());
+    await ro.close();
+  });
+
+  await check("Approve through the UI: reason required, one POST, server state changes", async () => {
+    await page.goto(origin + "/next/#/approvals");
+    await page.getByRole("list", { name: /Work waiting on a human/ }).waitFor();
+    const approveBtn = page.getByRole("button", { name: /^Approve .* for Review deployment request$/ });
+    await approveBtn.waitFor();
+    await page.locator("header [role=status]").getByText("Live").waitFor();
+    const posts = [];
+    page.on("request", (r) => r.method() === "POST" && posts.push(new URL(r.url()).pathname));
+    await approveBtn.click();
+    const dialog = page.getByRole("dialog");
+    await dialog.waitFor();
+    const confirm = dialog.getByRole("button", { name: "Approve", exact: true });
+    if (!(await confirm.isDisabled())) throw Error("confirm must be disabled without a reason");
+    await dialog.getByRole("textbox").fill("e2e: reviewed the request");
+    await confirm.dblclick();
+    await dialog.waitFor({ state: "hidden" });
+    await page.getByText(/approved\./).waitFor();
+    if (posts.length !== 1 || !posts[0].endsWith("/approve")) throw Error("expected exactly one approve POST, got " + JSON.stringify(posts));
+    await page.getByRole("link", { name: "Review deployment request" }).waitFor({ state: "detached", timeout: 8000 });
+    const after = await (await context.request.get(origin + "/api/mission-control/queue")).json();
+    const item = after.items.find((i) => i.id === ids[8]);
+    if (!item || item.status === "needs_approval") throw Error("approval did not change server state: " + JSON.stringify(item?.status));
+    page.removeAllListeners("request");
+  });
+
+  await check("Deny through the UI rejects the work item server-side", async () => {
+    const denyBtn = page.getByRole("button", { name: "Deny Review storage mutation" });
+    await denyBtn.waitFor();
+    await denyBtn.click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("textbox").fill("e2e: not acceptable");
+    await dialog.getByRole("button", { name: "Deny", exact: true }).click();
+    await dialog.waitFor({ state: "hidden" });
+    await page.getByRole("link", { name: "Review storage mutation" }).waitFor({ state: "detached", timeout: 8000 });
+    const after = await (await context.request.get(origin + "/api/mission-control/queue")).json();
+    if (after.items.find((i) => i.id === ids[9])?.status !== "rejected") throw Error("deny did not reject the item");
+  });
+
+  await check("Escape dismisses a confirmation without sending anything", async () => {
+    const posts = [];
+    page.on("request", (r) => r.method() === "POST" && posts.push(r.url()));
+    await page.goto(origin + "/next/#/approvals");
+    const btn = page.getByRole("button", { name: /^(Approve|Deny|Unblock) / }).first();
+    if (!(await btn.count())) return; // all approvals handled above
+    await btn.click();
+    await page.getByRole("dialog").waitFor();
+    await page.keyboard.press("Escape");
+    await page.getByRole("dialog").waitFor({ state: "hidden" });
+    page.removeAllListeners("request");
+    if (posts.length) throw Error("Escape must not send anything");
+  });
 
   await check("Unauthenticated: API rejects and the SPA shows sign-in, never data", async () => {
     const anon = await browser.newContext({ viewport: { width: 1280, height: 800 } });

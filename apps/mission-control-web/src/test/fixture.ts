@@ -90,3 +90,38 @@ export function traceFixture(over: Partial<TraceReadModel> = {}): TraceReadModel
     ...over
   };
 }
+
+import type { ApprovalsReadModel, ExecutionReadModel } from "@agent-control-stack/mission-control-contract";
+
+export function approvalsFixture(over: Partial<ApprovalsReadModel> = {}): ApprovalsReadModel {
+  return {
+    schemaVersion: 1,
+    generatedAt: "2026-10-19T12:00:00.000Z",
+    viewer: { canApprove: true, canWrite: true },
+    slaMs: 1_800_000,
+    items: [
+      { id: "wrk_appr0000002", title: "Review deployment request", intent: "Ship the release", status: "needs_approval", risk: "high", requester: "user", since: "2026-10-19T10:00:00.000Z", overSla: true, actions: [{ actionHash: "d".repeat(64), kind: "fs.write", description: "write config" }] },
+      { id: "wrk_self0000003", title: "Review storage mutation", intent: "Mutate storage", status: "needs_approval", risk: "high", requester: "user", since: "2026-10-19T11:30:00.000Z", overSla: false, actions: [] },
+      { id: "wrk_blk00000004", title: "Check connector scopes", intent: "Inspect", status: "blocked", risk: "low", requester: "user", since: "2026-10-19T11:40:00.000Z", overSla: false, actions: [] }
+    ],
+    ...over
+  };
+}
+
+export function executionFixture(over: Partial<ExecutionReadModel> = {}): ExecutionReadModel {
+  const t = overviewFixture().observability.telemetry!;
+  return {
+    schemaVersion: 1,
+    generatedAt: "2026-10-19T12:00:00.000Z",
+    viewer: { canApprove: true, canWrite: true },
+    summary: { running: 1, failed: 1, attention: 0, expiringLeases: 1 },
+    attempts: [
+      { attemptId: "att-1", workItemId: "wrk_run00000001", title: "Inspect queue latency", workItemStatus: "running", risk: "low", attemptNumber: 1, status: "running", workerId: "agent-a", fencingEpoch: 2, lease: { status: "active", expiresAt: "2026-10-19T12:00:30.000Z", expiringSoon: true }, startedAt: "2026-10-19T11:50:00.000Z", updatedAt: "2026-10-19T11:59:00.000Z" },
+      { attemptId: "att-2", workItemId: "wrk_fail0000005", title: "Review policy boundaries", workItemStatus: "failed", risk: "low", attemptNumber: 1, status: "failed", workerId: "agent-b", fencingEpoch: 1, lease: { status: "consumed", expiresAt: "2026-10-19T11:00:00.000Z", expiringSoon: false }, startedAt: "2026-10-19T10:50:00.000Z", updatedAt: "2026-10-19T10:55:00.000Z", durationMs: 300000 }
+    ],
+    telemetry: t,
+    admission: { active: 1, capacity: 4, queued: 0, saturated: false },
+    dryRun: "yes",
+    ...over
+  };
+}

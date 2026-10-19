@@ -9,12 +9,12 @@ export function NeedsYou({ data }: { data: OverviewReadModel }) {
   const n = data.needsYou;
   const total = n.approvals + n.blocked + n.quarantined + n.expiringLeases.length;
   return (
-    <Card id="needs-you" title="Needs you" subtitle="Counts come from the store. Acting on any of these happens in the classic console for now." tone={total > 0 ? "warn" : undefined}>
+    <Card id="needs-you" title="Needs you" subtitle="Counts come from the store. Open Approvals to act on them." tone={total > 0 ? "warn" : undefined}>
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Stat label="Awaiting approval" value={n.approvals} tone={n.approvals ? "warn" : "neutral"} href="/#approvals" />
+        <Stat label="Awaiting approval" value={n.approvals} tone={n.approvals ? "warn" : "neutral"} to="/approvals" />
         <Stat label="Blocked" value={n.blocked} tone={n.blocked ? "bad" : "neutral"} to="/queue?status=blocked" />
         <Stat label="Quarantined" value={n.quarantined} tone={n.quarantined ? "bad" : "neutral"} to="/queue?status=quarantined" />
-        <Stat label="Leases expiring" value={n.expiringLeases.length} tone={n.expiringLeases.length ? "warn" : "neutral"} note="Warning only. Not authority." href="/#execution" />
+        <Stat label="Leases expiring" value={n.expiringLeases.length} tone={n.expiringLeases.length ? "warn" : "neutral"} note="Warning only. Not authority." to="/execution" />
       </div>
       {total === 0 ? (
         <div className="mt-4"><EmptyState title="Nothing needs you right now">No approvals, blocked or quarantined work, and no leases near expiry.</EmptyState></div>
@@ -110,32 +110,36 @@ export function Pipeline({ data }: { data: OverviewReadModel }) {
 /* ───────────────────────── Observability ───────────────────────── */
 
 export function Observability({ data }: { data: OverviewReadModel }) {
-  const t = data.observability.telemetry;
-  const a = data.observability.admission;
   return (
     <Card id="observability" title="Execution observability" subtitle="Persisted attempt telemetry over a rolling 24-hour window.">
       {data.sections.observability.status !== "ok" ? (
         <Unavailable what="Telemetry" {...(data.sections.observability.reason ? { reason: data.sections.observability.reason } : {})} />
       ) : (
-        <div className="space-y-5">
-          {t ? <Throughput throughput={t.throughput} /> : <Unavailable what="Throughput" reason="telemetry_absent" />}
-          <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
-            <Metric label="Avg run time" value={t ? formatDuration(t.averageRunMs) : "unknown"} />
-            <Metric label="Avg queue time" value={t ? formatDuration(t.averageQueueMs) : "unknown"} />
-            <Metric label="Approvals granted" value={t?.approvalsGranted === undefined ? "unknown" : String(t.approvalsGranted)} />
-            <Metric label="Avg approval latency" value={t?.averageApprovalMs === undefined ? "unknown" : formatDuration(t.averageApprovalMs)} />
-          </dl>
-          {a ? (
-            <div>
-              <div className="mb-1 flex justify-between text-xs text-muted"><span>Global execution-slot usage</span><span>{a.active} of {a.capacity} · {a.queued} queued</span></div>
-              <div className="h-2 overflow-hidden rounded-full bg-surface-3" role="img" aria-label={`${a.active} of ${a.capacity} execution slots in use`}>
-                <div className={`h-full rounded-full ${a.saturated ? "bg-bad" : "bg-accent"}`} style={{ width: `${a.capacity ? Math.min(100, (a.active / a.capacity) * 100) : 0}%`, transition: "width .4s" }} />
-              </div>
-            </div>
-          ) : null}
-        </div>
+        <TelemetryPanel telemetry={data.observability.telemetry} admission={data.observability.admission} />
       )}
     </Card>
+  );
+}
+
+export function TelemetryPanel({ telemetry: t, admission: a }: { telemetry: OverviewReadModel["observability"]["telemetry"]; admission: OverviewReadModel["observability"]["admission"] }) {
+  return (
+    <div className="space-y-5">
+      {t ? <Throughput throughput={t.throughput} /> : <Unavailable what="Throughput" reason="telemetry_absent" />}
+      <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
+        <Metric label="Avg run time" value={t ? formatDuration(t.averageRunMs) : "unknown"} />
+        <Metric label="Avg queue time" value={t ? formatDuration(t.averageQueueMs) : "unknown"} />
+        <Metric label="Approvals granted" value={t?.approvalsGranted === undefined ? "unknown" : String(t.approvalsGranted)} />
+        <Metric label="Avg approval latency" value={t?.averageApprovalMs === undefined ? "unknown" : formatDuration(t.averageApprovalMs)} />
+      </dl>
+      {a ? (
+        <div>
+          <div className="mb-1 flex justify-between text-xs text-muted"><span>Global execution-slot usage</span><span>{a.active} of {a.capacity} · {a.queued} queued</span></div>
+          <div className="h-2 overflow-hidden rounded-full bg-surface-3" role="img" aria-label={`${a.active} of ${a.capacity} execution slots in use`}>
+            <div className={`h-full rounded-full ${a.saturated ? "bg-bad" : "bg-accent"}`} style={{ width: `${a.capacity ? Math.min(100, (a.active / a.capacity) * 100) : 0}%`, transition: "width .4s" }} />
+          </div>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
