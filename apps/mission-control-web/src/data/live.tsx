@@ -16,7 +16,8 @@ export const useStreamState = () => useContext(StreamContext);
 /**
  * One SSE connection for the whole app. Events never mutate state directly: they
  * invalidate every mission-control query (coalesced to one refetch window), so
- * the server stays the only source of truth. No polling loop is added.
+ * the server stays the only source of truth. Reads also refetch on a bounded
+ * interval (see TIME_DERIVED_REFRESH_MS) for facts that change without an event.
  */
 export function LiveProvider({ factory, children }: { factory?: EventSourceFactory | undefined; children: ReactNode }) {
   const client = useQueryClient();
@@ -51,7 +52,10 @@ export function LiveProvider({ factory, children }: { factory?: EventSourceFacto
 // Auth, not-found and contract violations are deterministic: retrying only delays the honest answer.
 const retry = (count: number, error: unknown) =>
   !(error instanceof AuthRequiredError) && !(error instanceof SchemaError) && !(error instanceof NotFoundError) && count < 2;
-const shared = { staleTime: Infinity, refetchOnWindowFocus: true, retry } as const;
+// Agent staleness, SLA breaches and lease expiry change with wall-clock time and emit no event, so an
+// otherwise-quiet console would show them indefinitely. A bounded refetch keeps them honest.
+const TIME_DERIVED_REFRESH_MS = 60_000;
+const shared = { staleTime: Infinity, refetchOnWindowFocus: true, refetchInterval: TIME_DERIVED_REFRESH_MS, retry } as const;
 
 export const useOverview = () => useQuery({ queryKey: OVERVIEW_KEY, queryFn: ({ signal }) => fetchOverview(fetch, signal), ...shared });
 export const useQueue = () => useQuery({ queryKey: QUEUE_KEY, queryFn: ({ signal }) => fetchQueue(fetch, signal), ...shared });

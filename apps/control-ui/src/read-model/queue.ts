@@ -3,6 +3,7 @@ import type { WorkItem } from "@agent-control-stack/work-items";
 import { redactSecrets } from "../redaction.js";
 import { executionStage } from "../render/operations.js";
 import type { MissionControlViewModel } from "../types.js";
+import { isCurrentLease } from "./lease.js";
 
 const text = (value: unknown, max: number): string => {
   const redacted = redactSecrets(value);
@@ -19,6 +20,7 @@ export function toQueueReadModel(model: MissionControlViewModel): QueueReadModel
   const admissions = model.executionPlanAdmissionsByWorkItem;
   const attempts = model.executionAttemptsByWorkItem ?? {};
   const leases = model.attemptLeasesByWorkItem ?? {};
+  const nowMs = (model.now ?? new Date()).getTime();
 
   const items: QueueItem[] = [...model.workItems]
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
@@ -28,7 +30,7 @@ export function toQueueReadModel(model: MissionControlViewModel): QueueReadModel
       const admission = admissions?.[item.id];
       const latest = attempts[item.id]?.at(-1);
       const lease = (leases[item.id] ?? []).reduce<(typeof leases)[string][number] | undefined>(
-        (best, l) => (l.status === "active" && (!best || l.fencingEpoch > best.fencingEpoch) ? l : best),
+        (best, l) => (isCurrentLease(l, nowMs) && (!best || l.fencingEpoch > best.fencingEpoch) ? l : best),
         undefined
       );
       const lineage =

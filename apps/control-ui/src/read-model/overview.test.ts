@@ -170,6 +170,25 @@ describe("parseOverviewReadModel fail-closed", () => {
   });
 });
 
+describe("authority bindings under node-cap pressure and lease expiry", () => {
+  it("keeps a lease binding even when the registry alone exceeds the node cap", () => {
+    const registry = Array.from({ length: 250 }, (_, i) => agent(`idle-${i}`));
+    const out = toOverviewReadModel(
+      model({ agents: [...registry, agent("agent-a")], attemptLeasesByWorkItem: { w1: [lease({ leaseId: "l1", workItemId: "w1" })] } })
+    );
+    expect(out.network.nodes.length).toBeLessThanOrEqual(200);
+    expect(out.network.edges).toContainEqual({ from: "agent:agent-a", to: "work:w1", kind: "active_lease", fencingEpoch: 1 });
+    for (const edge of out.network.edges) {
+      expect(out.network.nodes.some((n) => n.id === edge.from) && out.network.nodes.some((n) => n.id === edge.to)).toBe(true);
+    }
+  });
+
+  it("does not draw ownership from an active lease whose expiry has passed but the reaper has not closed", () => {
+    const out = toOverviewReadModel(model({ attemptLeasesByWorkItem: { w1: [lease({ leaseId: "l1", workItemId: "w1", expiresAt: "2026-10-19T11:59:00.000Z" })] } }));
+    expect(out.network.edges.filter((e) => e.kind === "active_lease")).toEqual([]);
+  });
+});
+
 describe("executor and connector nodes", () => {
   const withInfra = (over: Partial<MissionControlViewModel> = {}) =>
     model({ executorSummaries: [{ id: "acs-dc-bridge", displayName: "Desktop Commander", configured: false, status: "unconfigured" }], connectorSummaries: [{ id: "c1", displayName: "QA connector", status: "active", activeSessionCount: 2 }], ...over });

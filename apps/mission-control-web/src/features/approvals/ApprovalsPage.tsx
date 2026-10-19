@@ -5,7 +5,9 @@ import { Card, EmptyState, IdChip, Stat, StatusPill } from "../../design/primiti
 import { useControlGate, useWorkItemActions, type ActionSpec } from "../actions/actions";
 
 function ItemCard({ item, viewer, open }: { item: ApprovalItem; viewer: ApprovalsReadModel["viewer"]; open: (spec: ActionSpec) => void }) {
+  // Approve is gated by acs:approve; deny and unblock hit /reject and /unblock, which require acs:write.
   const approve = useControlGate(viewer.canApprove, "approve");
+  const write = useControlGate(viewer.canWrite, "write");
   const base = { workItemId: item.id, title: item.title, risk: item.risk, intent: item.intent, ...(item.requester ? { requester: item.requester } : {}) };
   const noApprovable = item.status === "needs_approval" && item.actions.length === 0;
   return (
@@ -41,12 +43,12 @@ function ItemCard({ item, viewer, open }: { item: ApprovalItem; viewer: Approval
 
       <div className="mt-4 flex flex-wrap items-center gap-3">
         {item.status === "needs_approval" && (
-          <button type="button" disabled={approve.disabled} onClick={() => open({ ...base, kind: "deny" })} aria-label={`Deny ${item.title}`} className="rounded-ctl border border-bad/50 px-3 py-1.5 text-sm font-medium text-bad disabled:cursor-not-allowed disabled:opacity-50">Deny</button>
+          <button type="button" disabled={write.disabled} onClick={() => open({ ...base, kind: "deny" })} aria-label={`Deny ${item.title}`} className="rounded-ctl border border-bad/50 px-3 py-1.5 text-sm font-medium text-bad disabled:cursor-not-allowed disabled:opacity-50">Deny</button>
         )}
         {item.status === "blocked" && (
-          <button type="button" disabled={approve.disabled} onClick={() => open({ ...base, kind: "unblock" })} aria-label={`Unblock ${item.title}`} className="rounded-ctl border border-line px-3 py-1.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50">Unblock</button>
+          <button type="button" disabled={write.disabled} onClick={() => open({ ...base, kind: "unblock" })} aria-label={`Unblock ${item.title}`} className="rounded-ctl border border-line px-3 py-1.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50">Unblock</button>
         )}
-        {approve.why && <p className="text-xs text-muted">{approve.why}</p>}
+        {(item.status === "blocked" ? write.why : approve.why) && <p className="text-xs text-muted">{item.status === "blocked" ? write.why : approve.why}</p>}
       </div>
     </li>
   );

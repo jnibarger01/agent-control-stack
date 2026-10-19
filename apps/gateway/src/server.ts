@@ -5361,7 +5361,10 @@ function isRateLimitedGetRoute(url: string): boolean {
     path === "/execution-mode" ||
     path === "/authority" ||
     path === "/api/mcp-clients" ||
-    path === "/api/mission-dispatch"
+    path === "/api/mission-dispatch" ||
+    // The React Mission Control shell and assets (flag-gated). Each read touches the filesystem, so it shares the limiter.
+    path === "/next" ||
+    path.startsWith("/next/")
   );
 }
 

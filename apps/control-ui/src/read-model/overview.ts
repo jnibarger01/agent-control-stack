@@ -9,6 +9,7 @@ import {
 import type { WorkItem } from "@agent-control-stack/work-items";
 import { redactSecrets, redactedAttributesJson } from "../redaction.js";
 import { dashboardAgents } from "../render/fragments.js";
+import { isCurrentLease } from "./lease.js";
 import { executionStage } from "../render/operations.js";
 import type { MissionControlAgent, MissionControlViewModel } from "../types.js";
 
@@ -78,6 +79,26 @@ function livenessOf(agent: MissionControlAgent): NetworkNode["liveness"] {
   return agent.status === "online" || agent.status === "stale" || agent.status === "offline" || agent.status === "observed"
     ? agent.status
     : "unknown";
+}
+
+/**
+ * Applies the node cap without dropping bindings. Edges claim their endpoints first, so a lease or reported task
+ * is never lost because unbound registry nodes filled the map; unbound nodes take whatever capacity is left.
+ */
+function retainNetwork(nodes: Map<string, NetworkNode>, edges: NetworkEdge[]): { nodes: NetworkNode[]; edges: NetworkEdge[] } {
+  const retained = new Map<string, NetworkNode>();
+  const keptEdges: NetworkEdge[] = [];
+  for (const edge of edges) {
+    const needed = [edge.from, edge.to].filter((id) => !retained.has(id));
+    if (retained.size + needed.length > MAX_NODES) continue;
+    for (const id of needed) retained.set(id, nodes.get(id)!);
+    keptEdges.push(edge);
+  }
+  for (const [id, node] of nodes) {
+    if (retained.size >= MAX_NODES) break;
+    if (!retained.has(id)) retained.set(id, node);
+  }
+  return { nodes: [...retained.values()], edges: keptEdges };
 }
 
 export function toOverviewReadModel(model: MissionControlViewModel): OverviewReadModel {
@@ -175,16 +196,16 @@ export function toOverviewReadModel(model: MissionControlViewModel): OverviewRea
   };
   const addEdge = (edge: NetworkEdge) => {
     const key = `${edge.from}|${edge.to}`;
-    if (edgeKeys.has(key) || nodes.size > MAX_NODES) return;
+    if (edgeKeys.has(key)) return;
     edgeKeys.add(key);
     edges.push(edge);
   };
-  // Only the active lease with the highest fencing epoch is current authority;
+  // Only the current lease with the highest fencing epoch is current authority;
   // a lower-epoch lease is stale and is never drawn as current ownership.
   for (const [workItemId, list] of Object.entries(leases)) {
     const item = workById.get(workItemId);
     if (!item) continue;
-    const active = list.filter((l) => l.status === "active");
+    const active = list.filter((l) => isCurrentLease(l, nowMs));
     if (!active.length) continue;
     const current = active.reduce((a, b) => (b.fencingEpoch > a.fencingEpoch ? b : a));
     const agent = agentNode(current.workerId);
@@ -212,7 +233,7 @@ export function toOverviewReadModel(model: MissionControlViewModel): OverviewRea
         .slice(0, MAX_ITEMS_PER_STAGE)
         .map((item) => {
           const latest = attempts[item.id]?.at(-1);
-          const lease = (leases[item.id] ?? []).filter((l) => l.status === "active").at(-1);
+          const lease = (leases[item.id] ?? []).filter((l) => isCurrentLease(l, nowMs)).at(-1);
           const agentId = lease?.workerId ?? latest?.claimedByWorkerId;
           return {
             id: item.id,
@@ -280,7 +301,7 @@ export function toOverviewReadModel(model: MissionControlViewModel): OverviewRea
       })),
       expiringLeases: expiringLeases.slice(0, MAX_NEEDS_YOU)
     },
-    network: { nodes: [...nodes.values()].slice(0, MAX_NODES), edges },
+    network: retainNetwork(nodes, edges),
     pipeline: {
       stages,
       ...(model.finishedWorkItems ? { finishedWindow: { shown: model.finishedWorkItems.shown, total: model.finishedWorkItems.total } } : {})

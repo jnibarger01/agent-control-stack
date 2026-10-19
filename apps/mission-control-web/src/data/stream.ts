@@ -21,6 +21,7 @@ export const STREAM_EVENT_NAMES = [
   "execution_attempt.created", "execution_attempt.transitioned", "execution_attempt.result_accepted",
   "attempt_lease.issued", "attempt_lease.renewed", "attempt_lease.stolen", "attempt_lease.expired",
   "execution_mode.changed", "approval.granted", "policy.decided",
+  "execution_plan.created", "execution_plan.admitted", "execution_plan_approval.granted",
   "agent_run.requested", "agent_run.started", "agent_run.finished", "agent_run.cancel_requested", "agent_run.interrupted"
 ] as const;
 

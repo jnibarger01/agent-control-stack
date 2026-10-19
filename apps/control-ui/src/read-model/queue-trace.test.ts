@@ -27,7 +27,7 @@ const plan = {
 } as unknown as ExecutionPlanRecord;
 const admission = { admissionId: "adm-1", workItemId: "w1", planId: "plan-1", planHash: hash, policyVersion: "p1", policyDecisionHash: hash, requiresApproval: true, admittedByActorId: "policy", admittedAt: "2026-10-19T11:02:00.000Z" } as ExecutionPlanAdmission;
 const attempt = { attemptId: "att-1", workItemId: "w1", planId: "plan-1", planHash: hash, attemptNumber: 1, protocolVersion: "acs.worker.v2", inputHash: hash, status: "running", currentFencingEpoch: 2, claimedByWorkerId: "agent-a", createdAt: "x", updatedAt: "y" } as unknown as ExecutionAttempt;
-const lease = (over: Partial<MissionControlAttemptLease>) => ({ leaseId: "l1", attemptId: "att-1", workItemId: "w1", admissionId: "adm-1", workerId: "agent-a", planHash: hash, inputHash: hash, fencingEpoch: 1, protocolVersion: "acs.worker.v2", policyVersion: "p1", policyDecisionHash: hash, issuedAt: "a", expiresAt: "b", maxExpiresAt: "c", lastRenewedAt: "a", status: "active", tokenHash: "deadbeefdeadbeef", ...over }) as unknown as MissionControlAttemptLease;
+const lease = (over: Partial<MissionControlAttemptLease>) => ({ leaseId: "l1", attemptId: "att-1", workItemId: "w1", admissionId: "adm-1", workerId: "agent-a", planHash: hash, inputHash: hash, fencingEpoch: 1, protocolVersion: "acs.worker.v2", policyVersion: "p1", policyDecisionHash: hash, issuedAt: "2026-10-19T11:50:00.000Z", expiresAt: "2026-10-19T12:05:00.000Z", maxExpiresAt: "2026-10-19T13:00:00.000Z", lastRenewedAt: "a", status: "active", tokenHash: "deadbeefdeadbeef", ...over }) as unknown as MissionControlAttemptLease;
 const ev = (sequence: number, name: string, attributes: Record<string, string | number | boolean> = {}) => ({ sequence, id: `e${sequence}`, name, timeUnixNano: "1792411200000000000", attributes, body: {}, previousHash: "", eventHash: "" }) as StoredAuditEvent;
 
 describe("toQueueReadModel", () => {
@@ -90,6 +90,12 @@ describe("toTraceReadModel", () => {
     expect(stageOf(out, "admission")).toMatchObject({ state: "current" });
     expect(stageOf(out, "admission").summary).toContain("not admitted");
     expect(out.admission).toBeNull();
+  });
+
+  it("keeps approval required while the work item still awaits approval, even after one action was granted", () => {
+    const out = toTraceReadModel(input({ workItem: item("w1", "needs_approval") }));
+    expect(out.approval.state).toBe("required");
+    expect(stageOf(out, "approval").state).not.toBe("done");
   });
 
   it("marks approval not applicable when policy did not require it and unavailable when unknowable", () => {

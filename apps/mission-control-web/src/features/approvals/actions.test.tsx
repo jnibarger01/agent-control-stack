@@ -95,6 +95,13 @@ describe("Approvals", () => {
     expect(screen.getByText("Read only")).toBeTruthy();
   });
 
+  it("gates deny on write permission, not approval permission", async () => {
+    mountAt("/approvals", { approvals: approvalsFixture({ viewer: { canApprove: true, canWrite: false } }) });
+    const deny = await screen.findByRole("button", { name: "Deny Review deployment request" });
+    expect((deny as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Approve fs.write for Review deployment request" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("disables controls while the live stream is not connected", async () => {
     mountAt("/approvals", { approvals: approvalsFixture(), factory: connecting });
     const approve = await screen.findByRole("button", { name: "Approve fs.write for Review deployment request" });

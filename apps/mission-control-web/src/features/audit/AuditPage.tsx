@@ -131,7 +131,8 @@ function AuditResults({ updating, head, older, nextBefore, loadingOlder, olderEr
           </>
         )}
         <div className="mt-4 flex items-center gap-3">
-          {more ? <button type="button" disabled={loadingOlder} onClick={() => void loadOlder(head)} className="rounded-ctl border border-line px-3 py-1.5 text-sm hover:border-accent disabled:opacity-50">{loadingOlder ? "Loading…" : "Load older events"}</button> : all.length > 0 ? <p className="text-xs text-muted">Start of the retained log reached.</p> : null}
+          {/* While filters are updating, `head` still belongs to the previous filter: its cursor must not be used. */}
+          {more ? <button type="button" disabled={loadingOlder || updating} onClick={() => void loadOlder(head)} className="rounded-ctl border border-line px-3 py-1.5 text-sm hover:border-accent disabled:opacity-50">{loadingOlder ? "Loading…" : "Load older events"}</button> : all.length > 0 ? <p className="text-xs text-muted">Start of the retained log reached.</p> : null}
           {olderError && <p role="alert" className="text-sm text-bad">Could not load older events. Nothing was changed.</p>}
         </div>
       </Card>

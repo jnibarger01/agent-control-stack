@@ -45,16 +45,21 @@ export function toTraceReadModel(input: TraceInput): TraceReadModel {
   const required = admission?.requiresApproval ?? (names.has("work_item.needs_approval") ? true : undefined);
   // `work_item.approved` also fires when policy allows low-risk work without a human, so it only
   // counts as a human grant when approval was actually required. An explicit approval.granted always counts.
-  const granted = names.has("approval.granted") || (required !== false && names.has("work_item.approved"));
+  // Grant events are historical: one approved action leaves the item in needs_approval while others remain,
+  // and a replaced plan can invalidate an earlier grant. The canonical work-item status decides while it still waits.
+  const awaitingApproval = workItem.status === "needs_approval";
+  const granted = !awaitingApproval && (names.has("approval.granted") || (required !== false && names.has("work_item.approved")));
   const approvalState: TraceReadModel["approval"]["state"] = rejected
     ? "rejected"
-    : granted
-      ? "granted"
-      : required === false
-        ? "not_required"
-        : required === true || workItem.status === "needs_approval"
-          ? "required"
-          : "unknown";
+    : awaitingApproval
+      ? "required"
+      : granted
+        ? "granted"
+        : required === false
+          ? "not_required"
+          : required === true
+            ? "required"
+            : "unknown";
 
   const traceAttempts: TraceAttempt[] = attempts.map((a) => ({
     attemptId: a.attemptId,

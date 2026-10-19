@@ -44,8 +44,6 @@ const MIME: Record<string, string> = {
   ".txt": "text/plain; charset=utf-8"
 };
 
-const RATE_LIMIT = { config: { rateLimit: { max: 600, timeWindow: "1 minute" } } } as const;
-
 export function defaultMissionControlWebDist(): string {
   return fileURLToPath(new URL("../../mission-control-web/dist", import.meta.url));
 }
@@ -75,9 +73,10 @@ export function registerMissionControlWeb(app: FastifyInstance, options: Mission
     reply.header("referrer-policy", "no-referrer");
   };
 
-  app.get("/next", RATE_LIMIT, async (_request, reply) => reply.redirect("/next/", 302));
+  // Requests under /next/ are throttled by the gateway's shared limiter (isRateLimitedGetRoute in server.ts).
+  app.get("/next", async (_request, reply) => reply.redirect("/next/", 302));
 
-  app.get("/next/*", RATE_LIMIT, async (request, reply) => {
+  app.get("/next/*", async (request, reply) => {
     securityHeaders(reply);
     if (!existsSync(join(root, "index.html"))) {
       app.log.error({ root }, "mission control web is enabled but not built");
