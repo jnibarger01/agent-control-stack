@@ -47,3 +47,46 @@ export function overviewFixture(over: Partial<OverviewReadModel> = {}): Overview
     ...over
   };
 }
+
+import type { QueueReadModel, TraceReadModel } from "@agent-control-stack/mission-control-contract";
+
+export function queueFixture(over: Partial<QueueReadModel> = {}): QueueReadModel {
+  const base = { createdAt: "2026-10-19T11:00:00.000Z", updatedAt: "2026-10-19T11:50:00.000Z", intent: "Browser verification" };
+  return {
+    schemaVersion: 1,
+    generatedAt: "2026-10-19T12:00:00.000Z",
+    counts: { source: "store", byStatus: { running: 1, needs_approval: 1, succeeded: 12 } },
+    finishedWindow: { shown: 1, total: 12 },
+    items: [
+      { ...base, id: "wrk_run00000001", title: "Inspect queue latency", status: "running", stageLabel: "Running", risk: "low", plan: { state: "admitted", planNumber: 1, requiresApproval: false }, attempt: { status: "running", number: 1, workerId: "agent-a" }, lease: { status: "active", fencingEpoch: 2, workerId: "agent-a", expiresAt: "2026-10-19T12:30:00.000Z" } },
+      { ...base, id: "wrk_appr0000002", title: "Review deployment request", status: "needs_approval", stageLabel: "Waiting Approval", risk: "high", plan: { state: "drafted", planNumber: 1 } },
+      { ...base, id: "wrk_done0000003", title: "Read runtime heartbeat", status: "succeeded", stageLabel: "Completed", risk: "low", plan: { state: "unknown" }, lineage: { retrySequence: 1, sourceWorkItemId: "wrk_run00000001" } }
+    ],
+    ...over
+  };
+}
+
+export function traceFixture(over: Partial<TraceReadModel> = {}): TraceReadModel {
+  return {
+    schemaVersion: 1,
+    generatedAt: "2026-10-19T12:00:00.000Z",
+    workItem: { id: "wrk_run00000001", title: "Inspect queue latency", intent: "Measure it", status: "running", risk: "low", requester: "user", createdAt: "2026-10-19T11:00:00.000Z", updatedAt: "2026-10-19T11:50:00.000Z", requestedActions: [{ kind: "fs.read", description: "read" }] },
+    stages: [
+      { key: "request", label: "Request", state: "done", summary: "Requested by user.", derived: false },
+      { key: "policy", label: "Policy decision", state: "done", summary: "A policy decision was recorded.", derived: true },
+      { key: "plan", label: "Execution plan", state: "done", summary: "Plan #1 with 1 step.", derived: false },
+      { key: "admission", label: "Admission", state: "done", summary: "Admitted under policy p1.", derived: false },
+      { key: "approval", label: "Human approval", state: "not_applicable", summary: "Policy did not require approval.", derived: true },
+      { key: "attempt", label: "Execution attempt", state: "current", summary: "Attempt #1 is running.", derived: false },
+      { key: "lease", label: "Lease and fencing", state: "current", summary: "Epoch 2, active, held by agent-a.", derived: false },
+      { key: "result", label: "Result", state: "pending", summary: "No result recorded.", derived: false }
+    ],
+    plan: { planNumber: 1, planHash: "a".repeat(64), objective: "Measure latency", steps: [{ sequence: 1, kind: "fs.read", description: "read it" }], constraints: { executionMode: "dry_run", maxRuntimeMs: 5000, allowedCommandCount: 2 }, createdAt: "2026-10-19T11:01:00.000Z", createdBy: "planner" },
+    admission: { admissionId: "adm-1", policyVersion: "p1", policyDecisionHash: "b".repeat(64), requiresApproval: false, admittedBy: "policy", admittedAt: "2026-10-19T11:02:00.000Z" },
+    approval: { state: "not_required", events: [] },
+    attempts: [{ attemptId: "att-1", attemptNumber: 1, status: "running", claimedByWorkerId: "agent-a", currentFencingEpoch: 2, createdAt: "2026-10-19T11:03:00.000Z", startedAt: "2026-10-19T11:04:00.000Z", updatedAt: "2026-10-19T11:50:00.000Z", leases: [{ leaseId: "l1", status: "active", fencingEpoch: 1, workerId: "agent-old", issuedAt: "2026-10-19T11:03:00.000Z", expiresAt: "2026-10-19T12:30:00.000Z" }, { leaseId: "l2", status: "active", fencingEpoch: 2, workerId: "agent-a", issuedAt: "2026-10-19T11:40:00.000Z", expiresAt: "2026-10-19T12:30:00.000Z" }] }],
+    result: null,
+    events: [{ sequence: 1, name: "work_item.created", at: "2026-10-19T11:00:00.000Z", summary: "{}" }],
+    ...over
+  };
+}

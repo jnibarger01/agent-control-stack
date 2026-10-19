@@ -155,3 +155,5 @@ export {
 } from "./operator-ux.js";
 export { OPERATOR_THIRTY, operatorToolbarHtml, operatorInsightsHtml } from "./operator-thirty-ui.js";
 export { toOverviewReadModel } from "./read-model/overview.js";
+export { toQueueReadModel } from "./read-model/queue.js";
+export { toTraceReadModel, type TraceInput } from "./read-model/trace.js";

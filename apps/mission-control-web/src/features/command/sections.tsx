@@ -1,4 +1,5 @@
 import type { OverviewReadModel, PipelineItem, PipelineStage } from "@agent-control-stack/mission-control-contract";
+import { Link } from "react-router";
 import { Card, DataTable, EmptyState, IdChip, Stat, StatusPill, Unavailable, type Tone } from "../../design/primitives";
 import { clockTime, formatDuration, percent, relativeTime } from "../../design/format";
 
@@ -11,8 +12,8 @@ export function NeedsYou({ data }: { data: OverviewReadModel }) {
     <Card id="needs-you" title="Needs you" subtitle="Counts come from the store. Acting on any of these happens in the classic console for now." tone={total > 0 ? "warn" : undefined}>
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat label="Awaiting approval" value={n.approvals} tone={n.approvals ? "warn" : "neutral"} href="/#approvals" />
-        <Stat label="Blocked" value={n.blocked} tone={n.blocked ? "bad" : "neutral"} href="/#queue" />
-        <Stat label="Quarantined" value={n.quarantined} tone={n.quarantined ? "bad" : "neutral"} href="/#queue" />
+        <Stat label="Blocked" value={n.blocked} tone={n.blocked ? "bad" : "neutral"} to="/queue?status=blocked" />
+        <Stat label="Quarantined" value={n.quarantined} tone={n.quarantined ? "bad" : "neutral"} to="/queue?status=quarantined" />
         <Stat label="Leases expiring" value={n.expiringLeases.length} tone={n.expiringLeases.length ? "warn" : "neutral"} note="Warning only. Not authority." href="/#execution" />
       </div>
       {total === 0 ? (
@@ -22,7 +23,7 @@ export function NeedsYou({ data }: { data: OverviewReadModel }) {
           {n.items.slice(0, 6).map((item) => (
             <li key={item.workItemId} className="flex flex-wrap items-center justify-between gap-2 py-2.5">
               <div className="min-w-0">
-                <p className="truncate text-sm font-medium">{item.title}</p>
+                <Link to={`/queue/${encodeURIComponent(item.workItemId)}`} className="block truncate text-sm font-medium hover:text-accent hover:underline">{item.title}</Link>
                 <p className="text-xs text-muted">Waiting {relativeTime(item.since).replace(" ago", "")} · risk {String(item.risk)} <IdChip id={item.workItemId} /></p>
               </div>
               <StatusPill tone={item.status === "needs_approval" ? "warn" : "bad"}>{item.status.replace(/_/g, " ")}</StatusPill>
