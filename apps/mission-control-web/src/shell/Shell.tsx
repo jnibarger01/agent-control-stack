@@ -89,7 +89,7 @@ export function Shell({ overview, stream, children, title, subtitle }: { overvie
             })}
           </ul>
         </nav>
-        <p className="mt-6 hidden px-1 text-xs leading-relaxed text-faint lg:block">Read-only preview. Actions stay in the classic console until each page is migrated. <Kbd>Ctrl</Kbd> <Kbd>K</Kbd> jumps to a page.</p>
+        <p className="mt-6 hidden px-1 text-xs leading-relaxed text-faint lg:block">Preview. Approvals and execution controls use the same authenticated routes as the classic console; other pages open there. <Kbd>Ctrl</Kbd> <Kbd>K</Kbd> jumps to a page.</p>
       </aside>
       <div className="min-w-0">
         <StaleBanner show={stream === "stale"} />
