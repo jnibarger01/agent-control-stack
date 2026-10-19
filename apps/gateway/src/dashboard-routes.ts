@@ -106,6 +106,8 @@ export interface DashboardRouteDeps {
   projectTunnelSession: (session: RegisteredTunnelSession, heartbeatTtlMs: number) => { effectiveStatus: string };
   validateRegisteredAgentPromptTarget: (store: SqliteWorkItemStore, input: Record<string, unknown>) => void;
   requireRead: (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
+  /** True when `/` should redirect to the React app. Evaluated per request; fail-closed. */
+  missionControlWebDefaultRoot?: () => boolean;
   sendError: (reply: FastifyReply, error: unknown) => unknown;
 }
 
@@ -123,6 +125,7 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardRou
     projectTunnelSession,
     validateRegisteredAgentPromptTarget,
     requireRead,
+    missionControlWebDefaultRoot,
     sendError
   } = deps;
 
@@ -223,13 +226,26 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardRou
     };
   }
 
-  app.get("/", { preHandler: requireRead }, async (request, reply) => {
+  const sendClassicConsole = async (request: FastifyRequest, reply: FastifyReply) => {
+    // Retirement evidence: the classic console may only be removed after a full release cycle in which this
+    // counter shows no operator is falling back to it (docs/runbooks/mission-control-web.md).
+    metrics.increment("acs_mc_legacy_console_requests_total", { route: request.routeOptions.url ?? "/" });
     try {
       reply.type("text/html").send(renderDashboard(missionControlViewModel(request)));
     } catch (error) {
       return sendError(reply, error);
     }
+  };
+
+  // `/` is the classic console unless the React app is the default; then it hands authenticated browsers
+  // to /next/. An unauthenticated request never reaches this handler (requireRead returns the login page).
+  app.get("/", { preHandler: requireRead }, async (request, reply) => {
+    if (missionControlWebDefaultRoot?.()) return reply.redirect("/next/", 302);
+    return sendClassicConsole(request, reply);
   });
+  // The classic console is always reachable here, so rollback and side-by-side comparison never depend on `/`.
+  app.get("/legacy", { preHandler: requireRead }, sendClassicConsole);
+  app.get("/legacy/", { preHandler: requireRead }, sendClassicConsole);
 
   app.get(
     "/api/mission-control/overview",

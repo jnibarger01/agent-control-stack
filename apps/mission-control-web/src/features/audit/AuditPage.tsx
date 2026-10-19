@@ -107,14 +107,14 @@ export function AuditPage() {
         </div>
       </Card>
       <QueryBoundary query={query} what="Audit log">
-        {(head) => <AuditResults head={head} older={older} nextBefore={nextBefore} loadingOlder={loadingOlder} olderError={olderError} loadOlder={loadOlder} text={text} selected={selected} setSelected={setSelected} />}
+        {(head) => <AuditResults updating={query.isPlaceholderData} head={head} older={older} nextBefore={nextBefore} loadingOlder={loadingOlder} olderError={olderError} loadOlder={loadOlder} text={text} selected={selected} setSelected={setSelected} />}
       </QueryBoundary>
     </div>
   );
 }
 
-function AuditResults({ head, older, nextBefore, loadingOlder, olderError, loadOlder, text, selected, setSelected }: {
-  head: AuditReadModel; older: AuditEvent[]; nextBefore: number | null | undefined; loadingOlder: boolean; olderError: boolean; loadOlder: (h: AuditReadModel) => Promise<void>;
+function AuditResults({ updating, head, older, nextBefore, loadingOlder, olderError, loadOlder, text, selected, setSelected }: {
+  updating: boolean; head: AuditReadModel; older: AuditEvent[]; nextBefore: number | null | undefined; loadingOlder: boolean; olderError: boolean; loadOlder: (h: AuditReadModel) => Promise<void>;
   text: string; selected: AuditEvent | null; setSelected: (e: AuditEvent | null) => void;
 }) {
   const all = useMemo(() => merge(head.events, older), [head.events, older]);
@@ -126,7 +126,7 @@ function AuditResults({ head, older, nextBefore, loadingOlder, olderError, loadO
       <Card>
         {rows.length === 0 ? <EmptyState title={all.length === 0 ? "No audit events match" : "No loaded event matches the search"} /> : (
           <>
-            <p className="mb-2 text-xs text-muted" role="status">Showing {rows.length} of {all.length} loaded events.</p>
+            <p className="mb-2 text-xs text-muted" role="status">{updating ? "Updating results… the rows below are from the previous filter." : `Showing ${rows.length} of ${all.length} loaded events.`}</p>
             <AuditTable events={rows} onSelect={setSelected} />
           </>
         )}

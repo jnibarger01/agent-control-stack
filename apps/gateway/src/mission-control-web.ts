@@ -15,6 +15,8 @@ import type { FastifyInstance } from "fastify";
 export interface MissionControlWebOptions {
   enabled?: boolean;
   distDir?: string;
+  /** Serve the React app at `/` (classic console stays at `/legacy`). Env: ACS_MC_WEB_DEFAULT=1. */
+  defaultRoot?: boolean;
 }
 
 export const MISSION_CONTROL_WEB_CSP = [
@@ -50,6 +52,16 @@ export function defaultMissionControlWebDist(): string {
 
 export function missionControlWebEnabled(options: MissionControlWebOptions | undefined): boolean {
   return options?.enabled ?? process.env.ACS_MC_WEB === "1";
+}
+
+/**
+ * Whether `/` should hand the browser to the React app. Evaluated per request and fail-closed: the app must be
+ * enabled AND actually built, otherwise `/` keeps serving the classic console rather than redirecting to a 503.
+ */
+export function missionControlWebDefaultRoot(options: MissionControlWebOptions | undefined): boolean {
+  if (!missionControlWebEnabled(options)) return false;
+  if (!(options?.defaultRoot ?? process.env.ACS_MC_WEB_DEFAULT === "1")) return false;
+  return existsSync(join(resolve(options?.distDir ?? defaultMissionControlWebDist()), "index.html"));
 }
 
 export function registerMissionControlWeb(app: FastifyInstance, options: MissionControlWebOptions | undefined): void {
