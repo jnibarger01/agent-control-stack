@@ -1,0 +1,140 @@
+#!/usr/bin/env node
+/**
+ * Process session output: absolute cursors across trimming, multibyte chunk splits,
+ * long-poll reads, and spawn-failure handling. Exercises the registry directly; the MCP
+ * surface is covered by test-jace-commander-ops.js.
+ */
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createProcessRegistry, OutputBuffer } from '../dist/jace-commander/processes.js';
+
+const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'jc-output-')));
+const policy = { roots: [tmp], deniedRoots: [] };
+const registry = createProcessRegistry();
+const MAX_OUTPUT = 256 * 1024;
+let passed = 0;
+async function test(name, fn) {
+  await fn();
+  passed += 1;
+  console.log(`  ✓ ${name}`);
+}
+const exe = (name) => {
+  for (const dir of ['/usr/bin', '/bin']) {
+    const candidate = path.join(dir, name);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  throw new Error(`${name} not found`);
+};
+// output() returns at once when the cursor is behind, so the loop must yield to let child I/O run.
+const waitForExit = async (sessionId) => {
+  for (;;) {
+    const out = await registry.output({ sessionId, waitMs: 1000 });
+    if (!out.running) return out;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+};
+
+await test('OutputBuffer keeps absolute offsets after the front is trimmed', () => {
+  const buffer = new OutputBuffer();
+  buffer.write(Buffer.from('a'.repeat(MAX_OUTPUT + 1000)));
+  assert.equal(buffer.end, MAX_OUTPUT + 1000);
+  const fromStart = buffer.read(0);
+  assert.equal(fromStart.skipped, 1000, '1000 characters were dropped before the retained tail');
+  assert.equal(fromStart.text.length, MAX_OUTPUT);
+  assert.equal(fromStart.nextOffset, MAX_OUTPUT + 1000);
+  const caughtUp = buffer.read(fromStart.nextOffset);
+  assert.equal(caughtUp.text, '');
+  assert.equal(caughtUp.skipped, 0);
+  buffer.write(Buffer.from('tail'));
+  assert.equal(buffer.read(fromStart.nextOffset).text, 'tail', 'a cursor reads only what arrived after it');
+});
+
+await test('OutputBuffer holds a multibyte character split across chunks until it completes', () => {
+  const buffer = new OutputBuffer();
+  const euro = Buffer.from('€');
+  buffer.write(euro.subarray(0, 1));
+  assert.equal(buffer.read(0).text, '', 'an incomplete sequence is not emitted as replacement characters');
+  buffer.write(euro.subarray(1));
+  assert.equal(buffer.read(0).text, '€');
+  assert.equal(buffer.end, 1);
+});
+
+await test('OutputBuffer clamps a cursor beyond the end instead of inventing text', () => {
+  const buffer = new OutputBuffer();
+  buffer.write(Buffer.from('abc'));
+  const read = buffer.read(99);
+  assert.equal(read.text, '');
+  assert.equal(read.offset, 3);
+  assert.equal(read.nextOffset, 3);
+});
+
+await test('start_process refuses a file that is not executable, instead of crashing the server', async () => {
+  const file = path.join(tmp, 'not-executable.sh');
+  fs.writeFileSync(file, '#!/bin/sh\necho hi\n', { mode: 0o644 });
+  assert.throws(
+    () => registry.start({ argv: [file], cwd: tmp }, policy),
+    (error) => error.code === 'not_executable',
+  );
+});
+
+await test('a long stream keeps the newest output; the cursor shows how much was lost', async () => {
+  const started = registry.start({ argv: [exe('head'), '-c', String(MAX_OUTPUT + 20_000), '/dev/zero'], cwd: tmp, timeoutMs: 20_000 }, policy);
+  const done = await waitForExit(started.sessionId);
+  assert.equal(done.exitCode, 0);
+  assert.equal(done.stdoutNextOffset, MAX_OUTPUT + 20_000);
+  assert.equal(done.stdoutSkipped, 20_000);
+  assert.equal(done.truncated, true);
+  assert.equal(done.stdout.length, MAX_OUTPUT);
+  const caughtUp = await registry.output({ sessionId: started.sessionId, offset: done.stdoutNextOffset });
+  assert.equal(caughtUp.stdout, '');
+  assert.equal(caughtUp.stdoutSkipped, 0);
+});
+
+await test('a reader resumes from its stored cursor and sees only new output', async () => {
+  const started = registry.start({ argv: [exe('printf'), 'first\\n'], cwd: tmp, timeoutMs: 5000 }, policy);
+  const first = await waitForExit(started.sessionId);
+  assert.equal(first.stdout, 'first\n');
+  const again = await registry.output({ sessionId: started.sessionId, offset: first.stdoutNextOffset });
+  assert.equal(again.stdout, '');
+  assert.equal(again.stdoutNextOffset, first.stdoutNextOffset);
+});
+
+await test('waitMs long-polls a running session and returns early once it exits', async () => {
+  const started = registry.start({ argv: [exe('sleep'), '0.3'], cwd: tmp, timeoutMs: 5000 }, policy);
+  const begun = Date.now();
+  const out = await registry.output({ sessionId: started.sessionId, waitMs: 10_000 });
+  const elapsed = Date.now() - begun;
+  assert.equal(out.running, false, 'the wait ended because the process exited');
+  assert.ok(elapsed < 5000, `wait took ${elapsed} ms; it should return at exit, not at waitMs`);
+});
+
+await test('waitMs returns after the timeout when the session stays silent', async () => {
+  const started = registry.start({ argv: [exe('sleep'), '5'], cwd: tmp, timeoutMs: 10_000 }, policy);
+  const begun = Date.now();
+  const out = await registry.output({ sessionId: started.sessionId, waitMs: 200 });
+  assert.equal(out.running, true);
+  assert.ok(Date.now() - begun >= 150);
+  registry.kill({ sessionId: started.sessionId });
+  await waitForExit(started.sessionId);
+});
+
+await test('timeouts kill the child and mark the session timedOut', async () => {
+  const started = registry.start({ argv: [exe('sleep'), '30'], cwd: tmp, timeoutMs: 200 }, policy);
+  const out = await waitForExit(started.sessionId);
+  assert.equal(out.timedOut, true);
+  assert.equal(out.signal, 'SIGTERM');
+  assert.equal(out.running, false);
+});
+
+await test('invalid cursors and waits are refused', async () => {
+  const started = registry.start({ argv: [exe('true')], cwd: tmp }, policy);
+  await assert.rejects(() => registry.output({ sessionId: started.sessionId, offset: -1 }), (error) => error.code === 'invalid_argument');
+  await assert.rejects(() => registry.output({ sessionId: started.sessionId, waitMs: 60_000 }), (error) => error.code === 'invalid_argument');
+  await assert.rejects(() => registry.output({ sessionId: 'proc_missing' }), (error) => error.code === 'not_found');
+  await waitForExit(started.sessionId);
+});
+
+console.log(`output: ${passed} passed`);
+fs.rmSync(tmp, { recursive: true, force: true });

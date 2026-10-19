@@ -47,7 +47,7 @@ export const JC_PROVIDERS: readonly JcProviderDefinition[] = Object.freeze([
     required: true,
     tools: [
       'list_directory', 'get_file_info', 'read_file', 'read_multiple_files',
-      'start_search', 'get_more_search_results', 'list_searches', 'stop_search',
+      'start_search', 'get_more_search_results', 'list_searches', 'stop_search', 'context_pack',
       'write_file', 'create_directory', 'move_file', 'edit_block',
     ],
   },

@@ -2,7 +2,7 @@
 /**
  * ADR 0026 parity gate. A golden matrix, derived from the manifest and NOT from
  * the provider/authorizer code under change, that pins today's behavior for the
- * `managed` and `standalone` presets across all 36 tools. Every rollout slice
+ * `managed` and `standalone` presets across all 37 tools. Every rollout slice
  * must keep this file green: new authorizers may add rows, never change these.
  */
 import assert from 'node:assert/strict';
@@ -57,9 +57,9 @@ const standaloneRefused = names.filter((name) => !standaloneAllowed.includes(nam
 const managed = await connect('managed');
 const standalone = await connect('standalone');
 
-await test('golden: 36 tools, 24 standalone-allowed, 12 refused', () => {
-  assert.equal(names.length, 36);
-  assert.equal(standaloneAllowed.length, 24);
+await test('golden: 37 tools, 25 standalone-allowed, 12 refused', () => {
+  assert.equal(names.length, 37);
+  assert.equal(standaloneAllowed.length, 25);
   assert.equal(standaloneRefused.length, 12);
 });
 
@@ -105,7 +105,7 @@ await test('managed: privileged_exec without a capability never reaches the help
   assert.equal(helperCalls.length, 1);
 });
 
-await test('standalone: lists exactly the 24 read-only tools', async () => {
+await test('standalone: lists exactly the 25 read-only tools', async () => {
   assert.deepEqual((await standalone.listTools()).tools.map((tool) => tool.name).sort(), [...standaloneAllowed].sort());
 });
 
