@@ -211,3 +211,26 @@ Each PR is independently shippable and independently revertible.
 4. **PR 0 lock fix:** OK to include `package-lock.json` as the first commit of this branch?
 
 On approval the next step is a written implementation plan for PR 0 and PR 1.
+
+## 11. Implementation status and deviations
+
+### PR 1 (implemented)
+
+Approved 2026-10-19 (architecture, PR sequence, dependencies, `/next/` behind `ACS_MC_WEB=1`, lockfile fix first). Delivered: contract package, mapper + `GET /api/mission-control/overview`, flag-gated `/next/` hosting with strict CSP, React/Vite/Tailwind SPA, design system, shell, and the read-only Command overview.
+
+Verification evidence: `scripts/verify-mission-control-web.mjs` passes 20 checks on a real gateway with a real dry-run worker (real SSE refresh after a real `POST /work-items`; unauthenticated rejection; schema-invalid fail-closed; stream-loss stale banner; both themes × four widths with axe WCAG 2.2 A/AA zero violations and no horizontal overflow; legacy `/` unaffected; sensitive-data canary absent). Bundle: ~130 KB gzip JS + 6 KB CSS. The gate `check-mission-control-e2e-gate.mjs` enforces the web harness exists and still asserts these properties.
+
+### Deviations from sections 3-4 (all deliberate)
+
+| Spec said | Built | Reason |
+|---|---|---|
+| Executor and connector nodes in the network | Aggregate Infrastructure card only | The existing view model carries counts, not lists. "No new store reads" was a hard constraint. Nodes arrive with their pages in PR 4. |
+| Pan/zoom on the network | Not built; "Bound only" filter and scroll | The two-lane layout does not need it; revisit with the force layout in PR 4. |
+| SVG `aria-hidden` over a parallel table | SVG nodes are focusable, labelled buttons **and** a Graph/Table toggle | Better for keyboard and screen-reader users than a hidden graphic. |
+| Global search placeholder | Ctrl+K page switcher only | Search over unloaded data is misleading; data search arrives with the Queue page. |
+
+### Findings kept for the record
+
+- Lockfile: `package-lock.json` was out of sync on this branch (fixed in its own commit).
+- CI pins npm 11.17.0; npm 12 mangles this lock. Lock edits must use `npx -y npm@11.17.0`.
+- The legacy `verify-mission-control.mjs` still fails its execution-mode `admin` step (pre-existing; admin mode retirement plan).
