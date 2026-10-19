@@ -263,3 +263,7 @@ List and detail pages on the existing JSON routes with client schemas that pick 
 ### PR 7 (prepared, deliberately not executed)
 
 Section 6.2 gates removal on one full release cycle with no rollback use, and section 1 requires rollback capability. Deleting the classic console would remove that capability, and a release cycle cannot elapse inside a build session. What is done: the legacy-use counter (`acs_mc_legacy_console_requests_total`), the retirement criteria and the exact removal scope, in the runbook. The deletion itself needs the gate to be met or an explicit decision to waive it.
+
+### Final verification (clean branch on current main)
+
+Branch `claude/mission-control-web` = 9 commits on `origin/main` (b91c8efc), no change to `packages/policy-gate`, `packages/work-items` or any mutation route. `npm ci` (npm 11.17.0), `tsc -b`, lint, full `npm run build` and the dry-run release gate pass. Whole suite run alone: 4,809 passed, 1 failed (`packages/local-advisor/src/egress.test.ts`, a Node env-proxy dispatcher test that times out here; the package is untouched by this branch). `scripts/verify-mission-control-web.mjs`: 146 checks pass. After-screenshots: `assets/2026-10-19-after/`.
