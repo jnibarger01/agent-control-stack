@@ -1,5 +1,5 @@
 import { Route, Routes, useLocation, useParams } from "react-router";
-import { LiveProvider, useAgent, useAgents, useApprovals, useConnector, useConnectors, useExecution, useExecutor, useExecutors, useOverview, useQueue, useStreamState, useTrace } from "./data/live";
+import { LiveProvider, useAudit, useAgent, useAgents, useApprovals, useConnector, useConnectors, useExecution, useExecutor, useExecutors, useOverview, useQueue, useStreamState, useTrace } from "./data/live";
 import type { EventSourceFactory } from "./data/stream";
 import { clockTime } from "./design/format";
 import { EmptyState } from "./design/primitives";
@@ -8,6 +8,10 @@ import { CommandPage } from "./features/command/CommandPage";
 import { ApprovalsPage } from "./features/approvals/ApprovalsPage";
 import { ExecutionPage } from "./features/execution/ExecutionPage";
 import { AgentDetailPage, AgentsPage, ConnectorDetailPage, ConnectorsPage, ExecutorDetailPage, ExecutorsPage } from "./features/registry/pages";
+import { AuditPage } from "./features/audit/AuditPage";
+import { MetricsPage } from "./features/metrics/MetricsPage";
+import { PolicyPage } from "./features/policy/PolicyPage";
+import { SystemPage } from "./features/system/SystemPage";
 import { QueuePage } from "./features/queue/QueuePage";
 import { TracePage } from "./features/trace/TracePage";
 import { Shell } from "./shell/Shell";
@@ -56,6 +60,18 @@ function ConnectorRoute() {
   const query = useConnector(id);
   return <QueryBoundary query={query} what="Connector">{(data) => <ConnectorDetailPage data={data} />}</QueryBoundary>;
 }
+function MetricsRoute() {
+  const query = useOverview();
+  return <QueryBoundary query={query} what="Metrics">{(data) => <MetricsPage data={data} />}</QueryBoundary>;
+}
+function SystemRoute() {
+  const query = useOverview();
+  return <QueryBoundary query={query} what="System status">{(data) => <SystemPage data={data} />}</QueryBoundary>;
+}
+function PolicyRoute() {
+  const query = useAudit({ name: "policy.decided", limit: 200 });
+  return <QueryBoundary query={query} what="Policy decisions">{(data) => <PolicyPage events={data.events} />}</QueryBoundary>;
+}
 function TraceRoute() {
   const { id = "" } = useParams();
   const query = useTrace(id);
@@ -67,6 +83,10 @@ function titleFor(pathname: string): string {
   if (pathname.startsWith("/queue")) return "Work Queue";
   if (pathname.startsWith("/approvals")) return "Approvals";
   if (pathname.startsWith("/execution")) return "Execution";
+  if (pathname.startsWith("/metrics")) return "Metrics";
+  if (pathname.startsWith("/audit")) return "Audit";
+  if (pathname.startsWith("/policy")) return "Policy";
+  if (pathname.startsWith("/system")) return "System";
   if (pathname.startsWith("/agents/")) return "Agent";
   if (pathname.startsWith("/agents")) return "Agents";
   if (pathname.startsWith("/executors/")) return "Executor";
@@ -91,6 +111,10 @@ function Frame() {
         <Route path="/queue/:id" element={<TraceRoute />} />
         <Route path="/approvals" element={<ApprovalsRoute />} />
         <Route path="/execution" element={<ExecutionRoute />} />
+        <Route path="/metrics" element={<MetricsRoute />} />
+        <Route path="/audit" element={<AuditPage />} />
+        <Route path="/policy" element={<PolicyRoute />} />
+        <Route path="/system" element={<SystemRoute />} />
         <Route path="/agents" element={<AgentsRoute />} />
         <Route path="/agents/:id" element={<AgentRoute />} />
         <Route path="/executors" element={<ExecutorsRoute />} />
