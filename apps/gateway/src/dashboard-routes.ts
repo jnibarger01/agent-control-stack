@@ -5,6 +5,7 @@ import {
   renderDashboard,
   renderDashboardFragments,
   toMissionControlAttemptLease,
+  toOverviewReadModel,
   type ApprovalActionOption,
   type MissionControlViewModel
 } from "@agent-control-stack/control-ui";
@@ -213,6 +214,19 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardRou
       return sendError(reply, error);
     }
   });
+
+  app.get(
+    "/api/mission-control/overview",
+    { preHandler: requireRead, config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      try {
+        reply.header("cache-control", "no-store");
+        return toOverviewReadModel(missionControlViewModel(request));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
 
   app.get("/dashboard/fragments", { preHandler: requireRead }, async (request, reply) => {
     try {

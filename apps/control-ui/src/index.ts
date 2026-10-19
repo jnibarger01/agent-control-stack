@@ -154,3 +154,4 @@ export {
   timezoneLabel
 } from "./operator-ux.js";
 export { OPERATOR_THIRTY, operatorToolbarHtml, operatorInsightsHtml } from "./operator-thirty-ui.js";
+export { toOverviewReadModel } from "./read-model/overview.js";

@@ -2,6 +2,7 @@ import { probeExecutableVersion } from "@agent-control-stack/agent-cli";
 import { advisorPortFromEnv } from "./advisor-consultation.js";
 import { registerMissionDispatchRoutes } from "./mission-dispatch-routes.js";
 import { registerDashboardRoutes, eventReadOptions } from "./dashboard-routes.js";
+import { registerMissionControlWeb, type MissionControlWebOptions } from "./mission-control-web.js";
 import {
   CodingMissionController,
   codingMissionPortsFromEnv,
@@ -277,6 +278,8 @@ export interface GatewayJevObservationOptions {
 
 export interface GatewayOptions {
   dbPath?: string;
+  /** React Mission Control hosted at /next/. Off unless ACS_MC_WEB=1. */
+  missionControlWeb?: MissionControlWebOptions;
   /** Governed ports for autonomous coding missions. Absent ports fail closed. */
   codingMissionPorts?: CodingMissionPorts;
   heartbeatTtlMs?: number;
@@ -1377,6 +1380,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     });
   }
 
+  registerMissionControlWeb(app, options.missionControlWeb);
   registerDashboardRoutes(app, {
     workItems,
     executionReads,
