@@ -229,11 +229,11 @@ describe("runProbe safety and snapshotHash", () => {
     expect(HEAD).toHaveLength(40);
   });
   it("ignores the order GitHub returns checks in", () => {
-    const a = check({ name: "a" });
-    const b = check({ name: "b", conclusion: "FAILURE" });
+    const a = check({ name: "a" }) as never;
+    const b = check({ name: "b", conclusion: "FAILURE" }) as never;
     expect(snapshotHash(makeSnapshot({ checks: [a, b] }))).toBe(snapshotHash(makeSnapshot({ checks: [b, a] })));
     expect(snapshotHash(makeSnapshot({ checks: [a, b] }))).not.toBe(
-      snapshotHash(makeSnapshot({ checks: [a, check({ name: "b" })] }))
+      snapshotHash(makeSnapshot({ checks: [a, check({ name: "b" }) as never] }))
     );
   });
 });
