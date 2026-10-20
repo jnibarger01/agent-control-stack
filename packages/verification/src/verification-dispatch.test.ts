@@ -97,6 +97,16 @@ describe("planVerificationDispatch", () => {
     });
   });
 
+  it("never satisfies a semantic review from cache, even on an exact PASS", () => {
+    const batch = [job("j1", "review", "a", "semantic"), job("j2", "lint", "a")];
+    const cache = [pass("review", "a"), pass("lint", "a")];
+    expect(summarize(planVerificationDispatch(batch, cache, 4))).toEqual({
+      dispatch: ["j1"],
+      satisfiedByCache: ["j2"],
+      deferred: []
+    });
+  });
+
   it("matches the cache on checkId, not jobId", () => {
     // A PASS for another check on the same artifact must not cover this one.
     const otherCheck = planVerificationDispatch(pending, [pass("another-check", "a")], 1);

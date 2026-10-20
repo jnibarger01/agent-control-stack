@@ -45,7 +45,7 @@ export type CacheSatisfiedJob = Readonly<{
 export type VerificationDispatchPlan = Readonly<{
   /** Jobs to start now, deterministic first, capped at the available slots. */
   dispatch: readonly VerificationJob[];
-  /** Jobs skipped because an exact cached PASS exists. */
+  /** Deterministic jobs skipped because an exact cached PASS exists. Semantic jobs never land here. */
   satisfiedByCache: readonly CacheSatisfiedJob[];
   /** Jobs that still need to run but did not fit in the available slots, in priority order. */
   deferred: readonly VerificationJob[];
@@ -82,7 +82,9 @@ export function planVerificationDispatch(
   const satisfiedByCache: CacheSatisfiedJob[] = [];
   const toRun: VerificationJob[] = [];
   for (const job of pending) {
-    const cacheEntry = findExactPass(job, cache);
+    // Semantic (model) review is nondeterministic and advisory (ADR 0015), so a
+    // cached semantic PASS never stands in for running the review again.
+    const cacheEntry = job.kind === "deterministic" ? findExactPass(job, cache) : undefined;
     if (cacheEntry) satisfiedByCache.push({ job, cacheEntry });
     else toRun.push(job);
   }
