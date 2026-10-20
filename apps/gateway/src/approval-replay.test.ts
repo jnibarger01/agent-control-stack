@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
@@ -18,6 +19,28 @@ const credentials = [
     scopes: ["acs:read", "acs:write", "acs:approve"]
   }
 ];
+
+function grantSnapshot(dbPath: string, workItemId: string): unknown {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    return {
+      approvalRecords: db
+        .prepare(
+          `SELECT action_hash, approved_by, reason, status, created_at, expires_at, consumed_at
+           FROM approval_records WHERE work_item_id = ? ORDER BY action_hash`
+        )
+        .all(workItemId),
+      planApprovals: db
+        .prepare(
+          `SELECT approval_id, approved_by_actor_id, reason, status, created_at, expires_at
+           FROM execution_plan_approvals WHERE work_item_id = ? ORDER BY approval_id`
+        )
+        .all(workItemId)
+    };
+  } finally {
+    db.close();
+  }
+}
 
 describe("POST /work-items/:id/approve replay", () => {
   let dir: string;
@@ -51,7 +74,7 @@ describe("POST /work-items/:id/approve replay", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("a replay returns 200 and appends exactly one approval.granted and one policy.decided for the approval", async () => {
+  it("a replay returns 200 and appends no events and grants nothing new", async () => {
     const app = buildGateway({
       dbPath: join(dir, "control.db"),
       logger: false,
@@ -67,15 +90,37 @@ describe("POST /work-items/:id/approve replay", () => {
           payload: { reason, actionHash }
         });
       const events = async () =>
-        ((await app.inject({ method: "GET", url: `/work-items/${workItemId}`, headers: bearer })).json() as {
-          events: Array<{ name: string }>;
-        }).events;
+        (
+          (await app.inject({ method: "GET", url: `/work-items/${workItemId}`, headers: bearer })).json() as {
+            events: Array<{ id: string; name: string }>;
+          }
+        ).events;
+      // Every audit event in the store, not only the ones the work-item view returns.
+      const allEventIds = () => {
+        const db = new DatabaseSync(join(dir, "control.db"), { readOnly: true });
+        try {
+          return db.prepare("SELECT id FROM audit_events ORDER BY rowid").all();
+        } finally {
+          db.close();
+        }
+      };
       const count = (all: Array<{ name: string }>, name: string) => all.filter((e) => e.name === name).length;
 
       expect((await approve("first")).statusCode).toBe(200);
       const afterFirst = await events();
-      expect((await approve("replay")).statusCode).toBe(200);
+      const allBefore = allEventIds();
+      const grantsBefore = grantSnapshot(join(dir, "control.db"), workItemId);
+      expect(count(afterFirst, "approval.granted")).toBe(1);
+
+      const replay = await approve("replay");
+      expect(replay.statusCode).toBe(200);
+      expect((replay.json() as { workItem: { status: string } }).workItem.status).toBe("approved");
       const afterReplay = await events();
+
+      // Zero new events (work-item view and the whole audit log) and zero new grants.
+      expect(afterReplay.map((event) => event.id)).toEqual(afterFirst.map((event) => event.id));
+      expect(allEventIds()).toEqual(allBefore);
+      expect(grantSnapshot(join(dir, "control.db"), workItemId)).toEqual(grantsBefore);
 
       expect(count(afterReplay, "approval.granted")).toBe(1);
       expect(count(afterReplay, "execution_plan_approval.granted")).toBe(1);
