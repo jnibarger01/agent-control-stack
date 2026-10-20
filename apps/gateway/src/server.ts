@@ -987,7 +987,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.addHook("preHandler", async (request, reply) => {
     requestStartTimes.set(request, performance.now());
     if (!isRateLimitedRoute(request.url) || (request.method === "GET" && !isRateLimitedGetRoute(request.url))) return;
-    const decision = rateLimiter.check(rateLimitKey(request, auth));
+    const decision = rateLimiter.check(await rateLimitKey(request, auth, mcpAuth));
     reply.header("x-ratelimit-remaining", String(decision.remaining));
     if (!decision.allowed) {
       const route = request.routeOptions.url ?? "<unmatched>";
@@ -5383,12 +5383,37 @@ function isRateLimitedGetRoute(url: string): boolean {
   );
 }
 
-function rateLimitKey(request: FastifyRequest, auth: GatewayAuthOptions | undefined): string {
-  // Only a verified credential earns its own bucket. Absent or unverified bearer tokens are keyed by client IP,
+async function rateLimitKey(
+  request: FastifyRequest,
+  auth: GatewayAuthOptions | undefined,
+  mcpAuth: McpAuthOptions | undefined
+): Promise<string> {
+  // Only a verified principal earns its own bucket. Absent or unverified bearer tokens are keyed by client IP,
   // otherwise every junk token would get a fresh bucket and bypass the limit.
-  const credential = gatewayCredentialForRequest(request, auth);
-  const principal = credential ? `credential:${credential.id}` : `ip:${request.ip}`;
+  const principal = (await verifiedRateLimitPrincipal(request, auth, mcpAuth)) ?? `ip:${request.ip}`;
   return `${request.method}:${request.routeOptions.url ?? "<unmatched>"}:${principal}`;
+}
+
+async function verifiedRateLimitPrincipal(
+  request: FastifyRequest,
+  auth: GatewayAuthOptions | undefined,
+  mcpAuth: McpAuthOptions | undefined
+): Promise<string | undefined> {
+  const credential = gatewayCredentialForRequest(request, auth);
+  if (credential) return `credential:${credential.id}`;
+  const authorization = request.headers.authorization;
+  const token = typeof authorization === "string" ? /^Bearer\s+(\S+)$/i.exec(authorization)?.[1] : undefined;
+  if (!token) return undefined;
+  const worker = auth?.workerIdentities?.resolve(token, new Date());
+  if (worker?.ok) return `worker:${worker.identity.workerId}`;
+  if (!mcpAuth) return undefined;
+  const mcp = await authorizeMcpRequest({
+    headers: request.headers,
+    auth: mcpAuth,
+    requiredScopes: [],
+    remoteAddress: request.socket.remoteAddress ?? request.ip
+  });
+  return mcp.ok ? `mcp:${mcp.auth.issuer}:${mcp.auth.subject}` : undefined;
 }
 
 function jsonRpcRequestId(body: unknown): string | number | null {
