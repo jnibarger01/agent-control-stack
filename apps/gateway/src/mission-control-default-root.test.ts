@@ -72,6 +72,16 @@ describe("React app as the default at / (rollback is one flag)", () => {
       const evil = await app.inject({ method: "GET", url: "/?next=%2F%2Fevil.example%2F" });
       expect(evil.body).toContain('const redirectTo = "/"');
       expect(evil.body).not.toContain("evil.example");
+      // Browsers read "\\" as "/" and drop tabs/newlines, so these leave the origin despite a single leading "/".
+      for (const target of ["%2F%5Cevil.example", "%2F%5C%5Cevil.example", "%2F%09%2Fevil.example", "%2F%0A%2Fevil.example"]) {
+        const res = await app.inject({ method: "GET", url: `/?next=${target}` });
+        expect(res.body, target).toContain('const redirectTo = "/"');
+        expect(res.body, target).not.toContain("evil.example");
+      }
+      // A same-origin path must not be able to close the inline script.
+      const breakout = await app.inject({ method: "GET", url: "/?next=%2F%3C%2Fscript%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E" });
+      expect(breakout.body).not.toContain("<script>alert(1)");
+      expect(breakout.body.match(/<\/script>/g)?.length).toBe(1);
     } finally {
       await app.close();
     }

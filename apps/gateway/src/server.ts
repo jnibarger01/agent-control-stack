@@ -5463,8 +5463,28 @@ function adminModeTtlFromEnv(env: NodeJS.ProcessEnv = process.env): number | und
   return value;
 }
 
+/**
+ * Returns `redirectTo` only when it is a same-origin path, otherwise "/". Browsers treat a backslash as a path
+ * separator and strip tabs/newlines, so `/\\evil.example` or `/\t/evil.example` would leave the origin even though
+ * they start with a single "/". The target is therefore resolved against a fixed origin and must stay on it, and
+ * backslashes and control characters are refused outright.
+ */
+export function safeLoginRedirect(redirectTo: string): string {
+  // eslint-disable-next-line no-control-regex
+  if (!redirectTo.startsWith("/") || /[\\\u0000-\u001f\u007f]/.test(redirectTo)) return "/";
+  const base = "https://console.invalid";
+  let resolved: URL;
+  try {
+    resolved = new URL(redirectTo, base);
+  } catch {
+    return "/";
+  }
+  if (resolved.origin !== base) return "/";
+  return `${resolved.pathname}${resolved.search}${resolved.hash}`;
+}
+
 export function renderLoginPage(redirectTo = "/"): string {
-  const safeRedirect = redirectTo.startsWith("/") && !redirectTo.startsWith("//") ? redirectTo : "/";
+  const safeRedirect = safeLoginRedirect(redirectTo);
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -5490,7 +5510,7 @@ export function renderLoginPage(redirectTo = "/"): string {
       <output></output>
     </form>
     <script>
-      const redirectTo = ${JSON.stringify(safeRedirect)};
+      const redirectTo = ${JSON.stringify(safeRedirect).replace(/</g, "\\u003c")};
       document.querySelector('#login-form').addEventListener('submit', async (event) => {
         event.preventDefault();
         const form = new FormData(event.currentTarget);
