@@ -62,6 +62,18 @@ describe("mission control web hosting and overview endpoint", () => {
     }
   });
 
+  it("junk bearer tokens share the client-IP bucket and cannot bypass the /next/ limiter", async () => {
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, moa: false, auth: { token: TOKEN, actor: "user" }, missionControlWeb: { enabled: true, distDir: dist }, rateLimit: { windowMs: 60_000, maxRequests: 3 } });
+    try {
+      const codes: number[] = [];
+      for (let i = 0; i < 6; i++) codes.push((await app.inject({ method: "GET", url: "/next/", headers: { authorization: `Bearer junk-${i}` } })).statusCode);
+      expect(codes.slice(0, 3).every((c) => c !== 429)).toBe(true);
+      expect(codes.slice(3)).toEqual([429, 429, 429]);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("overview requires authentication", async () => {
     const app = gateway();
     try {

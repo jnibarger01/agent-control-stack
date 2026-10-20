@@ -5384,19 +5384,11 @@ function isRateLimitedGetRoute(url: string): boolean {
 }
 
 function rateLimitKey(request: FastifyRequest, auth: GatewayAuthOptions | undefined): string {
+  // Only a verified credential earns its own bucket. Absent or unverified bearer tokens are keyed by client IP,
+  // otherwise every junk token would get a fresh bucket and bypass the limit.
   const credential = gatewayCredentialForRequest(request, auth);
-  const principal = credential
-    ? `credential:${credential.id}`
-    : (bearerPrincipal(request.headers.authorization) ?? `ip:${request.ip}`);
+  const principal = credential ? `credential:${credential.id}` : `ip:${request.ip}`;
   return `${request.method}:${request.routeOptions.url ?? "<unmatched>"}:${principal}`;
-}
-
-function bearerPrincipal(authorization: string | string[] | undefined): string | undefined {
-  if (Array.isArray(authorization)) return undefined;
-  const match = /^Bearer\s+(\S+)$/i.exec(authorization ?? "");
-  if (!match) return undefined;
-  const digest = createHash("sha256").update(match[1]).digest("hex").slice(0, 16);
-  return `bearer:${digest}`;
 }
 
 function jsonRpcRequestId(body: unknown): string | number | null {
