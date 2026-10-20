@@ -56,6 +56,24 @@ describe("Audit page", () => {
     expect(screen.queryByRole("button", { name: "Load older events" })).toBeNull();
   });
 
+  it("disables Load older while a new filter is loading, so the previous filter's cursor is never reused", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      urls.push(url);
+      if (url.includes("name=policy.decided")) return new Promise<Response>(() => undefined); // the new filter is still loading
+      const body = url.includes("/audit") ? model([ev(5, "c"), ev(4, "b")], 4) : overviewFixture();
+      return Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } }));
+    }));
+    render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><MemoryRouter initialEntries={["/audit"]}><App streamFactory={idle} /></MemoryRouter></QueryClientProvider>);
+    const older = await screen.findByRole("button", { name: "Load older events" });
+    expect((older as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.change(screen.getByLabelText("Event name (exact)"), { target: { value: "policy.decided" } });
+    await screen.findByText(/Updating results/);
+    expect((screen.getByRole("button", { name: "Load older events" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Load older events" }));
+    expect(urls.some((u) => u.includes("beforeSequence"))).toBe(false);
+  });
+
   it("searches only the loaded events and says so when none match", async () => {
     mountAudit(() => model([ev(5, "work_item.created")], null));
     await screen.findByRole("table", { name: "Audit events, newest first" });
