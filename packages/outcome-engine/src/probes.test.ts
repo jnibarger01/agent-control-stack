@@ -122,6 +122,14 @@ describe("required_checks_succeeded", () => {
     );
     expect(run(checks(false, "other-app")).state).toBe("undecided");
   });
+  it("a failure from the pinned app is not hidden by a same-named check from elsewhere", () => {
+    for (const other of [check({ appSlug: "evil-app" }), check({ source: "status_context", appSlug: null })]) {
+      expect(run(checks(), { checks: [check({ conclusion: "FAILURE" }), other] as never })).toMatchObject({
+        state: "unsatisfied",
+        reasonCodes: ["required_check_failed"]
+      });
+    }
+  });
   it("a missing check is unavailable evidence", () => {
     expect(run(checks(), { checks: [] })).toMatchObject({
       state: "undecided",

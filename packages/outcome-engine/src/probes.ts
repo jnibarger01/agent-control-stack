@@ -176,12 +176,16 @@ function probeRequiredChecks(
       findings.push(`check_missing: ${pinned.name}`);
       continue;
     }
-    if (matches.some((check) => check.source !== "check_run" || check.appSlug !== pinned.appSlug)) {
+    // Only the pinned identity is trusted evidence; a same-named check from anywhere else is ambiguity, but it must
+    // never hide a failure the pinned check itself reports.
+    const isPinned = (check: (typeof matches)[number]): boolean =>
+      check.source === "check_run" && check.appSlug === pinned.appSlug;
+    const trusted = matches.filter(isPinned);
+    if (trusted.length !== matches.length) {
       ambiguous = true;
       findings.push(`check_name_ambiguous: ${pinned.name} is also reported by another source`);
-      continue;
     }
-    for (const check of matches) {
+    for (const check of trusted) {
       if (check.status !== "COMPLETED") {
         pendingExternal = true;
         findings.push(`pending: ${pinned.name} is ${check.status}`);
