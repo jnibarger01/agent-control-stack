@@ -282,6 +282,7 @@ export class OutcomeLedger {
   loadAll(): LoadedOutcome[] {
     const acceptedScan = this.parseAccepted(this.scan(EVENT_ACCEPTED));
     const evaluationScan = this.parseEvaluations(this.scan(EVENT_EVALUATION));
+    const scanProblems = [...acceptedScan.problems, ...evaluationScan.problems];
     const seen = new Set<string>();
     return acceptedScan.records
       .filter((record) => (seen.has(record.outcomeId) ? false : (seen.add(record.outcomeId), true)))
@@ -289,7 +290,9 @@ export class OutcomeLedger {
         const evaluations = evaluationScan.records
           .filter((record) => record.outcomeId === accepted.outcomeId)
           .sort((left, right) => left.sequenceNo - right.sequenceNo);
-        return { accepted, evaluations, problems: verifyOutcome(accepted, evaluations) };
+        // Same rule as load(): a record that does not parse cannot be attributed safely, so it taints every outcome.
+        const problems = [...scanProblems, ...verifyOutcome(accepted, evaluations)];
+        return { accepted, evaluations, problems };
       });
   }
 }

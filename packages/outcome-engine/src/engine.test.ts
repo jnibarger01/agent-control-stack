@@ -275,6 +275,20 @@ describe("persistence and trust", () => {
     expect(e.show(record.outcomeId)?.problems).toEqual([]);
   });
 
+  it("list reports the same unparseable-record problems as show", async () => {
+    const e = engine();
+    const { record } = accept(e);
+    await e.evaluate(record.outcomeId);
+    store.recordSystemEvent({
+      name: "outcome.evaluation_recorded",
+      body: { schema: "not-an-evaluation" },
+      attributes: { "outcome.id": record.outcomeId }
+    });
+    const shown = e.show(record.outcomeId)?.problems ?? [];
+    expect(shown.some((problem) => problem.startsWith("evaluation_record_invalid@"))).toBe(true);
+    expect(e.list().find((row) => row.outcomeId === record.outcomeId)?.problems).toBe(shown.length);
+  });
+
   it("detects fabricated findings, summary or next actions even when the hashes were recomputed", async () => {
     const e = engine({ reader: sequenceReader(makeSnapshot({ mergeable: "CONFLICTING" })) });
     const { record } = accept(e);
