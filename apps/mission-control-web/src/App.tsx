@@ -19,7 +19,7 @@ import { Shell } from "./shell/Shell";
 function CommandRoute() {
   const query = useOverview();
   const stream = useStreamState();
-  return <QueryBoundary query={query} what="Mission Control data">{(data) => <CommandPage data={data} stale={stream === "stale" || query.isError} />}</QueryBoundary>;
+  return <QueryBoundary query={query} what="Mission Control data">{(data) => <CommandPage data={data} stale={stream === "stale"} />}</QueryBoundary>;
 }
 function QueueRoute() {
   const query = useQueue();

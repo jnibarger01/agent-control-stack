@@ -23,8 +23,22 @@ export interface QueryLike<T> {
   error: unknown;
 }
 
+/**
+ * Every route renders through here, so a failed refetch over cached data is surfaced in one place: the last data
+ * stays on screen, but with a warning, because a healthy SSE connection alone keeps the shell saying "Live".
+ */
 export function QueryBoundary<T>({ query, what, children }: { query: QueryLike<T>; what: string; children: (data: T) => ReactNode }) {
-  if (query.data !== undefined) return <>{children(query.data)}</>;
+  if (query.data !== undefined) {
+    if (query.error == null) return <>{children(query.data)}</>;
+    return (
+      <div className="space-y-6">
+        <p role="alert" className="rounded-card border border-warn/50 bg-surface px-4 py-3 text-sm text-warn">
+          {what} may be out of date. The latest refresh failed, so this shows the last data received.
+        </p>
+        {children(query.data)}
+      </div>
+    );
+  }
   if (query.isPending) {
     return (
       <div className="space-y-4" aria-busy="true" aria-label={`Loading ${what}`}>

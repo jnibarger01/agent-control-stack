@@ -2,12 +2,12 @@ import type { OverviewReadModel } from "@agent-control-stack/mission-control-con
 import { AgentNetwork } from "./AgentNetwork";
 import { Activity, InfrastructureStrip, KpiRow, NeedsYou, Observability, Pipeline, Readiness } from "./sections";
 
-export function CommandPage({ data, stale }: { data: OverviewReadModel; stale: boolean }) {
+export function CommandPage({ data, stale }: { data: OverviewReadModel; /** The live stream is down; refetch failures are surfaced by QueryBoundary. */ stale: boolean }) {
   return (
     <div className="space-y-6">
       {stale && (
         <p role="alert" className="rounded-card border border-warn/50 bg-surface px-4 py-3 text-sm text-warn">
-          The overview may be out of date. The live stream is disconnected or the latest refresh failed, so the figures below are the last data received.
+          The overview may be out of date. The live stream is disconnected, so the figures below are the last data received.
         </p>
       )}
       <NeedsYou data={data} />
