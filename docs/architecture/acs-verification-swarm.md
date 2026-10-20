@@ -108,3 +108,84 @@ Follow-up slices, each with independent tests and explicit promotion gates:
 Default OFF. This PR does not wire dispatch into the running worker or enable
 any new backend. Preserve all existing authorization and promotion gates.
 Do not merge until CI and independent review are satisfactory.
+
+## S0 decision record — review required before ADR 0017 acceptance
+
+**Recommendation:** accept the *authority separation* in ADR 0017, but do not
+change its status from Proposed until the network isolation profile and
+negative enforcement tests are reviewed. This is a decision proposal, not an
+authorization to deploy or to broaden egress.
+
+### Network contract decision proposal
+
+- Default network policy remains `none`. For model-backed lanes, introduce
+  a distinct, versioned `codex-swarm-v1` isolation profile that enforces
+  `scoped-egress:<allowlistHash>` at the actual process-tree boundary.
+- The admitted plan must bind the exact profile, provider endpoint allowlist,
+  DNS/proxy behavior, tool permissions, secret-injection channel, and revision.
+  All changes require re-admission and fresh attempt authority.
+- Do not interpret a hashed allowlist string as network enforcement. Verify
+  the actual sandbox mechanism, redirects, DNS resolution, sub-processes,
+  and denial of unlisted hosts before enabling any provider traffic.
+- No `unmanaged-egress` fallback for governed swarm attempts. Provider
+  unavailability, policy mismatch, and egress denial must fail closed.
+- No networked swarm launch until contract tests and independent security
+  review pass. This PR does not modify the plan contract.
+
+### Cache and dispatch safety correction
+
+The experimental `planVerificationDispatch` helper currently compares only
+check ID, artifact hash, policy hash, and toolchain hash. **These are not
+sufficient production cache keys.** A future ACS-owned cache must additionally
+bind: admitted plan hash, attempt/fencing context or an explicitly proven
+cross-attempt reuse rule, workspace tree SHA, exact command/argv and check
+definition, dependency lockfile, environment allowlist, sandbox/network
+profile, verifier implementation and identity, evidence manifest hash,
+expiry/revocation, and validation freshness.
+
+Until that full binding and trusted ACS evidence-store lookup exist, callers
+MUST pass an empty cache array and must never use a skipped job as proof that
+a required check passed. A cache hit is only an optimization after ACS
+independently validates the corresponding machine observation.
+
+The helper does not authorize work, satisfy gates, or accept semantic PASS.
+Semantic reviewers produce advisory findings; ACS policy alone concludes.
+
+### Scheduling and retries
+
+Do not create a second global scheduler. Reuse ACS mission admission, budget,
+resource claims, lease/fencing, and attempt lifecycle. Any backend may narrow
+its `maxLanes`, never expand ACS concurrency. Swarm loop iterations are
+strictly within a single ACS attempt and bounded by its envelope; retries
+across attempts require a new ACS authorization.
+
+### Durable verification completion
+
+Swarm EventBus notifications are telemetry, not reliable verification
+completion. ACS must persist an idempotent check record before scheduling,
+with terminal PASS/FAIL/BLOCKED/UNKNOWN, lease ownership, timeout, crash
+recovery, and a canonical audit link. Missing, timed-out, or crashed checks
+are BLOCKED/UNKNOWN, never silently treated as PASS.
+
+### Delivery sequence
+
+S1: add fail-closed envelope verification in Codex Swarm against shared ACS
+golden fixtures (no runtime activation).
+
+S2: add a hard ACS-mode fork disabling operator API, push, root promotion,
+and automatic recovery; test standalone compatibility.
+
+S3: add a disabled ACS `codex_swarm` backend adapter using a fake child first.
+
+S4: ingest untrusted swarm evidence and independently run ACS ResultValidator,
+EvidenceManifest creation, independent verification, and canonical audit.
+
+S5: implement durable ACS verification queue, strict cache, hard timeouts,
+and advisory semantic review with crash/replay tests.
+
+S6: benchmark isolated 2, then 5, then 10 lanes under existing ACS budgets;
+raise limits only through explicit reviewed policy changes.
+
+**Merge gates:** focused and full CI, contract compatibility across both
+repositories, adversarial tests, independent security review, and explicit
+acceptance of the egress isolation profile. No production rollout in this PR.
