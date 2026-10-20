@@ -72,8 +72,12 @@ inherit authority merely because their review labels say PASS.
 
 `packages/verification/src/verification-dispatch.ts` introduces a small pure
 dispatcher for a verified, admission-controlled queue. It prioritizes
-deterministic jobs, caps issued slots, rejects duplicate IDs and invalid
-capacities, and avoids repeating an exact cached PASS. This is **not** a live
+deterministic jobs, caps issued slots, rejects duplicate job IDs and invalid
+capacities, and avoids repeating an exact cached PASS. Each job carries a
+per-run `jobId` and a stable `checkId`; the cache matches on `checkId`. Every
+pending job is returned in exactly one of `dispatch`, `satisfiedByCache` (with
+the matched entry, for ACS to reconfirm) or `deferred`, so missing coverage is
+never silent. This is **not** a live
 queue, persistence mechanism, execution engine, cache authority, or rollout
 flag. It has no side effects or grant power.
 
