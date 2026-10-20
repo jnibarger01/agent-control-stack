@@ -51,6 +51,16 @@ describe("useEventStream", () => {
     expect(onReconnect).toHaveBeenCalledTimes(1);
   });
 
+  it("reports execution-plan lifecycle events, which can change plan and approval state without a work-item status change", () => {
+    const events: string[] = [];
+    render(<Probe onState={() => undefined} onEvent={(n) => events.push(n)} onReconnect={() => undefined} />);
+    const source = FakeSource.all[0]!;
+    act(() => source.emit("open"));
+    const planEvents = ["execution_plan.created", "execution_plan.admitted", "execution_plan_approval.granted", "execution_plan_approval.invalidated"];
+    for (const name of planEvents) act(() => source.emit(name));
+    expect(events).toEqual(planEvents);
+  });
+
   it("closes the stream on unmount", () => {
     const { unmount } = render(<Probe onState={() => undefined} onEvent={() => undefined} onReconnect={() => undefined} />);
     unmount();
