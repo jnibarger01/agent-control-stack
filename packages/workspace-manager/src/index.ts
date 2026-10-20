@@ -1,28 +1,9 @@
-import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import {
-  closeSync,
-  existsSync,
-  linkSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  realpathSync,
-  renameSync,
-  rmSync,
-  unlinkSync,
-  writeSync
-} from "node:fs";
-import { hostname } from "node:os";
+import { spawn } from "node:child_process";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, realpathSync, rmSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
-import { promisify } from "node:util";
 import { ControlStackError, createId } from "@agent-control-stack/shared";
 import type { PrivilegedTransitionOptions, WorkspaceAllocation } from "@agent-control-stack/work-items";
 import { z } from "zod";
-
-const execFileAsync = promisify(execFile);
 
 /**
  * git does not make `git worktree add/remove/prune` safe against each other
@@ -32,115 +13,97 @@ const execFileAsync = promisify(execFile);
  * sibling's empty `commondir` (`fatal: failed to read .../commondir:
  * Success`), and a concurrent `prune` can delete a half-created admin dir
  * out from under its `add`. Every worktree command against one repository
- * is therefore serialized: in-process by a promise chain keyed by the
- * repository's git common dir (shared by every WorkspaceManager instance in
- * this process), and across processes by an O_EXCL lock file in that dir.
+ * is therefore serialized by a kernel advisory lock: flock(2) on
+ * `<git common dir>/acs-worktree.lock`, taken by util-linux `flock(1)` which
+ * then runs git while holding it.
+ *
+ * Why flock(2) and not a pid/lock file:
+ *  - the kernel owns the lock state, so there is no stale-lock detection or
+ *    breaking at all: no pid liveness probe (which is wrong across pid
+ *    namespaces), no rename/link-back, no "empty file" window, and nothing
+ *    to resurrect. The lock is released by the kernel the instant the last
+ *    descriptor closes, including on SIGKILL / crash of the holder;
+ *  - release never unlinks the lock path (unlinking a flock file is itself
+ *    a classic race), so a release can never drop someone else's lock;
+ *  - two descriptors opened separately conflict even inside one process, so
+ *    this one mechanism serializes same-process and cross-process callers,
+ *    and flock(1) `-w` bounds every waiter;
+ *  - it holds across containers that share the repository bind mount on one
+ *    kernel regardless of hostname or pid namespace.
+ * flock(1) is used instead of a native npm addon (fs-ext etc.): it is a
+ * standard util-linux binary present on the Linux images this runs on, and
+ * it adds no compiled dependency. When it is missing, every worktree command
+ * fails closed (`workspace_git_lock_unavailable`) - it never runs unlocked.
+ *
+ * Every git invocation has a hard timeout. git runs in its own process group
+ * and the whole group (flock, git, any hook git started) is SIGKILLed on
+ * timeout, so a hung git cannot hold the lock forever.
  */
 const WORKTREE_LOCK_FILE = "acs-worktree.lock";
-const WORKTREE_LOCK_POLL_MS = 25;
-const WORKTREE_LOCK_ACQUIRE_LIMIT_MS = 60_000;
-const worktreeQueues = new Map<string, Promise<void>>();
+const DEFAULT_LOCK_WAIT_MS = 60_000;
+const DEFAULT_GIT_TIMEOUT_MS = 120_000;
+/** flock(1) exit status on conflict/timeout; chosen to not collide with git's own (0, 1, 128, 129). */
+const FLOCK_CONFLICT_EXIT = 75;
 
-async function withRepoWorktreeLock<T>(commonDir: string, fn: () => Promise<T>): Promise<T> {
-  const previous = worktreeQueues.get(commonDir) ?? Promise.resolve();
-  let release!: () => void;
-  const current = new Promise<void>((resolveCurrent) => {
-    release = resolveCurrent;
-  });
-  const tail = previous.then(() => current);
-  worktreeQueues.set(commonDir, tail);
-  await previous;
-  try {
-    const lockPath = join(commonDir, WORKTREE_LOCK_FILE);
-    await acquireLockFile(lockPath);
-    try {
-      return await fn();
-    } finally {
-      rmSync(lockPath, { force: true });
-    }
-  } finally {
-    release();
-    if (worktreeQueues.get(commonDir) === tail) worktreeQueues.delete(commonDir);
+interface ProcessResult {
+  stdout: string;
+  stderr: string;
+}
+
+class ProcessFailure extends Error {
+  constructor(
+    message: string,
+    readonly stderr: string,
+    readonly exitCode: number | null,
+    readonly timedOut: boolean,
+    readonly spawnCode?: string
+  ) {
+    super(message);
   }
 }
 
-async function acquireLockFile(lockPath: string): Promise<void> {
-  const owner = `${process.pid}@${hostname()}\n`;
-  const deadline = Date.now() + WORKTREE_LOCK_ACQUIRE_LIMIT_MS;
-  for (;;) {
-    try {
-      const fd = openSync(lockPath, "wx", 0o600);
+function runProcess(file: string, args: string[], cwd: string, timeoutMs: number): Promise<ProcessResult> {
+  return new Promise((resolveRun, rejectRun) => {
+    const child = spawn(file, args, { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let settled = false;
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
+    const timer = setTimeout(() => {
+      timedOut = true;
       try {
-        writeSync(fd, owner);
-      } finally {
-        closeSync(fd);
+        // Negative pid: the whole process group (flock + git + git's children).
+        if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
       }
-      return;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
-    breakLockIfOwnerDead(lockPath);
-    if (Date.now() >= deadline) {
-      // Fail closed: never run a worktree mutation without the lock.
-      throw new ControlStackError(
-        "workspace_git_lock_timeout",
-        `timed out waiting for worktree lock ${lockPath} (held by ${readLockOwner(lockPath) ?? "unknown"})`
+    }, timeoutMs);
+    child.once("error", (error: NodeJS.ErrnoException) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      rejectRun(new ProcessFailure(error.message, stderr, null, false, error.code));
+    });
+    child.once("close", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code === 0 && !timedOut) {
+        resolveRun({ stdout, stderr });
+        return;
+      }
+      rejectRun(
+        new ProcessFailure(
+          timedOut ? `timed out after ${timeoutMs}ms` : `exited with ${signal ?? code}`,
+          stderr,
+          code,
+          timedOut
+        )
       );
-    }
-    await delay(WORKTREE_LOCK_POLL_MS);
-  }
-}
-
-function readLockOwner(lockPath: string): string | undefined {
-  try {
-    return readFileSync(lockPath, "utf8").trim();
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Removes a lock left by a crashed process on this host. Only a lock whose
- * recorded pid is provably dead on this same host is broken; a foreign-host,
- * unreadable or half-written lock is waited on (and eventually fails closed).
- * The lock is moved aside atomically and restored if it turns out to have
- * been replaced by a live holder in between.
- */
-function breakLockIfOwnerDead(lockPath: string): void {
-  const owner = readLockOwner(lockPath);
-  const match = owner ? /^(\d+)@(.+)$/u.exec(owner) : null;
-  if (!match || match[2] !== hostname()) return;
-  const pid = Number(match[1]);
-  if (pid === process.pid || isProcessAlive(pid)) return;
-  const aside = `${lockPath}.stale-${randomUUID()}`;
-  try {
-    renameSync(lockPath, aside);
-  } catch {
-    return;
-  }
-  if (readLockOwner(aside) !== owner) {
-    // A live holder replaced the stale lock between our read and rename;
-    // put it back (link fails if yet another holder already took the path).
-    try {
-      linkSync(aside, lockPath);
-    } catch {
-      // Another holder owns lockPath now; the moved-aside lock is not ours.
-    }
-  }
-  try {
-    unlinkSync(aside);
-  } catch {
-    // Best effort.
-  }
-}
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
+    });
+  });
 }
 
 // Mirrors packages/sandbox/src/contracts.ts's identifierSchema and
@@ -256,6 +219,12 @@ export interface WorkspaceManagerOptions {
   /** Authoritative, cross-process ownership record. Required - see class doc. */
   store: WorkspaceAllocationStore;
   gitPath?: string;
+  /** Path to util-linux flock(1). Defaults to "flock" on PATH. */
+  flockPath?: string;
+  /** Upper bound on waiting for the repository worktree lock (same- or cross-process). Default 60s. */
+  lockWaitMs?: number;
+  /** Hard timeout for one git command once it holds the lock. Default 120s. */
+  gitTimeoutMs?: number;
 }
 
 export interface ProvisionOptions {
@@ -307,6 +276,9 @@ export class WorkspaceManager {
   private readonly repoPath: string;
   private readonly rootDir: string;
   private readonly gitPath: string;
+  private readonly flockPath: string;
+  private readonly lockWaitMs: number;
+  private readonly gitTimeoutMs: number;
   private readonly store: WorkspaceAllocationStore;
   private commonDir: Promise<string> | undefined;
 
@@ -317,6 +289,9 @@ export class WorkspaceManager {
     this.repoPath = options.repoPath;
     this.rootDir = options.rootDir;
     this.gitPath = options.gitPath ?? "git";
+    this.flockPath = options.flockPath ?? "flock";
+    this.lockWaitMs = positiveMs(options.lockWaitMs ?? DEFAULT_LOCK_WAIT_MS, "lockWaitMs");
+    this.gitTimeoutMs = positiveMs(options.gitTimeoutMs ?? DEFAULT_GIT_TIMEOUT_MS, "gitTimeoutMs");
     this.store = options.store;
     mkdirSync(this.rootDir, { recursive: true });
   }
@@ -558,9 +533,26 @@ export class WorkspaceManager {
   }
 
   /** Every call here is a `git worktree` command, so every call is serialized per repository. */
-  private async git(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  private async git(args: string[]): Promise<ProcessResult> {
     const commonDir = await this.gitCommonDir();
-    return withRepoWorktreeLock(commonDir, () => this.runGit(args));
+    const lockPath = join(commonDir, WORKTREE_LOCK_FILE);
+    // Create the lock file once if missing; it is never removed. Its content is irrelevant.
+    closeSync(openSync(lockPath, "a", 0o600));
+    const flockArgs = [
+      "--exclusive",
+      "--wait",
+      (this.lockWaitMs / 1000).toFixed(3),
+      "--conflict-exit-code",
+      String(FLOCK_CONFLICT_EXIT),
+      lockPath,
+      this.gitPath,
+      ...args
+    ];
+    try {
+      return await runProcess(this.flockPath, flockArgs, this.repoPath, this.lockWaitMs + this.gitTimeoutMs);
+    } catch (error) {
+      throw this.gitError(args, error, lockPath);
+    }
   }
 
   private gitCommonDir(): Promise<string> {
@@ -576,17 +568,42 @@ export class WorkspaceManager {
     return this.commonDir;
   }
 
-  private async runGit(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  /** Unlocked, read-only git (only `rev-parse`). Still bounded by the git timeout. */
+  private async runGit(args: string[]): Promise<ProcessResult> {
     try {
-      return await execFileAsync(this.gitPath, args, { cwd: this.repoPath });
+      return await runProcess(this.gitPath, args, this.repoPath, this.gitTimeoutMs);
     } catch (error) {
-      const failure = error as Error & { stderr?: string };
-      throw new ControlStackError(
-        "workspace_git_failed",
-        `git ${args.join(" ")} failed: ${failure.stderr ?? failure.message}`
-      );
+      throw this.gitError(args, error);
     }
   }
+
+  private gitError(args: string[], error: unknown, lockPath?: string): ControlStackError {
+    const failure = error as ProcessFailure;
+    const command = `git ${args.join(" ")}`;
+    if (lockPath && failure.spawnCode === "ENOENT") {
+      return new ControlStackError(
+        "workspace_git_lock_unavailable",
+        `${command} not run: flock(1) not found at ${this.flockPath}; refusing to run a worktree command unlocked`
+      );
+    }
+    if (lockPath && failure.exitCode === FLOCK_CONFLICT_EXIT) {
+      return new ControlStackError(
+        "workspace_git_lock_timeout",
+        `${command} not run: timed out after ${this.lockWaitMs}ms waiting for worktree lock ${lockPath}`
+      );
+    }
+    if (failure.timedOut) {
+      return new ControlStackError("workspace_git_timeout", `${command} killed: ${failure.message}`);
+    }
+    return new ControlStackError("workspace_git_failed", `${command} failed: ${failure.stderr || failure.message}`);
+  }
+}
+
+function positiveMs(value: number, name: string): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new ControlStackError("workspace_manager_invalid_options", `${name} must be a positive number of ms`);
+  }
+  return value;
 }
 
 function workspaceFromAllocation(allocation: WorkspaceAllocation): Workspace {
