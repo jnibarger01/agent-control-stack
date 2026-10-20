@@ -1611,6 +1611,16 @@ export interface WorkItemStore {
     body?: Record<string, unknown>;
     attributes?: Record<string, string | number | boolean>;
   }): StoredAuditEvent;
+  /**
+   * Appends a system event unless one with the same name already carries the same value for `uniqueAttribute`. The
+   * check and the append share one IMMEDIATE transaction, so concurrent writers cannot both claim the same key.
+   */
+  recordSystemEventOnce(input: {
+    name: string;
+    uniqueAttribute: string;
+    body?: Record<string, unknown>;
+    attributes: Record<string, string | number | boolean>;
+  }): { event: StoredAuditEvent; recorded: boolean };
   /** Read the single canonical execution-mode row. null mode means missing or corrupt. */
   getExecutionMode(): {
     mode: "strict" | "admin" | null;
@@ -7972,6 +7982,32 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const attributes = { ...(input.attributes ?? {}), "work_item.id": workItemId };
       const event = this.appendAuditEvent(createEvent(name, input.body ?? {}, attributes));
       return { value: event, events: [event] };
+    });
+  }
+
+  recordSystemEventOnce(input: {
+    name: string;
+    uniqueAttribute: string;
+    body?: Record<string, unknown>;
+    attributes: Record<string, string | number | boolean>;
+  }): { event: StoredAuditEvent; recorded: boolean } {
+    const name = requiredString(input.name, "name");
+    const key = requiredString(input.uniqueAttribute, "uniqueAttribute");
+    // The key becomes part of a JSON path, so only plain dotted identifiers are accepted.
+    if (!/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/u.test(key)) {
+      throw new ControlStackError("invalid_request", "uniqueAttribute must be a dotted identifier");
+    }
+    const value = input.attributes[key];
+    if (typeof value !== "string" || value.length === 0) {
+      throw new ControlStackError("invalid_request", `attributes must carry the unique attribute ${key} as a string`);
+    }
+    return this.write((): { value: { event: StoredAuditEvent; recorded: boolean }; events: StoredAuditEvent[] } => {
+      const existing = this.db
+        .prepare(`SELECT * FROM audit_events WHERE name = ? AND json_extract(attributes, ?) = ? LIMIT 1`)
+        .get(name, `$."${key}"`, value) as unknown as EventRow | undefined;
+      if (existing) return { value: { event: rowToEvent(existing), recorded: false }, events: [] };
+      const event = this.appendAuditEvent(createEvent(name, input.body ?? {}, input.attributes));
+      return { value: { event, recorded: true }, events: [event] };
     });
   }
 
