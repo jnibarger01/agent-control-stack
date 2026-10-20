@@ -11,9 +11,11 @@ import { buildGateway } from "./server.js";
 
 const OPERATOR = "o".repeat(48);
 const READER = "r".repeat(48);
+const APPROVER = "a".repeat(48);
+const WRITER = "w".repeat(48);
 const bearer = (t: string) => ({ authorization: `Bearer ${t}` });
 const cred = (id: string, token: string, scopes: string[]) => ({ id, token, actor: "qa-operator", actorId: id, roles: ["operator" as const], scopes });
-const credentials = [cred("operator", OPERATOR, ["acs:read", "acs:write", "acs:approve"]), cred("reader", READER, ["acs:read"])];
+const credentials = [cred("operator", OPERATOR, ["acs:read", "acs:write", "acs:approve"]), cred("reader", READER, ["acs:read"]), cred("approver", APPROVER, ["acs:read", "acs:approve"]), cred("writer", WRITER, ["acs:read", "acs:write"])];
 
 describe("approvals and execution read models + the real mutation routes", () => {
   let dir: string;
@@ -53,6 +55,28 @@ describe("approvals and execution read models + the real mutation routes", () =>
       expect(rd.viewer).toEqual({ canApprove: false, canWrite: false });
       const exec = await app.inject({ method: "GET", url: "/api/mission-control/execution", headers: bearer(READER) });
       expect(parseExecutionReadModel(exec.json()).ok).toBe(true);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("deny and unblock need acs:write on the server: an approve-only credential is refused and changes nothing", async () => {
+    const app = gateway();
+    try {
+      const approver = (await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(APPROVER) })).json();
+      const writer = (await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(WRITER) })).json();
+      expect(approver.viewer).toEqual({ canApprove: true, canWrite: false });
+      expect(writer.viewer).toEqual({ canApprove: false, canWrite: true });
+      for (const op of ["reject", "unblock"]) {
+        const res = await app.inject({ method: "POST", url: `/work-items/${highRiskId}/${op}`, headers: bearer(APPROVER), payload: { reason: "approve-only credential" } });
+        expect(res.statusCode, op).toBe(403);
+        expect(res.json().code, op).toBe("insufficient_gateway_scope");
+      }
+      const unchanged = (await app.inject({ method: "GET", url: `/work-items/${highRiskId}`, headers: bearer(OPERATOR) })).json() as { workItem: { status: string } };
+      expect(unchanged.workItem.status).toBe("needs_approval");
+      const rejected = await app.inject({ method: "POST", url: `/work-items/${highRiskId}/reject`, headers: bearer(WRITER), payload: { reason: "write credential" } });
+      expect(rejected.statusCode).toBe(200);
+      expect(rejected.json().workItem.status).toBe("rejected");
     } finally {
       await app.close();
     }
