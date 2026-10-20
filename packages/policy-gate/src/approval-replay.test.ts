@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
+import { SqliteWorkItemStore, defaultExecutionPlanForWorkItem } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
 import { createPolicyEngine, type PolicyEngine } from "./policy.js";
 import { createWorkItemTools } from "./tools.js";
@@ -65,10 +65,20 @@ describe("approve_work_item replay", () => {
         risk: "high"
       });
       const evaluation = policy.evaluateWorkItem(workItem, "qa-operator", "approve")[0];
-      tools.approve_work_item({ id: workItem.id, approvedBy: "qa-operator", reason: "ok", actionHash: evaluation!.actionHash });
+      tools.approve_work_item({
+        id: workItem.id,
+        approvedBy: "qa-operator",
+        reason: "ok",
+        actionHash: evaluation!.actionHash
+      });
 
       expect(() =>
-        tools.approve_work_item({ id: workItem.id, approvedBy: "qa-operator", reason: "bad", actionHash: "0".repeat(64) })
+        tools.approve_work_item({
+          id: workItem.id,
+          approvedBy: "qa-operator",
+          reason: "bad",
+          actionHash: "0".repeat(64)
+        })
       ).toThrow(/approval_action_mismatch|does not match/);
     } finally {
       store.close();
@@ -246,6 +256,30 @@ describe("approve_work_item replay", () => {
       expect(replay.decision.decision).not.toBe("deny");
       expect(fx.countOf("policy.decided")).toBe(decided + 1);
       expect(fx.countOf("approval.granted")).toBe(1);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("an approval the current plan does not carry is not a replay: the new plan is approved", () => {
+    const fx = approvedFixture();
+    try {
+      fx.tools.approve_work_item(fx.input);
+      const oldPlan = fx.store.getCurrentExecutionPlan(fx.workItem.id)!;
+      const granted = fx.countOf("approval.granted");
+      const superseding = fx.store.createExecutionPlan({
+        workItemId: fx.workItem.id,
+        definition: defaultExecutionPlanForWorkItem(fx.workItem, { executionMode: "desktop_commander" }),
+        createdByActorId: "qa-operator",
+        expectedCurrentPlanHash: oldPlan.planHash
+      });
+      expect(superseding.planHash).not.toBe(oldPlan.planHash);
+      expect(fx.store.hasExecutionPlanApproval(fx.workItem.id, superseding.planHash, fx.actionHash)).toBe(false);
+
+      fx.tools.approve_work_item({ ...fx.input, reason: "approve the superseding plan" });
+
+      expect(fx.store.hasExecutionPlanApproval(fx.workItem.id, superseding.planHash, fx.actionHash)).toBe(true);
+      expect(fx.countOf("approval.granted")).toBe(granted + 1);
     } finally {
       fx.cleanup();
     }

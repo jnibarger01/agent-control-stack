@@ -152,8 +152,13 @@ function gateApprovalInTransaction(
   // A different approver is a real update, not a replay: in particular a human must still
   // be able to supersede an acs:admin approval. The approver is read from the current base
   // grant (the record recordApproval updates), so Alice-then-Bob followed by Bob again is a replay.
+  // The current execution plan must also carry a valid approval for this action: a superseded
+  // plan leaves the base grant in place but needs grantExecutionPlanApproval on the new plan.
   const grant = store.getApprovalGrant(workItem.id, parsed.actionHash);
+  const currentPlan = store.getCurrentExecutionPlan(workItem.id);
   if (
+    currentPlan !== undefined &&
+    store.hasExecutionPlanApproval(workItem.id, currentPlan.planHash, parsed.actionHash) &&
     workItem.status === "approved" &&
     grant?.status === "granted" &&
     grant.approvedBy === parsed.approvedBy &&
