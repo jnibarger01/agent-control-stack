@@ -281,13 +281,18 @@ export function snapshotHash(pr: PullRequestSnapshot): string {
     mergeable: pr.mergeable,
     reviewDecision: pr.reviewDecision,
     unresolvedThreads: pr.unresolvedThreads,
-    checks: pr.checks.map((check) => ({
-      name: check.name,
-      status: check.status,
-      conclusion: check.conclusion,
-      appSlug: check.appSlug ?? null,
-      source: check.source ?? null
-    })),
+    // GitHub returns checks in no guaranteed order and every probe treats them as a set, so order is not a change.
+    checks: pr.checks
+      .map((check) => ({
+        name: check.name,
+        status: check.status,
+        conclusion: check.conclusion,
+        appSlug: check.appSlug ?? null,
+        source: check.source ?? null
+      }))
+      .map((check) => ({ check, key: JSON.stringify(check) }))
+      .sort((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0))
+      .map(({ check }) => check),
     changedFiles: [...pr.changedFiles].sort(),
     truncated: pr.truncated
   });
