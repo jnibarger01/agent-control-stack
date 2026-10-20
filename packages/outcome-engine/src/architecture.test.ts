@@ -48,7 +48,7 @@ describe("Outcome Engine architecture (a verdict is evidence, never authority)",
         /\.merge\(|mergePullRequest|enableAutoMerge|markReadyForReview|addComment|addLabels|createReview/u,
         "reaches a write operation"
       ],
-      [/\bcreateEvent\(|appendAuditEvent/u, "bypasses the three-method port"],
+      [/\bcreateEvent\(|appendAuditEvent/u, "bypasses the outcome store port"],
       [/CREATE\s+TABLE|INSERT\s+INTO|ALTER\s+TABLE/iu, "runs DDL or SQL"],
       [/process\.env/u, "reads ambient environment (credentials come from the composition root)"]
     ] as const) {
@@ -56,8 +56,8 @@ describe("Outcome Engine architecture (a verdict is evidence, never authority)",
     }
   });
 
-  it("reaches the store only through the three allowed methods", () => {
-    const allowed = new Set(["recordSystemEvent", "readEvents", "verifyAuditChain"]);
+  it("reaches the store only through the four allowed methods", () => {
+    const allowed = new Set(["recordSystemEvent", "recordSystemEventOnce", "readEvents", "verifyAuditChain"]);
     const used = new Set([...code.matchAll(/\b(?:store|port)\.(\w+)/gu)].map((match) => match[1] as string));
     expect(used.size).toBeGreaterThan(0);
     expect([...used].filter((name) => !allowed.has(name))).toEqual([]);

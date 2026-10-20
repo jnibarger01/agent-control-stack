@@ -43,7 +43,7 @@ Evidence from simulated, fixture or asserted sources can neither satisfy nor con
 
 ## What is stored
 
-Two audit event names, written only through a three-method port: `outcome.accepted` and `outcome.evaluation_recorded`. Each evaluation is hash-chained to the previous one; `show` recomputes every hash and re-runs the verdict from the stored inputs. Token-like strings from pull request data are stored as `[unrepresentable:<hash>]` so recomputation matches what the audit store keeps.
+Two audit event names, written only through a four-method port: `outcome.accepted` and `outcome.evaluation_recorded`. Each evaluation is hash-chained to the previous one; `show` recomputes every hash and re-runs the verdict from the stored inputs. Token-like strings from pull request data are stored as `[unrepresentable:<hash>]` so recomputation matches what the audit store keeps.
 
 ## Trust limits
 

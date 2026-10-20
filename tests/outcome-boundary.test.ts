@@ -13,7 +13,7 @@ describe("Outcome Engine import boundary", () => {
   it.each([
     ['import { spawn } from "node:child_process";\nvoid spawn;\n', "never spawns processes"],
     ['import { exec } from "child_process";\nvoid exec;\n', "never spawns processes"],
-    ['import { DatabaseSync } from "node:sqlite";\nvoid DatabaseSync;\n', "three-method OutcomeStorePort"],
+    ['import { DatabaseSync } from "node:sqlite";\nvoid DatabaseSync;\n', "four-method OutcomeStorePort"],
     ['import { x } from "@agent-control-stack/coding-mission";\nvoid x;\n', "never authority"],
     ['import { x } from "@agent-control-stack/policy-gate";\nvoid x;\n', "never authority"],
     ['import { x } from "@agent-control-stack/secret-broker";\nvoid x;\n', "never authority"],

@@ -275,6 +275,39 @@ describe("persistence and trust", () => {
     expect(e.show(record.outcomeId)?.problems).toEqual([]);
   });
 
+  it("a concurrent evaluation that loses the chain head records nothing and leaves the chain intact", async () => {
+    const other = new SqliteWorkItemStore(dbPath);
+    try {
+      const rival = new OutcomeEngine({
+        store: createOutcomeStorePort(other),
+        readerFor: () => sequenceReader(makeSnapshot({ mergeable: "CONFLICTING" })),
+        provenance: "live_github",
+        acsRepository: REPO,
+        now: () => new Date(clock)
+      });
+      const { record } = accept(rival);
+      const inner = sequenceReader(makeSnapshot());
+      let raced = false;
+      // The rival evaluates and appends after this engine loaded the head but before it appends.
+      const racing: PullRequestReader = {
+        async getPullRequest(number) {
+          if (!raced) {
+            raced = true;
+            await rival.evaluate(record.outcomeId);
+          }
+          return inner.getPullRequest(number);
+        }
+      };
+      await expect(engine({ reader: racing }).evaluate(record.outcomeId)).rejects.toThrow(/evaluate again/u);
+      const shown = engine().show(record.outcomeId);
+      expect(shown?.problems).toEqual([]);
+      expect(shown?.evaluations.map((evaluation) => evaluation.sequenceNo)).toEqual([1]);
+      expect(shown?.evaluations[0]?.verdict).toBe("PARTIAL");
+    } finally {
+      other.close();
+    }
+  });
+
   it("list reports the same unparseable-record problems as show", async () => {
     const e = engine();
     const { record } = accept(e);

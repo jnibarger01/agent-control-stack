@@ -307,7 +307,18 @@ export class OutcomeEngine {
     ) {
       return { record: previous, recorded: false, deduped: true, stale: false };
     }
-    this.ledger.recordEvaluation(record);
+    const appended = this.ledger.recordEvaluation(record);
+    if (!appended.recorded) {
+      const winner = appended.event.body as { evaluationId?: unknown };
+      if (winner.evaluationId === record.evaluationId) {
+        // A concurrent evaluation recorded this exact record first.
+        return { record, recorded: false, deduped: true, stale: false };
+      }
+      throw new OutcomeIntegrityError(
+        "evaluation_head_moved",
+        `another evaluation recorded #${record.sequenceNo} of ${accepted.outcomeId} first; nothing was recorded, evaluate again`
+      );
+    }
     return { record, recorded: true, deduped: false, stale: false };
   }
 

@@ -94,7 +94,7 @@ export default tseslint.config(
             },
             {
               name: "node:sqlite",
-              message: "The Outcome Engine reaches storage only through the three-method OutcomeStorePort."
+              message: "The Outcome Engine reaches storage only through the four-method OutcomeStorePort."
             }
           ],
           patterns: [

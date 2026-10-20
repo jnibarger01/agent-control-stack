@@ -16,26 +16,37 @@ import { validatePlan } from "./plan.js";
 
 export const EVENT_ACCEPTED = "outcome.accepted";
 export const EVENT_EVALUATION = "outcome.evaluation_recorded";
+const ATTR_CHAIN_SLOT = "outcome.chain_slot";
 export const MAX_OUTCOME_SCAN_EVENTS = 20_000;
 const PAGE = 500;
 
-/** The entire surface of the audit store the engine can reach. Three methods, nothing else. */
+/**
+ * The entire surface of the audit store the engine can reach. Four methods, nothing else: two appends (one of them
+ * keyed, so an evaluation can claim its chain slot atomically), one read, one verification.
+ */
 export interface OutcomeStorePort {
   recordSystemEvent(input: {
     name: string;
     body?: Record<string, unknown>;
     attributes?: Record<string, string | number | boolean>;
   }): StoredAuditEvent;
+  recordSystemEventOnce(input: {
+    name: string;
+    uniqueAttribute: string;
+    body?: Record<string, unknown>;
+    attributes: Record<string, string | number | boolean>;
+  }): { event: StoredAuditEvent; recorded: boolean };
   readEvents(options?: ReadEventsOptions): StoredAuditEvent[];
   verifyAuditChain(): AuditChainVerification;
 }
 
 /** Runtime capability, not just a type: callers hand the engine this frozen object, never the store itself. */
 export function createOutcomeStorePort(
-  store: Pick<WorkItemStore, "recordSystemEvent" | "readEvents" | "verifyAuditChain">
+  store: Pick<WorkItemStore, "recordSystemEvent" | "recordSystemEventOnce" | "readEvents" | "verifyAuditChain">
 ): OutcomeStorePort {
   const port: OutcomeStorePort = {
     recordSystemEvent: (input) => store.recordSystemEvent(input),
+    recordSystemEventOnce: (input) => store.recordSystemEventOnce(input),
     readEvents: (options) => store.readEvents(options),
     verifyAuditChain: () => store.verifyAuditChain()
   };
@@ -201,15 +212,22 @@ export class OutcomeLedger {
     });
   }
 
-  recordEvaluation(record: EvaluationRecord): StoredAuditEvent {
+  /**
+   * Claims chain slot (outcomeId, sequenceNo) and appends in one store transaction. A concurrent evaluation that built
+   * on the same head finds the slot taken and gets the stored record back with `recorded: false`, so two writers can
+   * never fork the chain, duplicate a sequence number, or together exceed the evaluation limit.
+   */
+  recordEvaluation(record: EvaluationRecord): { event: StoredAuditEvent; recorded: boolean } {
     assertRepresentable(record, "outcome.evaluation_recorded");
-    return this.port.recordSystemEvent({
+    return this.port.recordSystemEventOnce({
       name: EVENT_EVALUATION,
+      uniqueAttribute: ATTR_CHAIN_SLOT,
       body: record as unknown as Record<string, unknown>,
       attributes: {
         "outcome.id": record.outcomeId,
         "outcome.verdict": record.verdict,
-        "outcome.sequence": record.sequenceNo
+        "outcome.sequence": record.sequenceNo,
+        [ATTR_CHAIN_SLOT]: `${record.outcomeId}#${record.sequenceNo}`
       }
     });
   }
