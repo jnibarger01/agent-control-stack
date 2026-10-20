@@ -5,6 +5,7 @@ import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../../App";
 import type { EventSourceLike } from "../../data/stream";
+import type { ExecutionReadModel } from "@agent-control-stack/mission-control-contract";
 import { approvalsFixture, executionFixture, overviewFixture } from "../../test/fixture";
 
 /** A stream that reports `open` immediately (live) or never (connecting). */
@@ -147,6 +148,22 @@ describe("Execution", () => {
     expect(within(table).queryByRole("button", { name: "Retry Inspect queue latency" })).toBeNull();
     expect(within(table).getByRole("button", { name: "Cancel Inspect queue latency" })).toBeTruthy();
     expect(within(table).queryByRole("button", { name: "Cancel Review policy boundaries" })).toBeNull();
+  });
+
+  it("offers retry for every retryable work-item status, once per work item on its latest attempt", async () => {
+    const row = (attemptId: string, workItemId: string, title: string, workItemStatus: string, status: string, attemptNumber = 1) =>
+      ({ attemptId, workItemId, title, workItemStatus, risk: "low", attemptNumber, status, fencingEpoch: 1, updatedAt: "2026-10-19T10:55:00.000Z" }) as ExecutionReadModel["attempts"][number];
+    const attempts = [
+      row("s1", "wrk_succ0000001", "Succeeded item", "succeeded", "succeeded"),
+      row("c1", "wrk_canc0000001", "Cancelled item", "cancelled", "cancelled"),
+      row("f1", "wrk_twice000001", "Twice failed", "failed", "failed", 1),
+      row("f2", "wrk_twice000001", "Twice failed", "failed", "failed", 2)
+    ];
+    mountAt("/execution", { execution: executionFixture({ attempts }) });
+    const table = await screen.findByRole("table", { name: "Execution attempts" });
+    expect(within(table).getByRole("button", { name: "Retry Succeeded item" })).toBeTruthy();
+    expect(within(table).getByRole("button", { name: "Retry Cancelled item" })).toBeTruthy();
+    expect(within(table).getAllByRole("button", { name: "Retry Twice failed" })).toHaveLength(1);
   });
 
   it("retry requires a reason and posts to the existing retry route", async () => {

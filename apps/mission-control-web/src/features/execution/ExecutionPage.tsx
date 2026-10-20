@@ -7,10 +7,12 @@ import { TelemetryPanel } from "../command/sections";
 
 const ATTEMPT_TONE: Record<string, Tone> = { succeeded: "ok", running: "info", leased: "info", pending: "neutral", failed: "bad", quarantined: "bad", interrupted: "bad", unknown: "unknown", cancelled: "neutral", cancellation_requested: "warn" };
 
-function Controls({ row, viewer, open }: { row: ExecutionAttemptRow; viewer: ExecutionReadModel["viewer"]; open: (s: ActionSpec) => void }) {
+function Controls({ row, latest, viewer, open }: { row: ExecutionAttemptRow; latest: boolean; viewer: ExecutionReadModel["viewer"]; open: (s: ActionSpec) => void }) {
   const gate = useControlGate(viewer.canWrite, "write");
   const base = { workItemId: row.workItemId, title: row.title, risk: row.risk };
-  const retry = controlOffered("retry", row.workItemStatus) && row.status === "failed";
+  // Retry is a work-item control: the canonical work-item status decides (succeeded, failed, cancelled, rejected all
+  // qualify). It is offered once per work item, on its latest attempt, rather than on every historical attempt.
+  const retry = latest && controlOffered("retry", row.workItemStatus);
   const cancel = controlOffered("cancel", row.workItemStatus) && ["running", "leased", "pending"].includes(row.status);
   if (!retry && !cancel) return <span className="text-xs text-muted">none</span>;
   return (
@@ -26,6 +28,8 @@ function Controls({ row, viewer, open }: { row: ExecutionAttemptRow; viewer: Exe
 
 export function ExecutionPage({ data }: { data: ExecutionReadModel }) {
   const { open, element } = useWorkItemActions();
+  const latestAttempt = new Map<string, number>();
+  for (const a of data.attempts) latestAttempt.set(a.workItemId, Math.max(latestAttempt.get(a.workItemId) ?? 0, a.attemptNumber));
   return (
     <div className="space-y-6">
       {element}
@@ -63,7 +67,7 @@ export function ExecutionPage({ data }: { data: ExecutionReadModel }) {
                   ) : <span className="text-xs text-muted">none</span>
               },
               { key: "dur", header: "Duration", render: (r) => <span className="text-xs">{r.durationMs !== undefined ? formatDuration(r.durationMs) : r.startedAt ? `started ${relativeTime(r.startedAt)}` : "not started"}</span> },
-              { key: "controls", header: "Controls", render: (r) => <Controls row={r} viewer={data.viewer} open={open} /> }
+              { key: "controls", header: "Controls", render: (r) => <Controls row={r} latest={latestAttempt.get(r.workItemId) === r.attemptNumber} viewer={data.viewer} open={open} /> }
             ]}
           />
         )}
