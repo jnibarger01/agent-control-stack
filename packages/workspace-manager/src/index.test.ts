@@ -1,6 +1,6 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { ControlStackError } from "@agent-control-stack/shared";
@@ -116,6 +116,105 @@ describe("WorkspaceManager", () => {
     expect(a.hostPath).not.toBe(b.hostPath);
     writeFileSync(join(a.hostPath, "only-in-a.txt"), "a\n", "utf8");
     expect(existsSync(join(b.hostPath, "only-in-a.txt"))).toBe(false);
+  });
+
+  it("regression: serializes every git worktree command per repository, across manager instances", async () => {
+    // CI run 39508664541 flaked with `fatal: failed to read
+    // .git/worktrees/<id>/commondir: Success`: concurrent `git worktree`
+    // commands on one repo race on git's admin dirs. A git shim marks a
+    // worktree command as in flight (atomic mkdir) and holds it open briefly,
+    // so any two overlapping worktree commands are recorded deterministically
+    // instead of depending on hitting git's narrow race window.
+    const fixture = await createRepoFixture();
+    cleanup = fixture.cleanup;
+    const shimDir = mkdtempSync(join(tmpdir(), "acs-workspace-manager-gitshim-"));
+    const previousCleanup = cleanup;
+    cleanup = () => {
+      previousCleanup();
+      rmSync(shimDir, { recursive: true, force: true });
+    };
+    const realGit = (await execFileAsync("sh", ["-c", "command -v git"])).stdout.trim();
+    const gitShim = join(shimDir, "git");
+    writeFileSync(
+      gitShim,
+      [
+        "#!/bin/sh",
+        'if [ "$1" != "worktree" ]; then exec "$REAL_GIT" "$@"; fi',
+        'if ! mkdir "$SHIM_DIR/in-flight" 2>/dev/null; then touch "$SHIM_DIR/overlap"; fi',
+        "sleep 0.05",
+        '"$REAL_GIT" "$@"',
+        "status=$?",
+        'rmdir "$SHIM_DIR/in-flight" 2>/dev/null',
+        "exit $status",
+        ""
+      ].join("\n"),
+      { mode: 0o755 }
+    );
+    vi.stubEnv("REAL_GIT", realGit);
+    vi.stubEnv("SHIM_DIR", shimDir);
+    try {
+      const managers = [0, 1].map(
+        () =>
+          new WorkspaceManager({
+            repoPath: fixture.repoPath,
+            rootDir: fixture.rootDir,
+            store: fixture.store,
+            gitPath: gitShim
+          })
+      );
+      const ids = Array.from({ length: 8 }, (_, index) => seedWorkItemId(fixture.store, `serial-${index}`));
+      await Promise.all(ids.map((id, index) => managers[index % 2]!.provision(id)));
+      await Promise.all([
+        ...ids.slice(0, 4).map((id, index) => managers[index % 2]!.teardown(id)),
+        managers[0]!.reconcile(new Set(ids))
+      ]);
+      expect(existsSync(join(shimDir, "overlap"))).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("waits for a cross-process worktree lock held by a live process before mutating", async () => {
+    const fixture = await createRepoFixture();
+    cleanup = fixture.cleanup;
+    const manager = new WorkspaceManager({
+      repoPath: fixture.repoPath,
+      rootDir: fixture.rootDir,
+      store: fixture.store
+    });
+    const lockPath = join(fixture.repoPath, ".git", "acs-worktree.lock");
+    writeFileSync(lockPath, `${process.pid}@${hostname()}\n`, "utf8");
+    const workItemId = seedWorkItemId(fixture.store, "locked");
+    let settled = false;
+    const pending = manager.provision(workItemId).finally(() => {
+      settled = true;
+    });
+    await new Promise((resolveWait) => setTimeout(resolveWait, 300));
+    expect(settled).toBe(false);
+    expect(existsSync(join(fixture.rootDir, workItemId))).toBe(false);
+    rmSync(lockPath);
+    const workspace = await pending;
+    expect(existsSync(join(workspace.hostPath, "README.md"))).toBe(true);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it("breaks a worktree lock left by a dead process on this host", async () => {
+    const fixture = await createRepoFixture();
+    cleanup = fixture.cleanup;
+    const manager = new WorkspaceManager({
+      repoPath: fixture.repoPath,
+      rootDir: fixture.rootDir,
+      store: fixture.store
+    });
+    const dead = spawn(process.execPath, ["-e", ""]);
+    await new Promise((resolveExit) => dead.once("exit", resolveExit));
+    const lockPath = join(fixture.repoPath, ".git", "acs-worktree.lock");
+    writeFileSync(lockPath, `${dead.pid}@${hostname()}\n`, "utf8");
+
+    const workspace = await manager.provision(seedWorkItemId(fixture.store, "stale-lock"));
+
+    expect(existsSync(join(workspace.hostPath, "README.md"))).toBe(true);
+    expect(existsSync(lockPath)).toBe(false);
   });
 
   it("refuses to provision over a path with no active allocation record", async () => {

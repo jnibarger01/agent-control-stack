@@ -1,12 +1,147 @@
 import { execFile } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  closeSync,
+  existsSync,
+  linkSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  unlinkSync,
+  writeSync
+} from "node:fs";
+import { hostname } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { ControlStackError, createId } from "@agent-control-stack/shared";
 import type { PrivilegedTransitionOptions, WorkspaceAllocation } from "@agent-control-stack/work-items";
 import { z } from "zod";
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * git does not make `git worktree add/remove/prune` safe against each other
+ * on one repository: `add` creates `.git/worktrees/<id>/` and only then
+ * writes its `locked`, `commondir` and `gitdir` files, while every other
+ * worktree command walks that directory. A concurrent `add` can read a
+ * sibling's empty `commondir` (`fatal: failed to read .../commondir:
+ * Success`), and a concurrent `prune` can delete a half-created admin dir
+ * out from under its `add`. Every worktree command against one repository
+ * is therefore serialized: in-process by a promise chain keyed by the
+ * repository's git common dir (shared by every WorkspaceManager instance in
+ * this process), and across processes by an O_EXCL lock file in that dir.
+ */
+const WORKTREE_LOCK_FILE = "acs-worktree.lock";
+const WORKTREE_LOCK_POLL_MS = 25;
+const WORKTREE_LOCK_ACQUIRE_LIMIT_MS = 60_000;
+const worktreeQueues = new Map<string, Promise<void>>();
+
+async function withRepoWorktreeLock<T>(commonDir: string, fn: () => Promise<T>): Promise<T> {
+  const previous = worktreeQueues.get(commonDir) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolveCurrent) => {
+    release = resolveCurrent;
+  });
+  const tail = previous.then(() => current);
+  worktreeQueues.set(commonDir, tail);
+  await previous;
+  try {
+    const lockPath = join(commonDir, WORKTREE_LOCK_FILE);
+    await acquireLockFile(lockPath);
+    try {
+      return await fn();
+    } finally {
+      rmSync(lockPath, { force: true });
+    }
+  } finally {
+    release();
+    if (worktreeQueues.get(commonDir) === tail) worktreeQueues.delete(commonDir);
+  }
+}
+
+async function acquireLockFile(lockPath: string): Promise<void> {
+  const owner = `${process.pid}@${hostname()}\n`;
+  const deadline = Date.now() + WORKTREE_LOCK_ACQUIRE_LIMIT_MS;
+  for (;;) {
+    try {
+      const fd = openSync(lockPath, "wx", 0o600);
+      try {
+        writeSync(fd, owner);
+      } finally {
+        closeSync(fd);
+      }
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    breakLockIfOwnerDead(lockPath);
+    if (Date.now() >= deadline) {
+      // Fail closed: never run a worktree mutation without the lock.
+      throw new ControlStackError(
+        "workspace_git_lock_timeout",
+        `timed out waiting for worktree lock ${lockPath} (held by ${readLockOwner(lockPath) ?? "unknown"})`
+      );
+    }
+    await delay(WORKTREE_LOCK_POLL_MS);
+  }
+}
+
+function readLockOwner(lockPath: string): string | undefined {
+  try {
+    return readFileSync(lockPath, "utf8").trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Removes a lock left by a crashed process on this host. Only a lock whose
+ * recorded pid is provably dead on this same host is broken; a foreign-host,
+ * unreadable or half-written lock is waited on (and eventually fails closed).
+ * The lock is moved aside atomically and restored if it turns out to have
+ * been replaced by a live holder in between.
+ */
+function breakLockIfOwnerDead(lockPath: string): void {
+  const owner = readLockOwner(lockPath);
+  const match = owner ? /^(\d+)@(.+)$/u.exec(owner) : null;
+  if (!match || match[2] !== hostname()) return;
+  const pid = Number(match[1]);
+  if (pid === process.pid || isProcessAlive(pid)) return;
+  const aside = `${lockPath}.stale-${randomUUID()}`;
+  try {
+    renameSync(lockPath, aside);
+  } catch {
+    return;
+  }
+  if (readLockOwner(aside) !== owner) {
+    // A live holder replaced the stale lock between our read and rename;
+    // put it back (link fails if yet another holder already took the path).
+    try {
+      linkSync(aside, lockPath);
+    } catch {
+      // Another holder owns lockPath now; the moved-aside lock is not ours.
+    }
+  }
+  try {
+    unlinkSync(aside);
+  } catch {
+    // Best effort.
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
 
 // Mirrors packages/sandbox/src/contracts.ts's identifierSchema and
 // absolutePathSchema shape so a Workspace can flow directly into a
@@ -173,6 +308,7 @@ export class WorkspaceManager {
   private readonly rootDir: string;
   private readonly gitPath: string;
   private readonly store: WorkspaceAllocationStore;
+  private commonDir: Promise<string> | undefined;
 
   constructor(options: WorkspaceManagerOptions) {
     if (!isAbsolute(options.repoPath) || !isAbsolute(options.rootDir)) {
@@ -400,15 +536,15 @@ export class WorkspaceManager {
       orphaned.push(
         persisted
           ? workspaceFromAllocation(persisted)
-          // A worktree with no persisted allocation at all - most likely
-          // the P1-L crash window (`git worktree add` succeeded, the
-          // process died before recordWorkspaceAllocation committed). No
-          // attemptId/leaseId/workerId/fencingEpoch authority tuple exists
-          // to report, so this is reported through the distinct orphan
-          // shape rather than forced through workspaceSchema's ownership
-          // requirement (which would throw and abort startup
-          // reconciliation entirely).
-          : orphanedWorkspaceSchema.parse({
+          : // A worktree with no persisted allocation at all - most likely
+            // the P1-L crash window (`git worktree add` succeeded, the
+            // process died before recordWorkspaceAllocation committed). No
+            // attemptId/leaseId/workerId/fencingEpoch authority tuple exists
+            // to report, so this is reported through the distinct orphan
+            // shape rather than forced through workspaceSchema's ownership
+            // requirement (which would throw and abort startup
+            // reconciliation entirely).
+            orphanedWorkspaceSchema.parse({
               allocationId: createId("workspace"),
               workItemId,
               hostPath: entry.path,
@@ -421,7 +557,26 @@ export class WorkspaceManager {
     return { orphaned };
   }
 
+  /** Every call here is a `git worktree` command, so every call is serialized per repository. */
   private async git(args: string[]): Promise<{ stdout: string; stderr: string }> {
+    const commonDir = await this.gitCommonDir();
+    return withRepoWorktreeLock(commonDir, () => this.runGit(args));
+  }
+
+  private gitCommonDir(): Promise<string> {
+    if (!this.commonDir) {
+      const pending = this.runGit(["rev-parse", "--git-common-dir"]).then(({ stdout }) =>
+        realpathSync(resolve(this.repoPath, stdout.trim()))
+      );
+      pending.catch(() => {
+        if (this.commonDir === pending) this.commonDir = undefined;
+      });
+      this.commonDir = pending;
+    }
+    return this.commonDir;
+  }
+
+  private async runGit(args: string[]): Promise<{ stdout: string; stderr: string }> {
     try {
       return await execFileAsync(this.gitPath, args, { cwd: this.repoPath });
     } catch (error) {
