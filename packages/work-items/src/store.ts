@@ -1529,7 +1529,10 @@ export interface WorkItemStore {
   recordApproval(input: ApprovalRecord): ApprovalGrant;
   hasApproval(workItemId: string, actionHash: string): boolean;
   /** The current base approval record for an action hash (no state or expiry checks). */
-  getApprovalGrant(workItemId: string, actionHash: string): { approvedBy: string; status: string; expiresAt: string } | undefined;
+  getApprovalGrant(
+    workItemId: string,
+    actionHash: string
+  ): { approvedBy: string; status: string; expiresAt: string } | undefined;
   consumeApproval(workItemId: string, actionHash: string, options?: Date | ConsumeApprovalOptions): StoredAuditEvent;
   startWorkItem(id: string, workerId?: string, options?: ClaimOptions): ClaimedWorkItem;
   claimNextApprovedWorkItem(workerId: string, options?: ClaimOptions): ClaimedWorkItem | undefined;
@@ -7234,7 +7237,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
       .prepare(
         `SELECT approved_by, status, expires_at FROM approval_records WHERE work_item_id = ? AND action_hash = ?`
       )
-      .get(workItemId, actionHash) as unknown as { approved_by: string; status: string; expires_at: string } | undefined;
+      .get(workItemId, actionHash) as unknown as
+      { approved_by: string; status: string; expires_at: string } | undefined;
     return row ? { approvedBy: row.approved_by, status: row.status, expiresAt: row.expires_at } : undefined;
   }
 
