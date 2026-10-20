@@ -14,6 +14,7 @@ export type VerificationJob = Readonly<{
 }>;
 
 export type CachedVerification = Readonly<{
+  id: string;
   artifactHash: string;
   policyHash: string;
   toolchainHash: string;
@@ -38,6 +39,7 @@ export function planVerificationDispatch(
   }
   const eligible = pending.filter((job) => !cache.some((entry) =>
     entry.verdict === "PASS" &&
+    entry.id === job.id &&
     entry.artifactHash === job.artifactHash &&
     entry.policyHash === job.policyHash &&
     entry.toolchainHash === job.toolchainHash
