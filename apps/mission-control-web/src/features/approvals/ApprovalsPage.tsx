@@ -42,13 +42,14 @@ function ItemCard({ item, viewer, open }: { item: ApprovalItem; viewer: Approval
       )}
 
       <div className="mt-4 flex flex-wrap items-center gap-3">
-        {item.status === "needs_approval" && (
+        {/* The state machine allows needs_approval → rejected and blocked → rejected; both go through /reject (acs:write). */}
+        {(item.status === "needs_approval" || item.status === "blocked") && (
           <button type="button" disabled={write.disabled} onClick={() => open({ ...base, kind: "deny" })} aria-label={`Deny ${item.title}`} className="rounded-ctl border border-bad/50 px-3 py-1.5 text-sm font-medium text-bad disabled:cursor-not-allowed disabled:opacity-50">Deny</button>
         )}
         {item.status === "blocked" && (
           <button type="button" disabled={write.disabled} onClick={() => open({ ...base, kind: "unblock" })} aria-label={`Unblock ${item.title}`} className="rounded-ctl border border-line px-3 py-1.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50">Unblock</button>
         )}
-        {(item.status === "blocked" ? write.why : approve.why) && <p className="text-xs text-muted">{item.status === "blocked" ? write.why : approve.why}</p>}
+        {[...new Set([item.status === "needs_approval" ? approve.why : undefined, write.why].filter(Boolean))].map((why) => <p key={why} className="text-xs text-muted">{why}</p>)}
       </div>
     </li>
   );

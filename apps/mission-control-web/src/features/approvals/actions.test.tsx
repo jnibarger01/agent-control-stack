@@ -102,6 +102,23 @@ describe("Approvals", () => {
     expect((screen.getByRole("button", { name: "Approve fs.write for Review deployment request" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it("offers Deny for blocked work too, sending it to /reject behind the write gate", async () => {
+    const { posts } = mountAt("/approvals", { approvals: approvalsFixture() });
+    const deny = await screen.findByRole("button", { name: "Deny Check connector scopes" });
+    await waitFor(() => expect((deny as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(deny);
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("textbox"), { target: { value: "no longer needed" } });
+    await act(async () => { fireEvent.click(within(dialog).getByRole("button", { name: "Deny" })); });
+    expect(posts).toEqual([{ url: "/work-items/wrk_blk00000004/reject", body: { reason: "no longer needed" } }]);
+  });
+
+  it("disables blocked-item Deny and Unblock for an approve-only credential", async () => {
+    mountAt("/approvals", { approvals: approvalsFixture({ viewer: { canApprove: true, canWrite: false } }) });
+    expect(((await screen.findByRole("button", { name: "Deny Check connector scopes" })) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Unblock Check connector scopes" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("disables controls while the live stream is not connected", async () => {
     mountAt("/approvals", { approvals: approvalsFixture(), factory: connecting });
     const approve = await screen.findByRole("button", { name: "Approve fs.write for Review deployment request" });
