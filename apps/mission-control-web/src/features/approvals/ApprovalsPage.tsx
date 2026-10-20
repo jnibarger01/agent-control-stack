@@ -42,7 +42,7 @@ function ItemCard({ item, viewer, open }: { item: ApprovalItem; viewer: Approval
       )}
 
       <div className="mt-4 flex flex-wrap items-center gap-3">
-        {item.status === "needs_approval" && (
+        {(item.status === "needs_approval" || item.status === "blocked") && (
           <button type="button" disabled={write.disabled} onClick={() => open({ ...base, kind: "deny" })} aria-label={`Deny ${item.title}`} className="rounded-ctl border border-bad/50 px-3 py-1.5 text-sm font-medium text-bad disabled:cursor-not-allowed disabled:opacity-50">Deny</button>
         )}
         {item.status === "blocked" && (

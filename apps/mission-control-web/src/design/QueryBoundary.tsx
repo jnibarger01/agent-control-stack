@@ -21,10 +21,22 @@ export interface QueryLike<T> {
   data: T | undefined;
   isPending: boolean;
   error: unknown;
+  isError?: boolean;
 }
 
 export function QueryBoundary<T>({ query, what, children }: { query: QueryLike<T>; what: string; children: (data: T) => ReactNode }) {
-  if (query.data !== undefined) return <>{children(query.data)}</>;
+  if (query.data !== undefined) {
+    return (
+      <>
+        {query.isError && (
+          <p role="status" className="mb-4 rounded-ctl border border-warn/40 bg-warn-soft px-4 py-2 text-sm text-warn">
+            Refresh failed. Showing the last successfully loaded data.
+          </p>
+        )}
+        {children(query.data)}
+      </>
+    );
+  }
   if (query.isPending) {
     return (
       <div className="space-y-4" aria-busy="true" aria-label={`Loading ${what}`}>

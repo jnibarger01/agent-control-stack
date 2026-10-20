@@ -10,7 +10,7 @@ const ATTEMPT_TONE: Record<string, Tone> = { succeeded: "ok", running: "info", l
 function Controls({ row, viewer, open }: { row: ExecutionAttemptRow; viewer: ExecutionReadModel["viewer"]; open: (s: ActionSpec) => void }) {
   const gate = useControlGate(viewer.canWrite, "write");
   const base = { workItemId: row.workItemId, title: row.title, risk: row.risk };
-  const retry = controlOffered("retry", row.workItemStatus) && row.status === "failed";
+  const retry = controlOffered("retry", row.workItemStatus) && ["failed", "succeeded", "cancelled"].includes(row.status);
   const cancel = controlOffered("cancel", row.workItemStatus) && ["running", "leased", "pending"].includes(row.status);
   if (!retry && !cancel) return <span className="text-xs text-muted">none</span>;
   return (

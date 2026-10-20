@@ -1450,7 +1450,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     const sessions = workItems.listTunnelSessions(connector.id);
     return {
       connector: projectConnector(connector, sessions, heartbeatTtlMs),
-      sessions: sessions.map((session) => projectTunnelSession(session, heartbeatTtlMs))
+      sessions: sessions.slice(0, 500).map((session) => projectTunnelSession(session, heartbeatTtlMs)),
+      sessionsWindowed: sessions.length > 500
     };
   });
 
@@ -5464,7 +5465,17 @@ function adminModeTtlFromEnv(env: NodeJS.ProcessEnv = process.env): number | und
 }
 
 export function renderLoginPage(redirectTo = "/"): string {
-  const safeRedirect = redirectTo.startsWith("/") && !redirectTo.startsWith("//") ? redirectTo : "/";
+  // Resolve against a fixed same-origin base so browser URL parsing cannot treat
+  // backslashes as authority separators (for example "/\\\\evil.example").
+  let safeRedirect = "/";
+  try {
+    const candidate = new URL(redirectTo, "https://mission-control.invalid");
+    if (candidate.origin === "https://mission-control.invalid") {
+      safeRedirect = `${candidate.pathname}${candidate.search}${candidate.hash}`;
+    }
+  } catch {
+    // Invalid URLs fall back to the console root.
+  }
   return `<!doctype html>
 <html lang="en">
   <head>
