@@ -51,6 +51,13 @@ describe("toQueueReadModel", () => {
     expect(toQueueReadModel(base({ executionPlansByWorkItem: undefined })).items.every((i) => i.plan.state === "unknown")).toBe(true);
   });
 
+  it("ignores a higher-epoch lease that is still stored active but has expired", () => {
+    const out = toQueueReadModel(base({ attemptLeasesByWorkItem: { w1: [lease({ fencingEpoch: 1 }), lease({ leaseId: "l2", fencingEpoch: 3, expiresAt: "2026-10-19T11:59:00.000Z" })] } }));
+    expect(out.items.find((i) => i.id === "w1")?.lease?.fencingEpoch).toBe(1);
+    const allExpired = toQueueReadModel(base({ attemptLeasesByWorkItem: { w1: [lease({ expiresAt: "2026-10-19T11:59:00.000Z" })] } }));
+    expect(allExpired.items.find((i) => i.id === "w1")?.lease).toBeUndefined();
+  });
+
   it("uses the highest-epoch active lease and carries lineage", () => {
     const out = toQueueReadModel(base());
     expect(out.items.find((i) => i.id === "w1")?.lease?.fencingEpoch).toBe(3);
