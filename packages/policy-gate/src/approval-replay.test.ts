@@ -202,4 +202,52 @@ describe("approve_work_item replay", () => {
       fx.cleanup();
     }
   });
+
+  it("alice then bob is a real update, and bob repeating is then a replay", () => {
+    const fx = approvedFixture();
+    try {
+      fx.tools.approve_work_item({ ...fx.input, approvedBy: "alice" });
+      fx.tools.approve_work_item({ ...fx.input, approvedBy: "bob" });
+      const granted = fx.countOf("approval.granted");
+      const total = fx.store.readEvents({ limit: 500 }).length;
+
+      fx.tools.approve_work_item({ ...fx.input, approvedBy: "bob", reason: "bob again" });
+
+      expect(fx.countOf("approval.granted")).toBe(granted);
+      expect(fx.store.readEvents({ limit: 500 })).toHaveLength(total);
+      expect(fx.store.getApprovalGrant(fx.workItem.id, fx.actionHash)?.approvedBy).toBe("bob");
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("a replay under a changed but still-approvable policy records the evaluation it reports", () => {
+    let reason = "original";
+    const real = createPolicyEngine();
+    const policy: PolicyEngine = {
+      ...real,
+      evaluateWorkItem: (workItem, actor, operation) =>
+        real.evaluateWorkItem(workItem, actor, operation).map((evaluation) => ({
+          ...evaluation,
+          decision: { ...evaluation.decision, reason }
+        }))
+    };
+    const fx = approvedFixture(policy);
+    try {
+      fx.tools.approve_work_item(fx.input);
+      const decided = fx.countOf("policy.decided");
+
+      fx.tools.approve_work_item({ ...fx.input, reason: "unchanged policy" });
+      expect(fx.countOf("policy.decided")).toBe(decided);
+
+      reason = "policy tightened";
+      const replay = fx.tools.approve_work_item({ ...fx.input, reason: "changed policy" });
+
+      expect(replay.decision.decision).not.toBe("deny");
+      expect(fx.countOf("policy.decided")).toBe(decided + 1);
+      expect(fx.countOf("approval.granted")).toBe(1);
+    } finally {
+      fx.cleanup();
+    }
+  });
 });

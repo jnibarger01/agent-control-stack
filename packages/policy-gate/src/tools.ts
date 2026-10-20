@@ -150,15 +150,13 @@ function gateApprovalInTransaction(
   // nothing: no second policy.decided / approval.granted, and no refreshed approval expiry.
   // Anything else (deny, unknown hash, expired or consumed approval) takes the normal path.
   // A different approver is a real update, not a replay: in particular a human must still
-  // be able to supersede an acs:admin approval (grantExecutionPlanApproval invalidates it).
-  const existingPlan = store.getCurrentExecutionPlan(workItem.id);
-  const existingPlanApproval = existingPlan
-    ? store.getExecutionPlanApproval(workItem.id, existingPlan.planHash, parsed.actionHash)
-    : undefined;
+  // be able to supersede an acs:admin approval. The approver is read from the current base
+  // grant (the record recordApproval updates), so Alice-then-Bob followed by Bob again is a replay.
+  const grant = store.getApprovalGrant(workItem.id, parsed.actionHash);
   if (
     workItem.status === "approved" &&
-    existingPlanApproval?.status === "granted" &&
-    existingPlanApproval.approvedByActorId === parsed.approvedBy &&
+    grant?.status === "granted" &&
+    grant.approvedBy === parsed.approvedBy &&
     store.hasApproval(workItem.id, parsed.actionHash)
   ) {
     const replayEvaluations = policy.evaluateWorkItem(workItem, parsed.approvedBy, "approve");
@@ -167,6 +165,9 @@ function gateApprovalInTransaction(
       (evaluation) => evaluation.actionHash === parsed.actionHash
     );
     if (replayDecision.decision !== "deny" && replayMatches) {
+      // The response reports the current evaluation, so any evaluation that differs from what
+      // is already recorded is recorded too; an unchanged policy appends nothing.
+      recordChangedEvaluations(store, workItem.id, replayEvaluations);
       return { decision: replayDecision, workItem, approvals: [] };
     }
   }
@@ -223,6 +224,28 @@ function gateApprovalInTransaction(
         : store.approveWorkItem(workItem.id, policyTransition),
     approvals
   };
+}
+
+function recordChangedEvaluations(store: WorkItemStore, workItemId: string, evaluations: PolicyEvaluation[]): void {
+  const recorded = store.readEvents({ name: "policy.decided", workItemId, limit: 500 });
+  for (const evaluation of evaluations) {
+    const latest = recorded
+      .filter((event) => (event.body as { actionHash?: string } | undefined)?.actionHash === evaluation.actionHash)
+      .at(-1)?.body as { decision?: string; reason?: string; matchedRules?: string[] } | undefined;
+    const unchanged =
+      latest !== undefined &&
+      latest.decision === evaluation.decision.decision &&
+      latest.reason === evaluation.decision.reason &&
+      JSON.stringify(latest.matchedRules ?? []) === JSON.stringify(evaluation.decision.matchedRules ?? []);
+    if (!unchanged) {
+      store.recordPolicyDecision({
+        workItemId,
+        actionHash: evaluation.actionHash,
+        context: policyContextAuditReceipt(evaluation.context),
+        ...evaluation.decision
+      });
+    }
+  }
 }
 
 function hasActionHash(input: unknown): boolean {
