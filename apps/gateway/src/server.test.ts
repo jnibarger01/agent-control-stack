@@ -3261,15 +3261,39 @@ describe("gateway MCP transport", () => {
     const { publicKey } = generateKeyPairSync("ed25519");
     const app = buildTestGateway({ dbPath, logger: false });
     try {
-      const created = await app.inject({ method: "POST", url: "/connectors", payload: { id: "busy", displayName: "Busy connector", publicKeyPem: String(publicKey.export({ type: "spki", format: "pem" })), allowedScopes: ["acs:work:read"] } });
+      const created = await app.inject({
+        method: "POST",
+        url: "/connectors",
+        payload: {
+          id: "busy",
+          displayName: "Busy connector",
+          publicKeyPem: String(publicKey.export({ type: "spki", format: "pem" })),
+          allowedScopes: ["acs:work:read"]
+        }
+      });
       expect(created.statusCode).toBe(201);
       // Seed history straight through the store: the routes are covered elsewhere, and 1000 HTTP calls are slow.
       const seed = new SqliteWorkItemStore(dbPath);
       try {
         // session_0 is the oldest row but still active; the 500 newer rows have already expired.
         const now = Date.now();
-        seed.registerTunnelSession({ connectorId: "busy", tunnelId: "tunnel_busy", sessionId: "session_0", now: new Date(now - 120_000), expiresAt: new Date(now + 600_000).toISOString(), actorId: testAuth.actorId });
-        for (let i = 1; i <= 500; i += 1) seed.registerTunnelSession({ connectorId: "busy", tunnelId: "tunnel_busy", sessionId: `session_${i}`, now: new Date(now - 60_000), expiresAt: new Date(now - 30_000).toISOString(), actorId: testAuth.actorId });
+        seed.registerTunnelSession({
+          connectorId: "busy",
+          tunnelId: "tunnel_busy",
+          sessionId: "session_0",
+          now: new Date(now - 120_000),
+          expiresAt: new Date(now + 600_000).toISOString(),
+          actorId: testAuth.actorId
+        });
+        for (let i = 1; i <= 500; i += 1)
+          seed.registerTunnelSession({
+            connectorId: "busy",
+            tunnelId: "tunnel_busy",
+            sessionId: `session_${i}`,
+            now: new Date(now - 60_000),
+            expiresAt: new Date(now - 30_000).toISOString(),
+            actorId: testAuth.actorId
+          });
       } finally {
         seed.close();
       }
