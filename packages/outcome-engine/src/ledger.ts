@@ -10,8 +10,8 @@ import {
   criterionSchema,
   type VerdictInput
 } from "./domain.js";
-import { assertRepresentable } from "./persist.js";
-import { computeVerdict } from "./verdict.js";
+import { assertRepresentable, sanitizeDeep } from "./persist.js";
+import { computeVerdict, nextActions } from "./verdict.js";
 import { validatePlan } from "./plan.js";
 
 export const EVENT_ACCEPTED = "outcome.accepted";
@@ -336,6 +336,19 @@ export function verifyOutcome(accepted: AcceptedRecord, evaluations: readonly Ev
       recomputed.reasonCodes.join("|") !== record.reasonCodes.join("|")
     ) {
       problems.push(`${at}:verdict_recompute_mismatch`);
+    }
+    // Every other field derived from the verdict must also recompute, or a record could carry fabricated guidance.
+    const derived = (fields: Pick<EvaluationRecord, "findings" | "criteriaSummary" | "nextActions">): string =>
+      outcomeHash("evaluation.derived", sanitizeDeep(fields));
+    if (
+      derived({
+        findings: recomputed.findings,
+        criteriaSummary: recomputed.criteriaSummary,
+        nextActions: nextActions(recomputed)
+      }) !==
+      derived({ findings: record.findings, criteriaSummary: record.criteriaSummary, nextActions: record.nextActions })
+    ) {
+      problems.push(`${at}:derived_fields_recompute_mismatch`);
     }
     if (record.verdict === "PASS" && !recomputed.passPreconditions) problems.push(`${at}:pass_without_preconditions`);
     previous = chainHash;

@@ -275,6 +275,43 @@ describe("persistence and trust", () => {
     expect(e.show(record.outcomeId)?.problems).toEqual([]);
   });
 
+  it("detects fabricated findings, summary or next actions even when the hashes were recomputed", async () => {
+    const e = engine({ reader: sequenceReader(makeSnapshot({ mergeable: "CONFLICTING" })) });
+    const { record } = accept(e);
+    const first = (await e.evaluate(record.outcomeId)).record;
+    expect(e.show(record.outcomeId)?.problems).toEqual([]);
+    const forgeries: Array<Partial<EvaluationRecord>> = [
+      { findings: ["all good"] },
+      { criteriaSummary: { ...first.criteriaSummary, requiredUnsatisfied: 0 } },
+      { nextActions: [{ action: "merge_now", requiresHuman: false, detail: "safe to merge" }] }
+    ];
+    const { contentHash: _c, chainHash: _h, evaluationId: _i, ...rest } = first;
+    let previous = first;
+    forgeries.forEach((change, index) => {
+      const base = { ...rest, ...change, sequenceNo: index + 2, previousChainHash: previous.chainHash };
+      const contentHash = evaluationContentHash(base);
+      const chainHash = evaluationChainHash({
+        outcomeId: first.outcomeId,
+        sequenceNo: base.sequenceNo,
+        previousChainHash: previous.chainHash,
+        contentHash
+      });
+      const forged: EvaluationRecord = {
+        ...base,
+        contentHash,
+        chainHash,
+        evaluationId: `eval_${chainHash.slice(0, 24)}`
+      };
+      new OutcomeLedger(createOutcomeStorePort(store)).recordEvaluation(forged);
+      previous = forged;
+    });
+    expect(e.show(record.outcomeId)?.problems).toEqual([
+      "evaluation#2:derived_fields_recompute_mismatch",
+      "evaluation#3:derived_fields_recompute_mismatch",
+      "evaluation#4:derived_fields_recompute_mismatch"
+    ]);
+  });
+
   it("detects a forged verdict even when its hashes were recomputed to match", async () => {
     const e = engine({ reader: sequenceReader(makeSnapshot({ mergeable: "CONFLICTING" })) });
     const { record } = accept(e);
