@@ -1448,9 +1448,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     const connector = workItems.getConnector(request.params.id);
     if (!connector) return reply.code(404).send({ error: "connector not found" });
     const sessions = workItems.listTunnelSessions(connector.id);
+    // Revoked and expired sessions stay stored, so the detail returns a bounded window (effectively active first,
+    // then most recently updated) and says so, instead of an unbounded list the console contract would reject.
+    const projected = sessions.map((session) => projectTunnelSession(session, heartbeatTtlMs));
+    const windowed = [
+      ...projected.filter((session) => session.effectiveStatus === "active"),
+      ...projected.filter((session) => session.effectiveStatus !== "active")
+    ].slice(0, CONNECTOR_SESSION_WINDOW);
     return {
       connector: projectConnector(connector, sessions, heartbeatTtlMs),
-      sessions: sessions.map((session) => projectTunnelSession(session, heartbeatTtlMs))
+      sessions: windowed,
+      sessionWindow: { shown: windowed.length, total: projected.length }
     };
   });
 
@@ -5072,6 +5080,9 @@ function auditEventIso(event: StoredAuditEvent): string {
   const millis = Number(BigInt(event.timeUnixNano) / 1_000_000n);
   return new Date(millis).toISOString();
 }
+
+/** Must not exceed the `sessions` maximum in the mission-control contract's connectorDetailSchema. */
+const CONNECTOR_SESSION_WINDOW = 500;
 
 function projectTunnelSession(session: RegisteredTunnelSession, heartbeatTtlMs: number) {
   const now = new Date();

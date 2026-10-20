@@ -63,7 +63,9 @@ export const connectorSchema = z.object({
 export const connectorsListSchema = z.object({ connectors: z.array(connectorSchema).max(500) });
 export const connectorDetailSchema = z.object({
   connector: connectorSchema,
-  sessions: z.array(z.object({ sessionId: short(200), tunnelId: short(200).optional(), status: short(40), effectiveStatus: short(40), staleReason: short(80).optional(), issuedAt: iso.optional(), expiresAt: iso.optional(), lastHeartbeatAt: iso.optional() })).max(500).default([])
+  sessions: z.array(z.object({ sessionId: short(200), tunnelId: short(200).optional(), status: short(40), effectiveStatus: short(40), staleReason: short(80).optional(), issuedAt: iso.optional(), expiresAt: iso.optional(), lastHeartbeatAt: iso.optional() })).max(500).default([]),
+  /** The gateway returns at most 500 sessions; `total` is how many are stored. Absent from older gateways. */
+  sessionWindow: z.object({ shown: z.number().int().nonnegative(), total: z.number().int().nonnegative() }).optional()
 });
 
 export type RegistryAgent = z.infer<typeof registryAgentSchema>;

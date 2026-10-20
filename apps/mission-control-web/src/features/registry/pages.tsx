@@ -174,7 +174,7 @@ export function ConnectorDetailPage({ data }: { data: ConnectorDetail }) {
           <div><dt className="text-xs text-muted">Next session expiry</dt><dd>{c.nextSessionExpiryAt ? relativeTime(c.nextSessionExpiryAt) : "no active session"}</dd></div>
         </dl>
       </Card>
-      <Card title="Tunnel sessions" subtitle="Effective status accounts for expiry and heartbeat; stored status alone can be stale.">
+      <Card title="Tunnel sessions" subtitle={`Effective status accounts for expiry and heartbeat; stored status alone can be stale.${data.sessionWindow && data.sessionWindow.total > data.sessionWindow.shown ? ` Showing ${data.sessionWindow.shown} of ${data.sessionWindow.total} stored sessions, active first.` : ""}`}>
         {data.sessions.length === 0 ? <EmptyState title="No sessions" /> : (
           <DataTable caption="Tunnel sessions" rows={data.sessions} rowKey={(s) => s.sessionId} columns={[
             { key: "id", header: "Session", render: (s) => <IdChip id={s.sessionId} /> },
