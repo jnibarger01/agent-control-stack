@@ -50,6 +50,18 @@ describe("mission control web hosting and overview endpoint", () => {
       ...(missionControlWeb ? { missionControlWeb } : {})
     });
 
+  it("the shared gateway limiter throttles unauthenticated /next/ shell and asset reads (one bucket per route)", async () => {
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, moa: false, auth: { token: TOKEN, actor: "user" }, missionControlWeb: { enabled: true, distDir: dist }, rateLimit: { windowMs: 60_000, maxRequests: 3 } });
+    try {
+      const codes: number[] = [];
+      for (const url of ["/next/", "/next/assets/app-abc123.js", "/next/queue", "/next/approvals"]) codes.push((await app.inject({ method: "GET", url })).statusCode);
+      expect(codes.slice(0, 3).every((c) => c !== 429)).toBe(true);
+      expect(codes[3]).toBe(429);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("overview requires authentication", async () => {
     const app = gateway();
     try {

@@ -5359,7 +5359,11 @@ function isRateLimitedRoute(url: string): boolean {
     path === "/api/mcp-clients/label" ||
     path === "/api/mcp-clients/label/clear" ||
     path.startsWith("/work-items/") ||
-    path.startsWith("/webhooks/")
+    path.startsWith("/webhooks/") ||
+    // The React Mission Control shell and assets: unauthenticated reads that touch the filesystem.
+    // isRateLimitedGetRoute must list them too, or GETs are still exempt.
+    path === "/next" ||
+    path.startsWith("/next/")
   );
 }
 
