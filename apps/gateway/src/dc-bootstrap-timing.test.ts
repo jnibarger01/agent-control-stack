@@ -3,7 +3,7 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { onDcBootstrapTiming, type DcBootstrapTimingFields } from "./dc-bootstrap-timing.js";
+import { onDcBootstrapTiming, registerDcBootstrapTiming, type DcBootstrapTimingFields } from "./dc-bootstrap-timing.js";
 import { buildGateway, type GatewayCredential } from "./server.js";
 
 const WORKER_TOKEN = "bridge-worker-token-timing-0123456789";
@@ -44,6 +44,7 @@ async function gateway() {
     },
     desktopCommanderContainment: { allowedRoots: [root], deniedRoots: [] }
   });
+  registerDcBootstrapTiming(app);
   cleanups.push(() => rmSync(root, { recursive: true, force: true }));
   cleanups.push(() => app.close());
   return app;
@@ -100,17 +101,24 @@ describe("dc runtime bootstrap timing (#375 diagnostics)", () => {
     for (const record of records) {
       expect(record.event).toBe("dc_runtime_bootstrap_timing");
       expect(record.requestId).toEqual(expect.any(String));
-      for (const key of ["authMs", "sqliteMs", "totalMs", "eventLoopDelayMaxMs", "eventLoopDelayP99Ms"] as const)
-        expect(record[key]).toBeGreaterThanOrEqual(0);
-      expect(record.receiptToHandlerMs).toBeGreaterThanOrEqual(0);
-      expect(record.lockWaitMs).toBeGreaterThanOrEqual(0);
-      expect(record.commitMs).toBeGreaterThanOrEqual(0);
+      for (const key of [
+        "receiptToHandlerMs",
+        "preRegistryMs",
+        "lockWaitMs",
+        "statementsMs",
+        "commitMs",
+        "totalMs",
+        "eventLoopDelayMaxMs",
+        "eventLoopDelayP99Ms"
+      ] as const)
+        expect(record[key], key).toBeGreaterThanOrEqual(0);
       const text = JSON.stringify(record);
       for (const secret of [WORKER_TOKEN, challenge, FINGERPRINT, "Bearer"]) expect(text).not.toContain(secret);
     }
     expect(records[0]!.correlationId).toBe(CORRELATION);
     expect(records[1]!.correlationId).toBe(CORRELATION);
     expect(records[2]!.correlationId).toBeUndefined();
+    expect(records.map((record) => record.transactionOutcome)).toEqual(["committed", "committed", "rolled_back"]);
   });
 
   it("drops a malformed correlation id instead of echoing it", async () => {

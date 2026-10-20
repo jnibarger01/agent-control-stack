@@ -1,20 +1,31 @@
 /**
  * Diagnostic timing for the managed-runtime bootstrap routes (#375).
  *
- * Emits only durations, the route, the Fastify request id, the HTTP status and
- * an error code. Never request bodies, headers, tokens, challenges or
- * fingerprints. Observational only: it changes no behavior or timeout.
+ * `registerDcBootstrapTiming(app)` adds app-level hooks that time
+ * /dc/runtime/bootstrap and /dc/runtime/bootstrap/complete and emit ONE
+ * structured record per request via the request logger (and in-process sinks):
+ * receipt->handler gap, handler time before the registry call (credential check
+ * plus body validation), the runtime-registry SQLite phases (write-lock wait
+ * for BEGIN IMMEDIATE, statements, COMMIT), total, and event-loop delay.
+ *
+ * Only durations, route, Fastify request id, edge correlation id, HTTP status
+ * and transaction outcome are recorded. Never headers, tokens, challenges,
+ * fingerprints or payloads. Observational only: no behavior or timeout change.
+ *
+ * It is registered by the E2E harness. Wiring it into buildGateway is
+ * deliberately left out of this change (apps/gateway/src/server.ts overlaps an
+ * open PR); it is a one-line follow-up.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
-
-export interface DcRegistryTransactionTiming {
-  lockWaitMs: number;
-  statementsMs: number;
-  commitMs: number;
-}
+import {
+  onRuntimeRegistryTransaction,
+  type RegistryTransactionTiming
+} from "@agent-control-stack/desktop-commander-adapter";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 
 export type DcBootstrapRoute = "/dc/runtime/bootstrap" | "/dc/runtime/bootstrap/complete";
-export type DcBootstrapPhase = "auth" | "sqlite";
+export const DC_BOOTSTRAP_CORRELATION_HEADER = "x-acs-request-id";
 
 export interface DcBootstrapTimingFields {
   readonly event: "dc_runtime_bootstrap_timing";
@@ -22,39 +33,35 @@ export interface DcBootstrapTimingFields {
   readonly requestId: string;
   /** Edge-generated x-acs-request-id, when well-formed. */
   readonly correlationId?: string;
-  /** Fastify onRequest (receipt) to handler start. */
-  readonly receiptToHandlerMs?: number;
   readonly statusCode: number;
-  readonly code?: string;
-  /** Credential/worker-identity check. */
-  readonly authMs: number;
-  /** Runtime-registry call: the SQLite BEGIN IMMEDIATE transaction and its statements. */
-  readonly sqliteMs: number;
-  /** BEGIN IMMEDIATE: write-lock acquisition including busy waits. */
+  /** onRequest (receipt) to preHandler (handler start). */
+  readonly receiptToHandlerMs: number;
+  /** Handler start to the registry transaction: credential check and body validation. */
+  readonly preRegistryMs?: number;
+  readonly transactionOutcome?: RegistryTransactionTiming["outcome"];
+  /** BEGIN IMMEDIATE: SQLite write-lock acquisition including busy_timeout waits. */
   readonly lockWaitMs?: number;
   readonly statementsMs?: number;
   /** COMMIT: journal/WAL write and fsync. */
   readonly commitMs?: number;
-  /** Handler entry to reply. */
+  /** Receipt to response sent. */
   readonly totalMs: number;
-  /** Event-loop delay observed since the previous record (ms). */
+  /** ACS event-loop delay since the previous record. */
   readonly eventLoopDelayMaxMs: number;
   readonly eventLoopDelayP99Ms: number;
 }
 
+const ROUTES = new Set<string>(["/dc/runtime/bootstrap", "/dc/runtime/bootstrap/complete"]);
+const CORRELATION_ID = /^[A-Za-z0-9-]{8,64}$/u;
+const round = (ms: number) => Math.round(ms * 10) / 10;
+
 type Sink = (fields: DcBootstrapTimingFields) => void;
 const sinks = new Set<Sink>();
-
-/** Test/diagnostic hook: observe emitted timing records in-process. Returns an unsubscribe function. */
+/** Observe emitted records in-process (E2E log surfacing, tests). Returns an unsubscribe function. */
 export function onDcBootstrapTiming(sink: Sink): () => void {
   sinks.add(sink);
   return () => sinks.delete(sink);
 }
-
-const round = (ms: number) => Math.round(ms * 10) / 10;
-const SAFE_CODE = /^[a-z0-9_]{1,64}$/u;
-const CORRELATION_ID = /^[A-Za-z0-9-]{8,64}$/u;
-export const DC_BOOTSTRAP_CORRELATION_HEADER = "x-acs-request-id";
 
 let histogram: ReturnType<typeof monitorEventLoopDelay> | undefined;
 function eventLoopDelay(): { maxMs: number; p99Ms: number } {
@@ -68,96 +75,87 @@ function eventLoopDelay(): { maxMs: number; p99Ms: number } {
   return result;
 }
 
-/** Start the event-loop delay monitor (idempotent) so the first record has a baseline. */
-export function enableDcBootstrapTiming(): void {
-  if (!histogram) eventLoopDelay();
+interface Pending {
+  route: DcBootstrapRoute;
+  correlationId?: string;
+  receivedAt: number;
+  handlerAt?: number;
+  transactionAt?: number;
+  transaction?: RegistryTransactionTiming;
+}
+const context = new AsyncLocalStorage<Pending>();
+const pending = new WeakMap<FastifyRequest, Pending>();
+let registryListener: (() => void) | undefined;
+
+function routeOf(url: string): DcBootstrapRoute | undefined {
+  const path = url.split("?", 1)[0]!;
+  return ROUTES.has(path) ? (path as DcBootstrapRoute) : undefined;
 }
 
-const receivedAt = new WeakMap<object, number>();
-/** Route-level onRequest hook: records request receipt. */
-export async function markDcBootstrapReceipt(request: object): Promise<void> {
-  receivedAt.set(request, performance.now());
-}
-
-export function startDcBootstrapTiming(
-  route: DcBootstrapRoute,
-  request: { id: string; headers: Record<string, string | string[] | undefined> }
-) {
-  const started = performance.now();
-  const received = receivedAt.get(request);
-  const header = request.headers[DC_BOOTSTRAP_CORRELATION_HEADER];
-  const correlationId = typeof header === "string" && CORRELATION_ID.test(header) ? header : undefined;
-  const requestId = request.id;
-  const phases: Record<DcBootstrapPhase, number> = { auth: 0, sqlite: 0 };
-  let transaction: DcRegistryTransactionTiming | undefined;
-  return {
-    transaction(timing: DcRegistryTransactionTiming | undefined): void {
-      transaction = timing;
-    },
-    /** Time `work`; `after` runs even when `work` throws (e.g. to collect registry transaction timing). */
-    phase<T>(name: DcBootstrapPhase, work: () => T, after?: () => void): T {
-      const at = performance.now();
+export function registerDcBootstrapTiming(app: FastifyInstance): void {
+  eventLoopDelay();
+  if (!registryListener) {
+    // The registry is synchronous and runs inside the handler's async context.
+    registryListener = onRuntimeRegistryTransaction((timing) => {
+      const current = context.getStore();
+      if (!current || current.transaction) return;
+      current.transaction = { ...timing };
+      current.transactionAt = performance.now() - timing.lockWaitMs - timing.statementsMs - timing.commitMs;
+    });
+  }
+  app.addHook("onRequest", async (request: FastifyRequest) => {
+    const route = routeOf(request.url);
+    if (!route) return;
+    const header = request.headers[DC_BOOTSTRAP_CORRELATION_HEADER];
+    const entry: Pending = {
+      route,
+      receivedAt: performance.now(),
+      ...(typeof header === "string" && CORRELATION_ID.test(header) ? { correlationId: header } : {})
+    };
+    pending.set(request, entry);
+    context.enterWith(entry);
+  });
+  app.addHook("preHandler", async (request: FastifyRequest) => {
+    const entry = pending.get(request);
+    if (!entry) return;
+    entry.handlerAt = performance.now();
+    context.enterWith(entry);
+  });
+  app.addHook("onResponse", async (request: FastifyRequest, reply: FastifyReply) => {
+    const entry = pending.get(request);
+    if (!entry) return;
+    pending.delete(request);
+    const now = performance.now();
+    const delay = eventLoopDelay();
+    const handlerAt = entry.handlerAt ?? now;
+    const tx = entry.transaction;
+    const fields: DcBootstrapTimingFields = {
+      event: "dc_runtime_bootstrap_timing",
+      route: entry.route,
+      requestId: String(request.id).slice(0, 64),
+      ...(entry.correlationId ? { correlationId: entry.correlationId } : {}),
+      statusCode: reply.statusCode,
+      receiptToHandlerMs: round(handlerAt - entry.receivedAt),
+      ...(tx && entry.transactionAt !== undefined
+        ? {
+            preRegistryMs: round(Math.max(0, entry.transactionAt - handlerAt)),
+            transactionOutcome: tx.outcome,
+            lockWaitMs: round(tx.lockWaitMs),
+            statementsMs: round(tx.statementsMs),
+            commitMs: round(tx.commitMs)
+          }
+        : {}),
+      totalMs: round(now - entry.receivedAt),
+      eventLoopDelayMaxMs: delay.maxMs,
+      eventLoopDelayP99Ms: delay.p99Ms
+    };
+    request.log.info(fields, "dc runtime bootstrap timing");
+    for (const sink of sinks) {
       try {
-        return work();
-      } finally {
-        phases[name] += performance.now() - at;
-        after?.();
+        sink(fields);
+      } catch {
+        // Diagnostics must never affect the request.
       }
-    },
-    finish(statusCode: number, code?: unknown): DcBootstrapTimingFields {
-      const fields: DcBootstrapTimingFields = {
-        event: "dc_runtime_bootstrap_timing",
-        route,
-        requestId: String(requestId).slice(0, 64),
-        ...(correlationId ? { correlationId } : {}),
-        ...(received !== undefined ? { receiptToHandlerMs: round(started - received) } : {}),
-        statusCode,
-        ...(typeof code === "string" && SAFE_CODE.test(code) ? { code } : {}),
-        authMs: round(phases.auth),
-        sqliteMs: round(phases.sqlite),
-        ...(transaction
-          ? {
-              lockWaitMs: round(transaction.lockWaitMs),
-              statementsMs: round(transaction.statementsMs),
-              commitMs: round(transaction.commitMs)
-            }
-          : {}),
-        totalMs: round(performance.now() - started),
-        ...(() => {
-          const delay = eventLoopDelay();
-          return { eventLoopDelayMaxMs: delay.maxMs, eventLoopDelayP99Ms: delay.p99Ms };
-        })()
-      };
-      for (const sink of sinks) {
-        try {
-          sink(fields);
-        } catch {
-          // Diagnostics must never affect the request.
-        }
-      }
-      return fields;
     }
-  };
-}
-
-type TimingRequest = {
-  id: string;
-  headers: Record<string, string | string[] | undefined>;
-  log: { info(fields: object, message: string): void };
-};
-const active = new WeakMap<object, ReturnType<typeof startDcBootstrapTiming>>();
-
-/** Begin timing a bootstrap handler; the route's onResponse hook emits the record. */
-export function beginDcBootstrapTiming(route: DcBootstrapRoute, request: TimingRequest) {
-  const timing = startDcBootstrapTiming(route, request);
-  active.set(request, timing);
-  return timing;
-}
-
-/** Route-level onResponse hook: emits one structured record per bootstrap request. */
-export async function emitDcBootstrapTiming(request: TimingRequest, reply: { statusCode: number }): Promise<void> {
-  const timing = active.get(request);
-  if (!timing) return;
-  active.delete(request);
-  request.log.info(timing.finish(reply.statusCode), "dc runtime bootstrap timing");
+  });
 }

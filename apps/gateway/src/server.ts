@@ -221,12 +221,6 @@ import { fileReadbackExpectationSchema } from "@agent-control-stack/verification
 import { changeSetExecutionInput } from "./change-set-execution.js";
 import { dcWorkItemActionKind, resolveChangeSetRuntimePolicy } from "./change-set-runtime-policy.js";
 import {
-  beginDcBootstrapTiming,
-  emitDcBootstrapTiming,
-  enableDcBootstrapTiming,
-  markDcBootstrapReceipt
-} from "./dc-bootstrap-timing.js";
-import {
   type GatewayAuthOptions,
   firstHeader,
   isDevelopmentLoopbackRequest,
@@ -861,7 +855,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const portfolioClient = options.portfolioClient ?? createPortfolioClientFromEnv();
   const capabilitySigningConfig = resolveCapabilitySigningConfig(options.desktopCommanderCapability, dbPath);
   const capabilityIssuanceRegistry = new SqliteDesktopCommanderRuntimeRegistry(dbPath);
-  enableDcBootstrapTiming();
   let dcSchedulerNeedsRuntimeReconciliation =
     workItems.countActiveAttemptLeases() > 0 ||
     (capabilitySigningConfig !== undefined &&
@@ -4043,15 +4036,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   // echoed by the managed Desktop Commander child during MCP initialize.
   app.post(
     "/dc/runtime/bootstrap",
-    {
-      config: { rateLimit: { max: 120, timeWindow: "1 minute" } },
-      onRequest: markDcBootstrapReceipt,
-      onResponse: emitDcBootstrapTiming
-    },
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
     async (request, reply) => {
-      const timing = beginDcBootstrapTiming("/dc/runtime/bootstrap", request);
       try {
-        const workerId = timing.phase("auth", () => requireWorkerIdentity(request, reply, auth));
+        const workerId = requireWorkerIdentity(request, reply, auth);
         if (!workerId) {
           return;
         }
@@ -4062,18 +4050,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           });
         }
         const body = dcRuntimeBootstrapSchema.parse(requestObject(request.body));
-        const challenge = timing.phase(
-          "sqlite",
-          () =>
-            capabilityIssuanceRegistry.issueBootstrap(
-              {
-                runtimeId: body.runtimeId,
-                identityConfigFingerprint: body.identityConfigFingerprint,
-                scopes: [...body.scopes]
-              },
-              new Date()
-            ),
-          () => timing.transaction(capabilityIssuanceRegistry.lastTransactionTiming)
+        const challenge = capabilityIssuanceRegistry.issueBootstrap(
+          {
+            runtimeId: body.runtimeId,
+            identityConfigFingerprint: body.identityConfigFingerprint,
+            scopes: [...body.scopes]
+          },
+          new Date()
         );
         return reply.code(201).send({
           runtimeId: challenge.runtimeId,
@@ -4089,15 +4072,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.post(
     "/dc/runtime/bootstrap/complete",
-    {
-      config: { rateLimit: { max: 120, timeWindow: "1 minute" } },
-      onRequest: markDcBootstrapReceipt,
-      onResponse: emitDcBootstrapTiming
-    },
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
     async (request, reply) => {
-      const timing = beginDcBootstrapTiming("/dc/runtime/bootstrap/complete", request);
       try {
-        const workerId = timing.phase("auth", () => requireWorkerIdentity(request, reply, auth));
+        const workerId = requireWorkerIdentity(request, reply, auth);
         if (!workerId) {
           return;
         }
@@ -4120,19 +4098,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             code: "desktop_commander_runtime_attestation_rejected"
           });
         }
-        timing.phase(
-          "sqlite",
-          () =>
-            capabilityIssuanceRegistry.completeBootstrap(
-              {
-                runtimeId: body.runtimeId,
-                identityConfigFingerprint: body.identityConfigFingerprint,
-                scopes: [...body.scopes],
-                challenge: proof.challenge
-              },
-              new Date()
-            ),
-          () => timing.transaction(capabilityIssuanceRegistry.lastTransactionTiming)
+        capabilityIssuanceRegistry.completeBootstrap(
+          {
+            runtimeId: body.runtimeId,
+            identityConfigFingerprint: body.identityConfigFingerprint,
+            scopes: [...body.scopes],
+            challenge: proof.challenge
+          },
+          new Date()
         );
         if (
           capabilitySigningConfig &&

@@ -25,7 +25,7 @@ import {
   type ExecutionAdmissionController
 } from "@agent-control-stack/execution-admission";
 import { buildGateway, type GatewayCredential } from "../../../apps/gateway/src/server.js";
-import { onDcBootstrapTiming } from "../../../apps/gateway/src/dc-bootstrap-timing.js";
+import { onDcBootstrapTiming, registerDcBootstrapTiming } from "../../../apps/gateway/src/dc-bootstrap-timing.js";
 
 export const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 export const DC_ROOT = join(REPO_ROOT, "vendor/desktop-commander");
@@ -181,6 +181,7 @@ export async function startAcs(
   });
   options.beforeListen?.(app);
   // #375 diagnostics: surface ACS bootstrap timing records in the E2E log.
+  registerDcBootstrapTiming(app);
   const stopTiming = onDcBootstrapTiming((fields) => console.log(`[acs-timing] ${JSON.stringify(fields)}`));
   app.addHook("onClose", async () => stopTiming());
   await app.listen({ host: "127.0.0.1", port: 0 });

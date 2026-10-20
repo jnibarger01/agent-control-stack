@@ -112,9 +112,36 @@ export function classifyCapabilityIssuanceConstraintError(error: unknown): Contr
  * enter persisted rows. Call `recordIssuance` before signing a capability.
  */
 export interface RegistryTransactionTiming {
+  operation: string;
+  outcome: "committed" | "rolled_back" | "lock_failed";
+  /** BEGIN IMMEDIATE: write-lock acquisition, including any busy_timeout wait. */
   lockWaitMs: number;
   statementsMs: number;
+  /** COMMIT: journal/WAL write and any fsync. */
   commitMs: number;
+}
+
+type RegistryTransactionListener = (timing: RegistryTransactionTiming) => void;
+const transactionListeners = new Set<RegistryTransactionListener>();
+
+/**
+ * Diagnostics for #375: observe runtime-registry transaction phase timings
+ * (durations and operation name only). Returns an unsubscribe function.
+ */
+export function onRuntimeRegistryTransaction(listener: RegistryTransactionListener): () => void {
+  transactionListeners.add(listener);
+  return () => transactionListeners.delete(listener);
+}
+
+function emitTransactionTiming(timing: RegistryTransactionTiming): void {
+  if (timing.operation === "registry") return;
+  for (const listener of transactionListeners) {
+    try {
+      listener(timing);
+    } catch {
+      // Diagnostics never affect the transaction.
+    }
+  }
 }
 
 export class SqliteDesktopCommanderRuntimeRegistry {
@@ -223,7 +250,7 @@ export class SqliteDesktopCommanderRuntimeRegistry {
         "INSERT INTO desktop_commander_bootstrap_challenge_scopes (challenge_id, scope_name) VALUES (?, ?)"
       );
       for (const scope of scopes) insert.run(row.challenge_id, scope);
-    });
+    }, "issueBootstrap");
     return {
       runtimeId: input.runtimeId,
       identityConfigFingerprint: input.identityConfigFingerprint,
@@ -306,7 +333,7 @@ export class SqliteDesktopCommanderRuntimeRegistry {
           "desktop_commander_runtime_attestation_rejected",
           "bootstrap challenge was already consumed"
         );
-    });
+    }, "completeBootstrap");
   }
 
   revoke(runtimeId: string, reason: string, now = new Date()): void {
@@ -488,17 +515,23 @@ export class SqliteDesktopCommanderRuntimeRegistry {
     });
   }
 
-  /**
-   * Phase timing of the most recent transaction (diagnostics for #375). The
-   * registry is synchronous, so a caller reads it right after its own call.
-   */
-  lastTransactionTiming: RegistryTransactionTiming | undefined;
-
-  private transaction<T>(work: () => T): T {
-    const timing = { lockWaitMs: 0, statementsMs: 0, commitMs: 0 };
-    this.lastTransactionTiming = timing;
+  private transaction<T>(work: () => T, operation = "registry"): T {
+    const timing: RegistryTransactionTiming = {
+      operation,
+      outcome: "rolled_back",
+      lockWaitMs: 0,
+      statementsMs: 0,
+      commitMs: 0
+    };
     let at = performance.now();
-    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.exec("BEGIN IMMEDIATE");
+    } catch (error) {
+      timing.lockWaitMs = performance.now() - at;
+      timing.outcome = "lock_failed";
+      emitTransactionTiming(timing);
+      throw error;
+    }
     // BEGIN IMMEDIATE takes the write lock; any busy_timeout wait is spent here.
     timing.lockWaitMs = performance.now() - at;
     try {
@@ -509,6 +542,7 @@ export class SqliteDesktopCommanderRuntimeRegistry {
       this.db.exec("COMMIT");
       // COMMIT includes the journal/WAL write and any fsync.
       timing.commitMs = performance.now() - at;
+      timing.outcome = "committed";
       return result;
     } catch (error) {
       try {
@@ -517,6 +551,8 @@ export class SqliteDesktopCommanderRuntimeRegistry {
         /* no active transaction */
       }
       throw error;
+    } finally {
+      emitTransactionTiming(timing);
     }
   }
 }
