@@ -68,6 +68,13 @@ describe("accept", () => {
       expect.arrayContaining(["github_read_pr", "verify_audit_chain", "run_pure_probe", "append_outcome_event"])
     );
   });
+  it("refuses the repository names . and .. that the GitHub reader would refuse at evaluation", () => {
+    const e = engine();
+    expect(() => accept(e, { repository: "o/." })).toThrow();
+    expect(() => accept(e, { repository: "o/.." })).toThrow();
+    expect(() => accept(e, { repository: "o/.r" })).not.toThrow();
+  });
+
   it("is idempotent: the same acceptance returns the same outcome, even with a different expiry", () => {
     const e = engine();
     const first = accept(e);

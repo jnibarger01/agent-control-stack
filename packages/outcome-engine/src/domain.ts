@@ -83,7 +83,12 @@ export const PR_READINESS_FLOOR: ReadonlyArray<{ kind: CriterionKind }> = [
 
 export const repositorySchema = z
   .string()
-  .regex(/^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}\/[A-Za-z0-9._-]{1,100}$/u);
+  .regex(/^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}\/[A-Za-z0-9._-]{1,100}$/u)
+  // Same rule as the GitHub reader's parseRepository: `.` and `..` are traversal segments, never repository names.
+  .refine((value) => {
+    const name = value.slice(value.indexOf("/") + 1);
+    return name !== "." && name !== "..";
+  }, "repository name may not be . or ..");
 
 /** Strict: a caller can never supply a verdict, status, grade, actor, approval or authority field. */
 export const acceptInputSchema = z.strictObject({
