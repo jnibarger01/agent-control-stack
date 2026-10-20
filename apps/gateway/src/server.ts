@@ -4,6 +4,7 @@ import { registerMissionDispatchRoutes } from "./mission-dispatch-routes.js";
 import { registerDashboardRoutes, eventReadOptions } from "./dashboard-routes.js";
 import { registerCsrfGuard } from "./csrf-guard.js";
 import {
+  MISSION_CONTROL_WEB_CSP,
   missionControlWebDefaultRoot,
   registerMissionControlWeb,
   type MissionControlWebOptions
@@ -1028,10 +1029,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if ((loginRoute === "/" || loginRoute === "/legacy" || loginRoute === "/legacy/") && auth) {
         // `next` only ever lands on a same-origin path (renderLoginPage rejects anything else).
         const next = (request.query as { next?: unknown } | undefined)?.next;
-        reply
-          .code(401)
-          .type("text/html")
-          .send(typeof next === "string" ? renderLoginPage(next) : renderLoginPage());
+        const page = typeof next === "string" ? renderLoginPage(next) : renderLoginPage();
+        reply.code(401).header("content-security-policy", loginPageCsp(page)).type("text/html").send(page);
         return reply;
       }
       sendReadAccessError(reply, auth);
@@ -5521,6 +5520,21 @@ export function safeLoginRedirect(redirectTo: string): string {
   if (!path.startsWith("/") || path.startsWith("//") || path.includes("\\")) return "/";
   if (new URL(path, base).origin !== base) return "/";
   return path;
+}
+
+/**
+ * The /next CSP (MISSION_CONTROL_WEB_CSP) for the login page. The page keeps its small inline style and script, so
+ * those two directives also allow exactly those blocks by hash; everything else is identical.
+ */
+export function loginPageCsp(page: string): string {
+  const hashes = (tag: "script" | "style") =>
+    [...page.matchAll(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "g"))]
+      .map((m) => ` 'sha256-${createHash("sha256").update(m[1]).digest("base64")}'`)
+      .join("");
+  return MISSION_CONTROL_WEB_CSP.replace("script-src 'self'", `script-src 'self'${hashes("script")}`).replace(
+    "style-src 'self'",
+    `style-src 'self'${hashes("style")}`
+  );
 }
 
 export function renderLoginPage(redirectTo = "/"): string {

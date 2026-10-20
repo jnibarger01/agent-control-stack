@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { buildGateway } from "./server.js";
+import { MISSION_CONTROL_WEB_CSP } from "./mission-control-web.js";
 
 const TOKEN = "t".repeat(48);
 const auth = { Authorization: `Bearer ${TOKEN}` };
@@ -89,6 +91,31 @@ describe("React app as the default at / (rollback is one flag)", () => {
       const breakout = await app.inject({ method: "GET", url: "/?next=%2F%3C%2Fscript%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E" });
       expect(breakout.body).not.toContain("<script>alert(1)");
       expect(breakout.body.match(/<\/script>/g)?.length).toBe(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("login 401 pages for /, /legacy and /legacy/ carry the /next CSP, allowing only their own inline blocks", async () => {
+    const app = gateway({ enabled: true, distDir: dist, defaultRoot: true });
+    try {
+      for (const url of ["/", "/legacy", "/legacy/", "/?next=%2Fnext%2F"]) {
+        const res = await app.inject({ method: "GET", url });
+        expect(res.statusCode, url).toBe(401);
+        const csp = String(res.headers["content-security-policy"] ?? "");
+        const directives = new Map(csp.split(";").map((d) => d.trim().split(/\s+/)).map(([name, ...values]) => [name, values]));
+        const expected = new Map(MISSION_CONTROL_WEB_CSP.split(";").map((d) => d.trim().split(/\s+/)).map(([name, ...values]) => [name, values]));
+        expect([...directives.keys()].sort(), url).toEqual([...expected.keys()].sort());
+        for (const [name, values] of expected) {
+          if (name === "script-src" || name === "style-src") continue;
+          expect(directives.get(name), `${url} ${name}`).toEqual(values);
+        }
+        for (const tag of ["script", "style"] as const) {
+          const body = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(res.body)?.[1] ?? "";
+          const hash = `'sha256-${createHash("sha256").update(body).digest("base64")}'`;
+          expect(directives.get(`${tag}-src`), `${url} ${tag}`).toEqual(["'self'", hash]);
+        }
+      }
     } finally {
       await app.close();
     }
