@@ -183,6 +183,14 @@ describe("authority bindings under node-cap pressure and lease expiry", () => {
     }
   });
 
+  it("keeps the binding when the registry exactly fills the node cap", () => {
+    const registry = Array.from({ length: 199 }, (_, i) => agent(`idle-${i}`));
+    const out = toOverviewReadModel(model({ agents: [...registry, agent("agent-a")], attemptLeasesByWorkItem: { w1: [lease({ leaseId: "l1", workItemId: "w1" })] } }));
+    expect(out.network.nodes).toHaveLength(200);
+    expect(out.network.edges).toContainEqual({ from: "agent:agent-a", to: "work:w1", kind: "active_lease", fencingEpoch: 1 });
+    expect(out.network.nodes.some((n) => n.id === "work:w1")).toBe(true);
+  });
+
   it("does not draw ownership from an active lease whose expiry has passed but the reaper has not closed", () => {
     const out = toOverviewReadModel(model({ attemptLeasesByWorkItem: { w1: [lease({ leaseId: "l1", workItemId: "w1", expiresAt: "2026-10-19T11:59:00.000Z" })] } }));
     expect(out.network.edges.filter((e) => e.kind === "active_lease")).toEqual([]);
