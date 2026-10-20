@@ -55,7 +55,8 @@ const retry = (count: number, error: unknown) =>
 // Agent staleness, SLA breaches and lease expiry change with wall-clock time and emit no event, so an
 // otherwise-quiet console would show them indefinitely. A bounded refetch keeps them honest.
 const TIME_DERIVED_REFRESH_MS = 60_000;
-const shared = { staleTime: Infinity, refetchOnWindowFocus: true, refetchInterval: TIME_DERIVED_REFRESH_MS, retry } as const;
+// staleTime matches the interval so a tab returning to focus after a quiet minute refetches at once.
+const shared = { staleTime: TIME_DERIVED_REFRESH_MS, refetchOnWindowFocus: true, refetchInterval: TIME_DERIVED_REFRESH_MS, retry } as const;
 
 export const useOverview = () => useQuery({ queryKey: OVERVIEW_KEY, queryFn: ({ signal }) => fetchOverview(fetch, signal), ...shared });
 export const useQueue = () => useQuery({ queryKey: QUEUE_KEY, queryFn: ({ signal }) => fetchQueue(fetch, signal), ...shared });
