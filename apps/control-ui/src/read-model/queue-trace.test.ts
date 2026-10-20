@@ -92,6 +92,12 @@ describe("toTraceReadModel", () => {
     expect(out.admission).toBeNull();
   });
 
+  it("reports a still-active lease past its expiry as expired and not as the current lease stage", () => {
+    const out = toTraceReadModel(input({ leases: [lease({ fencingEpoch: 2, expiresAt: "2026-10-19T11:59:00.000Z" })] }));
+    expect(out.attempts.at(-1)?.leases.at(-1)?.status).toBe("expired");
+    expect(stageOf(out, "lease").state).not.toBe("current");
+  });
+
   it("keeps approval required while the work item still awaits approval, even after one action was granted", () => {
     const out = toTraceReadModel(input({ workItem: item("w1", "needs_approval") }));
     expect(out.approval.state).toBe("required");

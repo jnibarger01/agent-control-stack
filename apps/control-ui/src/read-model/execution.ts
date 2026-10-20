@@ -1,6 +1,7 @@
 import type { ExecutionReadModel, Viewer } from "@agent-control-stack/mission-control-contract";
 import { redactSecrets } from "../redaction.js";
 import type { MissionControlViewModel } from "../types.js";
+import { displayLeaseStatus } from "./lease.js";
 
 const text = (value: unknown, max: number): string => {
   const redacted = redactSecrets(value);
@@ -42,7 +43,7 @@ export function toExecutionReadModel(model: MissionControlViewModel, viewer: Vie
         status: attempt.status,
         ...(attempt.claimedByWorkerId ? { workerId: text(attempt.claimedByWorkerId, 200) } : {}),
         fencingEpoch: attempt.currentFencingEpoch,
-        ...(current ? { lease: { status: current.status, expiresAt: current.expiresAt, expiringSoon: expiringSoon(current, nowMs) } } : {}),
+        ...(current ? { lease: { status: displayLeaseStatus(current, nowMs), expiresAt: current.expiresAt, expiringSoon: expiringSoon(current, nowMs) } } : {}),
         ...(attempt.startedAt ? { startedAt: attempt.startedAt } : {}),
         updatedAt: attempt.updatedAt,
         ...(terminal && Number.isFinite(started) && Number.isFinite(ended) && ended >= started ? { durationMs: ended - started } : {})

@@ -2,6 +2,7 @@ import type { TraceAttempt, TraceReadModel, TraceStage } from "@agent-control-st
 import type { ExecutionAttempt, ExecutionPlanAdmission, ExecutionPlanRecord, StoredAuditEvent, WorkItem } from "@agent-control-stack/work-items";
 import { redactSecrets, redactedAttributesJson } from "../redaction.js";
 import type { MissionControlAttemptLease } from "../types.js";
+import { displayLeaseStatus } from "./lease.js";
 
 export interface TraceInput {
   workItem: WorkItem;
@@ -75,7 +76,7 @@ export function toTraceReadModel(input: TraceInput): TraceReadModel {
       .sort((x, y) => x.fencingEpoch - y.fencingEpoch)
       .map((l) => ({
         leaseId: l.leaseId,
-        status: l.status,
+        status: displayLeaseStatus(l, now.getTime()),
         fencingEpoch: l.fencingEpoch,
         workerId: text(l.workerId, 200),
         issuedAt: l.issuedAt,

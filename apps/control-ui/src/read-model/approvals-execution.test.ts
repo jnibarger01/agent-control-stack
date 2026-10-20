@@ -52,6 +52,11 @@ describe("toExecutionReadModel", () => {
     for (const bad of ["tokenHash", "deadbeef", "/home/secret", `${["sk", "abcdefghijklmnop"].join("-")}`, "SECRET-STDOUT"]) expect(json, bad).not.toContain(bad);
   });
 
+  it("reports a still-active lease past its expiry as expired, never as current ownership", () => {
+    const out = toExecutionReadModel(model({ attemptLeasesByWorkItem: { w1: [lease({ expiresAt: "2026-10-19T11:59:00.000Z" })] } }), viewer);
+    expect(out.attempts.find((a) => a.attemptId === "att-1")?.lease).toEqual({ status: "expired", expiresAt: "2026-10-19T11:59:00.000Z", expiringSoon: false });
+  });
+
   it("summarises attempts honestly and uses the highest-epoch lease", () => {
     const out = toExecutionReadModel(model(), viewer);
     expect(out.summary).toEqual({ running: 1, failed: 0, attention: 1, expiringLeases: 1 });

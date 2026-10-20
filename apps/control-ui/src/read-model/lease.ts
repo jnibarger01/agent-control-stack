@@ -7,3 +7,11 @@ export function isCurrentLease(lease: { status: string; expiresAt: string }, now
   const expiresMs = Date.parse(lease.expiresAt);
   return Number.isFinite(expiresMs) && expiresMs > nowMs;
 }
+
+/**
+ * The status to show for a lease. A row still stored as `active` after its expiry is reported as `expired`, so a
+ * projection never presents a lapsed lease as current ownership while the reaper has not yet reconciled it.
+ */
+export function displayLeaseStatus(lease: { status: string; expiresAt: string }, nowMs: number): string {
+  return lease.status === "active" && !isCurrentLease(lease, nowMs) ? "expired" : lease.status;
+}
