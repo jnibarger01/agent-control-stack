@@ -14,14 +14,14 @@ describe("planVerificationDispatch", () => {
 
   it("does not treat cached failures or stale policy/toolchain results as verified", () => {
     const cached = [
-      { artifactHash: "a", policyHash: "p", toolchainHash: "t", verdict: "FAIL" as const },
-      { artifactHash: "c", policyHash: "old", toolchainHash: "t", verdict: "PASS" as const },
+      { id: "lint-a", artifactHash: "a", policyHash: "p", toolchainHash: "t", verdict: "FAIL" as const },
+      { id: "test-c", artifactHash: "c", policyHash: "old", toolchainHash: "t", verdict: "PASS" as const },
     ];
     expect(planVerificationDispatch(pending, cached, 3).map((job) => job.id)).toEqual(["lint-a", "test-c", "review-b"]);
   });
 
   it("skips only exact PASS cache matches", () => {
-    const cached = [{ artifactHash: "a", policyHash: "p", toolchainHash: "t", verdict: "PASS" as const }];
+    const cached = [{ id: "lint-a", artifactHash: "a", policyHash: "p", toolchainHash: "t", verdict: "PASS" as const }];
     expect(planVerificationDispatch(pending, cached, 2).map((job) => job.id)).toEqual(["test-c", "review-b"]);
   });
 
@@ -30,6 +30,11 @@ describe("planVerificationDispatch", () => {
     expect(() => planVerificationDispatch(pending, [], 1.5)).toThrow();
     expect(() => planVerificationDispatch([pending[0], pending[0]], [], 2)).toThrow();
     expect(planVerificationDispatch(pending, [], 0)).toEqual([]);
+  });
+
+  it("does not reuse PASS evidence across different check IDs", () => {
+    const cached = [{ id: "another-check", artifactHash: "a", policyHash: "p", toolchainHash: "t", verdict: "PASS" as const }];
+    expect(planVerificationDispatch(pending, cached, 1).map((job) => job.id)).toEqual(["lint-a"]);
   });
 
   it("does not mutate queue order or cache input", () => {
