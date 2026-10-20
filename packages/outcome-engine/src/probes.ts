@@ -21,7 +21,12 @@ export const VERIFICATION_SURFACE_V1: readonly string[] = [
   "eslint.config.js",
   ".gitleaks.toml",
   "scripts/check-*.mjs",
-  "tsconfig.base.json"
+  "tsconfig.base.json",
+  // The verifier itself, the adapters that feed it GitHub facts and the merge-gate decision, and its composition root:
+  // a diff that changes how the verdict is reached cannot be trusted to have reached it.
+  "packages/outcome-engine/**",
+  "packages/integration-manager/src/**",
+  "apps/cli/src/outcome.ts"
 ];
 
 const MAX_LISTED_PATHS = 50;

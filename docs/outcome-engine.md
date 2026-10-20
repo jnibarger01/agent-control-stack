@@ -18,13 +18,13 @@ acs outcome list [--json]
 
 If `--criteria-file` is omitted the default "production-ready" template is used. Every outcome must require `pr_open` and `merge_gate_eligible` (the readiness floor); unknown kinds, unknown fields, and any `verdict`, `status`, `grade`, `actor`, `approval` or `authority` field are rejected.
 
-| Kind                             | Satisfied when                                                                                                                                                   |
-| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pr_open`                        | The pull request is open.                                                                                                                                        |
-| `merge_gate_eligible`            | The integration-manager gate passes and at least one check concluded SUCCESS. Policy `assessment` ignores only the draft and author blockers and says so.        |
-| `required_checks_succeeded`      | Each pinned `{name, appSlug}` check run concluded SUCCESS on the head commit. A same-named check from another app or a commit status is ambiguous (a human).     |
-| `files_within_scope`             | Every changed file matches `allowGlobs` and none matches `forbidGlobs`.                                                                                          |
-| `verification_surface_untouched` | No changed file is in `VERIFICATION_SURFACE_V1` (workflows, review instructions, CODEOWNERS, vitest/eslint config, `scripts/check-*.mjs`, `tsconfig.base.json`). |
+| Kind                             | Satisfied when                                                                                                                                                                                                                                                                            |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pr_open`                        | The pull request is open.                                                                                                                                                                                                                                                                 |
+| `merge_gate_eligible`            | The integration-manager gate passes and at least one check concluded SUCCESS. Policy `assessment` ignores only the draft and author blockers and says so.                                                                                                                                 |
+| `required_checks_succeeded`      | Each pinned `{name, appSlug}` check run concluded SUCCESS on the head commit. A same-named check from another app or a commit status is ambiguous (a human).                                                                                                                              |
+| `files_within_scope`             | Every changed file matches `allowGlobs` and none matches `forbidGlobs`.                                                                                                                                                                                                                   |
+| `verification_surface_untouched` | No changed file is in `VERIFICATION_SURFACE_V1` (workflows, review instructions, CODEOWNERS, vitest/eslint config, `scripts/check-*.mjs`, `tsconfig.base.json`, and the verifier itself: `packages/outcome-engine/**`, `packages/integration-manager/src/**`, `apps/cli/src/outcome.ts`). |
 
 `acs_work_item_real_success` is reserved and rejected: it needs a verified binding between a work item and the pull request.
 

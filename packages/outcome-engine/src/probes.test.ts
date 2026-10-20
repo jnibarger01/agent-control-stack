@@ -185,6 +185,18 @@ describe("files_within_scope and verification_surface_untouched", () => {
     const out = run(scope(["docs/**"]), { changedFiles: many });
     expect(out.findings).toHaveLength(51);
   });
+  it("changing the verifier or the adapters feeding it is touching the verification surface", () => {
+    for (const file of [
+      "packages/outcome-engine/src/verdict.ts",
+      "packages/outcome-engine/src/probes.ts",
+      "packages/integration-manager/src/github-source.ts",
+      "packages/integration-manager/src/gate.ts",
+      "apps/cli/src/outcome.ts"
+    ]) {
+      expect(matchesAny(file, VERIFICATION_SURFACE_V1), file).toBe(true);
+    }
+    expect(matchesAny("packages/work-items/src/store.ts", VERIFICATION_SURFACE_V1)).toBe(false);
+  });
   it("touching the verification surface needs a human", () => {
     const surface: Criterion = { id: "v", kind: "verification_surface_untouched", required: true };
     expect(run(surface).state).toBe("satisfied");
