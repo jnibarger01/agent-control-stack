@@ -78,6 +78,13 @@ describe("React app as the default at / (rollback is one flag)", () => {
         expect(res.body, target).toContain('const redirectTo = "/"');
         expect(res.body, target).not.toContain("evil.example");
       }
+      // URL normalisation collapses dot-segments, so these used to render redirectTo "//evil.com" or "///evil.com".
+      for (const target of ["/.//evil.com", "/..//evil.com", "/a/..//evil.com", "/%2e%2e//evil.com", "/..///evil.com", `/${"a".repeat(100_000)}`]) {
+        const res = await app.inject({ method: "GET", url: `/?next=${encodeURIComponent(target)}` });
+        const rendered = /const redirectTo = (".*?");/.exec(res.body)?.[1];
+        expect(rendered, target.slice(0, 40)).toBe('"/"');
+        expect(new URL(JSON.parse(rendered!) as string, "https://console.invalid").origin).toBe("https://console.invalid");
+      }
       // A same-origin path must not be able to close the inline script.
       const breakout = await app.inject({ method: "GET", url: "/?next=%2F%3C%2Fscript%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E" });
       expect(breakout.body).not.toContain("<script>alert(1)");

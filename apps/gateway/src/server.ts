@@ -5478,6 +5478,8 @@ function adminModeTtlFromEnv(env: NodeJS.ProcessEnv = process.env): number | und
   return value;
 }
 
+const MAX_LOGIN_REDIRECT_LENGTH = 2048;
+
 /**
  * Returns `redirectTo` only when it is a same-origin path, otherwise "/". Browsers treat a backslash as a path
  * separator and strip tabs/newlines, so `/\\evil.example` or `/\t/evil.example` would leave the origin even though
@@ -5485,6 +5487,7 @@ function adminModeTtlFromEnv(env: NodeJS.ProcessEnv = process.env): number | und
  * backslashes and control characters are refused outright.
  */
 export function safeLoginRedirect(redirectTo: string): string {
+  if (redirectTo.length > MAX_LOGIN_REDIRECT_LENGTH) return "/";
   // eslint-disable-next-line no-control-regex
   if (!redirectTo.startsWith("/") || /[\\\u0000-\u001f\u007f]/.test(redirectTo)) return "/";
   const base = "https://console.invalid";
@@ -5495,7 +5498,12 @@ export function safeLoginRedirect(redirectTo: string): string {
     return "/";
   }
   if (resolved.origin !== base) return "/";
-  return `${resolved.pathname}${resolved.search}${resolved.hash}`;
+  // Normalisation collapses dot-segments, so "/.//evil.example" or "/%2e%2e//evil.example" resolve to a pathname
+  // that starts with "//", which a browser reads as a protocol-relative URL to another host. Re-check the result.
+  const path = `${resolved.pathname}${resolved.search}${resolved.hash}`;
+  if (!path.startsWith("/") || path.startsWith("//") || path.includes("\\")) return "/";
+  if (new URL(path, base).origin !== base) return "/";
+  return path;
 }
 
 export function renderLoginPage(redirectTo = "/"): string {
