@@ -25,6 +25,7 @@ import {
   type ExecutionAdmissionController
 } from "@agent-control-stack/execution-admission";
 import { buildGateway, type GatewayCredential } from "../../../apps/gateway/src/server.js";
+import { onDcBootstrapTiming } from "../../../apps/gateway/src/dc-bootstrap-timing.js";
 
 export const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 export const DC_ROOT = join(REPO_ROOT, "vendor/desktop-commander");
@@ -179,6 +180,9 @@ export async function startAcs(
     ...(options.executionAdmission ? { executionAdmission: options.executionAdmission } : {})
   });
   options.beforeListen?.(app);
+  // #375 diagnostics: surface ACS bootstrap timing records in the E2E log.
+  const stopTiming = onDcBootstrapTiming((fields) => console.log(`[acs-timing] ${JSON.stringify(fields)}`));
+  app.addHook("onClose", async () => stopTiming());
   await app.listen({ host: "127.0.0.1", port: 0 });
   const url = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   const post = async (path: string, token: string, payload: unknown, headers: Record<string, string> = {}) => {
@@ -345,6 +349,14 @@ export async function startEdge(
     // wait on the edge's dependency-aware readiness probe before returning.
     "/ready"
   );
+  // #375 diagnostics: surface the edge's acs_post_timing records in the E2E log.
+  let pending = "";
+  service.child.stdout?.on("data", (chunk) => {
+    pending += String(chunk);
+    const lines = pending.split("\n");
+    pending = lines.pop() ?? "";
+    for (const line of lines) if (line.includes('"acs_post_timing"')) console.log(`[edge-timing] ${line}`);
+  });
   return { ...service, origin };
 }
 

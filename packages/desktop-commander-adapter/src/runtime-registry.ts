@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks";
 import { createHash, randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { ControlStackError, applyControlPlaneMigrations, createId } from "@agent-control-stack/shared";
@@ -110,6 +111,12 @@ export function classifyCapabilityIssuanceConstraintError(error: unknown): Contr
  * authoritative control-plane SQLite database; raw challenges/nonces never
  * enter persisted rows. Call `recordIssuance` before signing a capability.
  */
+export interface RegistryTransactionTiming {
+  lockWaitMs: number;
+  statementsMs: number;
+  commitMs: number;
+}
+
 export class SqliteDesktopCommanderRuntimeRegistry {
   private readonly db: DatabaseSync;
 
@@ -481,11 +488,27 @@ export class SqliteDesktopCommanderRuntimeRegistry {
     });
   }
 
+  /**
+   * Phase timing of the most recent transaction (diagnostics for #375). The
+   * registry is synchronous, so a caller reads it right after its own call.
+   */
+  lastTransactionTiming: RegistryTransactionTiming | undefined;
+
   private transaction<T>(work: () => T): T {
+    const timing = { lockWaitMs: 0, statementsMs: 0, commitMs: 0 };
+    this.lastTransactionTiming = timing;
+    let at = performance.now();
     this.db.exec("BEGIN IMMEDIATE");
+    // BEGIN IMMEDIATE takes the write lock; any busy_timeout wait is spent here.
+    timing.lockWaitMs = performance.now() - at;
     try {
+      at = performance.now();
       const result = work();
+      timing.statementsMs = performance.now() - at;
+      at = performance.now();
       this.db.exec("COMMIT");
+      // COMMIT includes the journal/WAL write and any fsync.
+      timing.commitMs = performance.now() - at;
       return result;
     } catch (error) {
       try {
