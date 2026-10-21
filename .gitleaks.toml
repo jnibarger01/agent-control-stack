@@ -17,7 +17,10 @@ paths = [
   # Desktop Commander fixtures: a random OAuth client UUID and the canonical
   # fake AWS key AKIAABCDEFGHIJKLMNOP used as secret_scan test input.
   '''(^|/)apps/dc-relay/test/test-control-plane-pairing\.js$''',
-  '''(^|/)vendor/desktop-commander/test/test-execution-tools\.js$'''
+  '''(^|/)vendor/desktop-commander/test/test-execution-tools\.js$''',
+  # Context-pack redaction fixtures: fake key shapes (AKIA..., sk-..., ghp_...)
+  # that the redaction under test must match. They are not credentials.
+  '''(^|/)vendor/desktop-commander/test/test-jace-commander-context-pack\.js$'''
 ]
 regexes = [
   '''(?i)authorization:\s*bearer\s+(?:change-me-local-dev|local-dev-token)''',
