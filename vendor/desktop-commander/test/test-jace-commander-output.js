@@ -237,5 +237,21 @@ await test('read_process_output omits argv, so arguments never reach the reply',
   assert.doesNotMatch(JSON.stringify(out), /ARGV-MARKER-VALUE/u);
 });
 
+await test('output is final once the session ends, even when a descendant held the pipe past the grace period', async () => {
+  // The grandchild inherits stdout, writes after the grace period, and exits. The session must not be
+  // reported final until the group is gone, and nothing may be appended after it is.
+  const leaderScript = [
+    "const { spawn } = require('child_process');",
+    "const child = spawn(process.execPath, ['-e', \"setTimeout(() => { process.stdout.write('late'); process.exit(0); }, 2500);\"], { stdio: 'inherit' });",
+    "child.unref();",
+  ].join('\n');
+  const started = registry.start({ argv: [process.execPath, '-e', leaderScript], cwd: tmp, timeoutMs: 60_000 }, policy);
+  const ended = await waitForExit(started.sessionId);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const after = await registry.output({ sessionId: started.sessionId });
+  assert.equal(after.running, false);
+  assert.equal(after.stdout, ended.stdout, 'the final output does not change after the session ends');
+});
+
 console.log(`output: ${passed} passed`);
 fs.rmSync(tmp, { recursive: true, force: true });

@@ -21,6 +21,7 @@
  * budget is an upper bound on the estimate, which is what keeps it deterministic.
  */
 import { createHash } from 'node:crypto';
+import { isAbsolute } from 'node:path';
 import { openContained, type JcFsPolicy, type OpenedPath } from './filesystem.js';
 import { IntegrationError } from './integrations.js';
 
@@ -164,7 +165,7 @@ function safeCut(text: string, length: number): number {
 
 /** `</context` in content would close the wrapper early; escape it in every item, operator included. */
 function escapeBody(text: string): string {
-  return text.replace(/<\/context/giu, '<\\/context');
+  return text.replace(/<(\/?)context/giu, '<\\$1context');
 }
 
 /** Attribute values come from callers and file paths; escape them so none can end the attribute. */
@@ -376,6 +377,11 @@ export interface ContextPackRequest {
 }
 
 /** The read-only tool entry point: resolve every source, then assemble. */
+/** Mirrors the canonical ABSOLUTE schema: an absolute path of at most 4096 characters with no NUL. */
+function isCanonicalAbsolutePath(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 4096 && !value.includes('\0') && isAbsolute(value);
+}
+
 /** Rejects anything outside the canonical request shape before it reaches assembly or attributes. */
 const REQUEST_KEYS = new Set(['files', 'pins', 'fileTrust', 'inline', 'budgetTokens']);
 const INLINE_KEYS = new Set(['id', 'text', 'trust', 'priority']);
@@ -386,8 +392,8 @@ function assertContextRequest(request: ContextPackRequest): void {
   }
   const isTrust = (value: unknown) => (CONTEXT_TRUST_LEVELS as readonly unknown[]).includes(value);
   // Shape before content: the ids below spread and map these fields, so a malformed value must be invalid_argument, not a TypeError.
-  if (request.files !== undefined && (!Array.isArray(request.files) || request.files.some((file) => typeof file !== 'string' || file.length === 0))) {
-    throw new IntegrationError('invalid_argument', 'files must be a list of non-empty path strings');
+  if (request.files !== undefined && (!Array.isArray(request.files) || request.files.some((file) => !isCanonicalAbsolutePath(file)))) {
+    throw new IntegrationError('invalid_argument', 'files must be a list of absolute paths (at most 4096 characters, no NUL)');
   }
   if (request.inline !== undefined && (!Array.isArray(request.inline) || request.inline.some((item) => typeof item !== 'object' || item === null))) {
     throw new IntegrationError('invalid_argument', 'inline must be a list of source objects');
