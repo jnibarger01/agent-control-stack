@@ -3357,8 +3357,12 @@ export class SqliteWorkItemStore implements WorkItemStore {
   ): ExecutionPlanApproval | undefined {
     const row = this.db
       .prepare(
+        // idx_execution_plan_approvals_one_granted allows at most one granted row per key; the
+        // ORDER BY keeps the choice deterministic (latest grant wins) should that ever not hold.
         `SELECT * FROM execution_plan_approvals
-         WHERE work_item_id = ? AND plan_hash = ? AND action_hash = ? AND status = 'granted' AND expires_at > ?`
+         WHERE work_item_id = ? AND plan_hash = ? AND action_hash = ? AND status = 'granted' AND expires_at > ?
+         ORDER BY created_at DESC, approval_id DESC
+         LIMIT 1`
       )
       .get(workItemId, planHash, actionHash, new Date().toISOString()) as unknown as
       ExecutionPlanApprovalRow | undefined;
