@@ -45,6 +45,8 @@ import { z } from "zod";
  * standard util-linux binary present on the Linux images this runs on, and
  * it adds no compiled dependency. When it is missing, every worktree command
  * fails closed (`workspace_git_lock_unavailable`) - it never runs unlocked.
+ * macOS does not ship flock(1), so there the lock always fails closed; see
+ * packages/workspace-manager/README.md for the full invocation and design.
  *
  * Every git invocation has a hard timeout. git runs in its own process group
  * and the whole group (flock, git, any hook git started) is SIGKILLed on
@@ -690,7 +692,8 @@ export class WorkspaceManager {
     if (lockPath && failure.spawnCode === "ENOENT") {
       return new ControlStackError(
         "workspace_git_lock_unavailable",
-        `${command} not run: flock(1) not found at ${this.flockPath}; refusing to run a worktree command unlocked`
+        `${command} not run: util-linux flock(1) not found at ${this.flockPath} (e.g. on macOS, which does not ship it); ` +
+          "the worktree lock fails closed, refusing to run a worktree command unlocked - install util-linux flock or set flockPath"
       );
     }
     // Exit 75 is a lock conflict only if the lock was never reported held:

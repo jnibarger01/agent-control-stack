@@ -736,7 +736,10 @@ describe("WorkspaceManager", () => {
         flockPath: join(fixture.rootDir, "no-such-flock")
       });
       const workItemId = seedWorkItemId(fixture.store, "noflock");
-      await expect(manager.provision(workItemId)).rejects.toMatchObject({ code: "workspace_git_lock_unavailable" });
+      await expect(manager.provision(workItemId)).rejects.toMatchObject({
+        code: "workspace_git_lock_unavailable",
+        message: expect.stringMatching(/macOS[\s\S]*fails closed/u)
+      });
       expect(existsSync(join(fixture.rootDir, workItemId))).toBe(false);
     });
   });
