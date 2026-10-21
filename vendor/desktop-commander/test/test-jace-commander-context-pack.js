@@ -179,6 +179,20 @@ await test('file source: missing and binary files are dropped with their reasons
   assert.equal(reasonFor('bin.dat'), 'binary');
 });
 
+await test('file source: bytes that are not valid UTF-8 are dropped as binary, not replaced with U+FFFD', async () => {
+  fs.writeFileSync(path.join(root, 'latin1.txt'), Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]));
+  const pack = await buildContextPack({ files: [path.join(root, 'latin1.txt')] }, policy);
+  assert.equal(pack.items.length, 0);
+  assert.equal(pack.dropped[0].reason, 'binary');
+});
+
+await test('duplicate source ids are refused before any source is read', async () => {
+  await assert.rejects(
+    buildContextPack({ inline: [{ id: 'dup', text: 'a', trust: 'repo' }, { id: 'dup', text: 'b', trust: 'repo' }] }, policy),
+    /source ids must be unique/u,
+  );
+});
+
 await test('file source: a symlink out of the roots is refused by containment', async () => {
   const outside = path.join(tmp, 'target.txt');
   fs.writeFileSync(outside, 'through the link\n');

@@ -196,6 +196,12 @@ export const JC_TOOL_ARGUMENT_SCHEMAS: Readonly<Record<JcToolName, z.ZodType>> =
       return total >= 1 && total <= 16;
     },
     "files and inline must hold 1 to 16 sources in total"
+  ).refine(
+    (args) => {
+      const ids = [...(args.files ?? []), ...(args.inline ?? []).map((item) => item.id)];
+      return new Set(ids).size === ids.length;
+    },
+    "source ids must be unique across files and inline"
   ),
   read_process_output: z.strictObject({
     sessionId: ID,

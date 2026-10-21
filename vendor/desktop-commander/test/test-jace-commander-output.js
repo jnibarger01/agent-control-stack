@@ -174,5 +174,28 @@ await test('SIGKILL escalation reaches a descendant that ignores SIGTERM after i
   await waitForExit(started.sessionId);
 });
 
+await test('a timeout still reaps a descendant after its leader has already exited', async () => {
+  // The leader exits at once, leaving a SIGTERM-ignoring child in its group. The deadline must
+  // survive the leader's exit so the timeout still signals the surviving group.
+  const leaderScript = [
+    "const { spawn } = require('child_process');",
+    "const child = spawn(process.execPath, ['-e', \"process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);\"], { stdio: 'ignore' });",
+    "console.log('child=' + child.pid);",
+  ].join('\n');
+  const started = registry.start({ argv: [process.execPath, '-e', leaderScript], cwd: tmp, timeoutMs: 1_500 }, policy);
+  let childPid;
+  for (let attempt = 0; attempt < 100 && childPid === undefined; attempt += 1) {
+    const out = await registry.output({ sessionId: started.sessionId, waitMs: 200 });
+    const match = /child=(\d+)/u.exec(out.stdout);
+    if (match) childPid = Number(match[1]);
+  }
+  assert.ok(childPid, 'leader reported its child pid');
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const deadline = Date.now() + 15_000;
+  while (alive(childPid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(alive(childPid), false, 'the deadline reached the descendant after the leader exited');
+  await waitForExit(started.sessionId);
+});
+
 console.log(`output: ${passed} passed`);
 fs.rmSync(tmp, { recursive: true, force: true });

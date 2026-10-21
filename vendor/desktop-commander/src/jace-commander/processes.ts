@@ -269,7 +269,7 @@ export function createProcessRegistry(): ProcessRegistry {
     child.on('exit', (code, signal) => {
       session.exitCode = code;
       session.signal = signal;
-      clearTimeout(timer);
+      // The deadline is NOT cleared here: a descendant can outlive the leader and must still be stopped.
       closeFallback = setTimeout(settle, STREAM_CLOSE_GRACE_MS);
       closeFallback.unref();
       wake(session);
@@ -279,6 +279,7 @@ export function createProcessRegistry(): ProcessRegistry {
       session.timedOut = true;
       terminate(session);
     }, timeoutMs);
+    timer.unref();
     sessions.set(session.sessionId, session);
     return session;
   }
@@ -341,6 +342,7 @@ export function createProcessRegistry(): ProcessRegistry {
     },
 
     async output(args) {
+      prune(Date.now());
       const session = requireSession(args.sessionId);
       const stdoutOffset = parseCursor(args.offset, 'offset');
       const stderrOffset = parseCursor(args.stderrOffset, 'stderrOffset');
@@ -360,6 +362,7 @@ export function createProcessRegistry(): ProcessRegistry {
     },
 
     list() {
+      prune(Date.now());
       return { processes: [...sessions.values()].map(summary) };
     },
 
@@ -367,7 +370,7 @@ export function createProcessRegistry(): ProcessRegistry {
       const session = [...sessions.values()].find((item) =>
         item.sessionId === args.sessionId || (typeof args.pid === 'number' && item.pid === args.pid));
       if (!session) throw new IntegrationError('not_found', 'managed process not found');
-      if (session.state !== 'running') {
+      if (session.state !== 'running' && !groupAlive(session.pid)) {
         return { sessionId: session.sessionId, pid: session.pid, alreadyExited: true };
       }
       terminate(session);
@@ -396,7 +399,8 @@ function groupAlive(pid: number): boolean {
  * Escalation follows the group, not the leader: a descendant can survive the leader's SIGTERM exit.
  */
 function terminate(session: Session): void {
-  if (session.state !== 'running') return;
+  // Once the leader has been reaped its group may still hold live descendants; signal them while any remain.
+  if (session.state !== 'running' && !groupAlive(session.pid)) return;
   signalGroup(session, 'SIGTERM');
   const escalate = setTimeout(() => {
     if (groupAlive(session.pid)) signalGroup(session, 'SIGKILL');
