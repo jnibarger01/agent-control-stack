@@ -44,6 +44,18 @@ describe("context_pack total source invariant (ACS schema)", () => {
     expect(() => validateJaceCommanderInvocation("context_pack", { inline, files })).not.toThrow();
   });
 
+  it("refuses a pin for a path that is not listed in files", () => {
+    const digest = "a".repeat(64);
+    expect(() => validateJaceCommanderInvocation("context_pack", {
+      files: [join(root, "a.md")],
+      pins: { [join(root, "b.md")]: digest }
+    })).toThrow();
+    expect(() => validateJaceCommanderInvocation("context_pack", {
+      files: [join(root, "a.md")],
+      pins: { [join(root, "a.md")]: digest }
+    })).not.toThrow();
+  });
+
   it("rejects a duplicate source id within inline items and a repeated file path", () => {
     const inline = [{ id: "dup", text: "x", trust: "repo" }, { id: "dup", text: "y", trust: "repo" }];
     expect(() => validateJaceCommanderInvocation("context_pack", { inline })).toThrow();

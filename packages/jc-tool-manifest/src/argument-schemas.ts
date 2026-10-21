@@ -202,6 +202,9 @@ export const JC_TOOL_ARGUMENT_SCHEMAS: Readonly<Record<JcToolName, z.ZodType>> =
       return new Set(ids).size === ids.length;
     },
     "source ids must be unique across files and inline"
+  ).refine(
+    (args) => Object.keys(args.pins ?? {}).every((pinned) => (args.files ?? []).includes(pinned)),
+    "pins may only name paths listed in files"
   ),
   read_process_output: z.strictObject({
     sessionId: ID,

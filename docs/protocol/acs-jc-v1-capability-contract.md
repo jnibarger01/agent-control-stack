@@ -40,6 +40,7 @@ rejected by the other verifier.
 | `acs_submit_mission`                                                  | `integration.write`  | no                                              | `jc.integration.write` | low            |
 | `mission_router_list`, `looptrace_verify`                             | `fs.read`            | no                                              | `jc.fs.read`           | low            |
 | `list_directory`, `get_file_info`, `read_file`, `read_multiple_files` | `fs.read`            | no                                              | `jc.fs.read`           | low            |
+| `context_pack`                                                        | `fs.read`            | no                                              | `jc.fs.read`           | low            |
 | Ordinary gated mutations (see manifest)                               | tool-specific        | required in strict; ACS may grant in admin mode | tool-specific          | medium/high    |
 | `privileged_exec`                                                     | `process.privileged` | required in strict; ACS may grant in admin mode | `privileged.exec`      | critical       |
 
