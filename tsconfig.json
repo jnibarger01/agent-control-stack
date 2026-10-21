@@ -29,6 +29,7 @@
     { "path": "./packages/coding-mission" },
     { "path": "./packages/model-broker" },
     { "path": "./packages/integration-manager" },
+    { "path": "./packages/outcome-engine" },
     { "path": "packages/verification" },
     { "path": "packages/jev-advisor" },
     { "path": "packages/eval-harness" },

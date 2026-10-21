@@ -25,6 +25,10 @@ Commands:
   audit export [--db <path>] [-o <file>]
   audit verify (--file <jsonl> | [--db <path>])
   trace relay [--db <path>] [--spool <dir>]
+  outcome accept --repo <owner/name> --pr <number> --goal <text> [--criteria-file <json>] [--expires-at <iso>] [--max-evaluations <n>] [--json]
+  outcome evaluate <outcome-id> [--json]   (exit 10 PASS, 11 PARTIAL, 12 BLOCK, 13 FAIL; PASS is never exit 0 and is not merge approval)
+  outcome show <outcome-id> [--json]
+  outcome list [--json]
 
 Legacy binaries remain available: acs-worker, acs-scheduler, acs-mcp, acs-gateway.
 `;
@@ -45,6 +49,19 @@ export type AcsCommand =
   | { kind: "audit-export"; dbPath?: string; outputPath?: string }
   | { kind: "audit-verify"; dbPath?: string; filePath?: string }
   | { kind: "trace-relay"; dbPath?: string; spoolDir?: string }
+  | {
+      kind: "outcome-accept";
+      repository: string;
+      pullRequest: number;
+      goal: string;
+      criteriaFile?: string;
+      expiresAt?: string;
+      maxEvaluations?: number;
+      json: boolean;
+    }
+  | { kind: "outcome-evaluate"; outcomeId: string; json: boolean }
+  | { kind: "outcome-show"; outcomeId: string; json: boolean }
+  | { kind: "outcome-list"; json: boolean }
   | { kind: "skills"; args: string[] };
 
 export class AcsUsageError extends Error {
@@ -203,6 +220,67 @@ function parseAuditArgs(args: string[]): AcsCommand {
   );
 }
 
+const OUTCOME_USAGE =
+  "Usage: acs outcome accept --repo <owner/name> --pr <number> --goal <text> [--criteria-file <json>] [--expires-at <iso>] [--max-evaluations <n>] [--json] | acs outcome evaluate|show <outcome-id> [--json] | acs outcome list [--json]";
+
+function parseOutcomeArgs(args: string[]): AcsCommand {
+  const [sub, ...rest] = args;
+  if (sub === "list") {
+    if (rest.length > 1 || (rest.length === 1 && rest[0] !== "--json")) throw new AcsUsageError(OUTCOME_USAGE);
+    return { kind: "outcome-list", json: rest[0] === "--json" };
+  }
+  if (sub === "evaluate" || sub === "show") {
+    const [outcomeId, ...flags] = rest;
+    if (!outcomeId || !/^out_[0-9a-f]{24}$/u.test(outcomeId)) throw new AcsUsageError(OUTCOME_USAGE);
+    if (flags.length > 1 || (flags.length === 1 && flags[0] !== "--json")) throw new AcsUsageError(OUTCOME_USAGE);
+    return { kind: sub === "evaluate" ? "outcome-evaluate" : "outcome-show", outcomeId, json: flags[0] === "--json" };
+  }
+  if (sub === "accept") {
+    let repository: string | undefined;
+    let pullRequest: number | undefined;
+    let goal: string | undefined;
+    let criteriaFile: string | undefined;
+    let expiresAt: string | undefined;
+    let maxEvaluations: number | undefined;
+    let json = false;
+    const value = (flag: string, index: number): string => {
+      const next = rest[index + 1];
+      if (next === undefined || next.startsWith("--"))
+        throw new AcsUsageError(`acs outcome accept ${flag} requires a value`);
+      return next;
+    };
+    for (let index = 0; index < rest.length; index += 1) {
+      const flag = rest[index];
+      if (flag === "--json") json = true;
+      else if (flag === "--repo") repository = value(flag, index++);
+      else if (flag === "--goal") goal = value(flag, index++);
+      else if (flag === "--criteria-file") criteriaFile = value(flag, index++);
+      else if (flag === "--expires-at") expiresAt = value(flag, index++);
+      else if (flag === "--pr" || flag === "--max-evaluations") {
+        const raw = value(flag, index++);
+        if (!/^[1-9][0-9]{0,8}$/u.test(raw))
+          throw new AcsUsageError(`acs outcome accept ${flag} requires a positive integer`);
+        if (flag === "--pr") pullRequest = Number(raw);
+        else maxEvaluations = Number(raw);
+      } else {
+        throw new AcsUsageError(`invalid outcome accept argument: ${flag}`);
+      }
+    }
+    if (!repository || pullRequest === undefined || !goal) throw new AcsUsageError(OUTCOME_USAGE);
+    return {
+      kind: "outcome-accept",
+      repository,
+      pullRequest,
+      goal,
+      ...(criteriaFile ? { criteriaFile } : {}),
+      ...(expiresAt ? { expiresAt } : {}),
+      ...(maxEvaluations !== undefined ? { maxEvaluations } : {}),
+      json
+    };
+  }
+  throw new AcsUsageError(OUTCOME_USAGE);
+}
+
 function parseModeArgs(args: string[]): AcsCommand {
   const sub = args[0];
   if (args.length !== 1 || (sub !== "status" && sub !== "strict" && sub !== "admin")) {
@@ -244,6 +322,8 @@ export function parseAcsArgs(args: string[]): AcsCommand {
       return parseAuditArgs(rest);
     case "trace":
       return parseTraceArgs(rest);
+    case "outcome":
+      return parseOutcomeArgs(rest);
     case "skills":
       return { kind: "skills", args: rest };
     default:
