@@ -1,6 +1,17 @@
 import { spawn } from "node:child_process";
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, realpathSync, rmSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import {
+  accessSync,
+  closeSync,
+  constants,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  realpathSync,
+  rmSync,
+  statSync
+} from "node:fs";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { ControlStackError, createId } from "@agent-control-stack/shared";
 import type { PrivilegedTransitionOptions, WorkspaceAllocation } from "@agent-control-stack/work-items";
 import { z } from "zod";
@@ -284,6 +295,13 @@ export interface WorkspaceManagerOptions {
   gitPath?: string;
   /** Path to util-linux flock(1). Defaults to "flock" on PATH. */
   flockPath?: string;
+  /**
+   * Path to util-linux setpriv(1), used for `--pdeathsig KILL` so the
+   * detached flock/git group dies with this process (a SIGKILLed node would
+   * otherwise orphan flock, which keeps holding the lock). Defaults to
+   * "setpriv" on PATH when present; `false` disables it.
+   */
+  setprivPath?: string | false;
   /** Upper bound on waiting for the repository worktree lock (same- or cross-process). Default 60s. */
   lockWaitMs?: number;
   /** Hard timeout for one git command once it holds the lock. Default 120s. */
@@ -340,6 +358,7 @@ export class WorkspaceManager {
   private readonly rootDir: string;
   private readonly gitPath: string;
   private readonly flockPath: string;
+  private readonly setprivPath: string | undefined;
   private readonly lockWaitMs: number;
   private readonly gitTimeoutMs: number;
   private readonly store: WorkspaceAllocationStore;
@@ -353,6 +372,7 @@ export class WorkspaceManager {
     this.rootDir = options.rootDir;
     this.gitPath = options.gitPath ?? "git";
     this.flockPath = options.flockPath ?? "flock";
+    this.setprivPath = options.setprivPath === false ? undefined : resolveExecutable(options.setprivPath ?? "setpriv");
     this.lockWaitMs = positiveMs(options.lockWaitMs ?? DEFAULT_LOCK_WAIT_MS, "lockWaitMs");
     this.gitTimeoutMs = positiveMs(options.gitTimeoutMs ?? DEFAULT_GIT_TIMEOUT_MS, "gitTimeoutMs");
     this.store = options.store;
@@ -616,17 +636,30 @@ export class WorkspaceManager {
       "-c",
       LOCKED_EXEC_SCRIPT,
       "acs-worktree-lock",
+      // git dies with flock (its parent) too, not just flock with node.
+      ...this.pdeathsig(),
       this.gitPath,
       ...args
     ];
+    // flock is resolved up front so that, behind setpriv, a missing flock
+    // still fails closed as workspace_git_lock_unavailable.
+    const flock = resolveExecutable(this.flockPath);
+    if (!flock) throw this.gitError(args, new ProcessFailure("ENOENT", "", null, false, "ENOENT"), lockPath);
+    // pdeathsig: if node is SIGKILLed, the kernel SIGKILLs flock, closing the
+    // only lock descriptor (--close), so the lock is released, never orphaned.
+    const [file, ...fileArgs] = [...this.pdeathsig(), flock, ...flockArgs];
     try {
       // gitTimeoutMs bounds git alone: its timer starts when the lock is held.
-      return await runProcess(this.flockPath, flockArgs, this.repoPath, this.gitTimeoutMs, {
+      return await runProcess(file!, fileArgs, this.repoPath, this.gitTimeoutMs, {
         lockWaitMs: this.lockWaitMs
       });
     } catch (error) {
       throw this.gitError(args, error, lockPath);
     }
+  }
+
+  private pdeathsig(): string[] {
+    return this.setprivPath ? [this.setprivPath, "--pdeathsig", "KILL"] : [];
   }
 
   private gitCommonDir(): Promise<string> {
@@ -674,6 +707,25 @@ export class WorkspaceManager {
     }
     return new ControlStackError("workspace_git_failed", `${command} failed: ${failure.stderr || failure.message}`);
   }
+}
+
+/** Absolute path of an executable (a path, or a name searched on PATH), or undefined. */
+function resolveExecutable(name: string): string | undefined {
+  const candidates = name.includes("/")
+    ? [resolve(name)]
+    : (process.env.PATH ?? "")
+        .split(delimiter)
+        .filter(Boolean)
+        .map((dir) => join(dir, name));
+  for (const candidate of candidates) {
+    try {
+      accessSync(candidate, constants.X_OK);
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      // Not here.
+    }
+  }
+  return undefined;
 }
 
 function positiveMs(value: number, name: string): number {

@@ -120,6 +120,7 @@ async function createOverlapGitShim(): Promise<OverlapShim> {
 
 const managerModule = fileURLToPath(new URL("./index.ts", import.meta.url));
 const workItemsModule = fileURLToPath(new URL("../../work-items/src/index.ts", import.meta.url));
+const tsxLoader = new URL("../../../node_modules/tsx/dist/loader.mjs", import.meta.url).href;
 const tsxBin = fileURLToPath(new URL("../../../node_modules/.bin/tsx", import.meta.url));
 
 /** Runs a WorkspaceManager in a separate node process that provisions `ids` against the shared repo. */
@@ -670,6 +671,60 @@ describe("WorkspaceManager", () => {
         message: expect.stringContaining("tempfail from git")
       });
     }, 15_000);
+
+    it("R/V MED: a node process SIGKILLed mid-operation does not orphan a lock-holding flock/git group", async () => {
+      const fixture = await createRepoFixture();
+      const shimDir = mkdtempSync(join(tmpdir(), "acs-workspace-manager-pdeathsig-"));
+      const pidsFile = join(shimDir, "git.pid");
+      cleanup = () => {
+        try {
+          process.kill(Number(readFileSync(pidsFile, "utf8").trim()), "SIGKILL");
+        } catch {
+          // Already gone (expected).
+        }
+        fixture.cleanup();
+        rmSync(shimDir, { recursive: true, force: true });
+      };
+      const realGit = (await execFileAsync("sh", ["-c", "command -v git"])).stdout.trim();
+      const hangGit = join(shimDir, "git");
+      writeFileSync(
+        hangGit,
+        `#!/bin/sh\nif [ "$1" = "worktree" ]; then echo $$ > "${pidsFile}"; exec sleep 60; fi\nexec "${realGit}" "$@"\n`,
+        { mode: 0o755 }
+      );
+      const script = [
+        `import { WorkspaceManager } from ${JSON.stringify(managerModule)};`,
+        `import { SqliteWorkItemStore } from ${JSON.stringify(workItemsModule)};`,
+        `const store = new SqliteWorkItemStore(${JSON.stringify(fixture.dbPath)});`,
+        `const manager = new WorkspaceManager({ repoPath: ${JSON.stringify(fixture.repoPath)}, rootDir: ${JSON.stringify(fixture.rootDir)}, store, gitPath: ${JSON.stringify(hangGit)}, gitTimeoutMs: 60_000 });`,
+        `await manager.provision(${JSON.stringify(seedWorkItemId(fixture.store, "pdeathsig"))});`
+      ].join("\n");
+      const scriptPath = join(shimDir, "child.mts");
+      writeFileSync(scriptPath, script, "utf8");
+      // node itself (not the tsx CLI wrapper), so the SIGKILL hits the process that spawned flock.
+      const child = spawn(process.execPath, ["--import", tsxLoader, scriptPath], { stdio: "ignore" });
+      const exited = new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()));
+      const lockPath = join(fixture.repoPath, ".git", "acs-worktree.lock");
+      const lockHeld = async () => {
+        try {
+          await execFileAsync("flock", ["--exclusive", "--nonblock", lockPath, "true"]);
+          return false;
+        } catch {
+          return true;
+        }
+      };
+      for (let i = 0; i < 200 && !existsSync(pidsFile); i += 1) await sleep(50);
+      expect(existsSync(pidsFile)).toBe(true);
+      expect(await lockHeld()).toBe(true);
+      child.kill("SIGKILL");
+      await exited;
+      let held = true;
+      for (let i = 0; i < 40 && held; i += 1) {
+        held = await lockHeld();
+        if (held) await sleep(50);
+      }
+      expect(held).toBe(false);
+    }, 30_000);
 
     it("fails closed when flock(1) is unavailable instead of running git unlocked", async () => {
       const fixture = await createRepoFixture();
