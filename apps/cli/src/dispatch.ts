@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { runWorkerOnce } from "@agent-control-stack/worker";
 import { listAvailableActors } from "./available-actors.js";
 import { discoverLocalActors as runLocalActorDiscovery, probeExecutableVersion } from "./discover-actors.js";
+import { createDefaultOutcomePort, runOutcomeCommand, type OutcomeCliPort } from "./outcome.js";
 import { ACS_CLI_VERSION, ACS_HELP, AcsUsageError, parseAcsArgs, type AcsCommand } from "./parse.js";
 
 export interface AcsIo {
@@ -36,6 +37,8 @@ export interface AcsAdapters {
   writeAuditExport: (outputPath: string, jsonl: string) => void;
   verifyAuditJsonlFile: (filePath: string) => { ok: boolean; eventCount: number; headHash: string; failure?: unknown };
   verifyAuditDatabase: (dbPath: string) => { ok: boolean; eventCount: number; headHash: string; failure?: unknown };
+  /** Optional so existing adapter fakes keep compiling; the default opens the real store and the read-only gh reader. */
+  outcome?: OutcomeCliPort;
 }
 
 const defaultIo: AcsIo = {
@@ -268,6 +271,11 @@ async function executeCommand(command: AcsCommand, io: AcsIo, adapters: AcsAdapt
       io.stdout.write(`${JSON.stringify(verification)}\n`);
       return verification.ok ? 0 : 1;
     }
+    case "outcome-accept":
+    case "outcome-evaluate":
+    case "outcome-show":
+    case "outcome-list":
+      return runOutcomeCommand(command, io, adapters.outcome ?? createDefaultOutcomePort());
     case "skills":
       return runSkillsCommand(command.args, io);
     default: {

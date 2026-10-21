@@ -2,6 +2,13 @@ import { probeExecutableVersion } from "@agent-control-stack/agent-cli";
 import { advisorPortFromEnv } from "./advisor-consultation.js";
 import { registerMissionDispatchRoutes } from "./mission-dispatch-routes.js";
 import { registerDashboardRoutes, eventReadOptions } from "./dashboard-routes.js";
+import { registerCsrfGuard } from "./csrf-guard.js";
+import {
+  MISSION_CONTROL_WEB_CSP,
+  missionControlWebDefaultRoot,
+  registerMissionControlWeb,
+  type MissionControlWebOptions
+} from "./mission-control-web.js";
 import {
   CodingMissionController,
   codingMissionPortsFromEnv,
@@ -277,6 +284,8 @@ export interface GatewayJevObservationOptions {
 
 export interface GatewayOptions {
   dbPath?: string;
+  /** React Mission Control hosted at /next/. Off unless ACS_MC_WEB=1. */
+  missionControlWeb?: MissionControlWebOptions;
   /** Governed ports for autonomous coding missions. Absent ports fail closed. */
   codingMissionPorts?: CodingMissionPorts;
   heartbeatTtlMs?: number;
@@ -975,10 +984,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     acpAdapterConfig === false || !acpAdapterConfig
       ? undefined
       : new ReadonlyAcpAdapter({ ...acpAdapterConfig, store: workItems });
+  registerCsrfGuard(app);
   app.addHook("preHandler", async (request, reply) => {
     requestStartTimes.set(request, performance.now());
     if (!isRateLimitedRoute(request.url) || (request.method === "GET" && !isRateLimitedGetRoute(request.url))) return;
-    const decision = rateLimiter.check(rateLimitKey(request, auth));
+    const decision = rateLimiter.check(await rateLimitKey(request, auth, mcpAuth));
     reply.header("x-ratelimit-remaining", String(decision.remaining));
     if (!decision.allowed) {
       const route = request.routeOptions.url ?? "<unmatched>";
@@ -1015,8 +1025,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const workItemIdempotency = new SqliteMoaIdempotencyStore(dbPath);
   const requireRead = async (request: FastifyRequest, reply: FastifyReply) => {
     if (!hasReadAccess(request, auth)) {
-      if (request.routeOptions.url === "/" && auth) {
-        reply.code(401).type("text/html").send(renderLoginPage());
+      const loginRoute = request.routeOptions.url;
+      if ((loginRoute === "/" || loginRoute === "/legacy" || loginRoute === "/legacy/") && auth) {
+        // `next` only ever lands on a same-origin path (renderLoginPage rejects anything else).
+        const next = (request.query as { next?: unknown } | undefined)?.next;
+        const page = typeof next === "string" ? renderLoginPage(next) : renderLoginPage();
+        reply.code(401).header("content-security-policy", loginPageCsp(page)).type("text/html").send(page);
         return reply;
       }
       sendReadAccessError(reply, auth);
@@ -1377,6 +1391,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     });
   }
 
+  registerMissionControlWeb(app, options.missionControlWeb);
   registerDashboardRoutes(app, {
     workItems,
     executionReads,
@@ -1390,6 +1405,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     projectTunnelSession: (session, ttl) => projectTunnelSession(session, ttl),
     validateRegisteredAgentPromptTarget: (store, input) => validateRegisteredAgentPromptTarget(store, input),
     requireRead,
+    missionControlWebDefaultRoot: () => missionControlWebDefaultRoot(options.missionControlWeb),
     sendError
   });
 
@@ -1431,9 +1447,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     const connector = workItems.getConnector(request.params.id);
     if (!connector) return reply.code(404).send({ error: "connector not found" });
     const sessions = workItems.listTunnelSessions(connector.id);
+    // Revoked and expired sessions stay stored, so the detail returns a bounded window (effectively active first,
+    // then most recently updated) and says so, instead of an unbounded list the console contract would reject.
+    const projected = sessions.map((session) => projectTunnelSession(session, heartbeatTtlMs));
+    const windowed = [
+      ...projected.filter((session) => session.effectiveStatus === "active"),
+      ...projected.filter((session) => session.effectiveStatus !== "active")
+    ].slice(0, CONNECTOR_SESSION_WINDOW);
     return {
       connector: projectConnector(connector, sessions, heartbeatTtlMs),
-      sessions: sessions.map((session) => projectTunnelSession(session, heartbeatTtlMs))
+      sessions: windowed,
+      sessionWindow: { shown: windowed.length, total: projected.length }
     };
   });
 
@@ -5056,6 +5080,9 @@ function auditEventIso(event: StoredAuditEvent): string {
   return new Date(millis).toISOString();
 }
 
+/** Must not exceed the `sessions` maximum in the mission-control contract's connectorDetailSchema. */
+const CONNECTOR_SESSION_WINDOW = 500;
+
 function projectTunnelSession(session: RegisteredTunnelSession, heartbeatTtlMs: number) {
   const now = new Date();
   const sessionExpired =
@@ -5306,6 +5333,7 @@ function isRateLimitedRoute(url: string): boolean {
   const path = url.split("?", 1)[0];
   return (
     path === "/mcp" ||
+    path.startsWith("/api/mission-control/") ||
     path === "/execution-mode" ||
     path === "/authority" ||
     path === "/session/login" ||
@@ -5330,7 +5358,11 @@ function isRateLimitedRoute(url: string): boolean {
     path === "/api/mcp-clients/label" ||
     path === "/api/mcp-clients/label/clear" ||
     path.startsWith("/work-items/") ||
-    path.startsWith("/webhooks/")
+    path.startsWith("/webhooks/") ||
+    // The React Mission Control shell and assets: unauthenticated reads that touch the filesystem.
+    // isRateLimitedGetRoute must list them too, or GETs are still exempt.
+    path === "/next" ||
+    path.startsWith("/next/")
   );
 }
 
@@ -5338,27 +5370,49 @@ function isRateLimitedGetRoute(url: string): boolean {
   // /device/verify rate limiting is enforced in-handler (see registerDeviceAuthRoutes).
   const path = url.split("?", 1)[0];
   return (
+    // Each read composes the whole dashboard view model (several store reads plus policy evaluation).
+    path.startsWith("/api/mission-control/") ||
     path === "/execution-mode" ||
     path === "/authority" ||
     path === "/api/mcp-clients" ||
-    path === "/api/mission-dispatch"
+    path === "/api/mission-dispatch" ||
+    // The React Mission Control shell and assets (flag-gated). Each read touches the filesystem, so it shares the limiter.
+    path === "/next" ||
+    path.startsWith("/next/")
   );
 }
 
-function rateLimitKey(request: FastifyRequest, auth: GatewayAuthOptions | undefined): string {
-  const credential = gatewayCredentialForRequest(request, auth);
-  const principal = credential
-    ? `credential:${credential.id}`
-    : (bearerPrincipal(request.headers.authorization) ?? `ip:${request.ip}`);
+async function rateLimitKey(
+  request: FastifyRequest,
+  auth: GatewayAuthOptions | undefined,
+  mcpAuth: McpAuthOptions | undefined
+): Promise<string> {
+  // Only a verified principal earns its own bucket. Absent or unverified bearer tokens are keyed by client IP,
+  // otherwise every junk token would get a fresh bucket and bypass the limit.
+  const principal = (await verifiedRateLimitPrincipal(request, auth, mcpAuth)) ?? `ip:${request.ip}`;
   return `${request.method}:${request.routeOptions.url ?? "<unmatched>"}:${principal}`;
 }
 
-function bearerPrincipal(authorization: string | string[] | undefined): string | undefined {
-  if (Array.isArray(authorization)) return undefined;
-  const match = /^Bearer\s+(\S+)$/i.exec(authorization ?? "");
-  if (!match) return undefined;
-  const digest = createHash("sha256").update(match[1]).digest("hex").slice(0, 16);
-  return `bearer:${digest}`;
+async function verifiedRateLimitPrincipal(
+  request: FastifyRequest,
+  auth: GatewayAuthOptions | undefined,
+  mcpAuth: McpAuthOptions | undefined
+): Promise<string | undefined> {
+  const credential = gatewayCredentialForRequest(request, auth);
+  if (credential) return `credential:${credential.id}`;
+  const authorization = request.headers.authorization;
+  const token = typeof authorization === "string" ? /^Bearer\s+(\S+)$/i.exec(authorization)?.[1] : undefined;
+  if (!token) return undefined;
+  const worker = auth?.workerIdentities?.resolve(token, new Date());
+  if (worker?.ok) return `worker:${worker.identity.workerId}`;
+  if (!mcpAuth) return undefined;
+  const mcp = await authorizeMcpRequest({
+    headers: request.headers,
+    auth: mcpAuth,
+    requiredScopes: [],
+    remoteAddress: request.socket.remoteAddress ?? request.ip
+  });
+  return mcp.ok ? `mcp:${mcp.auth.issuer}:${mcp.auth.subject}` : undefined;
 }
 
 function jsonRpcRequestId(body: unknown): string | number | null {
@@ -5440,8 +5494,51 @@ function adminModeTtlFromEnv(env: NodeJS.ProcessEnv = process.env): number | und
   return value;
 }
 
+const MAX_LOGIN_REDIRECT_LENGTH = 2048;
+
+/**
+ * Returns `redirectTo` only when it is a same-origin path, otherwise "/". Browsers treat a backslash as a path
+ * separator and strip tabs/newlines, so `/\\evil.example` or `/\t/evil.example` would leave the origin even though
+ * they start with a single "/". The target is therefore resolved against a fixed origin and must stay on it, and
+ * backslashes and control characters are refused outright.
+ */
+export function safeLoginRedirect(redirectTo: string): string {
+  if (redirectTo.length > MAX_LOGIN_REDIRECT_LENGTH) return "/";
+  // eslint-disable-next-line no-control-regex
+  if (!redirectTo.startsWith("/") || /[\\\u0000-\u001f\u007f]/.test(redirectTo)) return "/";
+  const base = "https://console.invalid";
+  let resolved: URL;
+  try {
+    resolved = new URL(redirectTo, base);
+  } catch {
+    return "/";
+  }
+  if (resolved.origin !== base) return "/";
+  // Normalisation collapses dot-segments, so "/.//evil.example" or "/%2e%2e//evil.example" resolve to a pathname
+  // that starts with "//", which a browser reads as a protocol-relative URL to another host. Re-check the result.
+  const path = `${resolved.pathname}${resolved.search}${resolved.hash}`;
+  if (!path.startsWith("/") || path.startsWith("//") || path.includes("\\")) return "/";
+  if (new URL(path, base).origin !== base) return "/";
+  return path;
+}
+
+/**
+ * The /next CSP (MISSION_CONTROL_WEB_CSP) for the login page. The page keeps its small inline style and script, so
+ * those two directives also allow exactly those blocks by hash; everything else is identical.
+ */
+export function loginPageCsp(page: string): string {
+  const hashes = (tag: "script" | "style") =>
+    [...page.matchAll(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "g"))]
+      .map((m) => ` 'sha256-${createHash("sha256").update(m[1]).digest("base64")}'`)
+      .join("");
+  return MISSION_CONTROL_WEB_CSP.replace("script-src 'self'", `script-src 'self'${hashes("script")}`).replace(
+    "style-src 'self'",
+    `style-src 'self'${hashes("style")}`
+  );
+}
+
 export function renderLoginPage(redirectTo = "/"): string {
-  const safeRedirect = redirectTo.startsWith("/") && !redirectTo.startsWith("//") ? redirectTo : "/";
+  const safeRedirect = safeLoginRedirect(redirectTo);
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -5467,7 +5564,7 @@ export function renderLoginPage(redirectTo = "/"): string {
       <output></output>
     </form>
     <script>
-      const redirectTo = ${JSON.stringify(safeRedirect)};
+      const redirectTo = ${JSON.stringify(safeRedirect).replace(/</g, "\\u003c")};
       document.querySelector('#login-form').addEventListener('submit', async (event) => {
         event.preventDefault();
         const form = new FormData(event.currentTarget);

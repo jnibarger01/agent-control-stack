@@ -144,6 +144,33 @@ function gateApprovalInTransaction(
     throw new ControlStackError("work_item_not_found", `work item not found: ${parsed.id}`);
   }
 
+  // Idempotent replay: an approval for this exact action hash is already granted and
+  // unexpired and the item is already approved. Re-run the policy evaluation (so the
+  // approver is still authorized and the hash still matches a required action) but record
+  // nothing: no second policy.decided / approval.granted, and no refreshed approval expiry.
+  // Anything else (deny, unknown hash, expired or consumed approval) takes the normal path.
+  // A different approver is a real update, not a replay: in particular a human must still
+  // be able to supersede an acs:admin approval (grantExecutionPlanApproval invalidates it).
+  const existingPlan = store.getCurrentExecutionPlan(workItem.id);
+  const existingPlanApproval = existingPlan
+    ? store.getExecutionPlanApproval(workItem.id, existingPlan.planHash, parsed.actionHash)
+    : undefined;
+  if (
+    workItem.status === "approved" &&
+    existingPlanApproval?.status === "granted" &&
+    existingPlanApproval.approvedByActorId === parsed.approvedBy &&
+    store.hasApproval(workItem.id, parsed.actionHash)
+  ) {
+    const replayEvaluations = policy.evaluateWorkItem(workItem, parsed.approvedBy, "approve");
+    const replayDecision = policy.summarize(replayEvaluations);
+    const replayMatches = approvalRequired(replayEvaluations).some(
+      (evaluation) => evaluation.actionHash === parsed.actionHash
+    );
+    if (replayDecision.decision !== "deny" && replayMatches) {
+      return { decision: replayDecision, workItem, approvals: [] };
+    }
+  }
+
   const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, workItem, parsed.approvedBy, "approve");
   if (decision.decision === "deny") {
     return { decision, workItem, approvals: [] };
