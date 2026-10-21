@@ -412,6 +412,46 @@ describe("persistence and trust", () => {
   });
 });
 
+describe("concurrent acceptance", () => {
+  it("a concurrent acceptance of the same outcome appends exactly one outcome.accepted record", () => {
+    const other = new SqliteWorkItemStore(dbPath);
+    try {
+      const rival = new OutcomeEngine({
+        store: createOutcomeStorePort(other),
+        readerFor: () => sequenceReader(makeSnapshot()),
+        provenance: "live_github",
+        acsRepository: REPO,
+        now: () => new Date(clock)
+      });
+      const base = createOutcomeStorePort(store);
+      let raced = false;
+      let rivalResult: ReturnType<typeof accept> | undefined;
+      // The rival accepts on its own connection after this engine checked for an existing record but before it appends.
+      const racing = {
+        ...base,
+        readEvents: (options?: Parameters<typeof base.readEvents>[0]) => {
+          const events = base.readEvents(options);
+          if (!raced && options?.name === "outcome.accepted") {
+            raced = true;
+            rivalResult = rival.accept({ goal: GOAL, repository: REPO, pullRequest: 7 }, { osUser: "rival" });
+          }
+          return events;
+        }
+      };
+      const mine = accept(engine({ store: racing }));
+      expect(rivalResult?.created).toBe(true);
+      expect(mine.created).toBe(false);
+      expect(mine.record).toEqual(rivalResult?.record);
+      const stored = store
+        .readEvents({ name: "outcome.accepted", limit: 50 })
+        .filter((event) => event.attributes["outcome.id"] === mine.record.outcomeId);
+      expect(stored).toHaveLength(1);
+    } finally {
+      other.close();
+    }
+  });
+});
+
 describe("audit chain on read paths", () => {
   it("show and list report a global audit-chain break even when the outcome-local hashes still verify", async () => {
     const e = engine();

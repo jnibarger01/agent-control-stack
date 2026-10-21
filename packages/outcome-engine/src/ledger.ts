@@ -17,6 +17,7 @@ import { validatePlan } from "./plan.js";
 export const EVENT_ACCEPTED = "outcome.accepted";
 export const EVENT_EVALUATION = "outcome.evaluation_recorded";
 const ATTR_CHAIN_SLOT = "outcome.chain_slot";
+const ATTR_OUTCOME_ID = "outcome.id";
 export const MAX_OUTCOME_SCAN_EVENTS = 20_000;
 const PAGE = 500;
 
@@ -207,17 +208,32 @@ export class OutcomeLedger {
     return this.auditChainOk() ? [] : ["audit_chain_invalid"];
   }
 
-  recordAccepted(record: AcceptedRecord): StoredAuditEvent {
+  /**
+   * Claims the outcome ID and appends in one store transaction, keyed on outcome.id within outcome.accepted events. A
+   * concurrent acceptance of the same outcome finds the ID taken and gets the stored record back with `recorded: false`,
+   * so two writers can never both append an acceptance for one outcome.
+   */
+  recordAccepted(record: AcceptedRecord): { record: AcceptedRecord; recorded: boolean } {
     assertRepresentable(record, "outcome.accepted");
-    return this.port.recordSystemEvent({
+    const { event, recorded } = this.port.recordSystemEventOnce({
       name: EVENT_ACCEPTED,
+      uniqueAttribute: ATTR_OUTCOME_ID,
       body: record as unknown as Record<string, unknown>,
       attributes: {
-        "outcome.id": record.outcomeId,
+        [ATTR_OUTCOME_ID]: record.outcomeId,
         "outcome.repository": record.repository,
         "outcome.pull_request": record.pullRequest
       }
     });
+    if (recorded) return { record, recorded };
+    const parsed = acceptedSchema.safeParse(event.body);
+    if (!parsed.success || parsed.data.outcomeId !== record.outcomeId) {
+      throw new OutcomeIntegrityError(
+        "accepted_record_invalid",
+        `stored acceptance for ${record.outcomeId} does not parse (event ${event.sequence})`
+      );
+    }
+    return { record: parsed.data, recorded };
   }
 
   /**

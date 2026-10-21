@@ -100,8 +100,9 @@ export class OutcomeEngine {
       authority: { kind: "unauthenticated_local_operator", osUser: authority.osUser },
       executionBasis: "none"
     };
-    this.ledger.recordAccepted(record);
-    return { record, created: true };
+    // The load above is only a fast path: the keyed append is what decides, so a concurrent acceptance cannot also append.
+    const claimed = this.ledger.recordAccepted(record);
+    return { record: claimed.record, created: claimed.recorded };
   }
 
   list(): Array<{
