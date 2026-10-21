@@ -253,10 +253,11 @@ export function createProcessRegistry(): ProcessRegistry {
     });
     // 'running' ends only when stdio has closed: until then a reader could see the exit and miss
     // the last chunk. If a descendant keeps the pipes open, settle after a grace period anyway.
-    // A session ends when its whole process group is gone, not when the leader exits or stdio closes:
-    // a descendant can keep the group alive and must keep the deadline, the state and the slot.
-    let settled = false;
+    // A session ends only when its whole process group is gone AND its stdio has closed, so its output
+    // is final once no writer can add to it. A descendant that holds a pipe past the grace period is
+    // detached: its later output is discarded, and the session stays running until the group is gone.
     let concluded = false;
+    let streamsClosed = false;
     let closeFallback: NodeJS.Timeout | undefined;
     let groupWatch: NodeJS.Timeout | undefined;
     const conclude = (): void => {
@@ -265,6 +266,8 @@ export function createProcessRegistry(): ProcessRegistry {
       clearTimeout(closeFallback);
       clearInterval(groupWatch);
       clearTimeout(timer);
+      session.stdout.finish();
+      session.stderr.finish();
       if (session.state === 'running') {
         session.state = 'exited';
         session.finishedAt = Date.now();
@@ -272,31 +275,24 @@ export function createProcessRegistry(): ProcessRegistry {
       wake(session);
       resolveDone();
     };
-    // Output is final once stdio closes. The state changes only in conclude(), so a waiter never sees an exit code while still 'running'.
-    const settle = (): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(closeFallback);
-      session.stdout.finish();
-      session.stderr.finish();
-      if (!groupAlive(session.pid)) {
-        conclude();
-        return;
-      }
-      wake(session);
-      groupWatch = setInterval(() => {
-        if (!groupAlive(session.pid)) conclude();
-      }, GROUP_POLL_MS);
-      groupWatch.unref();
+    const tryConclude = (): void => {
+      if (!concluded && streamsClosed && !groupAlive(session.pid)) conclude();
     };
     child.on('exit', (code, signal) => {
       session.exitCode = code;
       session.signal = signal;
-      // The leader's exit does not end the session: a descendant can outlive it (see settle).
-      closeFallback = setTimeout(settle, STREAM_CLOSE_GRACE_MS);
+      closeFallback = setTimeout(() => {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+      }, STREAM_CLOSE_GRACE_MS);
       closeFallback.unref();
+      groupWatch = setInterval(tryConclude, GROUP_POLL_MS);
+      groupWatch.unref();
     });
-    child.on('close', settle);
+    child.on('close', () => {
+      streamsClosed = true;
+      tryConclude();
+    });
     const timer = setTimeout(() => {
       session.timedOut = true;
       terminate(session);
