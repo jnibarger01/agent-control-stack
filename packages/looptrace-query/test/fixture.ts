@@ -5,7 +5,7 @@
  * a raw connection so scenarios (crash, tamper, contradiction) can be staged deterministically.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -25,11 +25,36 @@ export interface Fixture {
   cleanup(): void;
 }
 
+const STORE_OPTIONS = { traceInstance: "fixture-acs", releaseSha: "a".repeat(40) };
+
+/**
+ * The real SqliteWorkItemStore migrates an empty database through the whole migration chain, which is by far the
+ * most expensive part of a fixture (~20x opening an already-migrated file) and scales with CPU contention, so
+ * migrating once per fixture pushed multi-fixture tests past the 5s test timeout under parallel CI load. Migrate
+ * once per test worker into a template and give each fixture its own byte copy: every fixture still gets the real,
+ * current schema (drift still fails), and fixtures stay fully isolated from one another.
+ */
+let template: { dir: string; dbPath: string } | null = null;
+function migratedTemplate(): string {
+  if (template) return template.dbPath;
+  const dir = mkdtempSync(join(tmpdir(), "looptrace-query-template-"));
+  const dbPath = join(dir, "control.db");
+  new SqliteWorkItemStore(dbPath, STORE_OPTIONS).close();
+  // close() checkpoints the WAL; a leftover sidecar would mean the copied main file is not the whole database.
+  if (existsSync(`${dbPath}-wal`) || existsSync(`${dbPath}-journal`)) {
+    throw new Error("fixture template database was not fully checkpointed on close");
+  }
+  template = { dir, dbPath };
+  process.once("exit", () => rmSync(dir, { recursive: true, force: true }));
+  return dbPath;
+}
+
 export function createFixture(): Fixture {
   const dir = mkdtempSync(join(tmpdir(), "looptrace-query-"));
   const dbPath = join(dir, "control.db");
+  copyFileSync(migratedTemplate(), dbPath);
   // Real store => real, current schema + real audit/trace rows for create().
-  const store = new SqliteWorkItemStore(dbPath, { traceInstance: "fixture-acs", releaseSha: "a".repeat(40) });
+  const store = new SqliteWorkItemStore(dbPath, STORE_OPTIONS);
   const ids: string[] = [];
   return {
     dir,
