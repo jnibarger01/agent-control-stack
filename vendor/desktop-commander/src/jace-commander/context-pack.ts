@@ -168,7 +168,7 @@ function attr(value: string): string {
 function wrap(item: { id: string; trust: ContextTrust; location: string; sourceSha256: string; emittedSha256: string; truncated: boolean }, body: string): string {
   const attrs = [
     `id="${attr(item.id)}"`,
-    `trust="${item.trust}"`,
+    `trust="${attr(item.trust)}"`,
     `location="${attr(item.location)}"`,
     `source_sha256="${item.sourceSha256}"`,
     `emitted_sha256="${item.emittedSha256}"`,
@@ -312,7 +312,18 @@ export async function resolveContextSource(spec: ContextSourceSpec, policy: JcFs
   try {
     if (!opened.stats.isFile()) return { status: 'dropped', ...base, location: real, reason: 'read_failed' };
     if (opened.stats.size > MAX_FILE_BYTES) return { status: 'dropped', ...base, location: real, reason: 'oversize' };
-    content = await opened.handle.readFile();
+    // Bounded read: the file can grow after stat, so count bytes as they arrive and stop at the cap.
+    const chunks: Buffer[] = [];
+    let total = 0;
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    for (;;) {
+      const { bytesRead } = await opened.handle.read(buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+      if (total > MAX_FILE_BYTES) return { status: 'dropped', ...base, location: real, reason: 'oversize' };
+      chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
+    }
+    content = Buffer.concat(chunks);
   } catch {
     return { status: 'dropped', ...base, location: real, reason: 'read_failed' };
   } finally {
@@ -347,7 +358,25 @@ export interface ContextPackRequest {
 }
 
 /** The read-only tool entry point: resolve every source, then assemble. */
+/** Rejects anything outside the canonical request shape before it reaches assembly or attributes. */
+function assertContextRequest(request: ContextPackRequest): void {
+  const isTrust = (value: unknown) => (CONTEXT_TRUST_LEVELS as readonly unknown[]).includes(value);
+  if (request.fileTrust !== undefined && !isTrust(request.fileTrust)) throw new IntegrationError('invalid_argument', 'fileTrust is not a known trust level');
+  if (request.files !== undefined && (!Array.isArray(request.files) || request.files.some((file) => typeof file !== 'string' || file.length === 0))) {
+    throw new IntegrationError('invalid_argument', 'files must be a list of non-empty path strings');
+  }
+  for (const item of request.inline ?? []) {
+    if (typeof item.id !== 'string' || item.id.length === 0 || typeof item.text !== 'string' || !isTrust(item.trust)) {
+      throw new IntegrationError('invalid_argument', 'inline entries need a string id and text and a known trust level');
+    }
+    if (item.priority !== undefined && (!Number.isInteger(item.priority) || item.priority < 0 || item.priority > 100)) {
+      throw new IntegrationError('invalid_argument', 'inline priority must be an integer from 0 to 100');
+    }
+  }
+}
+
 export async function buildContextPack(request: ContextPackRequest, policy: JcFsPolicy): Promise<ContextPack> {
+  assertContextRequest(request);
   const files = request.files ?? [];
   const inline = request.inline ?? [];
   const total = files.length + inline.length;

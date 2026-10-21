@@ -136,5 +136,43 @@ await test('invalid cursors and waits are refused', async () => {
   await waitForExit(started.sessionId);
 });
 
+await test('a trim never leaves a lone low surrogate at the head of the retained output', () => {
+  const buffer = new OutputBuffer();
+  // Put an astral character so the cut lands between its two UTF-16 code units.
+  const head = 'a'.repeat(5) + '\u{1F600}';
+  const total = MAX_OUTPUT + 6;
+  buffer.write(Buffer.from(head + 'b'.repeat(total - head.length), 'utf8'));
+  const read = buffer.read(0);
+  const first = read.text.charCodeAt(0);
+  assert.ok(!(first >= 0xdc00 && first <= 0xdfff), `head must not be a lone low surrogate, got ${first.toString(16)}`);
+  assert.ok(read.text.length <= MAX_OUTPUT);
+});
+
+await test('SIGKILL escalation reaches a descendant that ignores SIGTERM after its leader exits', async () => {
+  // The leader exits on SIGTERM; its child ignores SIGTERM and stays in the group. The grace-period
+  // SIGKILL must still reach the child (the escalation timer must not be cancelled by the leader's exit).
+  const leaderScript = [
+    "const { spawn } = require('child_process');",
+    "const child = spawn(process.execPath, ['-e', \"process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);\"], { stdio: 'ignore' });",
+    "console.log('child=' + child.pid);",
+    "process.on('SIGTERM', () => process.exit(0));",
+    "setInterval(() => {}, 1000);",
+  ].join('\n');
+  const started = registry.start({ argv: [process.execPath, '-e', leaderScript], cwd: tmp, timeoutMs: 60_000 }, policy);
+  let childPid;
+  for (let attempt = 0; attempt < 100 && childPid === undefined; attempt += 1) {
+    const out = await registry.output({ sessionId: started.sessionId, waitMs: 200 });
+    const match = /child=(\d+)/u.exec(out.stdout);
+    if (match) childPid = Number(match[1]);
+  }
+  assert.ok(childPid, 'leader reported its child pid');
+  registry.kill({ sessionId: started.sessionId });
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const deadline = Date.now() + 15_000;
+  while (alive(childPid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(alive(childPid), false, 'the SIGTERM-ignoring descendant was killed by the group escalation');
+  await waitForExit(started.sessionId);
+});
+
 console.log(`output: ${passed} passed`);
 fs.rmSync(tmp, { recursive: true, force: true });
