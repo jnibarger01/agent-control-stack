@@ -231,18 +231,27 @@ function gateApprovalInTransaction(
   };
 }
 
+const DECISION_FIELDS = [
+  "decision",
+  "reason",
+  "matchedRules",
+  "requiredApprover",
+  "maxRuntimeMs",
+  "allowedPaths"
+] as const;
+
+/** Canonical form of every PolicyDecision field, so any change to the decision is detected. */
+function canonicalDecision(decision: Record<string, unknown>): string {
+  return JSON.stringify(DECISION_FIELDS.map((field) => decision[field] ?? null));
+}
+
 function recordChangedEvaluations(store: WorkItemStore, workItemId: string, evaluations: PolicyEvaluation[]): void {
   const recorded = store.readEvents({ name: "policy.decided", workItemId, limit: 500 });
   for (const evaluation of evaluations) {
     const latest = recorded
       .filter((event) => (event.body as { actionHash?: string } | undefined)?.actionHash === evaluation.actionHash)
-      .at(-1)?.body as { decision?: string; reason?: string; matchedRules?: string[] } | undefined;
-    const unchanged =
-      latest !== undefined &&
-      latest.decision === evaluation.decision.decision &&
-      latest.reason === evaluation.decision.reason &&
-      JSON.stringify(latest.matchedRules ?? []) === JSON.stringify(evaluation.decision.matchedRules ?? []);
-    if (!unchanged) {
+      .at(-1)?.body as Record<string, unknown> | undefined;
+    if (latest === undefined || canonicalDecision(latest) !== canonicalDecision({ ...evaluation.decision })) {
       store.recordPolicyDecision({
         workItemId,
         actionHash: evaluation.actionHash,

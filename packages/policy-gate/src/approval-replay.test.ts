@@ -284,4 +284,33 @@ describe("approve_work_item replay", () => {
       fx.cleanup();
     }
   });
+
+  it("a replay whose only change is an optional decision field (maxRuntimeMs) is still recorded", () => {
+    let maxRuntimeMs: number | undefined;
+    const real = createPolicyEngine();
+    const policy: PolicyEngine = {
+      ...real,
+      evaluateWorkItem: (workItem, actor, operation) =>
+        real.evaluateWorkItem(workItem, actor, operation).map((evaluation) => ({
+          ...evaluation,
+          decision: { ...evaluation.decision, ...(maxRuntimeMs === undefined ? {} : { maxRuntimeMs }) }
+        }))
+    };
+    const fx = approvedFixture(policy);
+    try {
+      fx.tools.approve_work_item(fx.input);
+      const decided = fx.countOf("policy.decided");
+
+      fx.tools.approve_work_item({ ...fx.input, reason: "unchanged" });
+      expect(fx.countOf("policy.decided")).toBe(decided);
+
+      maxRuntimeMs = 1_000;
+      fx.tools.approve_work_item({ ...fx.input, reason: "tighter limit" });
+
+      expect(fx.countOf("policy.decided")).toBe(decided + 1);
+      expect(fx.countOf("approval.granted")).toBe(1);
+    } finally {
+      fx.cleanup();
+    }
+  });
 });
