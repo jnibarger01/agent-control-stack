@@ -93,6 +93,10 @@ export interface MissionControlViewModel {
   executionBackend?: string;
   /** Canonical domain counts kept distinct: agents, executors, connectors, and execution admission. */
   infrastructure?: MissionControlInfrastructureSummary;
+  /** Executor identities for the network view. Configured is not healthy: no liveness is implied. */
+  executorSummaries?: Array<{ id: string; displayName: string; configured: boolean; status: string }>;
+  /** Connector identities for the network view. */
+  connectorSummaries?: Array<{ id: string; displayName: string; status: string; activeSessionCount: number }>;
   /** Exact per-status counts across the store. When present, cards use these instead of counting `workItems`. */
   statusCounts?: Record<string, number>;
   /** Recent `policy.decided` events for the Policy panel. Falls back to `events` when absent. */
