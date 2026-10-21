@@ -34,6 +34,9 @@ await test('commands map argv to exactly one tool with validated arguments', () 
   assert.equal(command.tool, 'read_file');
   assert.deepEqual(command.toArguments(parseArgs(rest)), { path: '/r/a.ts', offset: 10, length: 5 });
   assert.equal(resolveCommand(['acs', 'read', 'health']).command.tool, 'acs_read');
+  const output = resolveCommand(['output', 'proc_1', '--offset', '4', '--stderr-offset', '9']);
+  assert.equal(output.command.tool, 'read_process_output');
+  assert.deepEqual(output.command.toArguments(parseArgs(output.rest)), { sessionId: 'proc_1', offset: 4, stderrOffset: 9 });
   assert.throws(() => resolveCommand(['read', 'x', '--length', 'lots']).command.toArguments(parseArgs(['x', '--length', 'lots'])), CliUsageError);
   assert.throws(() => resolveCommand(['sudo', 'id']).command.toArguments(parseArgs(['id'])), /absolute/);
   assert.equal(resolveCommand(['nope']), undefined);

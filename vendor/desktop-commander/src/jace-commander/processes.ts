@@ -80,7 +80,9 @@ export class OutputBuffer {
   private append(piece: string): void {
     this.text += piece;
     if (this.text.length > MAX_OUTPUT) {
-      const drop = this.text.length - MAX_OUTPUT;
+      let drop = this.text.length - MAX_OUTPUT;
+      // Never leave a lone low surrogate at the head: the cut would split an astral character.
+      if (isLowSurrogate(this.text.charCodeAt(drop))) drop += 1;
       this.text = this.text.slice(drop);
       this.base += drop;
     }
@@ -375,12 +377,29 @@ export function createProcessRegistry(): ProcessRegistry {
 }
 
 /** SIGTERM the group now; SIGKILL it after the grace period if the leader is still alive. */
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+/** True while any process still belongs to the group led by `pid` (signal 0 probes without sending). */
+function groupAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * SIGTERM the group now; SIGKILL the group after the grace period if any member is still alive.
+ * Escalation follows the group, not the leader: a descendant can survive the leader's SIGTERM exit.
+ */
 function terminate(session: Session): void {
   if (session.state !== 'running') return;
   signalGroup(session, 'SIGTERM');
   const escalate = setTimeout(() => {
-    if (session.state === 'running') signalGroup(session, 'SIGKILL');
+    if (groupAlive(session.pid)) signalGroup(session, 'SIGKILL');
   }, KILL_GRACE_MS);
   escalate.unref();
-  session.child.once('exit', () => clearTimeout(escalate));
 }
