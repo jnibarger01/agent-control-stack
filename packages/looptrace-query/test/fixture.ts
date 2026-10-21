@@ -12,6 +12,7 @@ import { DatabaseSync } from "node:sqlite";
 import { buildEvidenceManifest } from "@agent-control-stack/evidence";
 import { auditEventHash } from "@agent-control-stack/shared";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
+import { afterAll } from "vitest";
 
 export const sha = (s: string): string => createHash("sha256").update(s).digest("hex");
 export const T0 = Date.parse("2026-10-12T10:00:00.000Z");
@@ -33,6 +34,9 @@ const STORE_OPTIONS = { traceInstance: "fixture-acs", releaseSha: "a".repeat(40)
  * migrating once per fixture pushed multi-fixture tests past the 5s test timeout under parallel CI load. Migrate
  * once per test worker into a template and give each fixture its own byte copy: every fixture still gets the real,
  * current schema (drift still fails), and fixtures stay fully isolated from one another.
+ *
+ * The template is removed in afterAll: vitest workers do not reliably emit process "exit", so an exit hook leaks it.
+ * Each test file gets its own instance of this module, so afterAll here runs once per file that built a template.
  */
 let template: { dir: string; dbPath: string } | null = null;
 function migratedTemplate(): string {
@@ -45,9 +49,14 @@ function migratedTemplate(): string {
     throw new Error("fixture template database was not fully checkpointed on close");
   }
   template = { dir, dbPath };
-  process.once("exit", () => rmSync(dir, { recursive: true, force: true }));
   return dbPath;
 }
+
+afterAll(() => {
+  if (!template) return;
+  rmSync(template.dir, { recursive: true, force: true });
+  template = null;
+});
 
 export function createFixture(): Fixture {
   const dir = mkdtempSync(join(tmpdir(), "looptrace-query-"));
