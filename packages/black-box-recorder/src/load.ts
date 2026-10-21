@@ -1,25 +1,9 @@
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import snapshot from "./snapshot.json" with { type: "json" };
 import { FIXTURE_RUNS } from "./fixture.js";
 import { RecorderStore } from "./store.js";
 import type { IngestDraft, RunAnnotation } from "./types.js";
 
 export const LIVE_FOCUS_RUN = "wrk_f0c9e63f-44f5-4b3c-a2ca-265bdbcebd8e";
-
-function resolveSnapshotPath(): string {
-  const candidates: string[] = [];
-  if (import.meta.url.startsWith("file:")) {
-    const here = dirname(fileURLToPath(import.meta.url));
-    candidates.push(join(here, "snapshot.json"), join(here, "../src/snapshot.json"));
-  }
-  candidates.push(join(process.cwd(), "packages/black-box-recorder/src/snapshot.json"));
-  const found = candidates.find((path) => existsSync(path));
-  if (!found) throw new Error("black-box snapshot.json was not found");
-  return found;
-}
-
-export const SNAPSHOT_PATH = resolveSnapshotPath();
 
 type Snapshot = {
   capturedAt: string;
@@ -41,11 +25,7 @@ type Snapshot = {
   }>;
 };
 
-function readSnapshot(): Snapshot {
-  return JSON.parse(readFileSync(SNAPSHOT_PATH, "utf8")) as Snapshot;
-}
-
-const data = readSnapshot();
+const data = snapshot as Snapshot;
 
 export const capture = {
   capturedAt: data.capturedAt,

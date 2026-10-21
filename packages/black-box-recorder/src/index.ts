@@ -37,5 +37,5 @@ export {
   timestampUncertain
 } from "./analyze.js";
 export { FIXTURE_RUNS } from "./fixture.js";
-export { LIVE_FOCUS_RUN, SNAPSHOT_PATH, capture, loadLane } from "./load.js";
+export { LIVE_FOCUS_RUN, capture, loadLane } from "./load.js";
 export { recorderFeatureEnabled } from "./flag.js";

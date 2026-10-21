@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import { queryRuns, summarize } from "./analyze.js";
 import { recorderFeatureEnabled } from "./flag.js";
-import { LIVE_FOCUS_RUN, SNAPSHOT_PATH, loadLane } from "./load.js";
+import { LIVE_FOCUS_RUN, loadLane } from "./load.js";
 import { redact } from "./redact.js";
 import { RecorderStore } from "./store.js";
 
@@ -139,7 +139,7 @@ describe("black box recorder", () => {
   });
 
   test("snapshot and export contain no withheld output or home paths", async () => {
-    const raw = readFileSync(SNAPSHOT_PATH, "utf8");
+    const raw = readFileSync(new URL("./snapshot.json", import.meta.url), "utf8");
     for (const needle of ["/home/jacen", "stdout", "stderr", "Bearer ", "BEGIN PRIVATE", "tokenHash"]) {
       expect(raw.includes(needle), needle).toBe(false);
     }
