@@ -28,7 +28,7 @@ describe("approve_work_item replay", () => {
       const first = tools.approve_work_item(input);
       expect(first.workItem.status).toBe("approved");
       expect(first.approvals).toHaveLength(1);
-      const countOf = (name: string) => store.readEvents().filter((event) => event.name === name).length;
+      const countOf = (name: string) => store.readEvents({ name, limit: 500 }).length;
       const before = {
         granted: countOf("approval.granted"),
         decided: countOf("policy.decided"),
@@ -133,7 +133,7 @@ describe("approve_work_item replay", () => {
     });
     const actionHash = createPolicyEngine().evaluateWorkItem(workItem, "qa-operator", "approve")[0]!.actionHash;
     const input = { id: workItem.id, approvedBy: "qa-operator", reason: "approve", actionHash };
-    const countOf = (name: string) => store.readEvents().filter((event) => event.name === name).length;
+    const countOf = (name: string) => store.readEvents({ name, limit: 500 }).length;
     const cleanup = () => {
       store.close();
       rmSync(dir, { recursive: true, force: true });
@@ -308,6 +308,63 @@ describe("approve_work_item replay", () => {
       fx.tools.approve_work_item({ ...fx.input, reason: "tighter limit" });
 
       expect(fx.countOf("policy.decided")).toBe(decided + 1);
+      expect(fx.countOf("approval.granted")).toBe(1);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("an acs:admin approval on the current plan is not a replay for a human approver", () => {
+    const fx = approvedFixture();
+    try {
+      fx.tools.approve_work_item(fx.input);
+      const oldPlan = fx.store.getCurrentExecutionPlan(fx.workItem.id)!;
+      const superseding = fx.store.createExecutionPlan({
+        workItemId: fx.workItem.id,
+        definition: defaultExecutionPlanForWorkItem(fx.workItem, { executionMode: "desktop_commander" }),
+        createdByActorId: "qa-operator",
+        expectedCurrentPlanHash: oldPlan.planHash
+      });
+      fx.store.grantExecutionPlanApproval(
+        {
+          workItemId: fx.workItem.id,
+          planHash: superseding.planHash,
+          actionHash: fx.actionHash,
+          approvedByActorId: "acs:admin",
+          reason: "admin approves the new plan"
+        },
+        { via: "policy_gate" }
+      );
+
+      fx.tools.approve_work_item({ ...fx.input, reason: "human takes over" });
+
+      expect(
+        fx.store.getExecutionPlanApproval(fx.workItem.id, superseding.planHash, fx.actionHash)?.approvedByActorId
+      ).toBe("qa-operator");
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("finds the latest recorded decision even when more than 500 later policy events exist", () => {
+    const fx = approvedFixture();
+    try {
+      fx.tools.approve_work_item(fx.input);
+      for (let index = 0; index < 501; index += 1) {
+        fx.store.recordPolicyDecision({
+          workItemId: fx.workItem.id,
+          actionHash: `other-${index}`,
+          decision: "allow",
+          reason: "noise",
+          matchedRules: [],
+          context: {}
+        });
+      }
+      const decided = fx.countOf("policy.decided");
+
+      fx.tools.approve_work_item({ ...fx.input, reason: "replay behind a lot of noise" });
+
+      expect(fx.countOf("policy.decided")).toBe(decided);
       expect(fx.countOf("approval.granted")).toBe(1);
     } finally {
       fx.cleanup();

@@ -70,6 +70,7 @@ const cloneInputSchema = idInputSchema.extend({
     .optional(),
   risk: z.enum(["low", "medium", "high", "critical"]).optional()
 });
+const ACS_ADMIN_ACTOR = "acs:admin";
 const policyTransition = { via: "policy_gate" } satisfies PrivilegedTransitionOptions;
 const routingTransition = { via: "policy_gate" } satisfies PrivilegedTransitionOptions;
 const domainTransition = { via: "domain_service" } satisfies PrivilegedTransitionOptions;
@@ -156,9 +157,16 @@ function gateApprovalInTransaction(
   // plan leaves the base grant in place but needs grantExecutionPlanApproval on the new plan.
   const grant = store.getApprovalGrant(workItem.id, parsed.actionHash);
   const currentPlan = store.getCurrentExecutionPlan(workItem.id);
+  const planApproval = currentPlan
+    ? store.getExecutionPlanApproval(workItem.id, currentPlan.planHash, parsed.actionHash)
+    : undefined;
+  // An acs:admin plan approval is only a replay for acs:admin itself: a human must still reach
+  // grantExecutionPlanApproval so the admin grant on the current plan is invalidated.
+  const planApprovalReplayable =
+    planApproval?.status === "granted" &&
+    (planApproval.approvedByActorId !== ACS_ADMIN_ACTOR || parsed.approvedBy === ACS_ADMIN_ACTOR);
   if (
-    currentPlan !== undefined &&
-    store.hasExecutionPlanApproval(workItem.id, currentPlan.planHash, parsed.actionHash) &&
+    planApprovalReplayable &&
     workItem.status === "approved" &&
     grant?.status === "granted" &&
     grant.approvedBy === parsed.approvedBy &&
@@ -245,12 +253,37 @@ function canonicalDecision(decision: Record<string, unknown>): string {
   return JSON.stringify(DECISION_FIELDS.map((field) => decision[field] ?? null));
 }
 
+/** Newest recorded policy.decided body for an action hash, paging back so event volume cannot hide it. */
+function latestRecordedDecision(
+  store: WorkItemStore,
+  workItemId: string,
+  actionHash: string
+): Record<string, unknown> | undefined {
+  const pageSize = 500;
+  let beforeSequence: number | undefined;
+  for (;;) {
+    const page = store.readEvents({
+      name: "policy.decided",
+      workItemId,
+      limit: pageSize,
+      ...(beforeSequence === undefined ? {} : { beforeSequence })
+    });
+    const match = page
+      .filter((event) => (event.body as { actionHash?: string } | undefined)?.actionHash === actionHash)
+      .at(-1);
+    if (match) {
+      return match.body as Record<string, unknown>;
+    }
+    if (page.length < pageSize) {
+      return undefined;
+    }
+    beforeSequence = page[0]!.sequence;
+  }
+}
+
 function recordChangedEvaluations(store: WorkItemStore, workItemId: string, evaluations: PolicyEvaluation[]): void {
-  const recorded = store.readEvents({ name: "policy.decided", workItemId, limit: 500 });
   for (const evaluation of evaluations) {
-    const latest = recorded
-      .filter((event) => (event.body as { actionHash?: string } | undefined)?.actionHash === evaluation.actionHash)
-      .at(-1)?.body as Record<string, unknown> | undefined;
+    const latest = latestRecordedDecision(store, workItemId, evaluation.actionHash);
     if (latest === undefined || canonicalDecision(latest) !== canonicalDecision({ ...evaluation.decision })) {
       store.recordPolicyDecision({
         workItemId,
