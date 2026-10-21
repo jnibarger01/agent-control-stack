@@ -565,6 +565,38 @@ describe("WorkspaceManager", () => {
       await first;
     }, 15_000);
 
+    it("R/V HIGH: a post-checkout hook that backgrounds a process does not keep the lock after git exits", async () => {
+      const fixture = await createRepoFixture();
+      const pidFile = join(fixture.rootDir, "..", "hook-bg.pid");
+      cleanup = () => {
+        try {
+          process.kill(Number(readFileSync(pidFile, "utf8").trim()), "SIGKILL");
+        } catch {
+          // Already gone / never started.
+        }
+        fixture.cleanup();
+      };
+      // Real `git worktree add` runs post-checkout; the hook leaves a long-lived
+      // background child behind (stdio detached so only an inherited lock fd
+      // could tie it to the lock).
+      writeFileSync(
+        join(fixture.repoPath, ".git", "hooks", "post-checkout"),
+        `#!/bin/sh\nsleep 30 </dev/null >/dev/null 2>&1 &\necho $! > "${pidFile}"\n`,
+        { mode: 0o755 }
+      );
+      const manager = new WorkspaceManager({
+        repoPath: fixture.repoPath,
+        rootDir: fixture.rootDir,
+        store: fixture.store,
+        lockWaitMs: 1_000
+      });
+      await manager.provision(seedWorkItemId(fixture.store, "hook-first"));
+      expect(existsSync(pidFile)).toBe(true);
+      const started = Date.now();
+      await manager.provision(seedWorkItemId(fixture.store, "hook-second"));
+      expect(Date.now() - started).toBeLessThan(1_000);
+    }, 15_000);
+
     it("fails closed when flock(1) is unavailable instead of running git unlocked", async () => {
       const fixture = await createRepoFixture();
       cleanup = fixture.cleanup;

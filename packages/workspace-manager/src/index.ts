@@ -540,6 +540,10 @@ export class WorkspaceManager {
     closeSync(openSync(lockPath, "a", 0o600));
     const flockArgs = [
       "--exclusive",
+      // Do not let git, its hooks, or anything they background/setsid inherit
+      // the lock descriptor: only flock(1) itself holds the lock, so it is
+      // released the moment flock exits, never later.
+      "--close",
       "--wait",
       (this.lockWaitMs / 1000).toFixed(3),
       "--conflict-exit-code",
