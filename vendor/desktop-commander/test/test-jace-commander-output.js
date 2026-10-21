@@ -197,5 +197,45 @@ await test('a timeout still reaps a descendant after its leader has already exit
   await waitForExit(started.sessionId);
 });
 
+await test('a session stays running while a descendant keeps its process group alive after the leader exits', async () => {
+  // The leader spawns a detached-from-stdio child, unrefs it, and exits. The group is still alive,
+  // so the session must not report itself as exited, and the deadline must still be armed.
+  const leaderScript = [
+    "const { spawn } = require('child_process');",
+    "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000);'], { stdio: 'ignore' });",
+    "child.unref();",
+    "console.log('child=' + child.pid);",
+  ].join('\n');
+  const started = registry.start({ argv: [process.execPath, '-e', leaderScript], cwd: tmp, timeoutMs: 60_000 }, policy);
+  let childPid;
+  for (let attempt = 0; attempt < 100 && childPid === undefined; attempt += 1) {
+    const out = await registry.output({ sessionId: started.sessionId, waitMs: 200 });
+    const match = /child=(\d+)/u.exec(out.stdout);
+    if (match) childPid = Number(match[1]);
+  }
+  assert.ok(childPid, 'leader reported its child pid');
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const before = await registry.output({ sessionId: started.sessionId });
+  assert.equal(before.running, true, 'a live descendant keeps the session running');
+  registry.kill({ sessionId: started.sessionId });
+  await waitForExit(started.sessionId);
+});
+
+await test('a deadline does not mark a session timed out after it completes normally', async () => {
+  const started = registry.start({ argv: [process.execPath, '-e', "console.log('done')"], cwd: tmp, timeoutMs: 1_000 }, policy);
+  await waitForExit(started.sessionId);
+  await new Promise((resolve) => setTimeout(resolve, 1_300));
+  const out = await registry.output({ sessionId: started.sessionId });
+  assert.equal(out.running, false);
+  assert.equal(out.timedOut, false, 'the deadline was cleared when the group completed');
+});
+
+await test('read_process_output omits argv, so arguments never reach the reply', async () => {
+  const started = registry.start({ argv: [process.execPath, '-e', "console.log('ok')", 'ARGV-MARKER-VALUE'], cwd: tmp, timeoutMs: 60_000 }, policy);
+  const out = await waitForExit(started.sessionId);
+  assert.equal('argv' in out, false);
+  assert.doesNotMatch(JSON.stringify(out), /ARGV-MARKER-VALUE/u);
+});
+
 console.log(`output: ${passed} passed`);
 fs.rmSync(tmp, { recursive: true, force: true });

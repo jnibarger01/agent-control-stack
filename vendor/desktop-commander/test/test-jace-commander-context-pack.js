@@ -295,5 +295,33 @@ await test('a denied path is reported as path_denied, not as a transient read fa
   assert.equal(pack.dropped[0].reason, 'path_denied');
 });
 
+await test('a budget that fits a single item exactly emits it untruncated', () => {
+  const build = (n) => `hello${'x'.repeat(n)}`;
+  const measure = (n) => assembleContextPack([ok('a', build(n))], 1000).rendered.length;
+  let n = 0;
+  while (measure(n) % 4 !== 0) n += 1;
+  const length = measure(n);
+  const pack = assembleContextPack([ok('a', build(n))], length / 4);
+  assert.equal(pack.items.length, 1);
+  assert.equal(pack.items[0].truncated, false, 'a separator is not charged before the first item');
+});
+
+await test('malformed source shapes are invalid_argument, never a TypeError', async () => {
+  const code = (error) => error?.code === 'invalid_argument';
+  await assert.rejects(buildContextPack({ files: 1 }, policy), code);
+  await assert.rejects(buildContextPack({ inline: {} }, policy), code);
+  await assert.rejects(buildContextPack({ inline: [null] }, policy), code);
+  await assert.rejects(buildContextPack({ files: [path.join(root, 'a.md')], pins: [] }, policy), code);
+});
+
+await test('a pin for a path that is not in files is refused before any read', async () => {
+  const file = path.join(root, 'pinned.md');
+  fs.writeFileSync(file, 'x\n');
+  await assert.rejects(
+    buildContextPack({ files: [file], pins: { [path.join(root, 'other.md')]: sha256Hex('x') } }, policy),
+    /pins names a path that is not in files/u,
+  );
+});
+
 console.log(`context-pack: ${passed} passed`);
 fs.rmSync(tmp, { recursive: true, force: true });

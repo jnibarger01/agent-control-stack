@@ -215,7 +215,9 @@ export function assembleContextPack(sources: readonly ResolvedSource[], budgetTo
     }
     const redacted = redactContext(source.text);
     const fullBody = escapeBody(redacted.text);
-    const remaining = budgetChars - usedChars - SEPARATOR_CHARS;
+    // A separator is charged only between emitted items; parts.join adds none before the first or after the last.
+    const separator = parts.length > 0 ? SEPARATOR_CHARS : 0;
+    const remaining = budgetChars - usedChars - separator;
 
     const build = (body: string, truncated: boolean): { wrapped: string; item: ContextPackItem } => {
       const meta = { id: source.id, trust: source.trust, location: source.location, sourceSha256: source.sourceSha256, emittedSha256: sha256Hex(body), truncated };
@@ -263,7 +265,7 @@ export function assembleContextPack(sources: readonly ResolvedSource[], budgetTo
       }
       chosen = best;
     }
-    usedChars += chosen.wrapped.length + SEPARATOR_CHARS;
+    usedChars += chosen.wrapped.length + separator;
     items.push(chosen.item);
     parts.push(chosen.wrapped);
   }
@@ -383,6 +385,16 @@ function assertContextRequest(request: ContextPackRequest): void {
     if (!REQUEST_KEYS.has(key)) throw new IntegrationError('invalid_argument', `unknown field: ${key}`);
   }
   const isTrust = (value: unknown) => (CONTEXT_TRUST_LEVELS as readonly unknown[]).includes(value);
+  // Shape before content: the ids below spread and map these fields, so a malformed value must be invalid_argument, not a TypeError.
+  if (request.files !== undefined && (!Array.isArray(request.files) || request.files.some((file) => typeof file !== 'string' || file.length === 0))) {
+    throw new IntegrationError('invalid_argument', 'files must be a list of non-empty path strings');
+  }
+  if (request.inline !== undefined && (!Array.isArray(request.inline) || request.inline.some((item) => typeof item !== 'object' || item === null))) {
+    throw new IntegrationError('invalid_argument', 'inline must be a list of source objects');
+  }
+  if (request.pins !== undefined && (typeof request.pins !== 'object' || request.pins === null || Array.isArray(request.pins))) {
+    throw new IntegrationError('invalid_argument', 'pins must be an object of path to sha256 digest');
+  }
   const ids = [...(request.files ?? []), ...(request.inline ?? []).map((item) => item.id)];
   if (new Set(ids).size !== ids.length) throw new IntegrationError('invalid_argument', 'source ids must be unique across files and inline');
   const total = (request.files?.length ?? 0) + (request.inline?.length ?? 0);
@@ -392,11 +404,9 @@ function assertContextRequest(request: ContextPackRequest): void {
   }
   for (const [pinned, digest] of Object.entries(request.pins ?? {})) {
     if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/u.test(digest)) throw new IntegrationError('invalid_argument', `pin for ${pinned} must be a sha256 hex digest`);
+    if (!(request.files ?? []).includes(pinned)) throw new IntegrationError('invalid_argument', `pins names a path that is not in files: ${pinned}`);
   }
   if (request.fileTrust !== undefined && !isTrust(request.fileTrust)) throw new IntegrationError('invalid_argument', 'fileTrust is not a known trust level');
-  if (request.files !== undefined && (!Array.isArray(request.files) || request.files.some((file) => typeof file !== 'string' || file.length === 0))) {
-    throw new IntegrationError('invalid_argument', 'files must be a list of non-empty path strings');
-  }
   for (const item of request.inline ?? []) {
     for (const key of Object.keys(item)) {
       if (!INLINE_KEYS.has(key)) throw new IntegrationError('invalid_argument', `unknown inline field: ${key}`);

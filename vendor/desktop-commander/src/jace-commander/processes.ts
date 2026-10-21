@@ -34,6 +34,8 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const KILL_GRACE_MS = 5_000;
 /** After the leader exits, how long to wait for stdio to close before settling anyway (a descendant may hold the pipes). */
 const STREAM_CLOSE_GRACE_MS = 2_000;
+/** How often a session whose stdio has closed re-checks whether its process group is gone. */
+const GROUP_POLL_MS = 200;
 /** How long a finished session stays readable before it is pruned. */
 const FINISHED_RETENTION_MS = 10 * 60_000;
 /** Longest `waitMs` a read may long-poll for new output. */
@@ -251,13 +253,18 @@ export function createProcessRegistry(): ProcessRegistry {
     });
     // 'running' ends only when stdio has closed: until then a reader could see the exit and miss
     // the last chunk. If a descendant keeps the pipes open, settle after a grace period anyway.
+    // A session ends when its whole process group is gone, not when the leader exits or stdio closes:
+    // a descendant can keep the group alive and must keep the deadline, the state and the slot.
     let settled = false;
-    const settle = (): void => {
-      if (settled) return;
-      settled = true;
+    let concluded = false;
+    let closeFallback: NodeJS.Timeout | undefined;
+    let groupWatch: NodeJS.Timeout | undefined;
+    const conclude = (): void => {
+      if (concluded) return;
+      concluded = true;
       clearTimeout(closeFallback);
-      session.stdout.finish();
-      session.stderr.finish();
+      clearInterval(groupWatch);
+      clearTimeout(timer);
       if (session.state === 'running') {
         session.state = 'exited';
         session.finishedAt = Date.now();
@@ -265,14 +272,29 @@ export function createProcessRegistry(): ProcessRegistry {
       wake(session);
       resolveDone();
     };
-    let closeFallback: NodeJS.Timeout | undefined;
+    // Output is final once stdio closes. The state changes only in conclude(), so a waiter never sees an exit code while still 'running'.
+    const settle = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(closeFallback);
+      session.stdout.finish();
+      session.stderr.finish();
+      if (!groupAlive(session.pid)) {
+        conclude();
+        return;
+      }
+      wake(session);
+      groupWatch = setInterval(() => {
+        if (!groupAlive(session.pid)) conclude();
+      }, GROUP_POLL_MS);
+      groupWatch.unref();
+    };
     child.on('exit', (code, signal) => {
       session.exitCode = code;
       session.signal = signal;
-      // The deadline is NOT cleared here: a descendant can outlive the leader and must still be stopped.
+      // The leader's exit does not end the session: a descendant can outlive it (see settle).
       closeFallback = setTimeout(settle, STREAM_CLOSE_GRACE_MS);
       closeFallback.unref();
-      wake(session);
     });
     child.on('close', settle);
     const timer = setTimeout(() => {
@@ -285,12 +307,16 @@ export function createProcessRegistry(): ProcessRegistry {
   }
 
   function summary(session: Session): Record<string, unknown> {
+    return { ...status(session), argv: session.argv };
+  }
+
+  /** Lifecycle fields only. Output replies use this, so argv (which can carry secrets) stays out of them. */
+  function status(session: Session): Record<string, unknown> {
     return {
       sessionId: session.sessionId,
       kind: session.kind,
       pid: session.pid,
       cwd: session.cwd,
-      argv: session.argv,
       state: session.state,
       running: session.state === 'running',
       exitCode: session.exitCode,
@@ -303,7 +329,7 @@ export function createProcessRegistry(): ProcessRegistry {
     const out = session.stdout.read(stdoutOffset);
     const err = session.stderr.read(stderrOffset);
     return {
-      ...summary(session),
+      ...status(session),
       ...(session.error !== undefined ? { error: session.error } : {}),
       stdout: out.text,
       stdoutOffset: out.offset,
