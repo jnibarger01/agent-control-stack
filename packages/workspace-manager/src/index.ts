@@ -56,30 +56,86 @@ class ProcessFailure extends Error {
     readonly stderr: string,
     readonly exitCode: number | null,
     readonly timedOut: boolean,
-    readonly spawnCode?: string
+    readonly spawnCode?: string,
+    /** For locked runs: whether the child reported holding the lock (fd 3) before exiting. */
+    readonly lockAcquired = true,
+    /** For locked runs: node's backstop on the lock wait fired. */
+    readonly lockWaitTimedOut = false
   ) {
     super(message);
   }
 }
 
-function runProcess(file: string, args: string[], cwd: string, timeoutMs: number): Promise<ProcessResult> {
+/**
+ * Shell run by flock(1) once the lock is held: report acquisition on fd 3
+ * (a pipe back to node), close fd 3 so git never inherits it, then exec git.
+ * Arguments arrive as "$@", never interpolated into the script.
+ */
+const LOCKED_EXEC_SCRIPT = 'printf L >&3 || exit 70; exec 3>&-; exec "$@"';
+/** Slack for flock(1)'s own `-w` to fire before node's backstop timer does. */
+const LOCK_WAIT_GRACE_MS = 1_000;
+
+interface LockedRun {
+  /** Bound on the lock wait, enforced by flock -w (backstop: +LOCK_WAIT_GRACE_MS here). */
+  lockWaitMs: number;
+}
+
+/**
+ * Runs file/args in its own process group. Without `lock`, the whole run is
+ * bounded by timeoutMs. With `lock`, the child must write to fd 3 once it
+ * holds the lock: the wait before that is bounded by lock.lockWaitMs, and
+ * timeoutMs (git's budget) starts only at that moment.
+ */
+function runProcess(
+  file: string,
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+  lock?: LockedRun
+): Promise<ProcessResult> {
   return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(file, args, { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(file, args, {
+      cwd,
+      detached: true,
+      stdio: lock ? ["ignore", "pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"]
+    });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let lockWaitTimedOut = false;
+    let lockAcquired = !lock;
     let settled = false;
-    child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
-    child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
-    const timer = setTimeout(() => {
-      timedOut = true;
+    child.stdout!.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
+    child.stderr!.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
+    const killGroup = () => {
       try {
         // Negative pid: the whole process group (flock + git + git's children).
         if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
       } catch {
         child.kill("SIGKILL");
       }
-    }, timeoutMs);
+    };
+    const startGitTimer = () =>
+      setTimeout(() => {
+        timedOut = true;
+        killGroup();
+      }, timeoutMs);
+    let timer = lock
+      ? setTimeout(() => {
+          lockWaitTimedOut = true;
+          killGroup();
+        }, lock.lockWaitMs + LOCK_WAIT_GRACE_MS)
+      : startGitTimer();
+    if (lock) {
+      const signal = child.stdio[3] as NodeJS.ReadableStream;
+      signal.on("data", () => {
+        if (lockAcquired || settled) return;
+        lockAcquired = true;
+        clearTimeout(timer);
+        timer = startGitTimer();
+      });
+      signal.on("error", () => undefined);
+    }
     child.once("error", (error: NodeJS.ErrnoException) => {
       if (settled) return;
       settled = true;
@@ -90,7 +146,7 @@ function runProcess(file: string, args: string[], cwd: string, timeoutMs: number
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (code === 0 && !timedOut) {
+      if (code === 0 && !timedOut && !lockWaitTimedOut) {
         resolveRun({ stdout, stderr });
         return;
       }
@@ -99,7 +155,10 @@ function runProcess(file: string, args: string[], cwd: string, timeoutMs: number
           timedOut ? `timed out after ${timeoutMs}ms` : `exited with ${signal ?? code}`,
           stderr,
           code,
-          timedOut
+          timedOut,
+          undefined,
+          lockAcquired,
+          lockWaitTimedOut
         )
       );
     });
@@ -549,11 +608,18 @@ export class WorkspaceManager {
       "--conflict-exit-code",
       String(FLOCK_CONFLICT_EXIT),
       lockPath,
+      "/bin/sh",
+      "-c",
+      LOCKED_EXEC_SCRIPT,
+      "acs-worktree-lock",
       this.gitPath,
       ...args
     ];
     try {
-      return await runProcess(this.flockPath, flockArgs, this.repoPath, this.lockWaitMs + this.gitTimeoutMs);
+      // gitTimeoutMs bounds git alone: its timer starts when the lock is held.
+      return await runProcess(this.flockPath, flockArgs, this.repoPath, this.gitTimeoutMs, {
+        lockWaitMs: this.lockWaitMs
+      });
     } catch (error) {
       throw this.gitError(args, error, lockPath);
     }
@@ -590,7 +656,7 @@ export class WorkspaceManager {
         `${command} not run: flock(1) not found at ${this.flockPath}; refusing to run a worktree command unlocked`
       );
     }
-    if (lockPath && failure.exitCode === FLOCK_CONFLICT_EXIT) {
+    if (lockPath && (failure.lockWaitTimedOut || failure.exitCode === FLOCK_CONFLICT_EXIT)) {
       return new ControlStackError(
         "workspace_git_lock_timeout",
         `${command} not run: timed out after ${this.lockWaitMs}ms waiting for worktree lock ${lockPath}`

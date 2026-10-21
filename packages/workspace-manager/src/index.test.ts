@@ -597,6 +597,53 @@ describe("WorkspaceManager", () => {
       expect(Date.now() - started).toBeLessThan(1_000);
     }, 15_000);
 
+    it("R/V MED: gitTimeoutMs bounds git on its own, not lockWaitMs + gitTimeoutMs", async () => {
+      const fixture = await createRepoFixture();
+      const shimDir = mkdtempSync(join(tmpdir(), "acs-workspace-manager-gittimeout-"));
+      cleanup = () => {
+        fixture.cleanup();
+        rmSync(shimDir, { recursive: true, force: true });
+      };
+      const realGit = (await execFileAsync("sh", ["-c", "command -v git"])).stdout.trim();
+      const hangGit = join(shimDir, "git");
+      writeFileSync(
+        hangGit,
+        `#!/bin/sh\nif [ "$1" = "worktree" ]; then sleep 30 & wait; exit 0; fi\nexec "${realGit}" "$@"\n`,
+        { mode: 0o755 }
+      );
+      const manager = new WorkspaceManager({
+        repoPath: fixture.repoPath,
+        rootDir: fixture.rootDir,
+        store: fixture.store,
+        gitPath: hangGit,
+        gitTimeoutMs: 300,
+        lockWaitMs: 10_000
+      });
+      const started = Date.now();
+      await expect(manager.provision(seedWorkItemId(fixture.store, "git-budget"))).rejects.toMatchObject({
+        code: "workspace_git_timeout"
+      });
+      expect(Date.now() - started).toBeLessThan(3_000);
+    }, 20_000);
+
+    it("R/V MED: time spent waiting for the lock is not charged to git's gitTimeoutMs budget", async () => {
+      const fixture = await createRepoFixture();
+      cleanup = fixture.cleanup;
+      const lockPath = join(fixture.repoPath, ".git", "acs-worktree.lock");
+      const holder = await holdKernelLock(lockPath);
+      const manager = new WorkspaceManager({
+        repoPath: fixture.repoPath,
+        rootDir: fixture.rootDir,
+        store: fixture.store,
+        gitTimeoutMs: 1_500,
+        lockWaitMs: 10_000
+      });
+      const pending = manager.provision(seedWorkItemId(fixture.store, "waited"));
+      await sleep(2_000);
+      await holder.release();
+      await pending;
+    }, 20_000);
+
     it("fails closed when flock(1) is unavailable instead of running git unlocked", async () => {
       const fixture = await createRepoFixture();
       cleanup = fixture.cleanup;
