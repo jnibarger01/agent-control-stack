@@ -12,7 +12,7 @@ import {
 } from "./domain.js";
 import { assertRepresentable, sanitizeDeep } from "./persist.js";
 import { computeVerdict, nextActions } from "./verdict.js";
-import { validatePlan } from "./plan.js";
+import { compilePlan, validatePlan } from "./plan.js";
 
 export const EVENT_ACCEPTED = "outcome.accepted";
 export const EVENT_EVALUATION = "outcome.evaluation_recorded";
@@ -361,11 +361,21 @@ export function verifyOutcome(accepted: AcceptedRecord, evaluations: readonly Ev
   } catch {
     problems.push("plan_invalid");
   }
+  // A plan that validates on its own is not enough: it must be the plan these criteria compile to, as evaluate() requires.
+  let expectedPlanHash: string | undefined;
+  try {
+    expectedPlanHash = compilePlan(accepted.criteria).planHash;
+  } catch {
+    problems.push("plan_recompile_failed");
+  }
+  if (expectedPlanHash !== undefined && expectedPlanHash !== accepted.plan.planHash)
+    problems.push("plan_hash_mismatch");
   let previous = "";
   evaluations.forEach((record, index) => {
     const at = `evaluation#${record.sequenceNo}`;
     if (record.sequenceNo !== index + 1) problems.push(`${at}:sequence_gap`);
     if (record.previousChainHash !== previous) problems.push(`${at}:previous_chain_hash_mismatch`);
+    if (record.planHash !== accepted.plan.planHash) problems.push(`${at}:plan_hash_mismatch`);
     const { contentHash, chainHash, evaluationId, ...rest } = record;
     if (evaluationContentHash(rest) !== contentHash) problems.push(`${at}:content_hash_mismatch`);
     if (

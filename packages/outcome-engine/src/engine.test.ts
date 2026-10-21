@@ -16,8 +16,10 @@ import {
   createOutcomeStorePort,
   evaluationChainHash,
   evaluationContentHash,
+  verifyOutcome,
   type EvaluationRecord
 } from "./ledger.js";
+import { compilePlan } from "./plan.js";
 import { STALE_AFTER_MS } from "./verdict.js";
 
 const REPO = "o/r";
@@ -409,6 +411,23 @@ describe("persistence and trust", () => {
     expect(view).toMatchObject({ recorded: false });
     expect(view.record.reasonCodes).toContain("audit_chain_invalid");
     expect(view.record.blockKind).toBe("integrity");
+  });
+});
+
+describe("plan replay", () => {
+  it("integrity replay recompiles the stored plan and binds every evaluation to it", async () => {
+    const e = engine();
+    const { record } = accept(e);
+    await e.evaluate(record.outcomeId);
+    const loaded = e.show(record.outcomeId);
+    expect(loaded?.problems).toEqual([]);
+    // Internally valid (its planHash matches its steps) but not the plan these criteria compile to.
+    const forgedPlan = compilePlan(record.criteria.slice(0, -1));
+    expect(forgedPlan.planHash).not.toBe(record.plan.planHash);
+    const problems = verifyOutcome({ ...record, plan: forgedPlan }, loaded?.evaluations ?? []);
+    expect(problems).toContain("plan_hash_mismatch");
+    expect(problems).toContain("evaluation#1:plan_hash_mismatch");
+    expect(problems).not.toContain("plan_invalid");
   });
 });
 
