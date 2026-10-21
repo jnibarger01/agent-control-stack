@@ -199,6 +199,14 @@ export class OutcomeLedger {
     return this.port.verifyAuditChain().ok;
   }
 
+  /**
+   * The outcome records live inside the global audit chain, so a break anywhere in that chain taints every read: show and
+   * list must fail closed on the same integrity state evaluate() blocks on.
+   */
+  private auditChainProblems(): string[] {
+    return this.auditChainOk() ? [] : ["audit_chain_invalid"];
+  }
+
   recordAccepted(record: AcceptedRecord): StoredAuditEvent {
     assertRepresentable(record, "outcome.accepted");
     return this.port.recordSystemEvent({
@@ -293,14 +301,19 @@ export class OutcomeLedger {
     const evaluations = evaluationScan.records
       .filter((record) => record.outcomeId === outcomeId)
       .sort((left, right) => left.sequenceNo - right.sequenceNo);
-    const problems = [...acceptedScan.problems, ...evaluationScan.problems, ...verifyOutcome(accepted, evaluations)];
+    const problems = [
+      ...this.auditChainProblems(),
+      ...acceptedScan.problems,
+      ...evaluationScan.problems,
+      ...verifyOutcome(accepted, evaluations)
+    ];
     return { accepted, evaluations, problems };
   }
 
   loadAll(): LoadedOutcome[] {
     const acceptedScan = this.parseAccepted(this.scan(EVENT_ACCEPTED));
     const evaluationScan = this.parseEvaluations(this.scan(EVENT_EVALUATION));
-    const scanProblems = [...acceptedScan.problems, ...evaluationScan.problems];
+    const scanProblems = [...this.auditChainProblems(), ...acceptedScan.problems, ...evaluationScan.problems];
     const seen = new Set<string>();
     return acceptedScan.records
       .filter((record) => (seen.has(record.outcomeId) ? false : (seen.add(record.outcomeId), true)))

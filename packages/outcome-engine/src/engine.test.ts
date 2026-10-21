@@ -412,6 +412,24 @@ describe("persistence and trust", () => {
   });
 });
 
+describe("audit chain on read paths", () => {
+  it("show and list report a global audit-chain break even when the outcome-local hashes still verify", async () => {
+    const e = engine();
+    store.recordSystemEvent({ name: "test.sentinel", body: { n: 1 } });
+    const { record } = accept(e);
+    await e.evaluate(record.outcomeId);
+    expect(e.show(record.outcomeId)?.problems).toEqual([]);
+    const db = new DatabaseSync(dbPath);
+    try {
+      db.prepare("UPDATE audit_events SET body = ? WHERE name = 'test.sentinel'").run('{"tampered":true}');
+    } finally {
+      db.close();
+    }
+    expect(e.show(record.outcomeId)?.problems).toContain("audit_chain_invalid");
+    expect(e.list().find((row) => row.outcomeId === record.outcomeId)?.problems).toBeGreaterThan(0);
+  });
+});
+
 describe("through the real gh reader", () => {
   const node = {
     number: 7,
