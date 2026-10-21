@@ -453,7 +453,7 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "execution; approval required in strict mode; no shell"
   ),
   read_process_output: row(
-    "Read buffered stdout and stderr for a process or shell session this server started. Pass the returned stdoutNextOffset / stderrNextOffset back as offset / stderrOffset to read only new output. stdoutSkipped reports bytes lost before the retained tail. waitMs long-polls a running session for new output.",
+    "Read buffered stdout and stderr for a process or shell session this server started. Pass the returned stdoutNextOffset / stderrNextOffset back as offset / stderrOffset to read only new output. stdoutSkipped reports the UTF-16 code units lost before the retained tail. Offsets and skipped counts are UTF-16 code units of the decoded text, not bytes. waitMs long-polls a running session for new output.",
     {
       type: "object",
       properties: {

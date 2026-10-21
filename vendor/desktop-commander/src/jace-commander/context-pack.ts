@@ -343,7 +343,14 @@ export async function resolveContextSource(spec: ContextSourceSpec, policy: JcFs
   if (spec.expectedSha256 !== undefined && spec.expectedSha256 !== sourceSha256) {
     return { status: 'dropped', ...base, location: real, reason: 'stale', sourceSha256 };
   }
-  return { status: 'ok', ...base, location: real, text: content.toString('utf8'), sourceSha256 };
+  // Strict decode: bytes that are not UTF-8 are binary for this purpose, not silently replaced with U+FFFD.
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(content);
+  } catch {
+    return { status: 'dropped', ...base, location: real, reason: 'binary', sourceSha256 };
+  }
+  return { status: 'ok', ...base, location: real, text, sourceSha256 };
 }
 
 export interface ContextInlineSpec {
@@ -376,6 +383,8 @@ function assertContextRequest(request: ContextPackRequest): void {
     if (!REQUEST_KEYS.has(key)) throw new IntegrationError('invalid_argument', `unknown field: ${key}`);
   }
   const isTrust = (value: unknown) => (CONTEXT_TRUST_LEVELS as readonly unknown[]).includes(value);
+  const ids = [...(request.files ?? []), ...(request.inline ?? []).map((item) => item.id)];
+  if (new Set(ids).size !== ids.length) throw new IntegrationError('invalid_argument', 'source ids must be unique across files and inline');
   const total = (request.files?.length ?? 0) + (request.inline?.length ?? 0);
   if (total < 1 || total > MAX_SOURCES) throw new IntegrationError('invalid_argument', `files and inline must hold 1 to ${MAX_SOURCES} sources in total`);
   if (request.budgetTokens !== undefined && (!Number.isInteger(request.budgetTokens) || request.budgetTokens < 1 || request.budgetTokens > 200_000)) {

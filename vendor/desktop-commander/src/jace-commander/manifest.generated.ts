@@ -24,7 +24,7 @@ export interface JcManifest {
 
 export const JC_MANIFEST: JcManifest = {
   "version": "acs.jc.v1",
-  "manifestHash": "f4f8319985ab3afa54f6275149ba36b4c6f5ccab3b2cc0bf22ef67e41444b792",
+  "manifestHash": "f4a89a88d90a9dadf26dc2773344c680397dfd5e3beec7ddb19e95e3c74cc563",
   "scopes": [
     "fs.read",
     "fs.write",
@@ -1064,7 +1064,7 @@ export const JC_MANIFEST: JcManifest = {
     },
     {
       "name": "read_process_output",
-      "description": "Read buffered stdout and stderr for a process or shell session this server started. Pass the returned stdoutNextOffset / stderrNextOffset back as offset / stderrOffset to read only new output. stdoutSkipped reports bytes lost before the retained tail. waitMs long-polls a running session for new output.",
+      "description": "Read buffered stdout and stderr for a process or shell session this server started. Pass the returned stdoutNextOffset / stderrNextOffset back as offset / stderrOffset to read only new output. stdoutSkipped reports the UTF-16 code units lost before the retained tail. Offsets and skipped counts are UTF-16 code units of the decoded text, not bytes. waitMs long-polls a running session for new output.",
       "inputSchema": {
         "type": "object",
         "properties": {

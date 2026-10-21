@@ -43,4 +43,11 @@ describe("context_pack total source invariant (ACS schema)", () => {
     const files = Array.from({ length: 6 }, (_u, i) => join(root, `f${i}.md`));
     expect(() => validateJaceCommanderInvocation("context_pack", { inline, files })).not.toThrow();
   });
+
+  it("rejects a duplicate source id within inline items and a repeated file path", () => {
+    const inline = [{ id: "dup", text: "x", trust: "repo" }, { id: "dup", text: "y", trust: "repo" }];
+    expect(() => validateJaceCommanderInvocation("context_pack", { inline })).toThrow();
+    const file = join(root, "dup.md");
+    expect(() => validateJaceCommanderInvocation("context_pack", { files: [file, file] })).toThrow();
+  });
 });
