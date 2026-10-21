@@ -50,13 +50,16 @@ must-not-change constraints.
 
 ## Choosing the continuation mechanism
 
-| Mechanism | Next-turn or run trigger | Stop condition | Use it for | Evidence |
-| --- | --- | --- | --- | --- |
-| `/goal` | The preceding turn finishes. | Fresh evaluator confirms the transcript proves the condition. | One substantial, session-scoped, proof-oriented objective. | [`/goal` row](platform-facts.md#claude-code-and-managed-agent-features) |
-| `/loop` | The configured interval elapses. | User stops it or the repeated prompt decides work is done. | Polling or periodic work while the current session stays open. | [`/loop` row](platform-facts.md#claude-code-and-managed-agent-features) |
-| Stop hook | The main agent finishes normally. | A configured command, prompt, HTTP, or MCP handler allows the stop. | A reusable deterministic or model-evaluated gate across sessions. | [Stop-hooks row](platform-facts.md#claude-code-and-managed-agent-features) |
-| Auto mode | None; it approves eligible tool calls inside the current turn. | The main agent ends the turn. | Reducing per-tool prompts; pair with `/goal` when another turn must start. | [Auto-mode row](platform-facts.md#claude-code-and-managed-agent-features) |
-| Routine | A schedule, authenticated API request, or matching GitHub event starts a cloud session. | That independently started cloud session completes. | Work that must start without an open local session. | [Routines row](platform-facts.md#claude-code-and-managed-agent-features) |
+| Mechanism | Next-turn or run trigger                                                                | Stop condition                                                      | Use it for                                                                 | Evidence                                                                   |
+| --------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `/goal`   | The preceding turn finishes.                                                            | Fresh evaluator confirms the transcript proves the condition.       | One substantial, session-scoped, proof-oriented objective.                 | [`/goal` row](platform-facts.md#claude-code-and-managed-agent-features)    |
+| `/loop`   | The configured interval elapses.                                                        | User stops it or the repeated prompt decides work is done.          | Polling or periodic work while the current session stays open.             | [`/loop` row](platform-facts.md#claude-code-and-managed-agent-features)    |
+| Stop hook | The main agent finishes normally.                                                       | A configured command, prompt, HTTP, or MCP handler allows the stop. | A reusable deterministic or model-evaluated gate across sessions.          | [Stop-hooks row](platform-facts.md#claude-code-and-managed-agent-features) |
+| Auto mode | None; it approves eligible tool calls inside the current turn.                          | The main agent ends the turn.                                       | Reducing per-tool prompts; pair with `/goal` when another turn must start. | [Auto-mode row](platform-facts.md#claude-code-and-managed-agent-features)  |
+| Routine   | A schedule, authenticated API request, or matching GitHub event starts a cloud session. | That independently started cloud session completes.                 | Work that must start without an open local session.                        | [Routines row](platform-facts.md#claude-code-and-managed-agent-features)   |
+
+> The [Outcome Engine](outcome-engine.md) is a different thing from `harness/outcomes.ts`: it uses typed probes over pull
+> request facts, not an LLM-graded rubric, and does not call the Managed Agents `define_outcome` event.
 
 ## Long-running rubric-graded work
 

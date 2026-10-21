@@ -14,6 +14,10 @@ export interface CheckSnapshot {
   status: "COMPLETED" | "IN_PROGRESS" | "QUEUED" | "PENDING" | "WAITING" | "REQUESTED" | "UNKNOWN";
   /** Meaningful when COMPLETED. */
   conclusion: string | null;
+  /** The GitHub App that produced a check run. Absent from reads that do not select it; null for a commit status. */
+  appSlug?: string | null;
+  /** Which GitHub object this entry came from. Absent from reads that do not select it. */
+  source?: "check_run" | "status_context";
 }
 
 export interface PullRequestSnapshot {
@@ -26,6 +30,10 @@ export interface PullRequestSnapshot {
   headRef: string;
   headSha: string;
   baseRef: string;
+  /** Base branch commit at read time. Present only on by-number reads. */
+  baseRefOid?: string;
+  /** Commit whose status rollup produced `checks`. Present only on by-number reads. */
+  checksCommitSha?: string;
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
   reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
   unresolvedThreads: number;
@@ -38,6 +46,11 @@ export interface PullRequestSnapshot {
 /** Read-only view of the forge. There is deliberately no method that changes anything. */
 export interface PullRequestSource {
   listOpenPullRequests(): Promise<PullRequestSnapshot[]>;
+}
+
+/** Read-only single pull request lookup by number, any state. There is deliberately no method that changes anything. */
+export interface PullRequestReader {
+  getPullRequest(number: number): Promise<PullRequestSnapshot>;
 }
 
 export type GateBlockerCode =
