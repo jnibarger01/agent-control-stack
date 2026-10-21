@@ -16,7 +16,7 @@ Verified at `b2b146a`:
 
 - Managed mode requires an `acs.jc.v1` capability for **every** call, including
   `ping`; an ACS outage is a total JC outage that fails closed.
-- `--standalone` serves only the 24 read-only tools and refuses the other 12
+- `--standalone` serves only the 25 read-only tools and refuses the other 12
   with `JC_STANDALONE_TOOL_REFUSED`. It is a development mode.
 - Capability **verification** is offline (pinned ACS public key). ACS is needed
   only at the OAuth edge for **issuance**, and for best-effort result reporting.
@@ -90,7 +90,7 @@ Presets (the only way to get a table without a policy file):
 | preset       | resolution                                                                                          |
 | ------------ | --------------------------------------------------------------------------------------------------- |
 | `managed`    | every tool `acs-capability` (default; identical to today)                                           |
-| `standalone` | the 24 read-only tools `local`/`allow`; the other 12 `refused` (identical to today, development)   |
+| `standalone` | the 25 read-only tools `local`/`allow`; the other 12 `refused` (identical to today, development)   |
 | `local`      | **new**: every provider `local`; class decisions from the policy (defaults below)                   |
 
 `standalone` is **not** redefined. `local` is a distinct preset (review

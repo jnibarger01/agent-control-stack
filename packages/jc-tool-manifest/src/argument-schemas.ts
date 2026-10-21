@@ -190,7 +190,13 @@ export const JC_TOOL_ARGUMENT_SCHEMAS: Readonly<Record<JcToolName, z.ZodType>> =
       .max(16)
       .optional(),
     budgetTokens: z.number().int().min(1).max(200_000).optional()
-  }),
+  }).refine(
+    (args) => {
+      const total = (args.files?.length ?? 0) + (args.inline?.length ?? 0);
+      return total >= 1 && total <= 16;
+    },
+    "files and inline must hold 1 to 16 sources in total"
+  ),
   read_process_output: z.strictObject({
     sessionId: ID,
     offset: z.number().int().min(0).optional(),

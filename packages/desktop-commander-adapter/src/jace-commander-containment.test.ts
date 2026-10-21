@@ -30,3 +30,17 @@ describe("Jace Commander path containment for optional path arguments", () => {
     expect(() => containJaceCommanderInvocation(invocation, containment)).toThrow(/outside every allow root/u);
   });
 });
+
+describe("context_pack total source invariant (ACS schema)", () => {
+  it("rejects a request with no sources and one with more than 16 in total", () => {
+    expect(() => validateJaceCommanderInvocation("context_pack", {})).toThrow();
+    const many = Array.from({ length: 17 }, (_u, i) => ({ id: `s${i}`, text: "x", trust: "repo" }));
+    expect(() => validateJaceCommanderInvocation("context_pack", { inline: many })).toThrow();
+  });
+
+  it("accepts exactly 16 sources in total, across files and inline", () => {
+    const inline = Array.from({ length: 10 }, (_u, i) => ({ id: `s${i}`, text: "x", trust: "repo" }));
+    const files = Array.from({ length: 6 }, (_u, i) => join(root, `f${i}.md`));
+    expect(() => validateJaceCommanderInvocation("context_pack", { inline, files })).not.toThrow();
+  });
+});

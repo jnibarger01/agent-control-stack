@@ -42,6 +42,7 @@ export type DropReason =
   | 'binary'
   | 'oversize'
   | 'path_not_allowed'
+  | 'path_denied'
   | 'fs_roots_unconfigured'
   | 'read_failed'
   | 'budget';
@@ -155,6 +156,12 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / CHARS_PER_TOKEN);
 }
 
+/** A cut at `length` must not separate the two halves of an astral character. */
+function safeCut(text: string, length: number): number {
+  const code = length > 0 ? text.charCodeAt(length - 1) : 0;
+  return code >= 0xd800 && code <= 0xdbff ? length - 1 : length;
+}
+
 /** `</context` in content would close the wrapper early; escape it in every item, operator included. */
 function escapeBody(text: string): string {
   return text.replace(/<\/context/giu, '<\\/context');
@@ -240,7 +247,8 @@ export function assembleContextPack(sources: readonly ResolvedSource[], budgetTo
         let hi = fullBody.length;
         while (lo <= hi) {
           const mid = Math.floor((lo + hi) / 2);
-          const candidate = build(fullBody.slice(0, mid) + truncationMarker(fullBody.length - mid, fullBody.length), true);
+          const cut = safeCut(fullBody, mid);
+          const candidate = build(fullBody.slice(0, cut) + truncationMarker(fullBody.length - cut, fullBody.length), true);
           if (candidate.wrapped.length <= remaining) {
             best = candidate;
             lo = mid + 1;
@@ -264,8 +272,8 @@ export function assembleContextPack(sources: readonly ResolvedSource[], budgetTo
   const packHash = sha256Hex(JSON.stringify({
     version: CONTEXT_PACK_VERSION,
     budgetTokens,
-    items: items.map((item) => [item.id, item.trust, item.location, item.sourceSha256, item.emittedSha256, item.truncated]),
-    dropped: dropped.map((item) => [item.id, item.reason, item.sourceSha256 ?? null]),
+    items: items.map((item) => [item.id, item.kind, item.trust, item.location, item.priority, item.sourceSha256, item.emittedSha256, item.truncated, item.redactions]),
+    dropped: dropped.map((item) => [item.id, item.location, item.reason, item.sourceSha256 ?? null]),
   }));
   return {
     version: CONTEXT_PACK_VERSION,
@@ -282,6 +290,7 @@ function dropReasonOf(error: unknown): DropReason {
   if (error instanceof IntegrationError) {
     if (error.code === 'not_found') return 'missing';
     if (error.code === 'path_not_allowed') return 'path_not_allowed';
+    if (error.code === 'path_denied') return 'path_denied';
     if (error.code === 'fs_roots_unconfigured') return 'fs_roots_unconfigured';
     if (error.code === 'permission_denied') return 'read_failed';
   }
@@ -359,16 +368,34 @@ export interface ContextPackRequest {
 
 /** The read-only tool entry point: resolve every source, then assemble. */
 /** Rejects anything outside the canonical request shape before it reaches assembly or attributes. */
+const REQUEST_KEYS = new Set(['files', 'pins', 'fileTrust', 'inline', 'budgetTokens']);
+const INLINE_KEYS = new Set(['id', 'text', 'trust', 'priority']);
+
 function assertContextRequest(request: ContextPackRequest): void {
+  for (const key of Object.keys(request)) {
+    if (!REQUEST_KEYS.has(key)) throw new IntegrationError('invalid_argument', `unknown field: ${key}`);
+  }
   const isTrust = (value: unknown) => (CONTEXT_TRUST_LEVELS as readonly unknown[]).includes(value);
+  const total = (request.files?.length ?? 0) + (request.inline?.length ?? 0);
+  if (total < 1 || total > MAX_SOURCES) throw new IntegrationError('invalid_argument', `files and inline must hold 1 to ${MAX_SOURCES} sources in total`);
+  if (request.budgetTokens !== undefined && (!Number.isInteger(request.budgetTokens) || request.budgetTokens < 1 || request.budgetTokens > 200_000)) {
+    throw new IntegrationError('invalid_argument', 'budgetTokens must be an integer from 1 to 200000');
+  }
+  for (const [pinned, digest] of Object.entries(request.pins ?? {})) {
+    if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/u.test(digest)) throw new IntegrationError('invalid_argument', `pin for ${pinned} must be a sha256 hex digest`);
+  }
   if (request.fileTrust !== undefined && !isTrust(request.fileTrust)) throw new IntegrationError('invalid_argument', 'fileTrust is not a known trust level');
   if (request.files !== undefined && (!Array.isArray(request.files) || request.files.some((file) => typeof file !== 'string' || file.length === 0))) {
     throw new IntegrationError('invalid_argument', 'files must be a list of non-empty path strings');
   }
   for (const item of request.inline ?? []) {
-    if (typeof item.id !== 'string' || item.id.length === 0 || typeof item.text !== 'string' || !isTrust(item.trust)) {
-      throw new IntegrationError('invalid_argument', 'inline entries need a string id and text and a known trust level');
+    for (const key of Object.keys(item)) {
+      if (!INLINE_KEYS.has(key)) throw new IntegrationError('invalid_argument', `unknown inline field: ${key}`);
     }
+    if (typeof item.id !== 'string' || item.id.length === 0 || item.id.length > 64 || typeof item.text !== 'string' || !isTrust(item.trust)) {
+      throw new IntegrationError('invalid_argument', 'inline entries need an id of 1 to 64 characters, text, and a known trust level');
+    }
+    if (item.text.length > 65_536) throw new IntegrationError('invalid_argument', 'inline text is limited to 65536 characters');
     if (item.priority !== undefined && (!Number.isInteger(item.priority) || item.priority < 0 || item.priority > 100)) {
       throw new IntegrationError('invalid_argument', 'inline priority must be an integer from 0 to 100');
     }
