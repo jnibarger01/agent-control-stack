@@ -14,8 +14,20 @@ const READER = "r".repeat(48);
 const APPROVER = "a".repeat(48);
 const WRITER = "w".repeat(48);
 const bearer = (t: string) => ({ authorization: `Bearer ${t}` });
-const cred = (id: string, token: string, scopes: string[]) => ({ id, token, actor: "qa-operator", actorId: id, roles: ["operator" as const], scopes });
-const credentials = [cred("operator", OPERATOR, ["acs:read", "acs:write", "acs:approve"]), cred("reader", READER, ["acs:read"]), cred("approver", APPROVER, ["acs:read", "acs:approve"]), cred("writer", WRITER, ["acs:read", "acs:write"])];
+const cred = (id: string, token: string, scopes: string[]) => ({
+  id,
+  token,
+  actor: "qa-operator",
+  actorId: id,
+  roles: ["operator" as const],
+  scopes
+});
+const credentials = [
+  cred("operator", OPERATOR, ["acs:read", "acs:write", "acs:approve"]),
+  cred("reader", READER, ["acs:read"]),
+  cred("approver", APPROVER, ["acs:read", "acs:approve"]),
+  cred("writer", WRITER, ["acs:read", "acs:write"])
+];
 
 describe("approvals and execution read models + the real mutation routes", () => {
   let dir: string;
@@ -27,7 +39,17 @@ describe("approvals and execution read models + the real mutation routes", () =>
     dir = mkdtempSync(join(tmpdir(), "acs-mcactions-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));
     const tools = createWorkItemTools(store, createPolicyEngine());
-    highRiskId = tools.create_work_item({ title: "Review deployment request", intent: "ship", requester: "user", requesterSubject: "someone-else", target: { cwd: "/tmp" }, risk: "high", requestedActions: [{ kind: "fs.write", description: "write a file", params: { path: "/tmp/mc-test.txt", content: "x" } }] }).id;
+    highRiskId = tools.create_work_item({
+      title: "Review deployment request",
+      intent: "ship",
+      requester: "user",
+      requesterSubject: "someone-else",
+      target: { cwd: "/tmp" },
+      risk: "high",
+      requestedActions: [
+        { kind: "fs.write", description: "write a file", params: { path: "/tmp/mc-test.txt", content: "x" } }
+      ]
+    }).id;
     store.close();
   });
   afterEach(() => {
@@ -35,12 +57,19 @@ describe("approvals and execution read models + the real mutation routes", () =>
     else process.env.ACS_GATEWAY_TOKEN = saved;
     rmSync(dir, { recursive: true, force: true });
   });
-  const gateway = () => buildGateway({ dbPath: join(dir, "control.db"), logger: false, moa: false, auth: { token: OPERATOR, actor: "qa-operator", actorId: "operator", credentials } });
+  const gateway = () =>
+    buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      moa: false,
+      auth: { token: OPERATOR, actor: "qa-operator", actorId: "operator", credentials }
+    });
 
   it("requires authentication", async () => {
     const app = gateway();
     try {
-      for (const url of ["/api/mission-control/approvals", "/api/mission-control/execution"]) expect((await app.inject({ method: "GET", url })).statusCode).toBe(401);
+      for (const url of ["/api/mission-control/approvals", "/api/mission-control/execution"])
+        expect((await app.inject({ method: "GET", url })).statusCode).toBe(401);
     } finally {
       await app.close();
     }
@@ -49,8 +78,12 @@ describe("approvals and execution read models + the real mutation routes", () =>
   it("reports what the credential may do: operator can act, reader cannot", async () => {
     const app = gateway();
     try {
-      const op = (await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(OPERATOR) })).json();
-      const rd = (await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(READER) })).json();
+      const op = (
+        await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(OPERATOR) })
+      ).json();
+      const rd = (
+        await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(READER) })
+      ).json();
       expect(op.viewer).toEqual({ canApprove: true, canWrite: true });
       expect(rd.viewer).toEqual({ canApprove: false, canWrite: false });
       const exec = await app.inject({ method: "GET", url: "/api/mission-control/execution", headers: bearer(READER) });
@@ -63,18 +96,34 @@ describe("approvals and execution read models + the real mutation routes", () =>
   it("deny and unblock need acs:write on the server: an approve-only credential is refused and changes nothing", async () => {
     const app = gateway();
     try {
-      const approver = (await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(APPROVER) })).json();
-      const writer = (await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(WRITER) })).json();
+      const approver = (
+        await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(APPROVER) })
+      ).json();
+      const writer = (
+        await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(WRITER) })
+      ).json();
       expect(approver.viewer).toEqual({ canApprove: true, canWrite: false });
       expect(writer.viewer).toEqual({ canApprove: false, canWrite: true });
       for (const op of ["reject", "unblock"]) {
-        const res = await app.inject({ method: "POST", url: `/work-items/${highRiskId}/${op}`, headers: bearer(APPROVER), payload: { reason: "approve-only credential" } });
+        const res = await app.inject({
+          method: "POST",
+          url: `/work-items/${highRiskId}/${op}`,
+          headers: bearer(APPROVER),
+          payload: { reason: "approve-only credential" }
+        });
         expect(res.statusCode, op).toBe(403);
         expect(res.json().code, op).toBe("insufficient_gateway_scope");
       }
-      const unchanged = (await app.inject({ method: "GET", url: `/work-items/${highRiskId}`, headers: bearer(OPERATOR) })).json() as { workItem: { status: string } };
+      const unchanged = (
+        await app.inject({ method: "GET", url: `/work-items/${highRiskId}`, headers: bearer(OPERATOR) })
+      ).json() as { workItem: { status: string } };
       expect(unchanged.workItem.status).toBe("needs_approval");
-      const rejected = await app.inject({ method: "POST", url: `/work-items/${highRiskId}/reject`, headers: bearer(WRITER), payload: { reason: "write credential" } });
+      const rejected = await app.inject({
+        method: "POST",
+        url: `/work-items/${highRiskId}/reject`,
+        headers: bearer(WRITER),
+        payload: { reason: "write credential" }
+      });
       expect(rejected.statusCode).toBe(200);
       expect(rejected.json().workItem.status).toBe("rejected");
     } finally {
@@ -100,16 +149,35 @@ describe("approvals and execution read models + the real mutation routes", () =>
   it("the server, not the browser, enforces authority: a reader is refused, an operator approves, and the queue updates", async () => {
     const app = gateway();
     try {
-      const list = (await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(OPERATOR) })).json();
+      const list = (
+        await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(OPERATOR) })
+      ).json();
       const hash = list.items.find((i: { id: string }) => i.id === highRiskId).actions[0].actionHash;
       const body = { reason: "reviewed in test", actionHash: hash };
-      const denied = await app.inject({ method: "POST", url: `/work-items/${highRiskId}/approve`, headers: bearer(READER), payload: body });
+      const denied = await app.inject({
+        method: "POST",
+        url: `/work-items/${highRiskId}/approve`,
+        headers: bearer(READER),
+        payload: body
+      });
       expect(denied.statusCode).toBe(403);
-      const noHash = await app.inject({ method: "POST", url: `/work-items/${highRiskId}/approve`, headers: bearer(OPERATOR), payload: { reason: "x" } });
+      const noHash = await app.inject({
+        method: "POST",
+        url: `/work-items/${highRiskId}/approve`,
+        headers: bearer(OPERATOR),
+        payload: { reason: "x" }
+      });
       expect(noHash.statusCode).toBeGreaterThanOrEqual(400);
-      const ok = await app.inject({ method: "POST", url: `/work-items/${highRiskId}/approve`, headers: bearer(OPERATOR), payload: body });
+      const ok = await app.inject({
+        method: "POST",
+        url: `/work-items/${highRiskId}/approve`,
+        headers: bearer(OPERATOR),
+        payload: body
+      });
       expect(ok.statusCode).toBe(200);
-      const after = (await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(OPERATOR) })).json();
+      const after = (
+        await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(OPERATOR) })
+      ).json();
       expect(after.items.some((i: { id: string }) => i.id === highRiskId)).toBe(false);
     } finally {
       await app.close();
@@ -119,18 +187,36 @@ describe("approvals and execution read models + the real mutation routes", () =>
   it("an approval leaves audit evidence, and a replay grants no additional authority", async () => {
     const app = gateway();
     try {
-      const list = (await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(OPERATOR) })).json();
+      const list = (
+        await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(OPERATOR) })
+      ).json();
       const hash = list.items.find((i: { id: string }) => i.id === highRiskId).actions[0].actionHash;
       const body = { reason: "first approval", actionHash: hash };
-      expect((await app.inject({ method: "POST", url: `/work-items/${highRiskId}/approve`, headers: bearer(OPERATOR), payload: body })).statusCode).toBe(200);
-      await app.inject({ method: "POST", url: `/work-items/${highRiskId}/approve`, headers: bearer(OPERATOR), payload: { ...body, reason: "replay" } });
-      const detail = (await app.inject({ method: "GET", url: `/work-items/${highRiskId}`, headers: bearer(OPERATOR) })).json() as { workItem: { status: string }; events: Array<{ name: string }> };
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: `/work-items/${highRiskId}/approve`,
+            headers: bearer(OPERATOR),
+            payload: body
+          })
+        ).statusCode
+      ).toBe(200);
+      await app.inject({
+        method: "POST",
+        url: `/work-items/${highRiskId}/approve`,
+        headers: bearer(OPERATOR),
+        payload: { ...body, reason: "replay" }
+      });
+      const detail = (
+        await app.inject({ method: "GET", url: `/work-items/${highRiskId}`, headers: bearer(OPERATOR) })
+      ).json() as { workItem: { status: string }; events: Array<{ name: string }> };
       expect(detail.workItem.status).toBe("approved");
       expect(detail.events.some((e) => e.name === "approval.granted")).toBe(true);
       expect(detail.events.some((e) => e.name === "work_item.approved")).toBe(true);
-      // The binding authority record (the execution-plan approval) is granted exactly once.
-      // NOTE: a replay may also append a second `approval.granted` audit event on servers that predate the
-      // replay-idempotency fix (tracked separately); it grants nothing, so it is deliberately not asserted here.
+      // The binding authority record (the execution-plan approval) is granted exactly once, and a
+      // replay appends no second `approval.granted` audit event.
+      expect(detail.events.filter((e) => e.name === "approval.granted")).toHaveLength(1);
       expect(detail.events.filter((e) => e.name === "execution_plan_approval.granted")).toHaveLength(1);
       expect(detail.events.filter((e) => e.name === "work_item.approved")).toHaveLength(1);
     } finally {
@@ -141,9 +227,16 @@ describe("approvals and execution read models + the real mutation routes", () =>
   it("a stale or wrong action hash cannot approve the work item", async () => {
     const app = gateway();
     try {
-      const wrong = await app.inject({ method: "POST", url: `/work-items/${highRiskId}/approve`, headers: bearer(OPERATOR), payload: { reason: "tampered", actionHash: "0".repeat(64) } });
+      const wrong = await app.inject({
+        method: "POST",
+        url: `/work-items/${highRiskId}/approve`,
+        headers: bearer(OPERATOR),
+        payload: { reason: "tampered", actionHash: "0".repeat(64) }
+      });
       expect(wrong.statusCode).toBeGreaterThanOrEqual(400);
-      const list = (await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(OPERATOR) })).json();
+      const list = (
+        await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(OPERATOR) })
+      ).json();
       expect(list.items.some((i: { id: string }) => i.id === highRiskId)).toBe(true);
     } finally {
       await app.close();
@@ -163,12 +256,18 @@ describe("approvals and execution read models + the real mutation routes", () =>
       expect(isCrossOriginCookieWrite("POST", { cookie, "sec-fetch-site": "same-site" })).toBe(true); // other port/subdomain of the same site
       expect(isCrossOriginCookieWrite("POST", { cookie, "sec-fetch-site": "same-origin" })).toBe(false);
       expect(isCrossOriginCookieWrite("POST", { cookie, "sec-fetch-site": "none" })).toBe(false);
-      expect(isCrossOriginCookieWrite("POST", { cookie, origin: "http://evil.localhost:9", host: "127.0.0.1:3000" })).toBe(true);
-      expect(isCrossOriginCookieWrite("POST", { cookie, origin: "http://127.0.0.1:3000", host: "127.0.0.1:3000" })).toBe(false);
+      expect(
+        isCrossOriginCookieWrite("POST", { cookie, origin: "http://evil.localhost:9", host: "127.0.0.1:3000" })
+      ).toBe(true);
+      expect(
+        isCrossOriginCookieWrite("POST", { cookie, origin: "http://127.0.0.1:3000", host: "127.0.0.1:3000" })
+      ).toBe(false);
       expect(isCrossOriginCookieWrite("POST", { cookie, origin: "not a url", host: "h" })).toBe(true);
       expect(isCrossOriginCookieWrite("POST", { cookie })).toBe(false); // non-browser client sends neither header
       expect(isCrossOriginCookieWrite("GET", { cookie, "sec-fetch-site": "cross-site" })).toBe(false); // reads are not writes
-      expect(isCrossOriginCookieWrite("POST", { "sec-fetch-site": "cross-site", authorization: "Bearer t" })).toBe(false); // bearer is not ambient
+      expect(isCrossOriginCookieWrite("POST", { "sec-fetch-site": "cross-site", authorization: "Bearer t" })).toBe(
+        false
+      ); // bearer is not ambient
       expect(isCrossOriginCookieWrite("POST", { "sec-fetch-site": "cross-site" })).toBe(false); // no cookie, nothing ambient to abuse
     });
 
@@ -176,10 +275,20 @@ describe("approvals and execution read models + the real mutation routes", () =>
       const app = gateway();
       try {
         const cookie = cookieFor(app);
-        const cross = await app.inject({ method: "POST", url: `/work-items/${highRiskId}/cancel`, headers: { cookie, "sec-fetch-site": "cross-site", "content-type": "text/plain" }, payload: "{}" });
+        const cross = await app.inject({
+          method: "POST",
+          url: `/work-items/${highRiskId}/cancel`,
+          headers: { cookie, "sec-fetch-site": "cross-site", "content-type": "text/plain" },
+          payload: "{}"
+        });
         expect(cross.statusCode).toBe(403);
         expect(cross.json().code).toBe("csrf_origin_mismatch");
-        const same = await app.inject({ method: "POST", url: `/work-items/${highRiskId}/cancel`, headers: { cookie, "sec-fetch-site": "same-origin", "content-type": "application/json" }, payload: JSON.stringify({ reason: "same origin" }) });
+        const same = await app.inject({
+          method: "POST",
+          url: `/work-items/${highRiskId}/cancel`,
+          headers: { cookie, "sec-fetch-site": "same-origin", "content-type": "application/json" },
+          payload: JSON.stringify({ reason: "same origin" })
+        });
         expect(same.statusCode).toBe(200);
       } finally {
         await app.close();
@@ -189,7 +298,12 @@ describe("approvals and execution read models + the real mutation routes", () =>
     it("a bearer-authenticated write is not affected by browser fetch metadata", async () => {
       const app = gateway();
       try {
-        const res = await app.inject({ method: "POST", url: `/work-items/${highRiskId}/cancel`, headers: { ...bearer(OPERATOR), "sec-fetch-site": "cross-site" }, payload: { reason: "bearer" } });
+        const res = await app.inject({
+          method: "POST",
+          url: `/work-items/${highRiskId}/cancel`,
+          headers: { ...bearer(OPERATOR), "sec-fetch-site": "cross-site" },
+          payload: { reason: "bearer" }
+        });
         expect(res.statusCode).toBe(200);
       } finally {
         await app.close();
@@ -198,10 +312,20 @@ describe("approvals and execution read models + the real mutation routes", () =>
   });
 
   it("the mission-control read routes are covered by the real rate limiter", async () => {
-    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, moa: false, auth: { token: OPERATOR, actor: "qa-operator", actorId: "operator", credentials }, rateLimit: { windowMs: 60_000, maxRequests: 2 } });
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      moa: false,
+      auth: { token: OPERATOR, actor: "qa-operator", actorId: "operator", credentials },
+      rateLimit: { windowMs: 60_000, maxRequests: 2 }
+    });
     try {
       const codes: number[] = [];
-      for (let i = 0; i < 4; i++) codes.push((await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(OPERATOR) })).statusCode);
+      for (let i = 0; i < 4; i++)
+        codes.push(
+          (await app.inject({ method: "GET", url: "/api/mission-control/approvals", headers: bearer(OPERATOR) }))
+            .statusCode
+        );
       expect(codes).toEqual([200, 200, 429, 429]);
     } finally {
       await app.close();
