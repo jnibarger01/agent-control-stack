@@ -644,6 +644,33 @@ describe("WorkspaceManager", () => {
       await pending;
     }, 20_000);
 
+    it("R/V MED: git (or a hook) exiting 75 is reported as a git failure, not a lock timeout", async () => {
+      const fixture = await createRepoFixture();
+      const shimDir = mkdtempSync(join(tmpdir(), "acs-workspace-manager-exit75-"));
+      cleanup = () => {
+        fixture.cleanup();
+        rmSync(shimDir, { recursive: true, force: true });
+      };
+      const realGit = (await execFileAsync("sh", ["-c", "command -v git"])).stdout.trim();
+      const exit75Git = join(shimDir, "git");
+      writeFileSync(
+        exit75Git,
+        `#!/bin/sh\nif [ "$1" = "worktree" ]; then echo "tempfail from git" >&2; exit 75; fi\nexec "${realGit}" "$@"\n`,
+        { mode: 0o755 }
+      );
+      const manager = new WorkspaceManager({
+        repoPath: fixture.repoPath,
+        rootDir: fixture.rootDir,
+        store: fixture.store,
+        gitPath: exit75Git,
+        lockWaitMs: 2_000
+      });
+      await expect(manager.provision(seedWorkItemId(fixture.store, "exit75"))).rejects.toMatchObject({
+        code: "workspace_git_failed",
+        message: expect.stringContaining("tempfail from git")
+      });
+    }, 15_000);
+
     it("fails closed when flock(1) is unavailable instead of running git unlocked", async () => {
       const fixture = await createRepoFixture();
       cleanup = fixture.cleanup;

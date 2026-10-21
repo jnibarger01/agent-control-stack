@@ -42,7 +42,11 @@ import { z } from "zod";
 const WORKTREE_LOCK_FILE = "acs-worktree.lock";
 const DEFAULT_LOCK_WAIT_MS = 60_000;
 const DEFAULT_GIT_TIMEOUT_MS = 120_000;
-/** flock(1) exit status on conflict/timeout; chosen to not collide with git's own (0, 1, 128, 129). */
+/**
+ * flock(1) exit status on conflict/timeout. git or a hook can exit with any
+ * status (75 included), so it only means "lock timeout" when the lock was
+ * never reported acquired on fd 3 (see runProcess).
+ */
 const FLOCK_CONFLICT_EXIT = 75;
 
 interface ProcessResult {
@@ -656,7 +660,10 @@ export class WorkspaceManager {
         `${command} not run: flock(1) not found at ${this.flockPath}; refusing to run a worktree command unlocked`
       );
     }
-    if (lockPath && (failure.lockWaitTimedOut || failure.exitCode === FLOCK_CONFLICT_EXIT)) {
+    // Exit 75 is a lock conflict only if the lock was never reported held:
+    // after acquisition, a 75 is git's (or a hook's) own exit status.
+    const lockConflict = !failure.lockAcquired && failure.exitCode === FLOCK_CONFLICT_EXIT;
+    if (lockPath && (failure.lockWaitTimedOut || lockConflict)) {
       return new ControlStackError(
         "workspace_git_lock_timeout",
         `${command} not run: timed out after ${this.lockWaitMs}ms waiting for worktree lock ${lockPath}`
