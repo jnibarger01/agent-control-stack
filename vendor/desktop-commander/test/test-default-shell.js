@@ -9,7 +9,7 @@
  */
 
 import { configManager } from '../dist/config-manager.js';
-import { startProcess, forceTerminate } from '../dist/tools/improved-process-tools.js';
+import { startProcess, readProcessOutput, forceTerminate } from '../dist/tools/improved-process-tools.js';
 import assert from 'assert';
 import os from 'os';
 
@@ -29,6 +29,50 @@ async function executeCommand(command, timeout_ms = 2000, shell = null) {
 }
 
 /**
+ * Run a command and wait for it to exit, using the process API's own
+ * completion signal (read_process_output reports "✅ Process completed with
+ * exit code N" once the process has exited) instead of trusting whatever
+ * start_process managed to capture during its initial wait window.
+ *
+ * start_process returns early with "⏳ Process is running" when the command
+ * has not finished within its initial wait (e.g. a cold pwsh start on a busy
+ * CI runner), so reading only its first chunk is racy.
+ *
+ * Returns the non-empty output lines and the exit code.
+ */
+const COMPLETION_RE = /^✅ Process completed with exit code (-?\d+|null)/;
+const COMPLETION_DEADLINE_MS = 60000; // hang guard only; normal runs finish in well under a second
+async function runToCompletion(command, shell = null) {
+  const started = await executeCommand(command, 2000, shell);
+  const startText = started.content?.[0]?.text ?? '';
+  const pidMatch = startText.match(/Process started with PID (\d+)/);
+  if (started.isError || !pidMatch) {
+    throw new Error(`start_process failed for "${command}": ${startText}`);
+  }
+  const pid = Number(pidMatch[1]);
+  const deadline = Date.now() + COMPLETION_DEADLINE_MS;
+  while (true) {
+    const read = await readProcessOutput({ pid, offset: -100000 });
+    const text = read.content?.[0]?.text ?? '';
+    const lines = text.split('\n');
+    const done = lines.map(line => line.match(COMPLETION_RE)).find(Boolean);
+    if (done) {
+      const outputLines = lines
+        .filter(line => !COMPLETION_RE.test(line))
+        .filter(line => !/^\[Reading .*lines/.test(line))
+        .filter(line => line !== '(No output in requested range)')
+        .filter(line => line.trim() !== '');
+      return { lines: outputLines, exitCode: done[1] === 'null' ? null : Number(done[1]) };
+    }
+    if (read.isError || Date.now() > deadline) {
+      await forceTerminate({ pid }).catch(() => {});
+      throw new Error(`"${command}" (PID ${pid}) did not complete: ${text}`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+}
+
+/**
  * Check if a shell is available on the system
  */
 async function isShellAvailable(shellPath) {
@@ -43,10 +87,12 @@ async function isShellAvailable(shellPath) {
     }
     
     if (shellPath === 'pwsh' || shellPath === 'powershell') {
-      // Check if PowerShell is available
+      // Check if PowerShell is available. Wait for the probe to actually exit:
+      // a cold PowerShell start can outlast start_process's initial wait, and
+      // the "⏳ Process is running" placeholder must not be read as "available".
       try {
-        const result = await executeCommand(`${shellPath} -Command "Get-Host"`, 2000);
-        return result.content && result.content[0] && !result.content[0].text.includes('not found');
+        const { lines, exitCode } = await runToCompletion(`${shellPath} -Command "Get-Host"`);
+        return exitCode === 0 && lines.some(line => line.includes('ConsoleHost'));
       } catch (error) {
         return false;
       }
@@ -54,8 +100,8 @@ async function isShellAvailable(shellPath) {
     
     // For Unix shells, check if the file exists and is executable
     try {
-      const result = await executeCommand(`test -x "${shellPath}" && echo "available"`, 2000);
-      return result.content && result.content[0] && result.content[0].text.includes('available');
+      const { lines } = await runToCompletion(`test -x "${shellPath}" && echo "available"`);
+      return lines.includes('available');
     } catch (error) {
       return false;
     }
@@ -97,26 +143,15 @@ async function getShellFromCommand(shellPath = null) {
     if (shellPath === 'cmd' || shellPath === 'cmd.exe') {
       command = 'echo %0';
     } else if (shellPath === 'pwsh' || shellPath === 'powershell') {
-      command = 'Write-Host $MyInvocation.MyCommand.Name';
+      // $MyInvocation.MyCommand.Name is empty for a `-Command` script block, so
+      // it never identified the shell. Ask PowerShell for its own process name.
+      command = 'Write-Output (Get-Process -Id $PID).ProcessName';
     }
     
-    const result = await executeCommand(command, 2000);
-    
-    // Extract shell name from the result
-    if (result.content && result.content[0] && result.content[0].text) {
-      const output = result.content[0].text;
-      // Look for the shell name in the output, handling both PID line and actual output
-      const lines = output.split('\n').filter(line => line.trim() !== '');
-      
-      // Find the line that contains the actual shell output (not the PID line, Command started, or Initial output)
-      for (const line of lines) {
-        if (!line.includes('PID') && 
-            !line.includes('Command started') && 
-            !line.includes('Initial output:') &&
-            line.trim() !== '') {
-          return line.trim();
-        }
-      }
+    // Wait for the command to exit before reading its output.
+    const { lines, exitCode } = await runToCompletion(command);
+    if (exitCode === 0 && lines.length > 0) {
+      return lines[lines.length - 1].trim();
     }
     
     throw new Error('Could not extract shell name from command output');
@@ -412,7 +447,11 @@ export default async function runTests() {
 
 // If this file is run directly (not imported), execute the test
 if (import.meta.url === `file://${process.argv[1]}`) {
-  runTests().catch(error => {
+  runTests().then(success => {
+    // runTests() reports failures by returning false; propagate that as a
+    // non-zero exit so run-all-tests.js does not mark a failed run as passed.
+    process.exit(success ? 0 : 1);
+  }).catch(error => {
     console.error('❌ Unhandled error:', error);
     process.exit(1);
   });

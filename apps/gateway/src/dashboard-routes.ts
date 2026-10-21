@@ -5,6 +5,12 @@ import {
   renderDashboard,
   renderDashboardFragments,
   toMissionControlAttemptLease,
+  toOverviewReadModel,
+  toQueueReadModel,
+  toApprovalsReadModel,
+  toAuditReadModel,
+  toExecutionReadModel,
+  toTraceReadModel,
   type ApprovalActionOption,
   type MissionControlViewModel
 } from "@agent-control-stack/control-ui";
@@ -100,6 +106,8 @@ export interface DashboardRouteDeps {
   projectTunnelSession: (session: RegisteredTunnelSession, heartbeatTtlMs: number) => { effectiveStatus: string };
   validateRegisteredAgentPromptTarget: (store: SqliteWorkItemStore, input: Record<string, unknown>) => void;
   requireRead: (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
+  /** True when `/` should redirect to the React app. Evaluated per request; fail-closed. */
+  missionControlWebDefaultRoot?: () => boolean;
   sendError: (reply: FastifyReply, error: unknown) => unknown;
 }
 
@@ -117,6 +125,7 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardRou
     projectTunnelSession,
     validateRegisteredAgentPromptTarget,
     requireRead,
+    missionControlWebDefaultRoot,
     sendError
   } = deps;
 
@@ -161,6 +170,17 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardRou
       events,
       registeredAgents,
       agents: projectedAgents,
+      executorSummaries: (getExecutorSummaries() as Array<{ id: string; displayName: string; configured: boolean; status: string }>).map(
+        (e) => ({ id: e.id, displayName: e.displayName, configured: e.configured, status: e.status })
+      ),
+      connectorSummaries: connectors.map((connector) => ({
+        id: connector.id,
+        displayName: connector.displayName,
+        status: connector.status,
+        activeSessionCount: tunnelSessions.filter(
+          (session) => session.connectorId === connector.id && projectTunnelSession(session, heartbeatTtlMs).effectiveStatus === "active"
+        ).length
+      })),
       infrastructure: {
         agents: {
           registered: registeredAgents.length,
@@ -206,13 +226,144 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardRou
     };
   }
 
-  app.get("/", { preHandler: requireRead }, async (request, reply) => {
+  const sendClassicConsole = async (request: FastifyRequest, reply: FastifyReply) => {
+    // Retirement evidence: the classic console may only be removed after a full release cycle in which this
+    // counter shows no operator is falling back to it (docs/runbooks/mission-control-web.md).
+    metrics.increment("acs_mc_legacy_console_requests_total", { route: request.routeOptions.url ?? "/" });
     try {
       reply.type("text/html").send(renderDashboard(missionControlViewModel(request)));
     } catch (error) {
       return sendError(reply, error);
     }
+  };
+
+  // `/` is the classic console unless the React app is the default; then it hands authenticated browsers
+  // to /next/. An unauthenticated request never reaches this handler (requireRead returns the login page).
+  app.get("/", { preHandler: requireRead }, async (request, reply) => {
+    if (missionControlWebDefaultRoot?.()) return reply.redirect("/next/", 302);
+    return sendClassicConsole(request, reply);
   });
+  // The classic console is always reachable here, so rollback and side-by-side comparison never depend on `/`.
+  app.get("/legacy", { preHandler: requireRead }, sendClassicConsole);
+  app.get("/legacy/", { preHandler: requireRead }, sendClassicConsole);
+
+  app.get(
+    "/api/mission-control/overview",
+    { preHandler: requireRead, config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      try {
+        reply.header("cache-control", "no-store");
+        return toOverviewReadModel(missionControlViewModel(request));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  /** What this credential may do, so the UI avoids offering a control that is certain to be refused. Never authority. */
+  function viewerFor(request: FastifyRequest) {
+    const credential = auth ? gatewayCredentialForRequest(request, auth) : undefined;
+    const operatorish = Boolean(credential && (credential.roles.includes("operator") || credential.roles.includes("service")));
+    return {
+      canApprove: operatorish && Boolean(credential?.scopes.includes("acs:approve")),
+      canWrite: operatorish && Boolean(credential?.scopes.includes("acs:write"))
+    };
+  }
+
+  app.get(
+    "/api/mission-control/queue",
+    { preHandler: requireRead, config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      try {
+        reply.header("cache-control", "no-store");
+        return toQueueReadModel(missionControlViewModel(request));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  const auditQuerySchema = z
+    .object({
+      limit: z.coerce.number().int().min(1).max(200).default(100),
+      beforeSequence: z.coerce.number().int().min(1).optional(),
+      name: z.string().min(1).max(160).optional(),
+      workItemId: z.string().min(1).max(200).optional(),
+      agentId: z.string().min(1).max(200).optional()
+    })
+    .strict();
+
+  app.get(
+    "/api/mission-control/audit",
+    { preHandler: requireRead, config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      try {
+        const q = auditQuerySchema.parse(request.query ?? {});
+        reply.header("cache-control", "no-store");
+        const events = workItems.readEvents({
+          limit: q.limit,
+          // Page backwards from the newest event: readEvents defaults to oldest-first.
+          beforeSequence: q.beforeSequence ?? Number.MAX_SAFE_INTEGER,
+          ...(q.name ? { name: q.name } : {}),
+          ...(q.workItemId ? { workItemId: q.workItemId } : {}),
+          ...(q.agentId ? { agentId: q.agentId } : {})
+        });
+        return toAuditReadModel(events, q.limit);
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.get(
+    "/api/mission-control/approvals",
+    { preHandler: requireRead, config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      try {
+        reply.header("cache-control", "no-store");
+        return toApprovalsReadModel(missionControlViewModel(request), viewerFor(request));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.get(
+    "/api/mission-control/execution",
+    { preHandler: requireRead, config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      try {
+        reply.header("cache-control", "no-store");
+        return toExecutionReadModel(missionControlViewModel(request), viewerFor(request));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/api/mission-control/work-items/:id/trace",
+    { preHandler: requireRead, config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      try {
+        const id = request.params.id;
+        const workItem = workItems.get(id);
+        if (!workItem) return reply.code(404).send({ error: "work item not found" });
+        reply.header("cache-control", "no-store");
+        return toTraceReadModel({
+          workItem,
+          plan: workItems.getCurrentExecutionPlan(id),
+          admission: executionReads.listCurrentPlanAdmissionsForWorkItems([id]).get(id),
+          attempts: executionReads.listExecutionAttempts(id),
+          leases: executionReads.listAttemptLeases(id).map(toMissionControlAttemptLease),
+          events: workItems.readEvents(eventReadOptions(request.query, { workItemId: id })),
+          now: new Date()
+        });
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
 
   app.get("/dashboard/fragments", { preHandler: requireRead }, async (request, reply) => {
     try {

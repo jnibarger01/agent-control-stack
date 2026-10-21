@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  esbuild: { jsx: "automatic" },
   resolve: {
     alias: {
       "@agent-control-stack/vercel-bridge-contract": fileURLToPath(
@@ -9,6 +10,9 @@ export default defineConfig({
       ),
       "@agent-control-stack/moa-orchestrator": fileURLToPath(
         new URL("./packages/moa-orchestrator/src/index.ts", import.meta.url)
+      ),
+      "@agent-control-stack/mission-control-contract": fileURLToPath(
+        new URL("./packages/mission-control-contract/src/index.ts", import.meta.url)
       ),
       "@agent-control-stack/procedural-learning": fileURLToPath(
         new URL("./packages/procedural-learning/src/index.ts", import.meta.url)
@@ -19,6 +23,7 @@ export default defineConfig({
     include: [
       "packages/**/*.test.ts",
       "apps/**/*.test.ts",
+      "apps/mission-control-web/src/**/*.test.tsx",
       "harness/**/*.test.ts",
       "evals/**/*.test.ts",
       "tests/**/*.test.ts"
