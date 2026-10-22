@@ -138,3 +138,19 @@ test('only failures that mean the client\'s own authorization is gone are report
   assert.deepEqual([...REPORTABLE_REFRESH_FAILURES].sort(), ['refresh_expired', 'refresh_reused', 'revoked']);
   for (const reason of ['invalid_client', 'client_mismatch', 'refresh_superseded', 'refresh_unknown']) assert.equal(REPORTABLE_REFRESH_FAILURES.has(reason), false, reason);
 });
+
+test('an expired token minted for the other lane is a lane error, not an expiry on this lane', () => {
+  const token = sign(claims({ aud: 'https://gw.test/mcp', exp: NOW - 5 }));
+  const result = classify(bearer(token));
+  assert.equal(result.reason, 'wrong_audience');
+  assert.equal(classifyBearer(bearer(sign(claims({ iss: 'https://other.test', exp: NOW - 5 }))), { signingKey: KEY, issuer: ISSUER, resource: RESOURCE, nowSec: NOW }).reason, 'wrong_issuer');
+});
+
+test('refresh: a confidential client proves itself BEFORE the record\'s state is revealed or reportable', () => {
+  const secret = 'client-secret-for-order-test';
+  for (const state of [{ revoked: true }, { exp: NOW - 1 }, { active: false }]) {
+    const result = resolveRefresh({ r1: rec(state) }, 'r1', NOW, { clientSecret: secret, presentedSecret: 'wrong' });
+    assert.deepEqual(result, { ok: false, reason: 'invalid_client', clientId: 'client-chatgpt' }, JSON.stringify(state));
+  }
+  assert.equal(resolveRefresh({ r1: rec({ revoked: true }) }, 'r1', NOW, { clientSecret: secret, presentedSecret: secret }).reason, 'revoked');
+});

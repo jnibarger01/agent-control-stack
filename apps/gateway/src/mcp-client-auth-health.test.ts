@@ -6,7 +6,7 @@
  */
 import type { StoredAuditEvent } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
-import { McpClientService } from "./mcp-clients.js";
+import { MAX_TRACKED_CLIENTS, McpClientService } from "./mcp-clients.js";
 
 const T0 = Date.parse("2026-10-17T12:00:00.000Z");
 const HOUR = 3_600_000;
@@ -210,5 +210,77 @@ describe("MCP client authentication health", () => {
       observedAt: new Date(T0 - 3 * HOUR).toISOString()
     });
     expect(h.view()?.auth.state).toBe("reauth_required");
+  });
+
+  it("does not infer expiry from a lossy success stream: a verified request after the stale expiry proves a renewal happened", () => {
+    const h = harness();
+    // The grant is reported; every later refresh report is lost, so the recorded expiry goes stale.
+    h.service.recordAuthEvent({ ...base, kind: "granted", refreshExpiresAt: new Date(T0 + 30 * DAY).toISOString() });
+    h.advance(31 * DAY);
+    expect(h.view()?.auth.state).toBe("reauth_required"); // nothing else known: it genuinely looks expired
+    h.service.observe({ ...base, method: "initialize" }); // a verified request: the client holds a newer credential
+    expect(h.view()?.auth.state).toBe("ok");
+  });
+
+  it("an auth-only report does not make a client live; real activity does", () => {
+    const h = harness();
+    h.service.recordAuthEvent({ ...base, kind: "granted" });
+    expect(h.view()?.live).toBe(false);
+    h.service.observe({ ...base, method: "initialize" });
+    expect(h.view()?.live).toBe(true);
+  });
+
+  it("an older failure delivered late never replaces the reason of a newer one", () => {
+    const h = harness();
+    const t = (ms: number) => new Date(T0 + ms).toISOString();
+    h.service.recordAuthEvent({ ...base, kind: "revoked", observedAt: t(5_000) });
+    h.service.recordAuthEvent({ ...base, kind: "refresh_failed", reason: "refresh_reused", observedAt: t(1_000) });
+    expect(h.view()?.auth).toMatchObject({ failureReason: "revoked", lastFailureAt: t(5_000) });
+  });
+
+  it("keeps health per lane: a failure on one lane is not cleared by a success on the other", () => {
+    const h = harness();
+    h.service.recordAuthEvent({ ...base, lane: "jc", kind: "granted" });
+    h.service.recordAuthEvent({ ...base, lane: "dc", kind: "granted" });
+    h.service.recordAuthEvent({ ...base, lane: "dc", kind: "revoked" });
+    h.advance(1_000);
+    h.service.recordAuthEvent({ ...base, lane: "jc", kind: "refreshed" });
+    expect(h.view()?.auth).toMatchObject({ state: "reauth_required", lane: "dc", failureReason: "revoked" });
+    h.advance(1_000);
+    h.service.recordAuthEvent({ ...base, lane: "dc", kind: "granted" });
+    expect(h.view()?.auth.state).toBe("ok");
+  });
+
+  it("keeps health per authorization: outcomes for a superseded token family are ignored", () => {
+    const h = harness();
+    h.service.recordAuthEvent({ ...base, kind: "granted", family: "famA" });
+    h.advance(1_000);
+    h.service.recordAuthEvent({ ...base, kind: "granted", family: "famB" }); // the user reconnected
+    h.advance(1_000);
+    // The old family's stale token is retried later and fails: it says nothing about the current authorization.
+    h.service.recordAuthEvent({ ...base, kind: "refresh_failed", reason: "refresh_reused", family: "famA" });
+    expect(h.view()?.auth.state).toBe("ok");
+    // A real failure of the current family counts, and an old family's success cannot clear it.
+    h.service.recordAuthEvent({ ...base, kind: "refresh_failed", reason: "revoked", family: "famB" });
+    h.advance(1_000);
+    h.service.recordAuthEvent({ ...base, kind: "refreshed", family: "famA" });
+    expect(h.view()?.auth).toMatchObject({ state: "reauth_required", failureReason: "revoked" });
+  });
+
+  it("eviction keeps clients whose expiry-derived warning is active", () => {
+    const h = harness();
+    h.service.recordAuthEvent({
+      ...base,
+      clientId: "client-expired",
+      kind: "granted",
+      refreshExpiresAt: new Date(T0 + HOUR).toISOString()
+    });
+    h.advance(2 * HOUR);
+    for (let i = 0; i < MAX_TRACKED_CLIENTS + 5; i += 1) {
+      h.advance(10);
+      h.service.observe({ ...base, clientId: `client-healthy-${i}`, method: "initialize" });
+    }
+    expect(h.view("client-expired")?.auth.state).toBe("reauth_required");
+    expect(h.service.list().length).toBeLessThanOrEqual(MAX_TRACKED_CLIENTS + 1);
   });
 });

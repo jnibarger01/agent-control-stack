@@ -47,10 +47,11 @@ export function classifyBearer(header, { signingKey, issuer, resource, nowSec })
     ...(typeof payload.sub === "string" ? { subject: payload.sub } : {})
   };
   if (typeof payload.exp !== "number") return { ok: false, reason: "malformed", ...identity };
-  if (payload.exp < nowSec) return { ok: false, reason: "expired", ...identity };
+  // Lane first: an expired token minted for the OTHER lane must not be reported as an expiry on this one.
   if (payload.iss !== issuer) return { ok: false, reason: "wrong_issuer", ...identity };
   const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
   if (!aud.includes(resource)) return { ok: false, reason: "wrong_audience", ...identity };
+  if (payload.exp < nowSec) return { ok: false, reason: "expired", ...identity };
   return { ok: true, payload };
 }
 
@@ -90,12 +91,13 @@ export function resolveRefresh(records, token, nowSec, options = {}) {
   if (typeof options.presentedClientId === "string" && options.presentedClientId !== clientId) {
     return { ok: false, reason: "client_mismatch" };
   }
-  if (record.revoked) return { ok: false, reason: "revoked", clientId };
-  if (typeof record.exp !== "number" || record.exp < nowSec) return { ok: false, reason: "refresh_expired", clientId };
   const confidential = typeof options.clientSecret === "string" && options.clientSecret.length > 0;
   if (confidential && !equalSecrets(options.clientSecret, options.presentedSecret)) {
     return { ok: false, reason: "invalid_client", clientId };
   }
+  // Only after the caller has proven it is the client may the record's state (revoked / expired) be revealed or reported.
+  if (record.revoked) return { ok: false, reason: "revoked", clientId };
+  if (typeof record.exp !== "number" || record.exp < nowSec) return { ok: false, reason: "refresh_expired", clientId };
   if (record.active) return { ok: true, record };
   // The token was already rotated. If its successor has itself been used, the client demonstrably holds and uses a
   // working credential, so this is a stale duplicate (a double-submitted refresh), not a lost authorization: refuse it,
@@ -132,7 +134,7 @@ export function acsReason(reason) {
 export function createAuthEventReporter({ enabled = false, post, timeoutMs = 1_500, throttleMs = 60_000, now = Date.now, onError = () => {} }) {
   const last = new Map();
   const stats = { sent: 0, throttled: 0, failed: 0, disabled: 0 };
-  async function report({ lane, identity, kind, reason, refreshExpiresAt }) {
+  async function report({ lane, identity, kind, reason, refreshExpiresAt, family }) {
     try {
       if (!enabled) {
         stats.disabled += 1;
@@ -162,6 +164,7 @@ export function createAuthEventReporter({ enabled = false, post, timeoutMs = 1_5
         kind,
         ...(mapped ? { reason: mapped } : {}),
         ...(refreshExpiresAt ? { refreshExpiresAt } : {}),
+        ...(family ? { family: sanitizeClaim(family, 64) } : {}),
         observedAt
       };
       const result = await Promise.race([

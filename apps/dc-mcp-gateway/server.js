@@ -167,7 +167,9 @@ const saveJson = (f, o) => {
   const fd = fs.openSync(tmp, 'wx', 0o600);
   try {
     fs.fchmodSync(fd, 0o600);
-    fs.writeSync(fd, JSON.stringify(o, null, 2));
+    // writeSync may write fewer bytes than asked; never rename a truncated file over tokens.json.
+    const buf = Buffer.from(JSON.stringify(o, null, 2));
+    for (let off = 0; off < buf.length;) off += fs.writeSync(fd, buf, off);
     fs.fsyncSync(fd);
   } catch (error) {
     fs.closeSync(fd); fs.rmSync(tmp, { force: true }); // do not leave plaintext tokens behind on ENOSPC etc.
@@ -465,7 +467,7 @@ async function handleConsent(req, res, body, laneHint = null) {
 const codes = new Map();
 setInterval(() => { const t = now(); for (const [c, g] of codes) if (g.exp < t) codes.delete(c); }, 60_000);
 
-function issueTokens(grant, lane = DC_OAUTH_LANE) {
+function issueTokens(grant, lane = DC_OAUTH_LANE, family = randId().slice(0, 12)) {
   const t = now();
   const jti = randId();
   const access = signJwt({
@@ -473,7 +475,7 @@ function issueTokens(grant, lane = DC_OAUTH_LANE) {
     scope: grant.scope, iat: t, exp: t + ACCESS_TTL_S, jti,
   });
   const rjti = randId();
-  refreshTokens[rjti] = { client_id: grant.client_id, scope: grant.scope, resource: lane.resource, issuer: lane.issuer, exp: t + REFRESH_TTL_S, active: true };
+  refreshTokens[rjti] = { client_id: grant.client_id, scope: grant.scope, resource: lane.resource, issuer: lane.issuer, exp: t + REFRESH_TTL_S, active: true, family };
   saveJson(tokensFile, refreshTokens);
   return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TTL_S, refresh_token: rjti, scope: grant.scope };
 }
@@ -498,9 +500,11 @@ function authReporterFor(laneName) {
   return reporter;
 }
 /** Fire-and-forget. Never awaited, never throws, never changes a response. */
-function reportAuth(laneName, identity, kind, reason, refreshExpiresAt) {
-  try { void authReporterFor(laneName).report({ lane: laneName, identity, kind, reason, refreshExpiresAt }); } catch { /* reporting is best-effort */ }
+function reportAuth(laneName, identity, kind, reason, refreshExpiresAt, family) {
+  try { void authReporterFor(laneName).report({ lane: laneName, identity, kind, reason, refreshExpiresAt, family }); } catch { /* reporting is best-effort */ }
 }
+/** Untrusted values in log lines: printable ASCII only (no forged lines or terminal control), bounded. */
+const logSafe = (value) => String(value ?? '-').replace(/[^\x20-\x7e]/g, '?').slice(0, 64);
 const isoFromSec = (sec) => new Date(sec * 1000).toISOString();
 
 async function handleToken(req, res, body, laneHint = null) {
@@ -523,7 +527,7 @@ async function handleToken(req, res, body, laneHint = null) {
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return jsonError(res, 400, 'invalid_grant', 'PKCE verification failed');
     if (resource && resource !== lane.resource) return jsonError(res, 400, 'invalid_target', 'resource mismatch');
     const issued = issueTokens(g, lane);
-    reportAuth(lane.name, { clientId: g.client_id, subject: 'jacen' }, 'granted', undefined, isoFromSec(refreshTokens[issued.refresh_token].exp));
+    reportAuth(lane.name, { clientId: g.client_id, subject: 'jacen' }, 'granted', undefined, isoFromSec(refreshTokens[issued.refresh_token].exp), refreshTokens[issued.refresh_token].family);
     return send(res, 200, issued, { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' });
   }
   if (grant_type === 'refresh_token') {
@@ -533,7 +537,7 @@ async function handleToken(req, res, body, laneHint = null) {
     // A record whose own client is gone from clients.json must not fall back to "public client". https ids are CIMD
     // documents, which never carry a secret, so an unreachable metadata host must not turn into a refusal.
     if (known && !refreshClient && !/^https:\/\//.test(String(known.client_id))) {
-      console.log(`auth: refresh refused reason=client_unknown client=${String(known.client_id).slice(0, 64)}`);
+      console.log(`auth: refresh refused reason=client_unknown client=${logSafe(known.client_id)}`);
       return jsonError(res, 400, 'invalid_grant', 'invalid refresh token');
     }
     const resolved = resolveRefresh(refreshTokens, refresh_token, now(), {
@@ -544,8 +548,8 @@ async function handleToken(req, res, body, laneHint = null) {
     const rejectedLane = known ? laneForGrant(known) : null;
     if (resolved.ok === false) {
       // Every refusal leaves a trace (reason, lane, client; never a token), whether or not reporting to ACS is on.
-      console.log(`auth: refresh refused reason=${resolved.reason} lane=${rejectedLane ? rejectedLane.name : '-'} client=${String(resolved.clientId || client_id || '-').slice(0, 64)}`);
-      if (rejectedLane && resolved.clientId && REPORTABLE_REFRESH_FAILURES.has(resolved.reason)) reportAuth(rejectedLane.name, { clientId: resolved.clientId, subject: 'jacen' }, 'refresh_failed', resolved.reason);
+      console.log(`auth: refresh refused reason=${resolved.reason} lane=${rejectedLane ? rejectedLane.name : '-'} client=${logSafe(resolved.clientId || client_id)}`);
+      if (rejectedLane && resolved.clientId && REPORTABLE_REFRESH_FAILURES.has(resolved.reason)) reportAuth(rejectedLane.name, { clientId: resolved.clientId, subject: 'jacen' }, 'refresh_failed', resolved.reason, undefined, known && known.family);
       if (resolved.reason === 'invalid_client') return jsonError(res, 401, 'invalid_client', 'client auth failed');
       return jsonError(res, 400, 'invalid_grant', 'invalid refresh token');
     }
@@ -556,10 +560,10 @@ async function handleToken(req, res, body, laneHint = null) {
     if (resource && resource !== lane.resource) return jsonError(res, 400, 'invalid_target', 'resource mismatch');
     rec.active = false;
     rec.rotatedAt = now();
-    const t = issueTokens({ client_id: rec.client_id, scope: rec.scope }, lane);
+    const t = issueTokens({ client_id: rec.client_id, scope: rec.scope }, lane, rec.family);
     rec.successor = t.refresh_token;
     saveJson(tokensFile, refreshTokens);
-    reportAuth(lane.name, { clientId: rec.client_id, subject: 'jacen' }, 'refreshed', undefined, isoFromSec(refreshTokens[t.refresh_token].exp));
+    reportAuth(lane.name, { clientId: rec.client_id, subject: 'jacen' }, 'refreshed', undefined, isoFromSec(refreshTokens[t.refresh_token].exp), rec.family);
     return send(res, 200, t, { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' });
   }
   return jsonError(res, 400, 'unsupported_grant_type', 'supported: authorization_code, refresh_token');

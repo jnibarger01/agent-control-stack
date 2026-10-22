@@ -409,3 +409,45 @@ test('a stale duplicate refresh (client already moved on to its successor) raise
     assert.equal(gw.events().filter((e) => e.kind === 'refresh_failed').length, 0);
   } finally { gw.close(); }
 });
+
+test('security: control characters in a client-supplied client_id cannot forge log lines', async () => {
+  const gw = await boot();
+  try {
+    await gw.refresh('does-not-exist', 'x\nauth: refresh refused reason=forged lane=jc client=victim\u001b[31m');
+    await settle();
+    assert.doesNotMatch(gw.logs(), /^auth: refresh refused reason=forged/m);
+    assert.doesNotMatch(gw.logs(), /\u001b/);
+  } finally { gw.close(); }
+});
+
+test('an expired token from the other lane raises no report on this lane', async () => {
+  const gw = await boot({ authEvents: true });
+  try {
+    const res = await gw.mcp(`Bearer ${jwt({ aud: `${ORIGIN}/mcp`, iss: ORIGIN, exp: nowS() - 5 })}`);
+    assert.equal(res.status, 401);
+    await settle();
+    assert.deepEqual(gw.events(), []);
+  } finally { gw.close(); }
+});
+
+test('security: a stranger holding a revoked confidential client\'s token and no secret cannot flag the client', async () => {
+  const gw = await boot({ authEvents: true, tokens: { R1: refreshRecord({ client_id: 'confidential-app', revoked: true, active: false }), R2: refreshRecord({ client_id: 'confidential-app', exp: nowS() - 1 }) } });
+  try {
+    assert.equal((await gw.refresh('R1', 'confidential-app')).status, 401);
+    assert.equal((await gw.refresh('R2', 'confidential-app')).status, 401);
+    await settle();
+    assert.deepEqual(gw.events(), []);
+  } finally { gw.close(); }
+});
+
+test('reports carry the authorization family so ACS can keep health per authorization', async () => {
+  const gw = await boot({ authEvents: true, tokens: { R1: refreshRecord({ family: 'famX' }) } });
+  try {
+    assert.equal((await gw.refresh('R1')).status, 200);
+    await settle();
+    const refreshed = gw.events().find((e) => e.kind === 'refreshed');
+    assert.equal(refreshed.family, 'famX');
+    const next = Object.values(gw.tokensOnDisk()).filter((r) => r.active);
+    assert.equal(next[0].family, 'famX', 'the successor stays in the same family');
+  } finally { gw.close(); }
+});

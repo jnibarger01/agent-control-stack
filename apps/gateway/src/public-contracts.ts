@@ -215,7 +215,8 @@ export const mcpAuthEventBodySchema = z
       ])
       .optional(),
     refreshExpiresAt: z.string().datetime().optional(),
-    observedAt: z.string().datetime().optional()
+    observedAt: z.string().datetime().optional(),
+    family: z.string().min(1).max(64).optional()
   })
   .strict();
 

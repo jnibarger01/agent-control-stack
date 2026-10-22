@@ -63,6 +63,10 @@ export interface McpClientAuthView {
   lastSuccessAt?: string;
   lastFailureAt?: string;
   failureReason?: McpAuthFailureReason;
+  /** The lane whose authorization failed (a client can hold independent grants on both lanes). */
+  lane?: McpLane;
+  /** Soonest refresh-token expiry among healthy grants, so a browser can notice an expiry without refetching. */
+  refreshExpiresAt?: string;
 }
 
 export interface McpAuthEventInput {
@@ -73,6 +77,8 @@ export interface McpAuthEventInput {
   reason?: string;
   /** When the refresh token this event leaves the client holding stops working. */
   refreshExpiresAt?: string;
+  /** Opaque id of the authorization (refresh-token family) the outcome belongs to. */
+  family?: string;
   /** When the edge observed the outcome. Reports travel on separate connections, so arrival order is not event order. */
   observedAt?: string;
 }
@@ -127,6 +133,14 @@ export interface McpClientSummary {
   policy: McpClientPolicy;
 }
 
+interface LaneAuth {
+  family?: string;
+  lastSuccessMs?: number;
+  lastFailureMs?: number;
+  failure?: McpAuthFailureReason;
+  refreshExpiresMs?: number;
+}
+
 interface ClientState {
   clientId: string;
   label?: { label: string; kind: McpClientKind; note?: string; at: string; by: string };
@@ -140,7 +154,8 @@ interface ClientState {
   denied: number;
   lastTool?: string;
   lastMethod?: string;
-  auth: { lastSuccessMs?: number; lastFailureMs?: number; failure?: McpAuthFailureReason; refreshExpiresMs?: number };
+  /** Health is kept per lane and per authorization (family): one lane or a superseded grant must not decide for another. */
+  auth: Partial<Record<McpLane, LaneAuth>>;
 }
 
 const PRINTABLE = /[^\x20-\x7e]/gu;
@@ -377,7 +392,17 @@ export class McpClientService {
       const subject = sanitizeClaim(body.subject, 128);
       if (subject && !state.subjects.includes(subject) && state.subjects.length < MAX_SUBJECTS)
         state.subjects.push(subject);
-      const auth = state.auth;
+      if (!lane) return;
+      const auth = (state.auth[lane] ??= {});
+      const family = sanitizeClaim(body.family, 64);
+      // A newer authorization (granted) supersedes older ones on this lane; outcomes for a superseded family say nothing
+      // about the current grant, so they are ignored rather than flagging or clearing it.
+      if (kind === "granted") {
+        if (family) auth.family = family;
+      } else if (family) {
+        if (auth.family && auth.family !== family) return;
+        auth.family ??= family;
+      }
       // Order by when the edge observed the outcome, not by arrival: a late failure must not undo a newer success.
       const observed = typeof body.observedAt === "string" ? Date.parse(body.observedAt) : NaN;
       const at = Number.isFinite(observed) ? observed : ms;
@@ -385,12 +410,14 @@ export class McpClientService {
         auth.lastSuccessMs = Math.max(auth.lastSuccessMs ?? 0, at);
         if (auth.failure && (auth.lastFailureMs ?? 0) <= at) delete auth.failure;
         const expires = typeof body.refreshExpiresAt === "string" ? Date.parse(body.refreshExpiresAt) : NaN;
-        if (Number.isFinite(expires)) auth.refreshExpiresMs = Math.max(auth.refreshExpiresMs ?? 0, expires);
+        if (Number.isFinite(expires))
+          auth.refreshExpiresMs = kind === "granted" ? expires : Math.max(auth.refreshExpiresMs ?? 0, expires);
       } else if (kind === "refresh_failed" || kind === "revoked") {
         const reason = MCP_AUTH_PERMANENT_REASONS.find((r) => r === body.reason);
-        if (reason && at >= (auth.lastSuccessMs ?? 0)) {
+        // Newer than both the last success and the last failure, so delivery order never decides the shown cause.
+        if (reason && at >= (auth.lastSuccessMs ?? 0) && at >= (auth.lastFailureMs ?? 0)) {
           auth.failure = reason;
-          auth.lastFailureMs = Math.max(auth.lastFailureMs ?? 0, at);
+          auth.lastFailureMs = at;
         }
       }
     } else if (event.name === MCP_CLIENT_EVENTS.labelled) {
@@ -423,9 +450,10 @@ export class McpClientService {
     const unlabelled = [...this.clients.values()].filter((c) => !c.label);
     if (unlabelled.length <= MAX_TRACKED_CLIENTS) return;
     // Clients that need reauthentication are what the operator must act on, so they are evicted last.
-    unlabelled.sort(
-      (a, b) => Number(Boolean(a.auth.failure)) - Number(Boolean(b.auth.failure)) || a.lastSeenMs - b.lastSeenMs
-    );
+    // That includes a refresh token that has expired with no renewal (derived), not only an explicit failure.
+    const now = this.now();
+    const needsReauth = (c: ClientState) => Number(this.authView(c, now).state === "reauth_required");
+    unlabelled.sort((a, b) => needsReauth(a) - needsReauth(b) || a.lastSeenMs - b.lastSeenMs);
     for (const state of unlabelled.slice(0, unlabelled.length - MAX_TRACKED_CLIENTS))
       this.clients.delete(state.clientId);
   }
@@ -465,7 +493,8 @@ export class McpClientService {
           denied: state.denied,
           ...(state.lastTool ? { lastTool: state.lastTool } : {}),
           ...(state.lastMethod ? { lastMethod: state.lastMethod } : {}),
-          live: now - state.lastSeenMs <= MCP_CLIENT_LIVE_WINDOW_MS,
+          // Auth outcomes alone (a grant before the first request, or a failure for an evicted client) are not "seen".
+          live: state.connects + state.issued + state.denied > 0 && now - state.lastSeenMs <= MCP_CLIENT_LIVE_WINDOW_MS,
           auth
         };
       })
@@ -477,15 +506,30 @@ export class McpClientService {
    * expired with no renewal since. It is never derived from how long a client has been quiet.
    */
   private authView(state: ClientState, now: number): McpClientAuthView {
-    const { lastSuccessMs, lastFailureMs, failure, refreshExpiresMs } = state.auth;
-    const expired = !failure && refreshExpiresMs !== undefined && now > refreshExpiresMs;
-    const reason: McpAuthFailureReason | undefined = failure ?? (expired ? "refresh_expired" : undefined);
-    const failureMs = failure ? lastFailureMs : expired ? refreshExpiresMs : undefined;
+    let lastSuccessMs: number | undefined;
+    let worst: { reason: McpAuthFailureReason; atMs: number; lane: McpLane } | undefined;
+    let nextExpiry: number | undefined;
+    for (const [lane, auth] of Object.entries(state.auth) as Array<[McpLane, LaneAuth]>) {
+      if (auth.lastSuccessMs !== undefined) lastSuccessMs = Math.max(lastSuccessMs ?? 0, auth.lastSuccessMs);
+      // Expiry is only inferred when the client shows no sign of life after it. Success reports are best-effort and can be
+      // lost, so a stale expiry alone proves nothing; any verified request after it means a newer token was issued
+      // (an access token cannot outlive the refresh token it came from).
+      const expired =
+        !auth.failure &&
+        auth.refreshExpiresMs !== undefined &&
+        now > auth.refreshExpiresMs &&
+        state.lastSeenMs <= auth.refreshExpiresMs;
+      const reason: McpAuthFailureReason | undefined = auth.failure ?? (expired ? "refresh_expired" : undefined);
+      const atMs = auth.failure ? (auth.lastFailureMs ?? 0) : (auth.refreshExpiresMs ?? 0);
+      if (reason && (!worst || atMs > worst.atMs)) worst = { reason, atMs, lane };
+      if (!reason && auth.refreshExpiresMs !== undefined)
+        nextExpiry = Math.min(nextExpiry ?? Number.POSITIVE_INFINITY, auth.refreshExpiresMs);
+    }
     return {
-      state: reason ? "reauth_required" : "ok",
+      state: worst ? "reauth_required" : "ok",
       ...(lastSuccessMs !== undefined ? { lastSuccessAt: iso(lastSuccessMs) } : {}),
-      ...(reason && failureMs !== undefined ? { lastFailureAt: iso(failureMs) } : {}),
-      ...(reason ? { failureReason: reason } : {})
+      ...(worst ? { lastFailureAt: iso(worst.atMs), failureReason: worst.reason, lane: worst.lane } : {}),
+      ...(!worst && nextExpiry !== undefined ? { refreshExpiresAt: iso(nextExpiry) } : {})
     };
   }
 
@@ -575,6 +619,7 @@ export class McpClientService {
       reason = "revoked";
     }
     const subject = sanitizeClaim(input.subject, 128);
+    const family = sanitizeClaim(input.family, 64);
     const expires = input.refreshExpiresAt ? Date.parse(input.refreshExpiresAt) : NaN;
     const observed = input.observedAt ? Date.parse(input.observedAt) : NaN;
     // Trust the edge's clock only when it agrees with ours to within ten minutes; otherwise use arrival time.
@@ -591,7 +636,8 @@ export class McpClientService {
         kind: input.kind,
         ...(reason ? { reason } : {}),
         ...(Number.isFinite(expires) ? { refreshExpiresAt: new Date(expires).toISOString() } : {}),
-        ...(observedAt ? { observedAt } : {})
+        ...(observedAt ? { observedAt } : {}),
+        ...(family ? { family } : {})
       },
       attributes: { "mcp.client_id": clientId, "mcp.lane": input.lane, "mcp.auth_kind": input.kind }
     });
