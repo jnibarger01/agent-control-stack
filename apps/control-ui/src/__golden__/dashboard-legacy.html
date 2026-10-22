@@ -3956,7 +3956,19 @@ const MCP_AUTH_REASONS = {
   revoked: 'The connection was revoked.',
   invalid_client: 'The client could not authenticate itself when renewing.'
 };
-function mcpNeedsReauth(client) { return !!(client.auth && client.auth.state === 'reauth_required'); }
+// The server decides, but a refresh token can expire while this page is open and nothing is emitted at that moment, so the
+// browser also applies the same rule to the soonest expiry it was given: expired, and no sign of life from the client since.
+function mcpAuthExpired(client) {
+  const a = client.auth;
+  if (!a || a.state === 'reauth_required' || !a.refreshExpiresAt) return false;
+  const exp = new Date(a.refreshExpiresAt).getTime();
+  const now = Date.now() + mcpState.skewMs;
+  return Number.isFinite(exp) && now > exp && new Date(client.lastSeenAt).getTime() <= exp;
+}
+function mcpNeedsReauth(client) { return !!(client.auth && client.auth.state === 'reauth_required') || mcpAuthExpired(client); }
+function mcpAuthView(client) {
+  return mcpAuthExpired(client) ? { state: 'reauth_required', failureReason: 'refresh_expired', lastSuccessAt: client.auth.lastSuccessAt, lastFailureAt: client.auth.refreshExpiresAt } : client.auth;
+}
 function mcpClientName(client) { return client.label || (client.suggestedKind ? MCP_KIND_LABELS[client.suggestedKind] : '') || client.clientId; }
 const MCP_KIND_LABELS = { chatgpt: 'ChatGPT', muse: 'Muse', grok: 'Grok', claude: 'Claude', gemini: 'Gemini', other: 'Other' };
 
@@ -3999,10 +4011,11 @@ function renderMcpClients() {
       const who = client.status === 'labelled'
         ? '<strong>' + escapeClient(client.label) + '</strong> <span class="pill labelled">' + escapeClient(MCP_KIND_LABELS[client.kind] || client.kind) + '</span>' + (client.note ? '<br><small class="muted">' + escapeClient(client.note) + '</small>' : '')
         : '<span class="pill unrecognized">Unrecognized</span>' + (client.suggestedKind ? '<br><small class="muted">Looks like ' + escapeClient(MCP_KIND_LABELS[client.suggestedKind] || client.suggestedKind) + ' (unverified)</small>' : '');
+      const authView = mcpAuthView(client);
       const reauth = mcpNeedsReauth(client)
-        ? '<div class="mcp-reauth"><span class="pill blocked">Reauthentication required</span><br><small>' + escapeClient(MCP_AUTH_REASONS[client.auth.failureReason] || 'Authorization is no longer valid.') + '</small>'
-          + '<br><small class="muted">Last successful authentication: ' + escapeClient(client.auth.lastSuccessAt ? formatClientTime(client.auth.lastSuccessAt) : 'not recorded') + '</small>'
-          + (client.auth.lastFailureAt ? '<br><small class="muted">Failed: ' + escapeClient(formatClientTime(client.auth.lastFailureAt)) + '</small>' : '')
+        ? '<div class="mcp-reauth"><span class="pill blocked">Reauthentication required</span><br><small>' + escapeClient(MCP_AUTH_REASONS[authView.failureReason] || 'Authorization is no longer valid.') + '</small>'
+          + '<br><small class="muted">Last successful authentication: ' + escapeClient(authView.lastSuccessAt ? formatClientTime(authView.lastSuccessAt) : 'not recorded') + '</small>'
+          + (authView.lastFailureAt ? '<br><small class="muted">Failed: ' + escapeClient(formatClientTime(authView.lastFailureAt)) + '</small>' : '')
           + '<div class="mcp-actions"><button type="button" class="tool-button" data-mcp-reconnect="' + escapeClient(client.clientId) + '">Reconnect</button></div></div>'
         : '';
       const claims = client.claims && client.claims.length
