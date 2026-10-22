@@ -53,7 +53,7 @@ function stubServer(handler) {
 
 let nextPort = 18900;
 async function boot({ authEvents = false, idempotentRetry = false, acsUp = true, tokens = {}, tokensMode } = {}) {
-  const acs = stubServer((req) => (acsUp ? { status: 202, body: { recorded: true } } : { status: 500, body: { error: 'down' } }));
+  const acs = stubServer(() => (acsUp ? { status: 202, body: { recorded: true } } : { status: 500, body: { error: 'down' } }));
   const jcUp = stubServer((req) => (req.path === '/authority' ? { status: 200, body: { variant: 'jc' } } : { status: 200, body: { jsonrpc: '2.0', id: 1, result: {} } }));
   const dcUp = stubServer(() => ({ status: 200, body: { jsonrpc: '2.0', id: 1, result: {} } }));
   const [acsPort, jcPort, dcPort] = [await acs.listen(), await jcUp.listen(), await dcUp.listen()];

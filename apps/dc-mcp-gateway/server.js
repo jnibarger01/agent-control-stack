@@ -191,18 +191,6 @@ const signJwt = (payload) => {
   const sig = crypto.createHmac('sha256', SIGNING_KEY).update(`${h}.${p}`).digest('base64url');
   return `${h}.${p}.${sig}`;
 };
-const verifyJwt = (token) => {
-  try {
-    const [h, p, sig] = token.split('.');
-    if (!h || !p || !sig) return null;
-    const expect = crypto.createHmac('sha256', SIGNING_KEY).update(`${h}.${p}`).digest('base64url');
-    const a = Buffer.from(sig); const b = Buffer.from(expect);
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
-    const payload = JSON.parse(Buffer.from(p, 'base64url').toString('utf8'));
-    if (typeof payload.exp !== 'number' || payload.exp < Math.floor(Date.now() / 1000)) return null;
-    return payload;
-  } catch { return null; }
-};
 const randId = () => crypto.randomBytes(24).toString('base64url');
 
 // ---- Client attribution (visibility only; never authority) ----
@@ -621,10 +609,6 @@ const JC_CHALLENGE = () => 'Bearer resource_metadata="' + ISSUER + '/.well-known
 
 function checkAuthDetailed(req, expectedResource = RESOURCE, expectedIssuer = ISSUER) {
   return classifyBearer(req.headers['authorization'] || '', { signingKey: SIGNING_KEY, issuer: expectedIssuer, resource: expectedResource, nowSec: now() });
-}
-function checkAuth(req, expectedResource = RESOURCE, expectedIssuer = ISSUER) {
-  const result = checkAuthDetailed(req, expectedResource, expectedIssuer);
-  return result.ok ? result.payload : null;
 }
 /** 401 with the right RFC 6750 challenge; reports an attributable rejection (verified signature only). */
 function rejectBearer(res, laneName, result, baseChallenge) {
