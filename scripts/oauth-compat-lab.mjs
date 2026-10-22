@@ -50,9 +50,9 @@ const secret = () => crypto.randomBytes(24).toString('hex');
 const secretsFile = path.join(lab, 'lab.json');
 const secrets = existing
   ? JSON.parse(fs.readFileSync(secretsFile, 'utf8'))
-  : { bridgeToken: `lab-bridge-${secret()}`, operatorToken: `lab-operator-${secret()}`, passphrase: `lab-${crypto.randomBytes(6).toString('hex')}`, signingKey: crypto.randomBytes(32).toString('hex') };
+  : { bridgeToken: `lab-bridge-${secret()}`, operatorToken: `lab-operator-${secret()}`, consentCode: `lab-${crypto.randomBytes(6).toString('hex')}`, signingKey: crypto.randomBytes(32).toString('hex') };
 if (!existing) fs.writeFileSync(secretsFile, JSON.stringify(secrets), { mode: 0o600 });
-const { bridgeToken, operatorToken, passphrase, signingKey } = secrets;
+const { bridgeToken, operatorToken, consentCode, signingKey } = secrets;
 const evidence = fs.createWriteStream(path.join(lab, 'evidence.jsonl'), { flags: 'a', mode: 0o600 });
 const note = (kind, data) => evidence.write(`${JSON.stringify({ at: new Date().toISOString(), kind, ...data })}\n`);
 
@@ -95,7 +95,7 @@ start('acs', process.execPath, ['apps/gateway/dist/cli.js'], {
   ])
 });
 start('edge', process.execPath, ['apps/dc-mcp-gateway/server.js'], {
-  GATEWAY_PORT: String(EDGE_PORT), PUBLIC_ORIGIN: publicOrigin, CONSENT_PASSPHRASE: passphrase, SIGNING_KEY: signingKey,
+  GATEWAY_PORT: String(EDGE_PORT), PUBLIC_ORIGIN: publicOrigin, CONSENT_PASSPHRASE: consentCode, SIGNING_KEY: signingKey,
   DATA_DIR: path.join(lab, 'edge-data'), UPSTREAM: upstreamUrl, JC_ENABLED: '1', JC_UPSTREAM: upstreamUrl,
   ACS_GATEWAY_URL: `http://127.0.0.1:${ACS_PORT}`, ACS_JC_GATEWAY_TOKEN: bridgeToken,
   EDGE_TEST_MODE: '1', EDGE_TEST_ACCESS_TTL_S: String(ACCESS_TTL), EDGE_TEST_REFRESH_TTL_S: String(REFRESH_TTL), ACS_MCP_AUTH_EVENTS: '1'
@@ -119,7 +119,7 @@ process.on('SIGINT', stop); process.on('SIGTERM', stop);
 console.log(`
 OAuth reauthentication lab (DISPOSABLE - delete ${lab} when done)
   MCP URL for the connector : ${publicOrigin}/jc/mcp
-  Consent passphrase        : ${passphrase}
+  Consent passphrase        : ${consentCode}
   Token lifetimes           : access ${ACCESS_TTL}s, refresh ${REFRESH_TTL}s
   Mission Control           : http://127.0.0.1:${ACS_PORT}/   (sign in with token: ${operatorToken})
   Evidence file             : ${path.join(lab, 'evidence.jsonl')}
