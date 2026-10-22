@@ -323,7 +323,8 @@ describe("reauthentication detection, end to end", () => {
       refreshExpiresAt: new Date(Date.now() + 30 * 86_400_000).toISOString()
     });
     const view = await acs.clients();
-    expect(byId(view, "chatgpt")).toMatchObject({ live: true, auth: { state: "ok" } });
+    // An authorization alone is not activity, so the client is not "live"; and it is healthy regardless.
+    expect(byId(view, "chatgpt")).toMatchObject({ live: false, auth: { state: "ok" } });
     // Liveness is separate from authorization: a long-quiet client is simply not live.
     expect(byId(view, "chatgpt")?.auth.failureReason).toBeUndefined();
   });
