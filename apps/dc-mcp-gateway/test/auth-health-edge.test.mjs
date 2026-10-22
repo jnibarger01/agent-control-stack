@@ -25,7 +25,7 @@ const KEY = 'k'.repeat(32);
 const ORIGIN = 'https://gw.test';
 const JC_RESOURCE = `${ORIGIN}/jc/mcp`;
 const JC_ISSUER = `${ORIGIN}/jc`;
-const SECRET = 'confidential-client-secret-value';
+const SECRET = crypto.randomBytes(16).toString('hex');
 const b64u = (buf) => Buffer.from(buf).toString('base64url');
 const nowS = () => Math.floor(Date.now() / 1000);
 

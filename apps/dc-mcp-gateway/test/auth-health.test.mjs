@@ -75,7 +75,7 @@ test('every presented-but-unusable token gets error="invalid_token" while keepin
 });
 
 const rec = (over = {}) => ({ client_id: 'client-chatgpt', exp: NOW + 1000, active: true, ...over });
-const SECRET = 's3cret-value-for-confidential-client';
+const SECRET = crypto.randomBytes(16).toString('hex');
 
 test('refresh: an active refresh token resolves', () => {
   assert.deepEqual(resolveRefresh({ r1: rec() }, 'r1', NOW), { ok: true, record: rec() });
