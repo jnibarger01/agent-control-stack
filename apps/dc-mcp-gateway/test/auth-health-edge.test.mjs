@@ -416,7 +416,7 @@ test('security: control characters in a client-supplied client_id cannot forge l
     await gw.refresh('does-not-exist', 'x\nauth: refresh refused reason=forged lane=jc client=victim\u001b[31m');
     await settle();
     assert.doesNotMatch(gw.logs(), /^auth: refresh refused reason=forged/m);
-    assert.doesNotMatch(gw.logs(), /\u001b/);
+    assert.ok(!gw.logs().includes(String.fromCharCode(27)), 'no terminal escape reaches the logs');
   } finally { gw.close(); }
 });
 
