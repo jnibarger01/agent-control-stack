@@ -84,3 +84,21 @@ real authorize + consent + PKCE flow, the alert and row cleared live, without a 
 
 Approve or adjust: (a) the live check with your accounts and a tunnel you start, (b) an independent security review, (c) whether to add a "dismiss"
 action now. Merge, deployment, flags and credential migration remain unapproved.
+
+## 8. Final verification (2026-10-22, rebased onto `origin/main` 318c27a0)
+
+Clean, self-contained trees (own `npm install`); evidence for the real-client and review claims is in [live evidence](oauth-reauthentication-live-evidence.md).
+
+| Check                                                              | Result                                                                                                                                                                                                                               |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `npx tsc -b`                                                       | exit 0, 0 errors (main and this branch)                                                                                                                                                                                              |
+| Full `vitest run`                                                  | 5057 passed, 91 skipped, **2 failed**. Both fail identically on clean `origin/main`: Hermes CLI interop (host `uv.lock` out of sync) and `local-advisor` egress `NO_PROXY` dispatcher test (5 s timeout). Not caused by this change. |
+| Edge suite                                                         | 130 pass                                                                                                                                                                                                                             |
+| JC CLI tests (full `npm ci` + `tsc` in `vendor/desktop-commander`) | mcp-auth 10 pass; device-login and cli pass                                                                                                                                                                                          |
+| `npm run contracts:check`                                          | current                                                                                                                                                                                                                              |
+| ESLint on changed code, Prettier on docs                           | clean                                                                                                                                                                                                                                |
+| Independent security review                                        | no critical/high; all medium/low resolved or accepted (see live evidence)                                                                                                                                                            |
+| Real Claude Code and Codex CLI                                     | passed (see live evidence)                                                                                                                                                                                                           |
+| ChatGPT web app, claude.ai connectors                              | **not tested: blocker** (personal-account connector changes are outside the approved scope)                                                                                                                                          |
+
+Dismiss action: not implemented, its trigger condition was not met. Cached-response retry: removed. Production deployment, flag activation and credential migration remain disabled.
