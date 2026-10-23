@@ -64,7 +64,7 @@ real authorize + consent + PKCE flow, the alert and row cleared live, without a 
 
 ## 5. Rollback
 
-- Fastest: unset `ACS_MCP_AUTH_EVENTS`, restart the edge. Reporting stops; Mission Control keeps its last state and the derived expiry view remains.
+- Fastest: unset `ACS_MCP_AUTH_EVENTS`, restart the edge. Reporting stops; Mission Control keeps its last confirmed state. Time alone cannot create a new warning.
 - Edge code: point the release symlink back to the previous release directory and restart. `tokens.json` stays compatible: the new fields are additive and
   ignored by old code; a leftover `*.tmp` file is harmless.
 - ACS gateway: revert to the previous release. `mcp_client.auth_event` audit rows are inert for the old version. No migration to undo.
@@ -102,3 +102,13 @@ Clean, self-contained trees (own `npm install`); evidence for the real-client an
 | ChatGPT web app, claude.ai connectors                              | **not tested: blocker** (personal-account connector changes are outside the approved scope)                                                                                                                                          |
 
 Dismiss action: not implemented, its trigger condition was not met. Cached-response retry: removed. Production deployment, flag activation and credential migration remain disabled.
+
+## PR 408 follow-up (2026-10-23)
+
+Current behavior supersedes the earlier idle-expiry expectations: best-effort telemetry cannot prove a refresh token
+is still current. Neither ACS nor the browser infers reauthentication from stored expiry. Detection waits for a
+confirmed permanent edge refusal. Grant selection is ordered before switching authorization families; an old family
+cannot carry its failure into a new grant. The browser requires real MCP activity before showing a client as live.
+
+Historical CI and live-client results above are not validation of this follow-up. See
+[the follow-up verification report](oauth-pr-408-follow-up.md) for current evidence and remaining gates.

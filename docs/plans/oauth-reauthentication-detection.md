@@ -17,7 +17,7 @@ Design record: [ADR 0027](../adr/0027-oauth-reauthentication-detection.md). Base
 Verified by automated tests (all green except the 9 pre-existing baseline cases):
 a protocol-faithful stand-in client against the real edge process and real ACS gateway (`apps/gateway/src/mcp-auth-e2e.test.ts`): revoked/expired and reused
 refresh tokens surface as "Reauthentication required" with no manual disconnect; expired-but-refreshable access tokens, idle clients, an ACS outage and
-the flag-off default produce no warning; a real expiry becomes visible on its own.
+the flag-off default produce no warning; expiry becomes visible after a confirmed permanent edge refusal.
 
 **Not verified:** behaviour of the real ChatGPT and Claude apps. The tests encode the documented OAuth client behaviour (refresh on `401 invalid_token`,
 reauthorize when refresh fails); whether each app actually does so, and how its UI reacts, needs the isolated live check in the runbook
@@ -93,16 +93,16 @@ Events (`kind`): `granted` (code exchange; carries `refreshExpiresAt`), `refresh
 
 State rules (this is requirement 6, and it is tested):
 
-| Signal                                                                                                           | Effect on `auth.state`                     |
-| ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| `granted` / `refreshed`                                                                                          | → `ok`, set `lastSuccessAt`, clear failure |
-| `refresh_failed` permanent: `refresh_rejected`, `refresh_expired`, `refresh_reused`, `revoked`, `invalid_client` | → `reauth_required`                        |
-| `refresh_failed` transient: `temporarily_unavailable`                                                            | no change                                  |
-| `token_rejected: access_token_expired`                                                                           | no change (renewable)                      |
-| Refresh token passed `refreshExpiresAt` with no later success (derived at read time)                             | → `reauth_required` / `refresh_expired`    |
-| `insufficient_scope`, `mcp_client_unlabelled` (403)                                                              | no change, not an auth failure             |
-| `bad_signature` / `malformed`                                                                                    | not recorded (cannot be attributed)        |
-| Inactivity, edge or ACS downtime, dropped connection                                                             | no event, so no change                     |
+| Signal                                                                                         | Effect on `auth.state`                     |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `granted` / `refreshed`                                                                        | → `ok`, set `lastSuccessAt`, clear failure |
+| `refresh_failed` permanent: `refresh_rejected`, `refresh_expired`, `refresh_reused`, `revoked` | → `reauth_required`                        |
+| `refresh_failed` transient: `temporarily_unavailable`                                          | no change                                  |
+| `token_rejected: access_token_expired`                                                         | no change (renewable)                      |
+| Refresh token passed recorded `refreshExpiresAt` (renewal reports may be lost)                 | no change; await confirmed edge refusal    |
+| `insufficient_scope`, `mcp_client_unlabelled` (403)                                            | no change, not an auth failure             |
+| `bad_signature` / `malformed`                                                                  | not recorded (cannot be attributed)        |
+| Inactivity, edge or ACS downtime, dropped connection                                           | no event, so no change                     |
 
 Inactivity is deliberately _not_ an input: a client idle for 20 days with a valid refresh token stays `ok`.
 

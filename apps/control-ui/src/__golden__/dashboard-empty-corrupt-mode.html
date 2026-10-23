@@ -3945,6 +3945,7 @@ composerForm?.addEventListener('submit', async function (event) {
 const mcpState = { summary: null, clients: [], legacy: [], loaded: false, skewMs: 0, liveWindowMs: 300000 };
 // Liveness comes from lastSeenAt and the server's clock, so it expires between refreshes.
 function mcpIsLive(client) {
+  if (!(client.connects + client.issued + client.denied > 0)) return false;
   const age = Date.now() + mcpState.skewMs - new Date(client.lastSeenAt).getTime();
   return Number.isFinite(age) && age <= mcpState.liveWindowMs;
 }
@@ -3956,19 +3957,9 @@ const MCP_AUTH_REASONS = {
   revoked: 'The connection was revoked.',
   invalid_client: 'The client could not authenticate itself when renewing.'
 };
-// The server decides, but a refresh token can expire while this page is open and nothing is emitted at that moment, so the
-// browser also applies the same rule to the soonest expiry it was given: expired, and no sign of life from the client since.
-function mcpAuthExpired(client) {
-  const a = client.auth;
-  if (!a || a.state === 'reauth_required' || !a.refreshExpiresAt) return false;
-  const exp = new Date(a.refreshExpiresAt).getTime();
-  const now = Date.now() + mcpState.skewMs;
-  return Number.isFinite(exp) && now > exp && new Date(client.lastSeenAt).getTime() <= exp;
-}
-function mcpNeedsReauth(client) { return !!(client.auth && client.auth.state === 'reauth_required') || mcpAuthExpired(client); }
-function mcpAuthView(client) {
-  return mcpAuthExpired(client) ? { state: 'reauth_required', failureReason: 'refresh_expired', lastSuccessAt: client.auth.lastSuccessAt, lastFailureAt: client.auth.refreshExpiresAt } : client.auth;
-}
+// Only the edge can confirm a permanent failure. A stale snapshot cannot prove that renewal failed.
+function mcpNeedsReauth(client) { return !!(client.auth && client.auth.state === 'reauth_required'); }
+function mcpAuthView(client) { return client.auth; }
 function mcpClientName(client) { return client.label || (client.suggestedKind ? MCP_KIND_LABELS[client.suggestedKind] : '') || client.clientId; }
 const MCP_KIND_LABELS = { chatgpt: 'ChatGPT', muse: 'Muse', grok: 'Grok', claude: 'Claude', gemini: 'Gemini', other: 'Other' };
 

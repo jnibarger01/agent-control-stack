@@ -15,10 +15,12 @@ the operator had no signal and had to disconnect and reconnect by hand. The edge
 
 1. **The edge decides, ACS records, Mission Control shows.** The edge classifies why a credential was refused and reports
    outcomes to `POST /mcp-clients/auth-event` (bridge identity, lane-scoped, strict schema, rate limited). `McpClientService`
-   keeps a per-client `auth` state rebuilt from the audit log. No new service or table.
+   keeps auth health per lane and current authorization family, rebuilt from the audit log. New grants select
+   the current family by observed grant time; superseded and unattributed legacy outcomes cannot change that family. No new service or table.
 2. **"Reauthentication required" means authorization is gone.** It is set by a permanent refresh failure
-   (`refresh_rejected`, `refresh_expired`, `refresh_reused`, `revoked`, `invalid_client`) or by a refresh token that has
-   expired with no renewal. It is never set by inactivity, edge or ACS downtime, a dropped connection, an expired but
+   (`refresh_rejected`, `refresh_expired`, `refresh_reused`, `revoked`). A stored refresh expiry is informational only:
+   a successful rotation report may have been lost, even without any later MCP activity. `invalid_client` describes
+   an unproven caller and must not flag a real client. It is never set by inactivity, edge or ACS downtime, a dropped connection, an expired but
    refreshable access token, `insufficient_scope`, or a token that cannot be attributed (bad signature, malformed).
    A later `granted`/`refreshed` event clears it.
 3. **Standards-compliant challenges are always on** (not behind a flag): no credential gets a bare `Bearer resource_metadata=…`
@@ -47,7 +49,7 @@ the operator had no signal and had to disconnect and reconnect by hand. The edge
 - Operators see which client needs to reconnect, why, and when it last authenticated, without disconnecting anything first.
 - The Vercel ingress is stateless and reports nothing; it only classifies correctly. Health for that path is not tracked.
 - There is no operator-facing revoke endpoint yet; `revoked` is reported if a token record is marked revoked.
-- Events are windowed like other activity events at startup (20 pages x 1000); refresh-expiry state needs the last
-  `granted`/`refreshed` event to still be in the retained log.
+- Events are windowed like other activity events at startup (20 pages x 1000); health needs the relevant outcomes
+  to still be in the retained log. Idle expiry is not inferred; a permanent refusal on the next refresh is required.
 - Whether ChatGPT and Claude retry refresh or restart authorization on `invalid_token` is client behaviour and must be
   verified live (runbook), not assumed.

@@ -384,8 +384,8 @@ describe("MCP clients panel: reauthentication required", () => {
     expect(ctx.document.querySelector("#mcp-clients-body img")).toBeNull();
   });
 
-  it("notices a refresh token expiring while the page is open, without another fetch", async () => {
-    const soon = new Date(Date.now() + 1_500).toISOString();
+  it("never turns a stale expiry snapshot into an unconfirmed reconnect warning", async () => {
+    const soon = new Date(Date.now() - 1_500).toISOString();
     const ctx = boot(
       payload([
         row({
@@ -397,11 +397,28 @@ describe("MCP clients panel: reauthentication required", () => {
     );
     await ctx.settle();
     expect(ctx.rows()[0]!.textContent).not.toContain("Reauthentication required");
-    await new Promise((r) => setTimeout(r, 1_700));
-    // The page's own periodic re-render applies the same rule to the snapshot it already has.
+    // A refresh may have succeeded while its best-effort report was lost.
     (ctx.dom.window as unknown as { renderMcpClients: () => void }).renderMcpClients?.();
     await ctx.settle();
-    expect(ctx.rows()[0]!.textContent).toContain("Reauthentication required");
+    expect(ctx.rows()[0]!.textContent).not.toContain("Reauthentication required");
+  });
+
+  it("auth-only rows are not live in the browser even with a recent timestamp", async () => {
+    const ctx = boot(
+      payload([
+        row({
+          live: false,
+          connects: 0,
+          issued: 0,
+          denied: 0,
+          lastSeenAt: new Date().toISOString(),
+          auth: { state: "ok" }
+        })
+      ])
+    );
+    await ctx.settle();
+    expect(ctx.rows()[0]!.querySelector(".mcp-live")).toBeNull();
+    expect(ctx.document.getElementById("mcp-client-alert")?.hidden).toBe(true);
   });
 
   it("does not flag an expired-looking client that has been seen since the expiry", async () => {

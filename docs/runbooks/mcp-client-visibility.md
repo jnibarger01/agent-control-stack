@@ -66,7 +66,10 @@ Design: [ADR 0027](../adr/0027-oauth-reauthentication-detection.md). When a clie
 the client, and **Reconnect** lists the steps. Nothing is sent from the page; the row clears when the client signs in again.
 
 It is never raised for inactivity, outages, a dropped connection, an expired-but-refreshable access token or missing
-permissions. A client that is merely quiet shows as not live, not as needing reauthentication.
+permissions. A client that is merely quiet shows as not live, not as needing reauthentication. Stored refresh-token
+expiry is informational: best-effort reports may miss a successful rotation. Only a confirmed permanent edge failure
+raises the warning, normally on the next refresh attempt. Outcomes and reporting throttles are isolated by lane and
+authorization family; a newer grant supersedes the old family on that lane.
 
 ### Switch (default off, set on the edge)
 
@@ -84,6 +87,6 @@ RFC 6750 challenges and refresh classification are always on and are not behind 
 4. Isolated live check, with a throwaway edge and ACS (not the production data directory):
    - ChatGPT: connect, then let the access token expire. Expect no warning and a silent refresh.
    - Claude: same.
-   - For each, expire or delete the refresh record on the throwaway edge. Expect the row to show **Reauthentication required** within a minute without disconnecting the connector first, and to clear after reconnecting.
+   - For each, expire or revoke a known refresh record on the throwaway edge, then use the client so it attempts refresh. Expect **Reauthentication required** after the attributable refusal, and clearance after reconnecting. Deleting a record makes the token unattributable and cannot safely flag the client.
    - Stop the edge for several minutes, and separately leave a connected client idle. Expect no warning in either case.
    - Record which `WWW-Authenticate` response each app acted on; this is what confirms their `invalid_token` behaviour.

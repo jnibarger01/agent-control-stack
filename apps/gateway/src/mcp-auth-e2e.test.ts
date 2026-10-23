@@ -329,16 +329,22 @@ describe("reauthentication detection, end to end", () => {
     expect(byId(view, "chatgpt")?.auth.failureReason).toBeUndefined();
   });
 
-  it("a refresh token that genuinely expires with no renewal becomes visible on its own", async () => {
+  it("a stale refresh expiry stays healthy until the edge confirms a permanent failure", async () => {
     const acs = await startAcs();
     await acs.post("/mcp-clients/auth-event", {
       lane: "jc",
       clientId: "chatgpt",
       kind: "granted",
-      refreshExpiresAt: new Date(Date.now() + 1_000).toISOString()
+      refreshExpiresAt: new Date(Date.now() - 1_000).toISOString()
     });
     expect(byId(await acs.clients(), "chatgpt")?.auth.state).toBe("ok");
-    const view = await eventually(acs.clients, (v) => byId(v, "chatgpt")?.auth?.state === "reauth_required", 3_000);
+    await acs.post("/mcp-clients/auth-event", {
+      lane: "jc",
+      clientId: "chatgpt",
+      kind: "refresh_failed",
+      reason: "refresh_expired"
+    });
+    const view = await acs.clients();
     expect(byId(view, "chatgpt")?.auth).toMatchObject({ state: "reauth_required", failureReason: "refresh_expired" });
   });
 

@@ -146,7 +146,7 @@ export function createAuthEventReporter({ enabled = false, post, timeoutMs = 1_5
       const mapped = reason ? acsReason(reason) : undefined;
       const observedAt = new Date(now()).toISOString();
       // Success is always worth sending; a repeated identical rejection is throttled.
-      const key = `${lane}|${clientId}|${kind}|${mapped ?? ""}`;
+      const key = JSON.stringify([lane, clientId, family ?? "", kind, mapped ?? ""]);
       const t = now();
       if (kind === "token_rejected" || kind === "refresh_failed") {
         const previous = last.get(key);

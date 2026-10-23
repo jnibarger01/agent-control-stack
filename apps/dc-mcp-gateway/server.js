@@ -15,6 +15,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { saveJson } from './atomic-json.js';
 import { ClientInfoCache, createClientObserver, extractClientInfo } from './client-attribution.js';
 import { localRoutingFromEnv, stripAuthorityMeta } from './jc-routing.js';
 import { managedModeFromEnv, jcModeFromEnv, identityAttribution, capabilityTransport, acsPost, isToolsCall, dcRuntimeIdentityFromState, issueRuntimeBootstrap, completeRuntimeBootstrap, injectRuntimeBootstrap } from './managed.js';
@@ -158,27 +159,6 @@ function laneForClientResource(client, resource) {
 const clientsFile = path.join(DATA_DIR, 'clients.json');
 const tokensFile = path.join(DATA_DIR, 'tokens.json');
 const loadJson = (f, d) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return d; } };
-// Atomic and always 0600: write a private temp file, then rename over the target. A crash can never leave a truncated
-// tokens.json (which would silently forget every refresh token and force every client to reconnect), and rename
-// replaces a pre-existing file that was created with looser permissions.
-const saveJson = (f, o) => {
-  const tmp = `${f}.${process.pid}.tmp`;
-  fs.rmSync(tmp, { force: true }); // never write through a stale file or a planted symlink; 'wx' below refuses both
-  const fd = fs.openSync(tmp, 'wx', 0o600);
-  try {
-    fs.fchmodSync(fd, 0o600);
-    // writeSync may write fewer bytes than asked; never rename a truncated file over tokens.json.
-    const buf = Buffer.from(JSON.stringify(o, null, 2));
-    for (let off = 0; off < buf.length;) off += fs.writeSync(fd, buf, off);
-    fs.fsyncSync(fd);
-  } catch (error) {
-    fs.closeSync(fd); fs.rmSync(tmp, { force: true }); // do not leave plaintext tokens behind on ENOSPC etc.
-    throw error;
-  }
-  fs.closeSync(fd);
-  fs.renameSync(tmp, f);
-  try { const dfd = fs.openSync(path.dirname(f), 'r'); try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); } } catch { /* best effort: durability of the rename */ }
-};
 const clients = loadJson(clientsFile, {});   // client_id -> {redirect_uris, scope, token_endpoint_auth_method, client_secret?}
 const refreshTokens = loadJson(tokensFile, {}); // jti -> {client_id, exp, active}
 const cimdCache = new Map();                  // client_id URL -> metadata doc

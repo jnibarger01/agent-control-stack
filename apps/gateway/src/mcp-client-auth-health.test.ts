@@ -120,10 +120,13 @@ describe("MCP client authentication health", () => {
     expect(h.view()?.auth.state).toBe("ok");
   });
 
-  it("flags a client once its refresh token has genuinely expired with no renewal", () => {
+  it("a stale expiry cannot prove authorization is gone when a successful refresh report was lost", () => {
     const h = harness();
     h.service.recordAuthEvent({ ...base, kind: "granted", refreshExpiresAt: new Date(T0 + 30 * DAY).toISOString() });
     h.advance(31 * DAY);
+    // A rotation may have succeeded without a report or any subsequent MCP request.
+    expect(h.view()?.auth.state).toBe("ok");
+    h.service.recordAuthEvent({ ...base, kind: "refresh_failed", reason: "refresh_expired" });
     expect(h.view()?.auth).toMatchObject({ state: "reauth_required", failureReason: "refresh_expired" });
   });
 
@@ -217,7 +220,7 @@ describe("MCP client authentication health", () => {
     // The grant is reported; every later refresh report is lost, so the recorded expiry goes stale.
     h.service.recordAuthEvent({ ...base, kind: "granted", refreshExpiresAt: new Date(T0 + 30 * DAY).toISOString() });
     h.advance(31 * DAY);
-    expect(h.view()?.auth.state).toBe("reauth_required"); // nothing else known: it genuinely looks expired
+    expect(h.view()?.auth.state).toBe("ok"); // silence is not evidence that rotation failed
     h.service.observe({ ...base, method: "initialize" }); // a verified request: the client holds a newer credential
     expect(h.view()?.auth.state).toBe("ok");
   });
@@ -267,7 +270,7 @@ describe("MCP client authentication health", () => {
     expect(h.view()?.auth).toMatchObject({ state: "reauth_required", failureReason: "revoked" });
   });
 
-  it("eviction keeps clients whose expiry-derived warning is active", () => {
+  it("eviction keeps clients with confirmed permanent failures", () => {
     const h = harness();
     h.service.recordAuthEvent({
       ...base,
@@ -276,11 +279,49 @@ describe("MCP client authentication health", () => {
       refreshExpiresAt: new Date(T0 + HOUR).toISOString()
     });
     h.advance(2 * HOUR);
+    h.service.recordAuthEvent({
+      ...base,
+      clientId: "client-expired",
+      kind: "refresh_failed",
+      reason: "refresh_expired"
+    });
     for (let i = 0; i < MAX_TRACKED_CLIENTS + 5; i += 1) {
       h.advance(10);
       h.service.observe({ ...base, clientId: `client-healthy-${i}`, method: "initialize" });
     }
     expect(h.view("client-expired")?.auth.state).toBe("reauth_required");
     expect(h.service.list().length).toBeLessThanOrEqual(MAX_TRACKED_CLIENTS + 1);
+  });
+
+  it("a delayed old grant cannot switch the current family or discard its later failure", () => {
+    const h = harness();
+    const t = (ms: number) => new Date(T0 + ms).toISOString();
+    h.service.recordAuthEvent({ ...base, kind: "granted", family: "new", observedAt: t(2_000) });
+    h.service.recordAuthEvent({ ...base, kind: "granted", family: "old", observedAt: t(1_000) });
+    h.service.recordAuthEvent({ ...base, kind: "revoked", family: "new", observedAt: t(3_000) });
+    expect(h.view()?.auth).toMatchObject({ state: "reauth_required", failureReason: "revoked" });
+  });
+
+  it("a new grant resets the superseded family's failure even if that old failure was observed later", () => {
+    const h = harness();
+    const t = (ms: number) => new Date(T0 + ms).toISOString();
+    h.service.recordAuthEvent({ ...base, kind: "granted", family: "old", observedAt: t(1_000) });
+    h.service.recordAuthEvent({ ...base, kind: "revoked", family: "old", observedAt: t(3_000) });
+    h.service.recordAuthEvent({ ...base, kind: "granted", family: "new", observedAt: t(2_000) });
+    expect(h.view()?.auth.state).toBe("ok");
+    h.service.recordAuthEvent({ ...base, kind: "revoked", family: "new", observedAt: t(2_500) });
+    expect(h.view()?.auth).toMatchObject({ state: "reauth_required", lastFailureAt: t(2_500) });
+  });
+
+  it("a familyless outcome cannot clear or flag an identified authorization", () => {
+    const h = harness();
+    h.service.recordAuthEvent({ ...base, kind: "granted", family: "current" });
+    h.advance(1_000);
+    h.service.recordAuthEvent({ ...base, kind: "revoked" });
+    expect(h.view()?.auth.state).toBe("ok");
+    h.service.recordAuthEvent({ ...base, kind: "revoked", family: "current" });
+    h.advance(1_000);
+    h.service.recordAuthEvent({ ...base, kind: "refreshed" });
+    expect(h.view()?.auth.state).toBe("reauth_required");
   });
 });

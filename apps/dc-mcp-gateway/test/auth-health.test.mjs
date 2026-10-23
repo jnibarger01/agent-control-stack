@@ -13,7 +13,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { DUPLICATE_REFRESH_WINDOW_S, REPORTABLE_REFRESH_FAILURES, bearerChallenge, classifyBearer, resolveRefresh } from '../auth-health.js';
+import { DUPLICATE_REFRESH_WINDOW_S, REPORTABLE_REFRESH_FAILURES, bearerChallenge, classifyBearer, createAuthEventReporter, resolveRefresh } from '../auth-health.js';
 
 const KEY = 'k'.repeat(32);
 const ISSUER = 'https://gw.test';
@@ -29,6 +29,16 @@ function sign(payload, key = KEY) {
 const claims = (over = {}) => ({ iss: ISSUER, sub: 'jacen', aud: RESOURCE, client_id: 'client-chatgpt', scope: 'mcp', iat: NOW - 100, exp: NOW + 3500, ...over });
 const classify = (header) => classifyBearer(header, { signingKey: KEY, issuer: ISSUER, resource: RESOURCE, nowSec: NOW });
 const bearer = (token) => `Bearer ${token}`;
+
+test('failure reporting is throttled independently for each authorization family', async () => {
+  const sent = [];
+  const reporter = createAuthEventReporter({ enabled: true, now: () => NOW * 1000, post: async (_path, body) => { sent.push(body); return { status: 202 }; } });
+  const event = { lane: 'jc', identity: { clientId: 'client-chatgpt' }, kind: 'refresh_failed', reason: 'revoked' };
+  assert.equal(await reporter.report({ ...event, family: 'old' }), true);
+  assert.equal(await reporter.report({ ...event, family: 'new' }), true);
+  assert.equal(await reporter.report({ ...event, family: 'new' }), false);
+  assert.deepEqual(sent.map((e) => e.family), ['old', 'new']);
+});
 
 test('a valid token is accepted and carries the verified identity', () => {
   const result = classify(bearer(sign(claims())));
