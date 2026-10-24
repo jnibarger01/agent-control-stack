@@ -19,6 +19,7 @@ import { saveJson } from './atomic-json.js';
 import { ClientInfoCache, createClientObserver, extractClientInfo } from './client-attribution.js';
 import { localRoutingFromEnv, stripAuthorityMeta } from './jc-routing.js';
 import { managedModeFromEnv, jcModeFromEnv, identityAttribution, capabilityTransport, acsPost, isToolsCall, dcRuntimeIdentityFromState, issueRuntimeBootstrap, completeRuntimeBootstrap, injectRuntimeBootstrap } from './managed.js';
+import { enableAcsTiming } from './acs-timing.js';
 import { dcBridgeReady } from './readiness.js';
 import { REPORTABLE_REFRESH_FAILURES, bearerChallenge, classifyBearer, createAuthEventReporter, equalSecrets, resolveRefresh } from './auth-health.js';
 
@@ -65,6 +66,7 @@ for (const [k, v] of Object.entries({ PUBLIC_ORIGIN, CONSENT_PASSPHRASE, SIGNING
   if (!v) { console.error(`gateway: missing required env ${k}; refusing to start`); process.exit(1); }
 }
 const NATIVE_RUNTIME_BOOTSTRAP = process.env.ACS_NATIVE_RUNTIME_BOOTSTRAP === '1';
+if (NATIVE_RUNTIME_BOOTSTRAP) enableAcsTiming(); // #375 diagnostics: event-loop delay baseline
 let MANAGED = { enabled: false };
 try {
   MANAGED = managedModeFromEnv();
