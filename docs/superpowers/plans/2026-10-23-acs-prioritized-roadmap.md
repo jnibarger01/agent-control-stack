@@ -1,0 +1,55 @@
+# ACS prioritized roadmap (2026-10-23, verified against origin/main 2026-10-24)
+
+Status: proposed. Not an execution plan. Ranking is preserved from the 2026-10-23 review. Statuses were corrected after
+re-checking origin/main and open PRs, because an earlier pass used a stale checkout and reported items as absent.
+
+## Architecture decision (recorded)
+
+- React Mission Control is the newer operator console. It is merged to `main` (`apps/mission-control-web`).
+- ACS gateway remains the sole authority. Approval and dispatch enforcement stay server-side.
+- The React app is feature-flagged: `ACS_MC_WEB=1` enables it, `ACS_MC_WEB_DEFAULT=1` serves it at `/`
+  (`apps/gateway/src/mission-control-web.ts`).
+- The server-rendered console stays at `/legacy` as rollback (`apps/gateway/src/dashboard-routes.ts:247`).
+- Do not start another frontend rewrite. Harden and integrate React. Retire the legacy renderer only after parity,
+  security, and operational acceptance gates pass.
+
+## Ranked roadmap with verified status
+
+Status key: **DONE** = merged and tested on main. **IMPL** = implemented, integration incomplete.
+**DRAFT** = open PR, not merged. **PARTIAL** = some code or docs, outcome not met. **NOT FOUND** = no matching code or doc on main.
+
+| Rank | Deliverable | Status | Evidence |
+|---|---|---|---|
+| 1 | Approval inbox with "Why blocked?" | PARTIAL | Approval rails and `/#approvals` exist. No "why blocked" explanation found on main. |
+| 2 | Approval-replay hardening | DONE (verify integration) | Merged as #402, `dff50089` "harden approval replay (base-grant approver, current plan, full decision audit)". Threat model T03 in `docs/threat-model.md:145`. |
+| 3 | JC path boundaries and alias parity | PARTIAL | Path-boundary matching specified in `docs/protocol/change-sets.md:292`. No alias-parity implementation found. |
+| 4 | Governed run timeline | PARTIAL | Attempts and lease projections in the Mission Control work queue. No single queued/executing/stalled/verified timeline found. |
+| 5 | DC scheduler visibility | PARTIAL | `packages/desktop-commander-adapter/src/concurrency-scheduler/` and queue/lease references on main. Read-only queue and lease endpoint not confirmed. |
+| 6 | Mission-scoped autonomy grants | PARTIAL (planned) | Plan in `docs/superpowers/plans/2026-10-02-retire-global-admin-mode.md`; a separate grants-plan branch exists (`origin/docs/mission-scoped-grants-plan`). Global admin mode is still in place. |
+| 7 | Outcome Engine PR checklist | IMPL | `docs/outcome-engine.md` and ADR 0028. CLI `acs outcome accept/evaluate/show/list` (`apps/cli/src/outcome.ts`). Read-only: it never merges or comments. Integration into the merge path is incomplete. |
+| 8 | Failed-mission evidence replay | PARTIAL | `packages/evidence` and `apps/evidence-mcp` exist. Replay over recorded events not confirmed. |
+| 9 | React Mission Control consolidation | DONE (rollout incomplete) | `apps/mission-control-web` on main, default-root flag, `/legacy` fallback. Rollout and hardening are not complete. |
+| 10 | Bounded black-box recorder | DRAFT | PR #406 `feat(black-box): Agent Black Box recorder, flagged off by default` (draft, mergeable, checks green). Live integration incomplete. |
+
+## Corrections from the 2026-10-24 check
+
+- Item 7 is implemented. Integration is open.
+- Item 9 is merged. Rollout and hardening are open. Legacy stays as fallback.
+- Item 10 is a draft PR, not merged. Live integration is open.
+- Item 2 is merged (#402). Its integration into the approval UX is still to verify.
+- Earlier "not found" results for items 7 and 10 came from a stale checkout. Do not reuse them.
+
+## Merge gate (replaces any readiness score)
+
+A change merges only when all of these hold:
+- Required checks pass. Record the exact commands (`npm run typecheck`, `npm run lint`, affected suites) in the PR body.
+- Zero unresolved review findings at high severity or above.
+- Each authority-bearing change has a deny-path test, not only an allow-path test.
+- Each claimed capability cites a file path and a passing test. Claims without evidence stay unverified.
+- Roadmap status moves to DONE only after the integration gate for that item passes, not when code merges.
+
+## Open decisions
+
+- Item 1 and item 4: confirm "why blocked" and the governed timeline are wanted in the inbox before scoping.
+- Item 5 and item 6: confirm read-only scheduler visibility ships before any grant changes.
+- Legacy retirement: name the parity, security, and operational gates and who signs off.
