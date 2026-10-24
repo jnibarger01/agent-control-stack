@@ -8,7 +8,7 @@
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { containJcPath, type JcFsPolicy } from './filesystem.js';
+import { containJcWritePath, type JcFsPolicy } from './filesystem.js';
 import { IntegrationError } from './integrations.js';
 
 const MAX_WRITE_BYTES = 256 * 1024;
@@ -21,7 +21,7 @@ function refuseGitMetadata(...paths: string[]): void {
 }
 
 function refuseRoot(target: string, policy: JcFsPolicy): void {
-  if (policy.roots.map((root) => path.resolve(root)).includes(path.resolve(target))) {
+  if ((policy.writeRoots ?? policy.roots).map((root) => path.resolve(root)).includes(path.resolve(target))) {
     throw new IntegrationError('path_denied', 'a configured filesystem root cannot be moved');
   }
 }
@@ -44,7 +44,7 @@ async function destination(requested: unknown, policy: JcFsPolicy): Promise<stri
     throw new IntegrationError('invalid_argument', 'path must be an absolute path');
   }
   const parent = path.dirname(requested);
-  const parentReal = containJcPath(parent, policy);
+  const parentReal = containJcWritePath(parent, policy);
   const base = path.basename(requested);
   if (!base || base === '.' || base === '..') throw new IntegrationError('invalid_argument', 'path basename is invalid');
   const dest = path.join(parentReal, base);
@@ -52,7 +52,7 @@ async function destination(requested: unknown, policy: JcFsPolicy): Promise<stri
   try {
     const link = await fs.lstat(dest);
     if (link.isSymbolicLink()) throw new IntegrationError('path_denied', 'refusing to write through a symlink');
-    containJcPath(dest, policy);
+    containJcWritePath(dest, policy);
   } catch (error) {
     if (error instanceof IntegrationError) throw error;
     const code = (error as NodeJS.ErrnoException).code;
@@ -82,12 +82,12 @@ export async function writeFile(args: Record<string, unknown>, policy: JcFsPolic
 export async function createDirectory(args: Record<string, unknown>, policy: JcFsPolicy): Promise<Record<string, unknown>> {
   const dest = await destination(args.path, policy);
   await fs.mkdir(dest, { recursive: args.recursive === true });
-  containJcPath(dest, policy);
+  containJcWritePath(dest, policy);
   return { path: dest, created: true };
 }
 
 export async function moveFile(args: Record<string, unknown>, policy: JcFsPolicy): Promise<Record<string, unknown>> {
-  const from = containJcPath(args.from, policy);
+  const from = containJcWritePath(args.from, policy);
   refuseGitMetadata(String(args.from), from);
   refuseRoot(from, policy);
   const fromStat = await fs.lstat(from);
@@ -111,7 +111,7 @@ export async function editBlock(args: Record<string, unknown>, policy: JcFsPolic
   if (Buffer.byteLength(args.old) > 8192 || Buffer.byteLength(args.new) > 8192) {
     throw new IntegrationError('invalid_argument', 'old and new are limited to 8 KiB');
   }
-  const file = containJcPath(args.path, policy);
+  const file = containJcWritePath(args.path, policy);
   refuseGitMetadata(String(args.path), file);
   const stat = await fs.lstat(file);
   if (stat.isSymbolicLink() || !stat.isFile()) throw new IntegrationError('invalid_argument', 'edit target must be a regular file');
