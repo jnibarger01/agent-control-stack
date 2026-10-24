@@ -95,26 +95,23 @@ describe("acs-looptrace-mcp (read-only MCP server)", () => {
     expect(JSON.parse(rb.result.content[0].text).verdict).toBe("PASS");
   });
 
-  it("returns structured tool errors (isError) for auth, authz, input and unsupported assertions", async () => {
-    const call = async (grant: string | null, name: string, args: unknown): Promise<any> => {
-      const h = harness(grant);
-      h.input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } })}\n`);
-      await settle(h);
-      return JSON.parse(h.text().trim()).result;
-    };
-    const noGrant = await call(null, "looptrace_trace", { work_item_id: "x" });
-    expect(noGrant).toMatchObject({ isError: true, structuredContent: { error: { code: "UNAUTHENTICATED" } } });
-    const scoped = await call(token(["looptrace:trace"]), "looptrace_verify", { work_item_id: "x", assertions: [{ type: "approval_valid" }] });
-    expect(scoped.structuredContent.error.code).toBe("UNAUTHENTICATED");
-    const bad = await call(token(), "looptrace_trace", {});
-    expect(bad.structuredContent.error.code).toBe("INVALID_ARGUMENT");
-    const unsupported = await call(token(), "looptrace_verify", { work_item_id: "x", assertions: [{ type: "deploy" }] });
-    expect(unsupported.structuredContent.error.code).toBe("UNSUPPORTED_ASSERTION");
-    const missing = await call(token(), "looptrace_trace", { work_item_id: "wrk_nope" });
-    expect(missing.structuredContent.error.code).toBe("NOT_FOUND");
+  it.each([
+    { scenario: "missing grant", grant: null, name: "looptrace_trace", args: { work_item_id: "x" }, code: "UNAUTHENTICATED" },
+    { scenario: "insufficient scope", grant: token(["looptrace:trace"]), name: "looptrace_verify", args: { work_item_id: "x", assertions: [{ type: "approval_valid" }] }, code: "UNAUTHENTICATED" },
+    { scenario: "invalid arguments", grant: token(), name: "looptrace_trace", args: {}, code: "INVALID_ARGUMENT" },
+    { scenario: "unsupported assertion", grant: token(), name: "looptrace_verify", args: { work_item_id: "x", assertions: [{ type: "deploy" }] }, code: "UNSUPPORTED_ASSERTION" },
+    { scenario: "missing work item", grant: token(), name: "looptrace_trace", args: { work_item_id: "wrk_nope" }, code: "NOT_FOUND" },
+  ])("returns structured tool errors (isError) for $scenario", async ({ grant, name, args, code }) => {
+    const h = harness(grant);
+    h.input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } })}\n`);
+    await settle(h);
+    expect(JSON.parse(h.text().trim()).result).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code } },
+    });
   });
 
-  it("rejects unknown tools / methods, malformed JSON and oversized frames without crashing", async () => {
+    it("rejects unknown tools / methods, malformed JSON and oversized frames without crashing", async () => {
     const h = harness();
     h.input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "looptrace_apply_fix", arguments: {} } })}\n`);
     h.input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "resources/read", params: {} })}\n`);

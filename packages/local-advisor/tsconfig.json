@@ -7,5 +7,21 @@
   },
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts"],
-  "references": [{ "path": "../advisory" }, { "path": "../model-broker" }, { "path": "../looptrace-query" }]
+  "references": [
+    {
+      "path": "../advisory"
+    },
+    {
+      "path": "../model-broker"
+    },
+    {
+      "path": "../looptrace-query"
+    },
+    {
+      "path": "../work-items"
+    },
+    {
+      "path": "../shared"
+    }
+  ]
 }

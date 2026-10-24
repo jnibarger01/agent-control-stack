@@ -23,6 +23,7 @@ import {
   executionDetail
 } from "./chatgpt-dashboard.js";
 import { chatgptDashboardWidgetHtml } from "./chatgpt-dashboard-widget.generated.js";
+import { runAdvisorConsultation, type AdvisorConsultPort } from "./advisor-consultation.js";
 import {
   PORTFOLIO_V2_WRITES_NOT_IMPLEMENTED_MESSAGE,
   createUnavailablePortfolioClient,
@@ -118,6 +119,7 @@ export async function handleMcpHttpRequest(input: {
   portfolioClient?: PortfolioClient;
   toolAllowlist?: McpToolAllowlistConfig;
   shutdownController?: ShutdownController;
+  advisor?: AdvisorConsultPort;
 }): Promise<McpHttpResult> {
   const request = jsonRpcRequestSchema.safeParse(input.body);
   if (!request.success) {
@@ -179,7 +181,8 @@ export async function handleMcpHttpRequest(input: {
         maxPendingWorkItems: input.maxPendingWorkItems,
         portfolioClient: input.portfolioClient,
         toolAllowlist: input.toolAllowlist,
-        shutdownController: input.shutdownController
+        shutdownController: input.shutdownController,
+        advisor: input.advisor
       });
     default:
       return handleProtectedUnsupportedMethod({
@@ -246,6 +249,7 @@ async function handleToolsCall(input: {
   portfolioClient?: PortfolioClient;
   toolAllowlist?: McpToolAllowlistConfig;
   shutdownController?: ShutdownController;
+  advisor?: AdvisorConsultPort;
 }): Promise<McpHttpResult> {
   const portfolioClient = input.portfolioClient ?? createUnavailablePortfolioClient();
   const candidateName = toolNameFromParams(input.params);
@@ -398,7 +402,8 @@ async function handleToolsCall(input: {
       name: parsed.data.name,
       args: parsed.data.arguments ?? {},
       auth: authorization.auth,
-      actor
+      actor,
+      advisor: input.advisor
     });
     // Shadow-mode Jev advisory (log-only, fire-and-forget). Fired ONLY after
     // the policy-gated create_work_item call succeeds. State is redacted and
@@ -521,7 +526,20 @@ async function callMcpTool(input: {
   args: unknown;
   auth: McpAuthenticatedRequest;
   actor: string;
+  advisor?: AdvisorConsultPort;
 }): Promise<unknown> {
+  if (input.name === "consult_advisor") {
+    if (!input.advisor) {
+      throw new ControlStackError("advisor_not_configured", "advisor consultation is not configured on this gateway");
+    }
+    return runAdvisorConsultation({
+      store: input.store,
+      caller: input.advisor.caller,
+      readFlight: input.advisor.readFlight,
+      request: input.args,
+      actor: input.actor
+    });
+  }
   if (input.name === directAgentToolName) {
     if (!input.directAgentController) {
       throw new ControlStackError("direct_agent_not_configured", "test.agent.run is not configured on this gateway");

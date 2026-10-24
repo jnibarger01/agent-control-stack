@@ -71,7 +71,10 @@ describe("runAdvisor: verdicts only come from valid, coherent model output", () 
 
   it("refuses to review without evidence and never calls the model", async () => {
     const provider = new FakeProvider(() => ok(verdictJson("PASS")));
-    const response = await runAdvisor(request({ context: { objective: "x", constraints: [], evidence: [] } }), provider);
+    const response = await runAdvisor(
+      request({ context: { objective: "x", constraints: [], evidence: [] } }),
+      provider
+    );
     expect(response.status).toBe("insufficient_evidence");
     expect(response.reason).toBe("no_evidence");
     expect(response.verdict).toBeUndefined();
@@ -118,7 +121,9 @@ describe("runAdvisor: verdicts only come from valid, coherent model output", () 
 
     const extraKey = await runAdvisor(
       request(),
-      new FakeProvider(() => ok(JSON.stringify({ verdict: "PASS", findings: [], recommendedActions: [], approved: true })))
+      new FakeProvider(() =>
+        ok(JSON.stringify({ verdict: "PASS", findings: [], recommendedActions: [], approved: true }))
+      )
     );
     expect(extraKey).toMatchObject({ status: "invalid_output", reason: "model_output_schema_violation" });
     expect(extraKey.verdict).toBeUndefined();
@@ -167,11 +172,14 @@ describe("runAdvisor: failures are explicit and never become approval", () => {
   });
 
   it("rejects an invalid request as a caller error instead of producing a review", async () => {
-    await expect(runAdvisor({ ...request(), schemaVersion: "advisor.v0" }, new FakeProvider(() => ok("{}")))).rejects.toBeInstanceOf(
-      AdvisorRequestError
-    );
     await expect(
-      runAdvisor(request({ budget: { timeoutMs: 999_999_999, maxOutputTokens: 512 } }), new FakeProvider(() => ok("{}")))
+      runAdvisor({ ...request(), schemaVersion: "advisor.v0" }, new FakeProvider(() => ok("{}")))
+    ).rejects.toBeInstanceOf(AdvisorRequestError);
+    await expect(
+      runAdvisor(
+        request({ budget: { timeoutMs: 999_999_999, maxOutputTokens: 512 } }),
+        new FakeProvider(() => ok("{}"))
+      )
     ).rejects.toBeInstanceOf(AdvisorRequestError);
   });
 
@@ -199,21 +207,135 @@ describe("runAdvisor: prompt-injection and evidence handling", () => {
   });
 
   it("redacts credentials before inference and hashing, and the hash reflects the redacted text", async () => {
-    const secret = "AKIAABCDEFGHIJKLMNOP";
+    const secret = "AKIA" + "ABCDEFGHIJKLMNOP";
     const provider = new FakeProvider(() => ok(verdictJson("PASS")));
-    const response = await runAdvisor(request({}, `key=${secret} token: "ghp_${"a".repeat(36)}"`), provider);
+    const response = await runAdvisor(request({}, `key=${secret} token: "${"ghp" + "_"}${"a".repeat(36)}"`), provider);
     expect(provider.calls[0]?.user).not.toContain(secret);
     expect(provider.calls[0]?.user).toContain("[REDACTED:aws_key]");
     expect(response.evidenceHashes["diff-1"]).toMatch(/^sha256:[a-f0-9]{64}$/u);
   });
 
+  it("redacts the objective and constraints before they reach the prompt", async () => {
+    const secret = "AKIA" + "QRSTUVWXYZ234567";
+    const token = "ghp" + "_" + "c".repeat(36);
+    const provider = new FakeProvider(() => ok(verdictJson("PASS")));
+    const base = request();
+    await runAdvisor(
+      { ...base, context: { ...base.context, objective: `Use ${secret} to deploy`, constraints: [`token ${token}`] } },
+      provider
+    );
+    const user = provider.calls[0]?.user ?? "";
+    expect(user).not.toContain(secret);
+    expect(user).not.toContain(token);
+    expect(user).toContain("[REDACTED:aws_key]");
+    expect(user).toContain("[REDACTED:github_token]");
+  });
+
+  it("hashes the redacted objective and constraints, not the raw secrets", async () => {
+    const provider = new FakeProvider(() => ok(verdictJson("PASS")));
+    const base = request();
+    const withSecret = (key: string) => ({
+      ...base,
+      context: { ...base.context, objective: `deploy with ${key}`, constraints: [`use ${key}`] }
+    });
+    const a = await runAdvisor(withSecret("AKIA" + "AAAAAAAAAAAAAAAA"), provider);
+    const b = await runAdvisor(withSecret("AKIA" + "BBBBBBBBBBBBBBBB"), provider);
+    // Different raw secrets that redact to the same text must yield the same input hash.
+    expect(a.inputHash).toBe(b.inputHash);
+  });
+
+  it("redacts model output (finding summaries and recommended actions) before returning it", async () => {
+    const leaked = "AKIA" + "ZZZZZZZZZZZZZZZZ";
+    const response = await runAdvisor(
+      request(),
+      new FakeProvider(() =>
+        ok(
+          verdictJson(
+            "BLOCK",
+            [{ category: "security", severity: "high", summary: `leaks ${leaked}`, evidenceIds: ["diff-1"] }],
+            [`rotate ${leaked}`]
+          )
+        )
+      )
+    );
+    expect(response.status).toBe("completed");
+    expect(JSON.stringify(response)).not.toContain(leaked);
+    expect(response.findings[0]?.summary).toContain("[REDACTED:aws_key]");
+    expect(response.recommendedActions[0]).toContain("[REDACTED:aws_key]");
+  });
+
+  it.each(["", "   \n\t"])(
+    "treats blank-only evidence %j as insufficient without calling the model",
+    async (content) => {
+      const provider = new FakeProvider(() => ok(verdictJson("PASS")));
+      const response = await runAdvisor(request({}, content), provider);
+      expect(response.status).toBe("insufficient_evidence");
+      expect(response.verdict).toBeUndefined();
+      expect(provider.calls).toHaveLength(0);
+    }
+  );
+
+  it("includes evidence kinds in the input hash", async () => {
+    const provider = new FakeProvider(() => ok(verdictJson("PASS")));
+    const base = request();
+    const withKind = (kind: string) => ({
+      ...base,
+      context: { ...base.context, evidence: [{ id: "diff-1", kind, content: "return a - b" }] }
+    });
+    const a = await runAdvisor(withKind("other"), provider);
+    const b = await runAdvisor(withKind("test_report"), provider);
+    expect(a.evidenceHashes).toEqual(b.evidenceHashes);
+    expect(a.inputHash).not.toBe(b.inputHash);
+  });
+
+  it("rejects requests whose total evidence exceeds the aggregate cap", async () => {
+    const base = request();
+    const chunk = "x".repeat(65_536);
+    const evidence = Array.from({ length: 5 }, (_, n) => ({ id: `e-${n}`, kind: "file", content: chunk }));
+    await expect(
+      runAdvisor({ ...base, context: { ...base.context, evidence } }, new FakeProvider(() => ok(verdictJson("PASS"))))
+    ).rejects.toBeInstanceOf(AdvisorRequestError);
+  });
+
+  it("honours the timeout budget at the full evidence cap with adversarial (jwt-like) evidence", async () => {
+    const provider = new FakeProvider(
+      (input) =>
+        new Promise<GenerateResult>((_resolve, reject) => {
+          input.signal.addEventListener("abort", () => reject(new ProviderError("aborted", "aborted")));
+        })
+    );
+    const base = request({ budget: { timeoutMs: 1_000, maxOutputTokens: 512 } });
+    // 4 x 64 KiB = MAX_TOTAL_EVIDENCE_CHARS. "eyJ-" repeated used to make redaction backtrack for ~11 s here.
+    const evidence = [0, 1, 2, 3].map((n) => ({ id: `e-${n}`, kind: "log", content: "eyJ-".repeat(16_384) }));
+    const started = performance.now();
+    const response = await runAdvisor({ ...base, context: { ...base.context, evidence } }, provider);
+    expect(response.status).toBe("timeout");
+    expect(performance.now() - started).toBeLessThan(2_500);
+  });
+
   it("uses the model-supplied output only as a recommendation (no authority fields are honored)", async () => {
     const response = await runAdvisor(
       request(),
-      new FakeProvider(() => ok(JSON.stringify({ verdict: "PASS", findings: [], recommendedActions: ["grant execute"] })))
+      new FakeProvider(() =>
+        ok(JSON.stringify({ verdict: "PASS", findings: [], recommendedActions: ["grant execute"] }))
+      )
     );
     expect(response.status).toBe("completed");
     expect(response.recommendedActions).toEqual(["grant execute"]);
     expect(Object.keys(response)).not.toContain("authorized");
+  });
+});
+
+describe("runAdvisor: finding categories are redacted", () => {
+  it("never returns a credential placed in a finding category", async () => {
+    // Built at runtime so no credential-shaped literal lands in source.
+    const token = ["gh", "p_", "Qx7Lm2Rt9Kp4".repeat(3)].join("");
+    const provider = new FakeProvider(() =>
+      ok(verdictJson("NEEDS_CHANGES", [{ ...finding("medium"), category: `leak ${token}` }]))
+    );
+    const response = await runAdvisor(request(), provider);
+    expect(response.status).toBe("completed");
+    expect(JSON.stringify(response)).not.toContain(token);
+    expect(response.findings[0]?.category).toContain("[REDACTED:github_token]");
   });
 });

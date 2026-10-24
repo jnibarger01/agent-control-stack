@@ -116,6 +116,8 @@ Successful renewal updates `expires_at` / `last_renewed_at` on the attempt lease
 
 Expiry reaping (`failExpiredLeases`) uses the authoritative attempt-lease clock when present, marks the attempt lease `expired`, emits `attempt_lease.expired`, and records a derived `lease_expired` result so a stale worker cannot complete afterward.
 
+The gateway runs the reaper on a fixed cadence (`ACS_LEASE_REAPER_INTERVAL_MS`, default 60s, 0 disables), so expiry converges even when the gateway is idle — previously the sweep only ran opportunistically on permit acquisition, readiness probes, and shutdown drain. Sweep failures are best-effort noise (logged, retried next tick) and never crash the gateway.
+
 Re-leasing an interrupted attempt revokes any prior active lease first and emits `attempt_lease.stolen` so concurrent workers cannot double-complete under a stale fencing epoch.
 
 ## Security rule

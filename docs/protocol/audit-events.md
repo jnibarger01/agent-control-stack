@@ -22,27 +22,33 @@ Audit events provide the replayable record of requests, policy decisions, approv
 
 ## Event types
 
-| Event type                                     | Meaning                                                                                           |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `tool.intent`                                  | Tool call was received and normalized.                                                            |
-| `policy.decision`                              | Policy classified and decided the action.                                                         |
-| `approval.requested`                           | Approval request was created.                                                                     |
-| `approval.granted`                             | Human approved out-of-band.                                                                       |
-| `approval.denied`                              | Human denied out-of-band.                                                                         |
-| `approval.consumed`                            | Approval token was used.                                                                          |
-| `execution.started`                            | Command/tool mutation began.                                                                      |
-| `execution.finished`                           | Execution completed.                                                                              |
-| `execution.failed`                             | Execution failed before completion.                                                               |
-| `desktop_commander.scheduler_queued`           | Approved Desktop Commander work entered the ACS concurrency scheduler.                            |
-| `desktop_commander.scheduler_admitted`         | Scheduler granted an execution admission before attempt/lease claim and capability minting.       |
-| `desktop_commander.scheduler_denied`           | Scheduler rejected or timed out queued execution before admission.                                |
-| `desktop_commander.scheduler_cancel_requested` | Cancellation reached scheduler state; active execution remains locked until stop evidence exists. |
-| `desktop_commander.scheduler_released`         | Accepted terminal result released the scheduler admission.                                        |
-| `desktop_commander.scheduler_reconciled`       | Post-restart runtime re-attestation and active-lease drain made scheduler admission safe again.   |
-| `work.created`                                 | Work item created.                                                                                |
-| `work.claimed`                                 | Worker claimed work and received lease.                                                           |
-| `work.result_submitted`                        | Worker submitted result.                                                                          |
-| `audit.verify`                                 | Audit verification was run.                                                                       |
+| Event type                                     | Meaning                                                                                                          |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `tool.intent`                                  | Tool call was received and normalized.                                                                           |
+| `advisory.advisor_binding_enabled`             | An operator enabled an advisor binding. Body has model ids and the completion flag, not guidance.                |
+| `advisory.advisor_binding_disabled`            | An operator disabled an advisor binding. Prior consultation rows stay.                                           |
+| `advisory.advisor_consultation_recorded`       | A leased advisor consultation was stored. Body has ids, checkpoint, disposition, and hashes only.                |
+| `advisory.advisor_not_attached`                | A child binding was not copied because the advisor cannot pair with the child executor.                          |
+| `outcome.accepted`                             | An Outcome Engine objective was accepted (local, unauthenticated operator). Body: goal, criteria, plan, limits.  |
+| `outcome.evaluation_recorded`                  | An Outcome Engine evaluation was recorded: verdict, evidence, hash chain. A verdict is evidence, never approval. |
+| `policy.decision`                              | Policy classified and decided the action.                                                                        |
+| `approval.requested`                           | Approval request was created.                                                                                    |
+| `approval.granted`                             | Human approved out-of-band.                                                                                      |
+| `approval.denied`                              | Human denied out-of-band.                                                                                        |
+| `approval.consumed`                            | Approval token was used.                                                                                         |
+| `execution.started`                            | Command/tool mutation began.                                                                                     |
+| `execution.finished`                           | Execution completed.                                                                                             |
+| `execution.failed`                             | Execution failed before completion.                                                                              |
+| `desktop_commander.scheduler_queued`           | Approved Desktop Commander work entered the ACS concurrency scheduler.                                           |
+| `desktop_commander.scheduler_admitted`         | Scheduler granted an execution admission before attempt/lease claim and capability minting.                      |
+| `desktop_commander.scheduler_denied`           | Scheduler rejected or timed out queued execution before admission.                                               |
+| `desktop_commander.scheduler_cancel_requested` | Cancellation reached scheduler state; active execution remains locked until stop evidence exists.                |
+| `desktop_commander.scheduler_released`         | Accepted terminal result released the scheduler admission.                                                       |
+| `desktop_commander.scheduler_reconciled`       | Post-restart runtime re-attestation and active-lease drain made scheduler admission safe again.                  |
+| `work.created`                                 | Work item created.                                                                                               |
+| `work.claimed`                                 | Worker claimed work and received lease.                                                                          |
+| `work.result_submitted`                        | Worker submitted result.                                                                                         |
+| `audit.verify`                                 | Audit verification was run.                                                                                      |
 
 ## Hashing
 

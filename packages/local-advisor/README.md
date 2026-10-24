@@ -14,7 +14,9 @@ Outputs are untrusted recommendations. This package does not grant capabilities,
 
 A response carries `status`. Only `completed` includes a verdict. `unavailable`, `timeout`, `invalid_output`, and `insufficient_evidence` never include a verdict.
 
-Completed reviews can be projected to `acs.review-finding.v1` with `projectReviewFinding`. The caller must supply the ACS evidence-manifest hash. The advisor does not invent one.
+Use `recordLocalAdvisorConsultation` to write the same `acs.advisor-consultation.v1` row as the gateway (caller-supplied fence; no invented lease). `projectReviewFinding` / `projectReviewFindingFromConsultation` and the `advisor.recorded` helpers are derived views at trust `asserted` only.
+
+Completed reviews can be projected to `acs.review-finding.v1` with `projectReviewFinding`. The caller must supply the ACS evidence-manifest hash plus the reviewed `missionId` and `inputHash`, and `workItemId` must equal that `missionId` (the trace's `work_item_id`); any mismatch throws `ReviewBindingError`. The advisor does not invent a manifest hash.
 
 `decideAdvisorRequirement` in `@agent-control-stack/policy-gate` is the governance hook:
 

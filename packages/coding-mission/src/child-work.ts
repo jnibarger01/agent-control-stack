@@ -6,11 +6,13 @@
  * (budget.ts) and the authority narrowing (authority.ts, on the migration-047 grant model) cannot be bypassed by
  * concurrency or a restart. Time comes from ACS's own clock; nothing a worker sends can set it.
  */
+import { missionUnitSubjectId } from "@agent-control-stack/advisory";
 import { ControlStackError, redactValue, stableHash } from "@agent-control-stack/shared";
 import {
   autonomousAuthorityCoreSchema,
   autonomousAuthorityHash,
   changeSetPrivilegeSchema,
+  copyAdvisorBinding,
   readAutonomousAuthorityRevocation,
   type AutonomousAuthorityGrant
 } from "@agent-control-stack/work-items";
@@ -145,6 +147,16 @@ export interface LedgerOptions {
   claimTtlMs?: number;
 }
 
+/** Why the browser-boundary authority re-check refused. */
+export type CuaAuthorityRefusal =
+  | "cua_authority_revoked"
+  | "cua_authority_expired"
+  | "cua_authority_subject_changed"
+  | "cua_authority_deadline_passed"
+  | "cua_browser_grant_missing"
+  | "cua_browser_scope_not_covered"
+  | "cua_authority_unavailable";
+
 export const DEFAULT_CLAIM_TTL_MS = 300_000;
 
 /** How far ahead of ACS's clock a claim timestamp may be and still count as live. */
@@ -160,7 +172,10 @@ const LANE_RUNTIME: Record<ExecutorLane, string | undefined> = {
   // The coder lane runs the repository edit, which the authority schema names `sandbox`.
   coder: "sandbox",
   // The authority schema has no MCP runtime, so no grant can authorize this lane. It is refused, not waved through.
-  mcp: undefined
+  mcp: undefined,
+  // The cua lane drives a real browser. Only an explicit `browser` grant authorizes it, and only for the origins and
+  // applications that grant names (checked in verifyDispatch).
+  cua: "browser"
 };
 
 /** Lanes an authority grants a tool runtime for. The same mapping `verifyDispatch` enforces. */
@@ -433,6 +448,59 @@ export class MissionAuthorityLedger {
     // recovered. A small skew is tolerated; anything further ahead of ACS's clock is not a live claim.
     const age = Date.parse(now) - Date.parse(parent.claimedAt);
     return age >= -MAX_CLAIM_CLOCK_SKEW_MS && age <= ttl;
+  }
+
+  /**
+   * Re-check, at the browser boundary, that the authority a CUA attempt runs under still covers it. Everything is
+   * re-read from the store on every call (no cached or caller-supplied grant): the mission or unit authority record,
+   * the live grant and its revocation. `deadlineAt` comes from the hash-verified stored dispatch. Any doubt, including
+   * a lookup that throws, is a refusal.
+   */
+  browserAuthorityVerdict(input: {
+    missionId: string;
+    unitId: string;
+    origins: readonly string[];
+    applications: readonly string[];
+    deadlineAt: string | undefined;
+  }): { ok: true } | { ok: false; reason: CuaAuthorityRefusal } {
+    const refuse = (reason: CuaAuthorityRefusal) => ({ ok: false as const, reason });
+    try {
+      const now = Date.parse(this.clock());
+      if (!Number.isFinite(now)) return refuse("cua_authority_unavailable");
+      const unit = this.store.workUnits(input.missionId).find((candidate) => candidate.unitId === input.unitId);
+      if (!unit) return refuse("cua_authority_unavailable");
+      const missionAuthority = this.missionAuthority(input.missionId);
+      if (!missionAuthority) return refuse("cua_authority_unavailable");
+      const record = unit.parentUnitId ? this.unitAuthority(input.missionId, input.unitId) : undefined;
+      if (unit.parentUnitId && !record) return refuse("cua_authority_unavailable");
+      const definition = record?.definition ?? missionAuthority.definition;
+      const grantId = record?.grantId ?? missionAuthority.grantId;
+      if (this.grantRevoked(grantId)) return refuse("cua_authority_revoked");
+      const grant = this.readGrant(grantId);
+      if (!grant) return refuse("cua_authority_unavailable");
+      // The mission's execution inputs must still be the ones the human granted against. A changed (or unreadable)
+      // subject hash ends the session at the next browser boundary, just as dispatch refuses `grant_subject_changed`.
+      const subjectHash = this.currentSubjectHash(input.missionId);
+      if (subjectHash === undefined || subjectHash !== grant.subjectInputHash)
+        return refuse("cua_authority_subject_changed");
+      for (const expiresAt of [definition.expiresAt, grant.definition.expiresAt]) {
+        const at = Date.parse(expiresAt);
+        if (!Number.isFinite(at) || !(now < at)) return refuse("cua_authority_expired");
+      }
+      const deadline = input.deadlineAt === undefined ? Number.NaN : Date.parse(input.deadlineAt);
+      if (!Number.isFinite(deadline) || !(now < deadline)) return refuse("cua_authority_deadline_passed");
+      const browserGrants = definition.toolClasses.filter((tool) => tool.runtime === "browser");
+      if (browserGrants.length === 0) return refuse("cua_browser_grant_missing");
+      if (input.origins.length === 0 || input.applications.length === 0) return refuse("cua_browser_scope_not_covered");
+      const covered = browserGrants.some(
+        (tool) =>
+          input.origins.every((origin) => tool.allowedOrigins.includes(origin)) &&
+          input.applications.every((application) => tool.allowedApplications.includes(application))
+      );
+      return covered ? { ok: true } : refuse("cua_browser_scope_not_covered");
+    } catch {
+      return refuse("cua_authority_unavailable");
+    }
   }
 
   /** Uses the canonical revocation reader, which checks the projection against its audit event. A mismatch counts as revoked. */
@@ -1063,6 +1131,48 @@ export class MissionAuthorityLedger {
           },
           nowIso
         );
+        const copied = copyAdvisorBinding(this.store.db, {
+          parentMissionId: missionId,
+          parentSubjectId: missionUnitSubjectId(missionId, parentUnitId),
+          childMissionId: missionId,
+          childSubjectId: missionUnitSubjectId(missionId, item.unitId),
+          now: nowIso,
+          actorId: request.workerId,
+          leaseProvenance: {
+            parentUnitId,
+            parentAttempt: parent.attempt,
+            claimFence: claimFenceOf(request.claimToken),
+            workerId: request.workerId
+          }
+        });
+        if (copied.status === "copied" && copied.binding) {
+          this.store.recordMissionEvent(
+            missionId,
+            "advisor.binding_copied",
+            {
+              parentUnitId,
+              unitId: item.unitId,
+              bindingHash: copied.binding.bindingHash,
+              actorId: copied.actorId ?? request.workerId,
+              leaseProvenance: copied.leaseProvenance ?? null
+            },
+            nowIso
+          );
+        }
+        if (copied.status === "not_attached") {
+          this.store.recordMissionEvent(
+            missionId,
+            "advisor.not_attached",
+            {
+              parentUnitId,
+              unitId: item.unitId,
+              code: copied.code ?? "advisor_pairing_rejected",
+              actorId: copied.actorId ?? request.workerId,
+              leaseProvenance: copied.leaseProvenance ?? null
+            },
+            nowIso
+          );
+        }
       }
       return { ok: true, created: created.created, authorities };
     });
@@ -1115,6 +1225,21 @@ export class MissionAuthorityLedger {
         return refuse("lane_not_permitted");
       }
       const payload = unit.payload;
+      if (input.lane === "cua") {
+        // A browser runtime grant alone is not enough: the unit's whole origin and application allowlist must sit inside
+        // one browser grant. A unit with no cua payload, or no origins or applications, is never authorized.
+        if (payload?.kind !== "cua") return refuse("browser_scope_not_permitted");
+        const origins = payload.allowedOrigins ?? [];
+        const applications = payload.allowedApplications ?? [];
+        if (origins.length === 0 || applications.length === 0) return refuse("browser_scope_not_permitted");
+        const covered = definition.toolClasses.some(
+          (tool) =>
+            tool.runtime === "browser" &&
+            origins.every((origin) => tool.allowedOrigins.includes(origin)) &&
+            applications.every((application) => tool.allowedApplications.includes(application))
+        );
+        if (!covered) return refuse("browser_scope_not_permitted");
+      }
       if (
         payload?.kind === "tool" &&
         !definition.toolClasses.some((tool) => tool.runtime === runtime && tool.toolName === payload.toolName)

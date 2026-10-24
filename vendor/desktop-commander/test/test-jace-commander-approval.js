@@ -49,6 +49,8 @@ async function makeApprover(extra = {}) {
     keyId: keyInfo.keyId,
     requestSocket: path.join(base, 'request', 'request.sock'),
     decideSocket: path.join(base, 'decide', 'decide.sock'),
+    // Legacy self-asserted decide path under test: the explicit, audited opt-out (no passkey block).
+    allowSelfAssertedPrivileged: true,
     ...extra,
   };
   const daemon = new Approverd(config, { now });
@@ -192,10 +194,14 @@ await test('audit is a verifiable hash chain; if it cannot be written nothing is
   authorize(info, 'write_file', WRITE);
   const { events } = readTraceFile(path.join(info.config.stateDir, 'audit.jsonl'));
   assert.equal(verifyChain(events).ok, true);
-  assert.deepEqual(events.map((event) => `${event.type}:${event.payload.action ?? ''}`), ['approval_requested:', 'approval_decision:approved', 'approval_decision:claimed']);
+  // The first entry is the audited allowSelfAssertedPrivileged opt-out recorded at start().
+  assert.deepEqual(events.map((event) => `${event.type}:${event.payload.action ?? ''}`), ['risk_classified:', 'approval_requested:', 'approval_decision:approved', 'approval_decision:claimed']);
+  assert.equal(events[0].payload.optOut, 'allowSelfAssertedPrivileged');
   assert.equal(JSON.stringify(events).includes('"signature"'), false);
 
   const broken = await makeApprover();
+  // start() already wrote the audited opt-out entry; replace the log with a directory so appends fail.
+  fs.rmSync(path.join(broken.config.stateDir, 'audit.jsonl'));
   fs.mkdirSync(path.join(broken.config.stateDir, 'audit.jsonl'), { recursive: true }); // unreadable as a trace
   assert.equal(authorize(broken, 'write_file', WRITE).code, 'AUDIT_UNAVAILABLE');
   await info.daemon.stop();
@@ -578,10 +584,11 @@ await test('review hardening: approvals are bound to the caller; restart trusts 
   // A tampered audit chain restores nothing at all.
   const auditFile = path.join(info.config.stateDir, 'audit.jsonl');
   fs.appendFileSync(auditFile, '{"not":"a chain event"}\n');
+  // Under the self-asserted opt-out the start() audit entry cannot extend a broken chain, so approverd
+  // refuses to start at all (stricter than restoring nothing; nothing is served).
   const broken = new Approverd(info.config, { now });
-  await broken.start();
+  await assert.rejects(broken.start(), /refusing to start/);
   assert.equal(broken.handleDecideOp({ op: 'show', id: alice.approvalId }).ok, false);
-  await broken.stop();
 });
 
 fs.rmSync(root, { recursive: true, force: true });

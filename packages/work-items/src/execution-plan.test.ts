@@ -688,3 +688,57 @@ describe("immutable execution plans", () => {
     }
   });
 });
+
+describe("getExecutionPlanApproval row choice", () => {
+  it("returns the latest granted approval when more than one granted row matches", () => {
+    const { directory, dbPath, store, workItem, plan } = createAdmittedFixture({ requiresApproval: true });
+    try {
+      const future = new Date(Date.now() + 60 * 60 * 1_000).toISOString();
+      const db = new DatabaseSync(dbPath);
+      try {
+        // The one-granted-per-key index normally forbids this; drop it so the read path's own
+        // ordering is what decides. The older grant is inserted first and expires sooner, so an
+        // unordered read through the lookup index (or rowid order) would return it; only an
+        // explicit latest-first ORDER BY returns the newer one.
+        db.exec("DROP INDEX idx_execution_plan_approvals_one_granted");
+        const insert = db.prepare(
+          `INSERT INTO execution_plan_approvals
+           (approval_id, work_item_id, plan_id, plan_hash, action_hash, request_hash, approved_by_actor_id,
+            reason, status, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'r', 'granted', ?, ?)`
+        );
+        insert.run(
+          "plan_approval_z_older",
+          workItem.id,
+          plan.planId,
+          plan.planHash,
+          hex("b"),
+          hex("c"),
+          "older-approver",
+          new Date(Date.now() - 60_000).toISOString(),
+          new Date(Date.now() + 30 * 60 * 1_000).toISOString()
+        );
+        insert.run(
+          "plan_approval_a_newer",
+          workItem.id,
+          plan.planId,
+          plan.planHash,
+          hex("b"),
+          hex("c"),
+          "newer-approver",
+          new Date(Date.now() - 1_000).toISOString(),
+          future
+        );
+      } finally {
+        db.close();
+      }
+
+      const approval = store.getExecutionPlanApproval(workItem.id, plan.planHash, hex("b"));
+      expect(approval?.approvalId).toBe("plan_approval_a_newer");
+      expect(approval?.approvedByActorId).toBe("newer-approver");
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});

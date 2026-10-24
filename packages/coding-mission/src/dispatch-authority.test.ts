@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { executionPlanSubjectInputHash } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
-import { ACTOR, HUMAN, setupRealGrants } from "./child-work-real-grants-fixture.js";
+import { ACTOR, HUMAN, setupRealGrants, type RealGrantOptions } from "./child-work-real-grants-fixture.js";
 import { MissionAuthorityLedger } from "./child-work.js";
 import { CodingMissionStore } from "./store.js";
 import {
@@ -18,8 +18,8 @@ import {
  */
 type Fixture = ReturnType<typeof setupRealGrants>;
 
-function governed() {
-  const f = setupRealGrants();
+function governed(options: RealGrantOptions = {}) {
+  const f = setupRealGrants(options);
   f.ledger.grantMissionAuthority({ missionId: f.item.id, grantId: f.grant.grantId });
   expect(f.missions.claimUnit(f.item.id, "root", f.claim)).toMatchObject({ ok: true });
   const dispatcher = new WorkUnitExecutionLedger(f.missions, { authority: f.ledger });
@@ -443,6 +443,52 @@ describe("dispatch deadline and lane authorization", () => {
     });
   });
 
+  it("denies the cua lane when the grant has no browser runtime: lane_not_permitted", () => {
+    const f = governed();
+    expect(
+      f.ledger.verifyDispatch({
+        missionId: f.item.id,
+        unitId: "root",
+        workerId: f.claim.workerId,
+        lane: "cua",
+        attempt: 1
+      })
+    ).toEqual({ ok: false, reason: "lane_not_permitted" });
+    expect(() => dispatchRoot(f, { lane: "cua" })).toThrow(/lane_not_permitted/u);
+    expect(attempts(f)).toBe(0);
+  });
+
+  it("refuses cua in an ungoverned mission before any attempt is recorded", () => {
+    const missions = new CodingMissionStore(":memory:");
+    missions.createGeneral({ missionId: "m1", summary: "cua", now: "2026-10-10T00:00:00.000Z" });
+    missions.addWorkUnits(
+      "m1",
+      [{ unitId: "u1", kind: "cua", title: "browse", payload: { kind: "cua", objective: "inspect" } }],
+      "2026-10-10T00:00:00.000Z"
+    );
+    missions.releaseReadyUnits("m1", "2026-10-10T00:00:00.000Z");
+    const claim = { token: "tok", workerId: "w1", route: {}, claimedAt: "2026-10-10T00:00:01.000Z" };
+    expect(missions.claimUnit("m1", "u1", claim)).toMatchObject({ ok: true });
+    const dispatcher = new WorkUnitExecutionLedger(missions);
+    expect(() =>
+      dispatcher.beginDispatch({
+        missionId: "m1",
+        unitId: "u1",
+        claimToken: "tok",
+        workerId: "w1",
+        lane: "cua",
+        now: "2026-10-10T00:00:02.000Z"
+      })
+    ).toThrow(/cua_requires_governed_mission/u);
+    expect(missions.db.prepare("SELECT count(*) AS n FROM work_unit_execution_attempts").get()).toEqual({ n: 0 });
+    expect(
+      missions
+        .events("m1")
+        .filter((e) => e.name === "authority.denied")
+        .map((e) => (e.body as { reason: string }).reason)
+    ).toEqual(["cua_requires_governed_mission"]);
+  });
+
   it("never authorizes the mcp lane: no grant can express it", () => {
     const f = governed();
     expect(() => dispatchRoot(f, { lane: "mcp" })).toThrow(/lane_not_permitted/u);
@@ -464,5 +510,92 @@ describe("dispatch deadline and lane authorization", () => {
     const f = governed();
     const claim = toolUnit(f, "tool-read-jc", "read_file");
     expect(() => begin(f, "tool-read-jc", claim.token, "jc")).toThrow(/lane_not_permitted/u);
+  });
+});
+
+describe("R2: browser runtime grant for the cua lane", () => {
+  const APP = "browser";
+  const ORIGIN = "https://app.example";
+  const cuaRoot = (over: { origins?: string[]; applications?: string[] } = {}) => ({
+    kind: "cua" as const,
+    objective: "inspect",
+    allowedApplications: over.applications ?? [APP],
+    allowedOrigins: over.origins ?? [ORIGIN],
+    actions: [{ type: "navigate", url: `${ORIGIN}/` }]
+  });
+  const browserGrant = (origins = [ORIGIN], applications = [APP]) => ({
+    runtime: "browser" as const,
+    toolName: "cua" as const,
+    allowedOrigins: origins,
+    allowedApplications: applications
+  });
+  const verify = (f: ReturnType<typeof governed>, lane: ExecutorLane = "cua") =>
+    f.ledger.verifyDispatch({ missionId: f.item.id, unitId: "root", workerId: f.claim.workerId, lane, attempt: 1 });
+
+  it("denies a governed cua dispatch with no browser grant", () => {
+    const f = governed({ cuaRootPayload: cuaRoot() });
+    expect(verify(f)).toEqual({ ok: false, reason: "lane_not_permitted" });
+    expect(() => dispatchRoot(f, { lane: "cua" })).toThrow(/lane_not_permitted/u);
+    expect(attempts(f)).toBe(0);
+  });
+
+  it("denies cua when the grant covers only jc and dc runtimes", () => {
+    const f = governed({
+      cuaRootPayload: cuaRoot(),
+      toolClasses: [
+        { runtime: "jace_commander", toolName: "read_file" },
+        { runtime: "desktop_commander", toolName: "read_file" }
+      ]
+    });
+    expect(verify(f)).toEqual({ ok: false, reason: "lane_not_permitted" });
+    expect(() => dispatchRoot(f, { lane: "cua" })).toThrow(/lane_not_permitted/u);
+    expect(attempts(f)).toBe(0);
+  });
+
+  it("allows cua under an explicit browser grant that covers its origins and application", () => {
+    const f = governed({ cuaRootPayload: cuaRoot(), extraToolClasses: [browserGrant()] });
+    expect(verify(f)).toMatchObject({ ok: true, grantId: f.grant.grantId });
+    const envelope = dispatchRoot(f, { lane: "cua" });
+    expect(envelope.lane).toBe("cua");
+    expect(envelope.authority.grantId).toBe(f.grant.grantId);
+    expect(attempts(f)).toBe(1);
+  });
+
+  it("denies a cua unit whose origins or application exceed the browser grant", () => {
+    for (const payload of [
+      cuaRoot({ origins: [ORIGIN, "https://evil.example"] }),
+      cuaRoot({ applications: [APP, "other-app"] }),
+      cuaRoot({ origins: [] }),
+      cuaRoot({ applications: [] })
+    ]) {
+      const f = governed({ cuaRootPayload: payload, extraToolClasses: [browserGrant()] });
+      expect(verify(f)).toEqual({ ok: false, reason: "browser_scope_not_permitted" });
+      expect(() => dispatchRoot(f, { lane: "cua" })).toThrow(/browser_scope_not_permitted/u);
+      expect(attempts(f)).toBe(0);
+    }
+  });
+
+  it("does not let a browser grant authorize a non-cua unit on the cua lane", () => {
+    const f = governed({ extraToolClasses: [browserGrant()] });
+    expect(verify(f)).toEqual({ ok: false, reason: "browser_scope_not_permitted" });
+  });
+
+  it("does not let a browser grant authorize jc, dc or the unmapped mcp lane", () => {
+    const f = governed({ cuaRootPayload: cuaRoot(), toolClasses: [browserGrant()] });
+    expect(verify(f, "jc")).toEqual({ ok: false, reason: "lane_not_permitted" });
+    expect(verify(f, "dc")).toEqual({ ok: false, reason: "lane_not_permitted" });
+    expect(verify(f, "mcp")).toEqual({ ok: false, reason: "lane_not_permitted" });
+    expect(verify(f, "cua")).toMatchObject({ ok: true });
+  });
+
+  it("ignores a caller-supplied authority when deciding the browser scope", () => {
+    const f = governed({
+      cuaRootPayload: cuaRoot({ origins: ["https://evil.example"] }),
+      extraToolClasses: [browserGrant()]
+    });
+    expect(() => dispatchRoot(f, { lane: "cua", authority: { grantId: "forged-grant" } })).toThrow(
+      /browser_scope_not_permitted|dispatch_authority/u
+    );
+    expect(attempts(f)).toBe(0);
   });
 });

@@ -19,6 +19,22 @@ import {
   type AuditEvent
 } from "@agent-control-stack/shared";
 import {
+  advisorAuditView,
+  advisorSubjectCompletionBlockReason,
+  assertAdvisorConsultationLease,
+  copyAdvisorBinding,
+  disableAdvisorBinding,
+  enableAdvisorBinding,
+  insertAdvisorConsultation,
+  readAdvisorBinding,
+  readAdvisorBindingsForSubject,
+  type AdvisorBinding,
+  type AdvisorConsultationRecord,
+  type AdvisorLeaseAssertion,
+  type EnableAdvisorBindingInput,
+  type RecordAdvisorConsultationInput
+} from "./advisor-consultation.js";
+import {
   changeSetReviewBodySchema,
   changeSetReviewHash,
   assertChangeSetEvidenceAudit,
@@ -1374,6 +1390,15 @@ export interface WorkItemStore {
 
   // --- ADR 0015 governance projections (append-only; canonical audit-backed) ---
   recordPlanProposal(input: RecordPlanProposalInput, options: PrivilegedTransitionOptions): PlanProposalProjection;
+  enableAdvisorBinding(input: EnableAdvisorBindingInput, options: PrivilegedTransitionOptions): AdvisorBinding;
+  disableAdvisorBinding(missionId: string, subjectId: string, options: PrivilegedTransitionOptions): AdvisorBinding;
+  getAdvisorBinding(missionId: string, subjectId: string): AdvisorBinding | undefined;
+  listAdvisorBindings(subjectId: string): AdvisorBinding[];
+  assertAdvisorConsultationLease(input: AdvisorLeaseAssertion): void;
+  recordAdvisorConsultation(
+    input: RecordAdvisorConsultationInput,
+    options: PrivilegedTransitionOptions
+  ): AdvisorConsultationRecord;
   markPlanProposalAdmitted(proposalHash: string, options: PrivilegedTransitionOptions): PlanProposalProjection;
   getPlanProposal(proposalHash: string): PlanProposalProjection | undefined;
   recordEvidenceManifest(
@@ -1586,6 +1611,16 @@ export interface WorkItemStore {
     body?: Record<string, unknown>;
     attributes?: Record<string, string | number | boolean>;
   }): StoredAuditEvent;
+  /**
+   * Appends a system event unless one with the same name already carries the same value for `uniqueAttribute`. The
+   * check and the append share one IMMEDIATE transaction, so concurrent writers cannot both claim the same key.
+   */
+  recordSystemEventOnce(input: {
+    name: string;
+    uniqueAttribute: string;
+    body?: Record<string, unknown>;
+    attributes: Record<string, string | number | boolean>;
+  }): { event: StoredAuditEvent; recorded: boolean };
   /** Read the single canonical execution-mode row. null mode means missing or corrupt. */
   getExecutionMode(): {
     mode: "strict" | "admin" | null;
@@ -1921,6 +1956,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           "change_set_completion_pending",
           "every operation needs an accepted result and verification"
         );
+      this.requireAdvisorBeforeSuccess(input.missionId);
       for (const operation of progress.operations) {
         const permit = this.getChangeSetOperationPermit(operation.permitId!)!;
         if ((permit.approvalId ?? permit.authorizationId) !== authorityId || permit.policyHash !== authority.policyHash)
@@ -3321,8 +3357,12 @@ export class SqliteWorkItemStore implements WorkItemStore {
   ): ExecutionPlanApproval | undefined {
     const row = this.db
       .prepare(
+        // idx_execution_plan_approvals_one_granted allows at most one granted row per key; the
+        // ORDER BY keeps the choice deterministic (latest grant wins) should that ever not hold.
         `SELECT * FROM execution_plan_approvals
-         WHERE work_item_id = ? AND plan_hash = ? AND action_hash = ? AND status = 'granted' AND expires_at > ?`
+         WHERE work_item_id = ? AND plan_hash = ? AND action_hash = ? AND status = 'granted' AND expires_at > ?
+         ORDER BY created_at DESC, approval_id DESC
+         LIMIT 1`
       )
       .get(workItemId, planHash, actionHash, new Date().toISOString()) as unknown as
       ExecutionPlanApprovalRow | undefined;
@@ -4478,6 +4518,84 @@ export class SqliteWorkItemStore implements WorkItemStore {
             "advisory.role": "ADVISORY_REASONER"
           }
         )
+      );
+      return { value, events: [event] };
+    });
+  }
+
+  enableAdvisorBinding(input: EnableAdvisorBindingInput, options: PrivilegedTransitionOptions): AdvisorBinding {
+    requirePrivilegedTransition(options, "enable_advisor_binding");
+    return this.write(() => {
+      if (input.subjectKind === "work_item") {
+        this.getRequired(input.subjectId);
+      }
+      const value = enableAdvisorBinding(this.db, input);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "advisory.advisor_binding_enabled",
+          {
+            subjectId: value.subjectId,
+            missionId: value.missionId,
+            subjectKind: value.subjectKind,
+            executorModelId: value.executorModelId,
+            advisorModelId: value.advisorModelId,
+            requireBeforeCompletion: value.requireBeforeCompletion,
+            bindingHash: value.bindingHash,
+            actorId: options.actorId ?? null
+          },
+          {
+            "work_item.id": value.subjectKind === "work_item" ? value.subjectId : value.missionId,
+            ...(options.actorId ? { "actor.id": options.actorId } : {})
+          }
+        )
+      );
+      return { value, events: [event] };
+    });
+  }
+
+  disableAdvisorBinding(missionId: string, subjectId: string, options: PrivilegedTransitionOptions): AdvisorBinding {
+    requirePrivilegedTransition(options, "disable_advisor_binding");
+    return this.write(() => {
+      const value = disableAdvisorBinding(this.db, missionId, subjectId, new Date().toISOString());
+      const event = this.appendAuditEvent(
+        createEvent(
+          "advisory.advisor_binding_disabled",
+          { subjectId, missionId, actorId: options.actorId ?? null },
+          {
+            "work_item.id": value.subjectKind === "work_item" ? subjectId : missionId,
+            ...(options.actorId ? { "actor.id": options.actorId } : {})
+          }
+        )
+      );
+      return { value, events: [event] };
+    });
+  }
+
+  getAdvisorBinding(missionId: string, subjectId: string): AdvisorBinding | undefined {
+    return readAdvisorBinding(this.db, missionId, subjectId);
+  }
+
+  listAdvisorBindings(subjectId: string): AdvisorBinding[] {
+    return readAdvisorBindingsForSubject(this.db, subjectId);
+  }
+
+  assertAdvisorConsultationLease(input: AdvisorLeaseAssertion): void {
+    assertAdvisorConsultationLease(this.db, input);
+  }
+
+  recordAdvisorConsultation(
+    input: RecordAdvisorConsultationInput,
+    options: PrivilegedTransitionOptions
+  ): AdvisorConsultationRecord {
+    requirePrivilegedTransition(options, "record_advisor_consultation");
+    return this.write(() => {
+      const value = insertAdvisorConsultation(this.db, input);
+      const event = this.appendAuditEvent(
+        createEvent("advisory.advisor_consultation_recorded", advisorAuditView(value), {
+          "work_item.id": value.subjectKind === "work_item" ? value.subjectId : value.missionId,
+          "advisory.disposition": value.disposition,
+          "advisory.checkpoint": value.checkpoint
+        })
       );
       return { value, events: [event] };
     });
@@ -7871,6 +7989,32 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
+  recordSystemEventOnce(input: {
+    name: string;
+    uniqueAttribute: string;
+    body?: Record<string, unknown>;
+    attributes: Record<string, string | number | boolean>;
+  }): { event: StoredAuditEvent; recorded: boolean } {
+    const name = requiredString(input.name, "name");
+    const key = requiredString(input.uniqueAttribute, "uniqueAttribute");
+    // The key becomes part of a JSON path, so only plain dotted identifiers are accepted.
+    if (!/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/u.test(key)) {
+      throw new ControlStackError("invalid_request", "uniqueAttribute must be a dotted identifier");
+    }
+    const value = input.attributes[key];
+    if (typeof value !== "string" || value.length === 0) {
+      throw new ControlStackError("invalid_request", `attributes must carry the unique attribute ${key} as a string`);
+    }
+    return this.write((): { value: { event: StoredAuditEvent; recorded: boolean }; events: StoredAuditEvent[] } => {
+      const existing = this.db
+        .prepare(`SELECT * FROM audit_events WHERE name = ? AND json_extract(attributes, ?) = ? LIMIT 1`)
+        .get(name, `$."${key}"`, value) as unknown as EventRow | undefined;
+      if (existing) return { value: { event: rowToEvent(existing), recorded: false }, events: [] };
+      const event = this.appendAuditEvent(createEvent(name, input.body ?? {}, input.attributes));
+      return { value: { event, recorded: true }, events: [event] };
+    });
+  }
+
   getExecutionMode(now: Date = new Date()): {
     mode: "strict" | "admin" | null;
     raw: string | null;
@@ -8327,6 +8471,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
     } else if (expiresAt <= Date.parse(now)) {
       throw new ControlStackError("worker_lease_expired", "worker lease has expired");
     }
+    if (input.outcome === "succeeded") {
+      this.requireAdvisorBeforeSuccess(input.workItemId);
+    }
 
     const resultId = createId("res");
     const updated = {
@@ -8540,6 +8687,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
           `attempt ${input.attemptId} cannot be accepted as succeeded: ${gate.reason}`
         );
       }
+    }
+    if (input.outcome === "succeeded") {
+      this.requireAdvisorBeforeSuccess(input.workItemId);
     }
 
     const resultId = createId("attempt_result");
@@ -8792,6 +8942,56 @@ export class SqliteWorkItemStore implements WorkItemStore {
         )
       );
       const createdEvent = this.appendAuditEvent(workItemCreatedEvent(linked));
+      // A parent binding that fails its integrity check throws here: the retry/clone is refused rather than
+      // silently producing a child without the advisor requirement.
+      const parentBindings = readAdvisorBindingsForSubject(this.db, source.id).filter((binding) => !binding.disabledAt);
+      const copyEvents: StoredAuditEvent[] = [];
+      for (const parentBinding of parentBindings) {
+        const copied = copyAdvisorBinding(this.db, {
+          parentMissionId: parentBinding.missionId,
+          parentSubjectId: source.id,
+          childMissionId: parentBinding.missionId === source.id ? linked.id : parentBinding.missionId,
+          childSubjectId: linked.id,
+          now: linked.createdAt,
+          actorId: actor,
+          leaseProvenance: { kind: lineageType, sourceWorkItemId: source.id }
+        });
+        if (copied.status === "copied" && copied.binding) {
+          copyEvents.push(
+            this.appendAuditEvent(
+              createEvent(
+                "advisory.advisor_binding_copied",
+                {
+                  parentSubjectId: source.id,
+                  childSubjectId: linked.id,
+                  missionId: copied.binding.missionId,
+                  bindingHash: copied.binding.bindingHash,
+                  actorId: copied.actorId ?? actor,
+                  leaseProvenance: copied.leaseProvenance ?? null
+                },
+                { "work_item.id": linked.id, "actor.id": actor }
+              )
+            )
+          );
+        }
+        if (copied.status === "not_attached") {
+          copyEvents.push(
+            this.appendAuditEvent(
+              createEvent(
+                "advisory.advisor_not_attached",
+                {
+                  parentSubjectId: source.id,
+                  childSubjectId: linked.id,
+                  code: copied.code ?? "advisor_pairing_rejected",
+                  actorId: copied.actorId ?? actor,
+                  leaseProvenance: copied.leaseProvenance ?? null
+                },
+                { "work_item.id": linked.id, "actor.id": actor }
+              )
+            )
+          );
+        }
+      }
       this.enqueueWorkItemLifecycleTraceNonBlocking({
         instance: this.traceInstance,
         releaseSha: this.releaseSha,
@@ -8806,8 +9006,19 @@ export class SqliteWorkItemStore implements WorkItemStore {
           source_work_item_id: source.id
         }
       });
-      return { value: linked, events: [createdEvent, event] };
+      return { value: linked, events: [createdEvent, event, ...copyEvents] };
     });
+  }
+
+  /**
+   * Single choke point for the advisor completion gate. Every terminal-success path for a work item
+   * (result submission, transition(..., "succeeded"), completeChangeSetMission) goes through here.
+   */
+  private requireAdvisorBeforeSuccess(workItemId: string): void {
+    const code = advisorSubjectCompletionBlockReason(this.db, workItemId);
+    if (code) {
+      throw new ControlStackError(code, "before_completion advisor consultation is required");
+    }
   }
 
   close(): void {
@@ -8952,6 +9163,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
       this.assertActorOwnsActiveLease(id, actorId);
       if (current.status === "running" && status === "blocked") {
         this.assertRunningTransitionLeaseProof(id, actorId, options.leaseToken);
+      }
+      if (status === "succeeded") {
+        this.requireAdvisorBeforeSuccess(id);
       }
       const updated = transitionWorkItem(current, status);
       const result =

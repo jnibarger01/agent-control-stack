@@ -53,7 +53,7 @@ const ENTRYPOINT = new URL('../managed.js', import.meta.url).pathname;
  * Stub ACS: issues a challenge on POST /dc/runtime/bootstrap and records +
  * answers POST /dc/runtime/bootstrap/complete per completeStatus.
  */
-function stubAcs({ completeStatus = 204 } = {}) {
+function stubAcs({ completeStatus = 204, dropCompletion = false } = {}) {
   const completeBodies = [];
   const acs = http.createServer((req, res) => {
     const chunks = [];
@@ -78,6 +78,7 @@ function stubAcs({ completeStatus = 204 } = {}) {
       }
       if (req.url === '/dc/runtime/bootstrap/complete') {
         completeBodies.push(body);
+        if (dropCompletion) { res.destroy(); return; }
         res.writeHead(completeStatus);
         res.end();
         return;
@@ -270,6 +271,27 @@ test('C: ACS rejecting completion fails closed — initialize success never expo
     // The completion was attempted with the exact proof, then rejected.
     assert.equal(completeBodies.length, 1);
     assert.deepEqual(completeBodies[0].runtimeIdentity, GOOD_PROOF);
+  } finally {
+    child.kill('SIGKILL'); acs.close(); upstream.close();
+  }
+});
+
+test('C1: completion transport reset remains fail-closed and reports a distinct safe code', async () => {
+  const { acs, completeBodies } = stubAcs({ dropCompletion: true });
+  const { upstream } = stubChild((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(CHILD_INIT_OK(GOOD_PROOF));
+  });
+  await new Promise((r) => { acs.listen(0, '127.0.0.1', r); });
+  await new Promise((r) => { upstream.listen(0, '127.0.0.1', r); });
+  const port = 18208;
+  const child = startServer(port, upstream.address().port, acs.address().port, makeStateDir());
+  await waitListening(child, port);
+  try {
+    const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), INITIALIZE);
+    assert.equal(status, 503, text);
+    assert.deepEqual(JSON.parse(text), { error: 'managed_authorization_unavailable', code: 'bootstrap_complete_unavailable' });
+    assert.equal(completeBodies.length, 1);
   } finally {
     child.kill('SIGKILL'); acs.close(); upstream.close();
   }

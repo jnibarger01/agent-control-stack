@@ -396,9 +396,11 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
       workItems: [item("wrk_a"), item("wrk_b", { status: "running" })],
       events: [],
       now: NOW
-    });
+    }, {}, { url: "https://acs.local/#execution" });
     app.open();
     await app.advance(2_000);
+    // The filter lives in the execution view; it must be visible to take focus.
+    expect(app.document.body.dataset.activeView).toBe("execution");
 
     // The execution filter lives inside #execution-operations, which is replaced
     // wholesale on refresh. Type part-way into a word, mid-string, then refresh.
@@ -483,6 +485,10 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     filter.dispatchEvent(new app.window.Event("input", { bubbles: true }));
     const reason = app.document.querySelector('[data-reason="wrk_b"]') as HTMLInputElement;
     reason.value = "half-typed justification";
+    // Reasons live in the approvals view; show it so the input can actually take focus.
+    app.window.history.pushState(null, "", "#approvals");
+    app.window.dispatchEvent(new app.window.HashChangeEvent("hashchange"));
+    expect(app.document.body.dataset.activeView).toBe("approvals");
     reason.focus();
     await app.flush();
 

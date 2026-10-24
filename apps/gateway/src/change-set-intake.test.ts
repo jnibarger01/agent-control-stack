@@ -2329,6 +2329,25 @@ describe("Change Set result verification", () => {
             } finally {
               verifierDb.close();
             }
+            // Advisor completion gate (PR #367 follow-up): completeChangeSetMission is a terminal-success
+            // path and must enforce a required before_completion consultation like every other path.
+            store.enableAdvisorBinding(
+              {
+                subjectId: ctx.mission.id,
+                missionId: ctx.mission.id,
+                subjectKind: "work_item",
+                executorModelId: "claude-sonnet-5",
+                advisorModelId: "claude-opus-5-5",
+                requireBeforeCompletion: true
+              },
+              { via: "domain_service" }
+            );
+            expect(() => store.completeChangeSetMission(complete, options)).toThrow(
+              expect.objectContaining({ code: "advisor_consultation_required" })
+            );
+            expect(store.get(ctx.mission.id)!.status).not.toBe("succeeded");
+            expect(store.readEvents({ name: "change_set.completed" })).toHaveLength(0);
+            store.disableAdvisorBinding(ctx.mission.id, ctx.mission.id, { via: "domain_service" });
             const receipt = store.completeChangeSetMission(complete, options);
             expect(receipt.operationReceipts).toHaveLength(1);
             const operationReceipt = receipt.operationReceipts![0]!;
@@ -2995,6 +3014,79 @@ describe("Change Set operation permits", () => {
       }
       const replay = await ctx.app.inject({ method: "POST", url: "/dc/capability/issue", headers, payload });
       expect(replay.statusCode, replay.body).toBe(409);
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("browser (cua) Autonomous Authority Grants through the issuance route", () => {
+  const browserTool = {
+    runtime: "browser",
+    toolName: "cua",
+    allowedOrigins: ["https://app.example", "https://admin.example:8443"],
+    allowedApplications: ["Chrome", "Firefox"]
+  };
+  const browserBody = (ctx: ReturnType<typeof fixture>, tool: Record<string, unknown> = browserTool) => {
+    const body = grantBody(ctx);
+    return {
+      ...body,
+      definition: { ...body.definition, toolClasses: [...body.definition.toolClasses, tool] }
+    };
+  };
+
+  it("issues a path-scoped grant that carries an exact browser tool class", async () => {
+    const ctx = fixture();
+    try {
+      const grant = await issueGrant(ctx, browserBody(ctx) as ReturnType<typeof grantBody>);
+      expect(grant.definition.toolClasses).toContainEqual(browserTool);
+      const onlyBrowser = grantBody(ctx);
+      const response = await ctx.app.inject({
+        method: "POST",
+        url: `/work-items/${ctx.mission.id}/authority-grants`,
+        headers: reviewerHeaders,
+        payload: {
+          ...onlyBrowser,
+          requestId: "browser-only",
+          definition: { ...onlyBrowser.definition, toolClasses: [browserTool] }
+        }
+      });
+      expect(response.statusCode, response.body).toBe(201);
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("still rejects glob, non-exact and lookalike browser scope, and runtimes without containment", async () => {
+    const ctx = fixture();
+    try {
+      for (const tool of [
+        { ...browserTool, allowedOrigins: ["https://*.example"] },
+        { ...browserTool, allowedOrigins: ["https://app.example/path"] },
+        { ...browserTool, allowedOrigins: ["https://app.example."] },
+        { ...browserTool, allowedOrigins: [] },
+        { ...browserTool, allowedApplications: ["Chrome*"] },
+        { ...browserTool, allowedApplications: ["Сhrome"] },
+        { ...browserTool, allowedApplications: ["Chrome", "Chrome"] },
+        { ...browserTool, toolName: "anything" }
+      ]) {
+        const response = await ctx.app.inject({
+          method: "POST",
+          url: `/work-items/${ctx.mission.id}/authority-grants`,
+          headers: reviewerHeaders,
+          payload: browserBody(ctx, tool)
+        });
+        expect(response.statusCode, JSON.stringify(tool)).toBe(400);
+      }
+      const sandbox = await ctx.app.inject({
+        method: "POST",
+        url: `/work-items/${ctx.mission.id}/authority-grants`,
+        headers: reviewerHeaders,
+        payload: browserBody(ctx, { runtime: "sandbox", toolName: "code_edit" })
+      });
+      expect(sandbox.json().code).toBe("autonomous_authority_runtime_unsupported");
     } finally {
       await ctx.app.close();
       rmSync(ctx.root, { recursive: true, force: true });

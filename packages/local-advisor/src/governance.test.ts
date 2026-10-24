@@ -5,7 +5,7 @@ import { decideAdvisorRequirement } from "@agent-control-stack/policy-gate";
 import { isTrusted } from "@agent-control-stack/looptrace-query";
 import { type AdvisorResponse } from "./contracts.js";
 import { advisorTraceEvent } from "./trace-event.js";
-import { projectReviewFinding } from "./to-review-finding.js";
+import { ReviewBindingError, projectReviewFinding } from "./to-review-finding.js";
 import { buildPrompt } from "./prompt.js";
 
 const HASH = `sha256:${"ab".repeat(32)}` as const;
@@ -40,6 +40,8 @@ describe("advisor governance", () => {
   it("does not project a review finding unless the review actually completed", () => {
     for (const status of ["unavailable", "timeout", "invalid_output", "insufficient_evidence"] as const) {
       const projected = projectReviewFinding(response({ status, verdict: undefined, findings: [], model: null }), {
+        missionId: "mission-1",
+        inputHash: HASH,
         workItemId: "mission-1",
         attemptId: "attempt-1",
         evidenceManifestHash: MANIFEST,
@@ -52,6 +54,8 @@ describe("advisor governance", () => {
 
   it("projects a completed review into an advisory finding that is not an authorization", () => {
     const finding = projectReviewFinding(response(), {
+      missionId: "mission-1",
+      inputHash: HASH,
       workItemId: "mission-1",
       attemptId: "attempt-1",
       evidenceManifestHash: MANIFEST,
@@ -64,6 +68,32 @@ describe("advisor governance", () => {
     expect(JSON.stringify(finding)).not.toMatch(/capability|approvalToken|allow/u);
   });
 
+  it("refuses to project a review onto a different mission or request", () => {
+    const base = {
+      missionId: "mission-1",
+      inputHash: HASH,
+      workItemId: "mission-1",
+      attemptId: "attempt-1",
+      evidenceManifestHash: MANIFEST,
+      reviewerPrincipalId: "advisor-local"
+    };
+    expect(() => projectReviewFinding(response(), { ...base, missionId: "mission-2" })).toThrow(ReviewBindingError);
+    expect(() => projectReviewFinding(response(), { ...base, workItemId: "some-other-work-item" })).toThrow(
+      ReviewBindingError
+    );
+    expect(() =>
+      projectReviewFinding(response(), { ...base, missionId: "mission-2", workItemId: "mission-2" })
+    ).toThrow(ReviewBindingError);
+    // The matching binding still projects, onto the trace's work item.
+    expect(projectReviewFinding(response(), base)?.workItemId).toBe(
+      advisorTraceEvent(response(), { observedAt: "2026-10-13T18:00:00.000Z", authorizationOutcome: "evidence_only" })
+        .work_item_id
+    );
+    expect(() => projectReviewFinding(response(), { ...base, inputHash: `sha256:${"ef".repeat(32)}` })).toThrow(
+      ReviewBindingError
+    );
+  });
+
   it("records a LoopTrace event that cannot count as trusted success", () => {
     const event = advisorTraceEvent(response(), {
       observedAt: "2026-10-13T18:00:00.000Z",
@@ -72,6 +102,8 @@ describe("advisor governance", () => {
     expect(event.event_type).toBe("advisor.recorded");
     expect(event.stage).toBe("lifecycle");
     expect(event.integrity.trust).toBe("asserted");
+    // null = unchecked; false would be read by LoopTrace verification as a confirmed integrity failure.
+    expect(event.integrity.hash_verified).toBeNull();
     expect(isTrusted(event.integrity.trust)).toBe(false);
     expect(event.flags).toContain("not_authorization");
     expect(JSON.stringify(event.untrusted)).toBe("{}");

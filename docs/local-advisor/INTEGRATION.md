@@ -6,13 +6,13 @@ Do not let an installer rewrite `~/.claude.json`, OpenClaw's global config, or t
 
 Environment:
 
-| Variable | Meaning |
-| --- | --- |
-| `ACS_LOCAL_ADVISOR_MODEL` | Installed Ollama model. Skips the route table. |
-| `ACS_LOCAL_ADVISOR_EXPECTED_DIGEST` | Optional `sha256:<64 hex>` pin. Mismatch refuses generation. |
-| `ACS_LOCAL_ADVISOR_BASE_URL` | Loopback only. Default `http://127.0.0.1:11434`. |
-| `ACS_LOCAL_ADVISOR_ROUTES` | JSON array of `{ role, model, operations, expectedDigest? }` used when `MODEL` is unset. |
-| `ACS_LOCAL_ADVISOR_MIN_FREE_BYTES` | Refuse inference when `os.freemem()` is below this. |
+| Variable                            | Meaning                                                                                  |
+| ----------------------------------- | ---------------------------------------------------------------------------------------- |
+| `ACS_LOCAL_ADVISOR_MODEL`           | Installed Ollama model. Skips the route table.                                           |
+| `ACS_LOCAL_ADVISOR_EXPECTED_DIGEST` | Optional `sha256:<64 hex>` pin. Mismatch refuses generation.                             |
+| `ACS_LOCAL_ADVISOR_BASE_URL`        | Loopback only. Default `http://127.0.0.1:11434`.                                         |
+| `ACS_LOCAL_ADVISOR_ROUTES`          | JSON array of `{ role, model, operations, expectedDigest? }` used when `MODEL` is unset. |
+| `ACS_LOCAL_ADVISOR_MIN_FREE_BYTES`  | Refuse inference when `os.freemem()` is below this.                                      |
 
 The server does not download models. Install and measure them with Ollama yourself. `nvidia-smi` in model-broker does not see an AMD GPU; free system RAM is the only pressure check here.
 
@@ -56,7 +56,9 @@ Keep using the gateway for execution. When a mission requires an advisor result,
 - `required` plus `completed` is `evidence_only`. Policy still has to allow the action on its own evidence.
 - `required` plus any other status is `fail_closed`.
 
-`projectReviewFinding` stores a completed review as `acs.review-finding.v1` only when ACS already has an evidence-manifest hash and an attempt id. `advisorTraceEvent` is the LoopTrace record. Neither function approves work.
+`recordLocalAdvisorConsultation` writes the same `acs.advisor-consultation.v1` row as the gateway path, through `WorkItemStore.recordAdvisorConsultation` / `insertAdvisorConsultation`. The caller that already holds the lease supplies the fence; this package never invents one. Prefer `runAdvisorConsultation` in the gateway when a projected flight is available so `projectFlightForAdvisor` runs.
+
+`projectReviewFinding` / `projectReviewFindingFromConsultation` and `advisorTraceEvent` / `advisorTraceEventFromConsultation` are derived views of that record (or of the local response before insert). Trust is `asserted` in the local-advisor schema only. They never feed completion, authority, approvals, or receipts, and `declined` does not satisfy a completion gate. Schema version stays `acs.advisor-consultation.v1`.
 
 ## Benchmark
 

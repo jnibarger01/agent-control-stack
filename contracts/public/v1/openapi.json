@@ -90,27 +90,75 @@
                         "maxItems": 512,
                         "type": "array",
                         "items": {
-                          "type": "object",
-                          "properties": {
-                            "runtime": {
-                              "type": "string",
-                              "enum": [
-                                "desktop_commander",
-                                "jace_commander",
-                                "sandbox"
-                              ]
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "runtime": {
+                                  "type": "string",
+                                  "enum": [
+                                    "desktop_commander",
+                                    "jace_commander",
+                                    "sandbox"
+                                  ]
+                                },
+                                "toolName": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 256
+                                }
+                              },
+                              "required": [
+                                "runtime",
+                                "toolName"
+                              ],
+                              "additionalProperties": false
                             },
-                            "toolName": {
-                              "type": "string",
-                              "minLength": 1,
-                              "maxLength": 256
+                            {
+                              "type": "object",
+                              "properties": {
+                                "runtime": {
+                                  "type": "string",
+                                  "const": "browser"
+                                },
+                                "toolName": {
+                                  "type": "string",
+                                  "const": "cua"
+                                },
+                                "allowedOrigins": {
+                                  "minItems": 1,
+                                  "maxItems": 64,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 256,
+                                    "pattern": "^https?:\\/\\/(?:[a-z0-9-]+(?:\\.[a-z0-9-]+)*|\\[[0-9a-f:.]+\\])(?::[0-9]{1,5})?$"
+                                  },
+                                  "uniqueItems": true
+                                },
+                                "allowedApplications": {
+                                  "minItems": 1,
+                                  "maxItems": 64,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 256,
+                                    "pattern": "^[!-)+->@-Z\\\\^-z|~]+$"
+                                  },
+                                  "uniqueItems": true
+                                }
+                              },
+                              "required": [
+                                "runtime",
+                                "toolName",
+                                "allowedOrigins",
+                                "allowedApplications"
+                              ],
+                              "additionalProperties": false
                             }
-                          },
-                          "required": [
-                            "runtime",
-                            "toolName"
-                          ],
-                          "additionalProperties": false
+                          ]
                         }
                       },
                       "maximumPrivileges": {
@@ -4205,6 +4253,100 @@
                   "clientId",
                   "subject",
                   "method"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/mcp-clients/auth-event": {
+      "post": {
+        "operationId": "reportMcpClientAuthEvent",
+        "summary": "Edge bridge reports an OAuth outcome for a verified client (bridge identity only).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "lane": {
+                    "type": "string",
+                    "enum": [
+                      "jc",
+                      "dc"
+                    ]
+                  },
+                  "clientId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "subject": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "granted",
+                      "refreshed",
+                      "refresh_failed",
+                      "token_rejected",
+                      "revoked"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "refresh_rejected",
+                      "refresh_expired",
+                      "refresh_reused",
+                      "revoked",
+                      "invalid_client",
+                      "temporarily_unavailable",
+                      "access_token_expired",
+                      "insufficient_scope"
+                    ]
+                  },
+                  "refreshExpiresAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "observedAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+                  },
+                  "family": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  }
+                },
+                "required": [
+                  "lane",
+                  "clientId",
+                  "kind"
                 ],
                 "additionalProperties": false
               }

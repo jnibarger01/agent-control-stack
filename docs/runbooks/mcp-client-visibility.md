@@ -58,3 +58,35 @@ usual; the original id passes the gate.
   have been seen by this gateway.
 - **Counts look low after a restart.** The index is rebuilt from the retained audit log (up to 20,000 events
   per event type).
+
+## Reauthentication required
+
+Design: [ADR 0027](../adr/0027-oauth-reauthentication-detection.md). When a client's authorization is gone, its row shows
+**Reauthentication required** with the reason and the last successful authentication, the alert bar on every page names
+the client, and **Reconnect** lists the steps. Nothing is sent from the page; the row clears when the client signs in again.
+
+It is never raised for inactivity, outages, a dropped connection, an expired-but-refreshable access token or missing
+permissions. A client that is merely quiet shows as not live, not as needing reauthentication. Stored refresh-token
+expiry is informational: best-effort reports may miss a successful rotation. Only a confirmed permanent edge failure
+raises the warning, normally on the next refresh attempt. Outcomes and reporting throttles are isolated by lane and
+authorization family; a newer grant supersedes the old family on that lane.
+
+### Switch (default off, set on the edge)
+
+| Variable                | Effect                                                                                  |
+| ----------------------- | --------------------------------------------------------------------------------------- |
+| `ACS_MCP_AUTH_EVENTS=1` | The edge reports auth outcomes to ACS. Without it Mission Control shows no auth health. |
+
+RFC 6750 challenges and refresh classification are always on and are not behind either switch.
+
+### Activation gates (do not enable in production until all pass and the operator approves)
+
+1. `cd apps/dc-mcp-gateway && node --test test/*.test.mjs` (authentication, token-replay and outage cases).
+2. `npx vitest run apps/gateway/src/mcp-client-auth-health.test.ts apps/gateway/src/mcp-auth-e2e.test.ts apps/vercel-mcp-ingress apps/control-ui` (reconnect, outage classification, UI).
+3. `npm run contracts:check`.
+4. Isolated live check, with a throwaway edge and ACS (not the production data directory):
+   - ChatGPT: connect, then let the access token expire. Expect no warning and a silent refresh.
+   - Claude: same.
+   - For each, expire or revoke a known refresh record on the throwaway edge, then use the client so it attempts refresh. Expect **Reauthentication required** after the attributable refusal, and clearance after reconnecting. Deleting a record makes the token unattributable and cannot safely flag the client.
+   - Stop the edge for several minutes, and separately leave a connected client idle. Expect no warning in either case.
+   - Record which `WWW-Authenticate` response each app acted on; this is what confirms their `invalid_token` behaviour.

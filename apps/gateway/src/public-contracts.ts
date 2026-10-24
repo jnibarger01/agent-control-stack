@@ -1,3 +1,4 @@
+import { advisorConsultRequestSchema } from "@agent-control-stack/advisory";
 import { directAgentNames } from "@agent-control-stack/machine-controller";
 import {
   missionDispatchInputSchema,
@@ -191,6 +192,34 @@ export const mcpObservationBodySchema = z
   })
   .strict();
 
+/**
+ * Edge-to-ACS report of an OAuth outcome for a verified client (ADR 0027). Attribution only. Carries no token
+ * material: `reason` is a closed vocabulary and `refreshExpiresAt` is a timestamp.
+ */
+export const mcpAuthEventBodySchema = z
+  .object({
+    lane: z.enum(["jc", "dc"]),
+    clientId: z.string().min(1).max(256),
+    subject: z.string().min(1).max(256).optional(),
+    kind: z.enum(["granted", "refreshed", "refresh_failed", "token_rejected", "revoked"]),
+    reason: z
+      .enum([
+        "refresh_rejected",
+        "refresh_expired",
+        "refresh_reused",
+        "revoked",
+        "invalid_client",
+        "temporarily_unavailable",
+        "access_token_expired",
+        "insufficient_scope"
+      ])
+      .optional(),
+    refreshExpiresAt: z.string().datetime().optional(),
+    observedAt: z.string().datetime().optional(),
+    family: z.string().min(1).max(64).optional()
+  })
+  .strict();
+
 export const mcpClientLabelBodySchema = z
   .object({
     clientId: z.string().min(1).max(256),
@@ -310,6 +339,7 @@ export const jsonRpcRequestSchema = z.object({
 });
 
 export const directAgentToolName = "test.agent.run" as const;
+export const advisorToolName = "consult_advisor" as const;
 export const dashboardToolNames = ["open_acs_dashboard", "get_execution_detail"] as const;
 export const portfolioToolNames = [
   "portfolio.get_summary",
@@ -322,6 +352,7 @@ export const portfolioToolNames = [
 ] as const;
 export const mcpToolNames = [
   ...workItemToolNames,
+  advisorToolName,
   ...dashboardToolNames,
   ...portfolioToolNames,
   directAgentToolName
@@ -329,6 +360,7 @@ export const mcpToolNames = [
 export type McpToolName = (typeof mcpToolNames)[number];
 export const remoteMcpToolNames = [
   ...workItemToolNames.filter((name) => name !== "approve_work_item"),
+  advisorToolName,
   ...dashboardToolNames,
   ...portfolioToolNames
 ];
@@ -366,13 +398,15 @@ export const gatewayMcpInputSchemas = {
   "portfolio.list_failures": portfolioLimitInputSchema,
   "portfolio.list_pending_work": portfolioLimitInputSchema,
   "portfolio.list_recent_progress": portfolioLimitInputSchema,
-  [directAgentToolName]: directAgentInputSchema
+  [directAgentToolName]: directAgentInputSchema,
+  [advisorToolName]: advisorConsultRequestSchema
 } satisfies Record<McpToolName, z.ZodType>;
 
 export function mcpRequiredScopes(name: McpToolName): McpScope[] {
   if (name === directAgentToolName) return ["acs:work:approve"];
   switch (name) {
     case "create_work_item":
+    case "consult_advisor":
       return ["acs:work:create"];
     case "get_work_item":
     case "list_work_items":
@@ -414,6 +448,8 @@ export function mcpToolAnnotations(name: McpToolName): Record<string, boolean> {
     case "cancel_work_item":
     case "reject_work_item":
       return { readOnlyHint: false, destructiveHint: true, openWorldHint: false };
+    case "consult_advisor":
+      return { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
     default:
       return { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
   }
@@ -428,6 +464,8 @@ export function mcpToolDescription(name: McpToolName): string {
       return "Open the read-only ACS Control Center with current health, executions, approvals, and operational findings.";
     case "get_execution_detail":
       return "Read authoritative detail and recent audit events for one ACS execution.";
+    case "consult_advisor":
+      return "Ask the configured advisor at one checkpoint. Guidance is evidence for the executor and is not approval or completion.";
     case "create_work_item":
       return "Create a governed work item and immediately evaluate it through the policy gate.";
     case "get_work_item":
@@ -952,6 +990,14 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     operationId: "observeMcpClient",
     summary: "Edge bridge reports a verified client connection (bridge identity only).",
     requestSchema: mcpObservationBodySchema,
+    successStatus: 202
+  },
+  {
+    method: "post",
+    path: "/mcp-clients/auth-event",
+    operationId: "reportMcpClientAuthEvent",
+    summary: "Edge bridge reports an OAuth outcome for a verified client (bridge identity only).",
+    requestSchema: mcpAuthEventBodySchema,
     successStatus: 202
   },
   {

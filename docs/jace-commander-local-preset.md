@@ -31,6 +31,8 @@ hash-chained audit log (a broken chain restores nothing). The approver name in t
 service uses its own `/var/lib/jace-commander-mcp` state directory; `/var/lib/jace-commander` (approver
 key/state, helper nonces) stays root-owned.
 
+With `passkey` configured in approverd (Jace's decision 2026-10-13), privileged approvals instead require a WebAuthn passkey with user verification and are audited as `webauthn-uv` with the authenticated principal; see [jace-commander-passkey-approvals.md](jace-commander-passkey-approvals.md).
+
 Install with `sudo deploy/jace-commander/install-approverd.sh` (a root action; the
 repo never runs it for you). It creates three distinct identities: the `jc` server
 account, the `jc-approverd` signer that alone holds the signing key, and your login,
@@ -58,11 +60,30 @@ cannot be written nothing is approved or minted.
 `/etc/jace-commander/policy.json` (override: `JC_POLICY_PATH`). See
 `vendor/desktop-commander/deploy/jace-commander/policy.example.json`.
 
-**The JC process must not be able to modify it.** The file and every parent
-directory must be non-symlink, not group/world-writable, and `access(W_OK)` must
-fail for the user JC runs as. Otherwise the policy is `invalid` and everything
-except the `jc.meta` diagnostics is denied. Run JC as a dedicated `jc` account
-and keep the policy root-owned.
+**The policy must be root-controlled** (Jace's decision, 2026-10-13; restores
+#324's rule). The file and **every parent directory up to `/`** must be owned by
+root (uid 0), must not be group- or world-writable (no sticky-bit exception, so
+nothing under `/tmp` qualifies), must not be owned by the JC uid, and
+`access(W_OK)` must fail for the user JC runs as. A symlink in the path is
+accepted only if root owns the link and its realpath is a root-owned chain with
+no symlinks. The file is opened with `O_NOFOLLOW` and the open fd is `fstat`-ed
+against the checked inode before it is read, so a file swapped in between the
+check and the read is rejected. Otherwise the policy is `invalid` and everything
+except the `jc.meta` diagnostics is denied. A missing file keeps its existing
+handling: built-in defaults when no path was configured, `invalid` when
+`JC_POLICY_PATH` names a file that does not exist.
+
+Supplying a root-owned path in dev and test:
+
+- Dev machine: `sudo install -o root -g root -m 0644 policy.json /etc/jace-commander/policy.json`
+  (make sure `/etc/jace-commander` is `root:root 0755`). The default path is then
+  used as-is.
+- Throwaway dev without root: `JC_POLICY_UNSAFE_DEV=1` (below). The policy is
+  still loaded but reported as not immutable.
+- Unit tests never need root. `loadJcPolicy({ rootIo })` and
+  `assertPolicyImmutable(path, io)` take a filesystem/uid seam (see
+  `test/test-jace-commander-policy-root-owned.js`); other suites pass
+  `requireImmutable: false`.
 
 An optional `<JC_STATE_DIR>/policy.user.json` may only **tighten**: stricter
 class decisions, extra denied roots, narrower roots, fewer commands or remotes.

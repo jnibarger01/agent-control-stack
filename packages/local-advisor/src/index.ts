@@ -13,18 +13,33 @@ export {
   ADVISOR_SCHEMA_VERSION,
   ADVISOR_STATUSES,
   AdvisorRequestError,
+  MAX_TOTAL_EVIDENCE_CHARS,
   advisorRequestSchema,
   advisorResponseSchema,
   modelReviewOutputSchema
 } from "./contracts.js";
-export type { AdvisorOperation, AdvisorReason, AdvisorRequest, AdvisorResponse, AdvisorStatus, EvidenceItem } from "./contracts.js";
+export type {
+  AdvisorOperation,
+  AdvisorReason,
+  AdvisorRequest,
+  AdvisorResponse,
+  AdvisorStatus,
+  EvidenceItem
+} from "./contracts.js";
 export { findModelOutputViolation, runAdvisor } from "./advisor.js";
 export type { RunAdvisorOptions } from "./advisor.js";
 export { ProviderError } from "./provider.js";
 export type { AdvisorProvider, GenerateInput, GenerateResult, ProviderErrorKind } from "./provider.js";
-export { DEFAULT_OLLAMA_BASE_URL, OllamaProvider, chatModelNames, listInstalledOllamaModels } from "./ollama-provider.js";
+export {
+  DEFAULT_OLLAMA_BASE_URL,
+  OllamaProvider,
+  assertOllamaBaseUrl,
+  chatModelNames,
+  listInstalledOllamaModels
+} from "./ollama-provider.js";
 export type { InstalledOllamaModel, OllamaProviderOptions } from "./ollama-provider.js";
 export { redactText } from "./redact.js";
+export { EgressConfigError, assertDirectLoopbackEgress, envProxyModeOn, nodeWouldProxy } from "./egress.js";
 export {
   ADVISOR_MODEL_ROLES,
   DEFAULT_MODEL_ROUTES,
@@ -34,7 +49,9 @@ export {
   selectModelRoute
 } from "./router.js";
 export type { AdvisorModelRole, ModelRoute } from "./router.js";
-export { advisorTraceEvent } from "./trace-event.js";
 export type { AdvisorAuthorizationOutcome } from "./trace-event.js";
-export { projectReviewFinding } from "./to-review-finding.js";
+export { ReviewBindingError, projectReviewFinding, projectReviewFindingFromConsultation } from "./to-review-finding.js";
 export type { ReviewFindingBinding } from "./to-review-finding.js";
+export { consultationDraftFromResponse, recordLocalAdvisorConsultation } from "./to-consultation.js";
+export type { LocalAdvisorFence, RecordLocalAdvisorConsultationInput } from "./to-consultation.js";
+export { advisorTraceEvent, advisorTraceEventFromConsultation } from "./trace-event.js";

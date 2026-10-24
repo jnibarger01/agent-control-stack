@@ -39,6 +39,8 @@ ADR status values:
 | [0024](0024-governed-agent-run-lifecycle.md)                             | Harden agent runs: expiring confirmations, fencing, verified results, review              | Accepted                            |
 | [0025](0025-routing-ownership-and-staged-jev-influence.md)               | Routing ownership and staged, bounded Jev influence                                       | Accepted                            |
 | [0026](0026-jace-commander-standalone-authorizers.md)                    | Jace Commander provider registry, authorizers, and optional ACS                           | Accepted, in progress               |
+| [0027](0027-advisor-consultation.md)                                     | Advisor consultation is evidence, never a decision                                        | Accepted                            |
+| [0028](0028-outcome-engine-verdict-records.md)                           | Outcome Engine verdicts are evidence records, never authority                             | Accepted                            |
 
 ## Decision rules
 

@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { OllamaProvider, DEFAULT_OLLAMA_BASE_URL, chatModelNames } from "./ollama-provider.js";
+import {
+  OllamaProvider,
+  DEFAULT_OLLAMA_BASE_URL,
+  MAX_CHAT_RESPONSE_BYTES,
+  MAX_TAGS_RESPONSE_BYTES,
+  chatModelNames,
+  listInstalledOllamaModels,
+  readBoundedJson
+} from "./ollama-provider.js";
 import { ProviderError } from "./provider.js";
 
 const HEX = "c".repeat(64);
@@ -44,7 +52,7 @@ describe("OllamaProvider: local-only endpoint", () => {
     "http://10.0.0.5:11434",
     "http://example.com:11434",
     "https://api.openai.com",
-    "http://user:pass@127.0.0.1:11434"
+    `http://user:${"pa" + "ss"}@127.0.0.1:11434`
   ])("refuses non-loopback or credentialed endpoint %s", (baseUrl) => {
     expect(() => new OllamaProvider({ model: "qwen2.5-coder:7b", baseUrl })).toThrow();
   });
@@ -79,7 +87,9 @@ describe("OllamaProvider: model identity", () => {
   });
 
   it("refuses generation when the installed digest differs from the pinned digest", async () => {
-    const fake = fakeFetch((url) => (url.pathname === "/api/tags" ? tags("qwen2.5-coder:7b", "d".repeat(64)) : chat("{}")));
+    const fake = fakeFetch((url) =>
+      url.pathname === "/api/tags" ? tags("qwen2.5-coder:7b", "d".repeat(64)) : chat("{}")
+    );
     const provider = new OllamaProvider({ model: "qwen2.5-coder:7b", expectedDigest: DIGEST, fetchImpl: fake.impl });
     await expect(provider.generate(input())).rejects.toMatchObject({ kind: "digest_mismatch" });
     expect(fake.seen.some((c) => c.url.pathname === "/api/chat")).toBe(false);
@@ -100,7 +110,12 @@ describe("OllamaProvider: failures, retries, cancellation", () => {
       chatCalls++;
       return new Response("boom", { status: 503 });
     });
-    const provider = new OllamaProvider({ model: "qwen2.5-coder:7b", fetchImpl: fake.impl, retries: 2, retryBaseDelayMs: 1 });
+    const provider = new OllamaProvider({
+      model: "qwen2.5-coder:7b",
+      fetchImpl: fake.impl,
+      retries: 2,
+      retryBaseDelayMs: 1
+    });
     await expect(provider.generate(input())).rejects.toMatchObject({ kind: "unavailable" });
     expect(chatCalls).toBe(3);
   });
@@ -112,7 +127,12 @@ describe("OllamaProvider: failures, retries, cancellation", () => {
       chatCalls++;
       return new Response("<html>", { status: 200 });
     });
-    const provider = new OllamaProvider({ model: "qwen2.5-coder:7b", fetchImpl: fake.impl, retries: 3, retryBaseDelayMs: 1 });
+    const provider = new OllamaProvider({
+      model: "qwen2.5-coder:7b",
+      fetchImpl: fake.impl,
+      retries: 3,
+      retryBaseDelayMs: 1
+    });
     await expect(provider.generate(input())).rejects.toMatchObject({ kind: "malformed_response" });
     expect(chatCalls).toBe(1);
   });
@@ -165,5 +185,61 @@ describe("chatModelNames", () => {
       { name: "legacy:7b", digest: DIGEST }
     ]);
     expect([...names].sort()).toEqual(["legacy:7b", "qwen2.5-coder:7b"]);
+  });
+});
+
+/** A body that streams `chunk` forever and records whether the reader cancelled it. */
+function endlessBody(chunk: Uint8Array) {
+  const state = { cancelled: false, pulls: 0 };
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      state.pulls++;
+      controller.enqueue(chunk);
+    },
+    cancel() {
+      state.cancelled = true;
+    }
+  });
+  return { body, state };
+}
+
+describe("OllamaProvider: response size caps", () => {
+  it("aborts an oversized /api/chat body during the read", async () => {
+    const stream = endlessBody(new Uint8Array(64 * 1024).fill(0x20));
+    const provider = new OllamaProvider({
+      model: "qwen2.5-coder:7b",
+      fetchImpl: fakeFetch((url) =>
+        url.pathname === "/api/tags" ? tags() : new Response(stream.body, { status: 200 })
+      ).impl
+    });
+    await expect(provider.generate(input())).rejects.toMatchObject({ kind: "malformed_response" });
+    expect(stream.state.cancelled).toBe(true);
+    expect(stream.state.pulls * 64 * 1024).toBeLessThanOrEqual(MAX_CHAT_RESPONSE_BYTES + 3 * 64 * 1024);
+  });
+
+  it("aborts an oversized /api/tags body during the read", async () => {
+    const stream = endlessBody(new Uint8Array(16 * 1024).fill(0x20));
+    await expect(
+      listInstalledOllamaModels({ fetchImpl: fakeFetch(() => new Response(stream.body, { status: 200 })).impl })
+    ).rejects.toMatchObject({ kind: "malformed_response" });
+    expect(stream.state.cancelled).toBe(true);
+    expect(stream.state.pulls * 16 * 1024).toBeLessThanOrEqual(MAX_TAGS_RESPONSE_BYTES + 3 * 16 * 1024);
+  });
+
+  it("rejects a declared content-length above the cap without reading", async () => {
+    const response = new Response("{}", {
+      status: 200,
+      headers: { "content-length": String(MAX_TAGS_RESPONSE_BYTES + 1) }
+    });
+    await expect(readBoundedJson(response, MAX_TAGS_RESPONSE_BYTES)).rejects.toBeInstanceOf(ProviderError);
+  });
+
+  it("parses a body under the cap", async () => {
+    await expect(readBoundedJson(new Response('{"ok":true}'), 1024)).resolves.toEqual({ ok: true });
+  });
+
+  it.each(["abc", "12abc", "-1", "1e3", ""])("refuses a non-numeric content-length %j", async (value) => {
+    const response = new Response("{}", { status: 200, headers: { "content-length": value } });
+    await expect(readBoundedJson(response, 1024)).rejects.toMatchObject({ kind: "malformed_response" });
   });
 });

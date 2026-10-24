@@ -65,15 +65,18 @@ export async function runAdvisor(
     const redacted = redactText(item.content);
     return { id: item.id, kind: item.kind, text: redacted.text, sha256: sha256Ref(redacted.text) };
   });
+  const objective = redactText(request.context.objective).text;
+  const constraints = request.context.constraints.map((c) => redactText(c).text);
   const evidenceHashes = Object.fromEntries(evidence.map((item) => [item.id, item.sha256]));
   const inputHash = sha256Ref(
     canonicalJson({
       schemaVersion: ADVISOR_SCHEMA_VERSION,
       operation: request.operation,
       mission: request.mission,
-      objective: request.context.objective,
-      constraints: request.context.constraints,
-      evidence: evidence.map(({ id, sha256 }) => ({ id, sha256 }))
+      objective,
+      constraints,
+      // Every inference-relevant evidence field: the prompt includes the kind, so the fingerprint must too.
+      evidence: evidence.map(({ id, kind, sha256 }) => ({ id, kind, sha256 }))
     })
   );
 
@@ -96,15 +99,16 @@ export async function runAdvisor(
       }
     });
 
-  if (evidence.length === 0) {
+  // Blank or whitespace-only items are not evidence: never let them carry a model verdict.
+  if (!evidence.some((item) => item.text.trim().length > 0)) {
     return finish({ status: "insufficient_evidence", reason: "no_evidence" satisfies AdvisorReason });
   }
 
   const nonce = randomNonce();
   const prompt = buildPrompt({
     operation: request.operation,
-    objective: request.context.objective,
-    constraints: request.context.constraints,
+    objective,
+    constraints,
     evidence,
     nonce
   });
@@ -166,7 +170,9 @@ export async function runAdvisor(
       return finish({ status: "invalid_output", reason: "model_output_incoherent", model }, ...usage);
     }
 
-    const recommendedActions = output.data.recommendedActions;
+    // Model output is returned to the MCP client; redact it in case the model echoes a secret redaction missed upstream.
+    const clean = (text: string, max: number) => redactText(text).text.slice(0, max);
+    const recommendedActions = output.data.recommendedActions.map((action) => clean(action, 500));
     if (output.data.verdict === "INSUFFICIENT_EVIDENCE") {
       return finish(
         { status: "insufficient_evidence", reason: "model_reports_insufficient_evidence", model, recommendedActions },
@@ -179,9 +185,9 @@ export async function runAdvisor(
         status: "completed",
         verdict: output.data.verdict as ReviewVerdict,
         findings: output.data.findings.map((finding) => ({
-          category: finding.category,
+          category: clean(finding.category, 128),
           severity: finding.severity,
-          summary: finding.summary,
+          summary: clean(finding.summary, 2_000),
           evidenceRefs: finding.evidenceIds
         })),
         recommendedActions,

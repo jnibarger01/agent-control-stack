@@ -9,10 +9,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./guidance": {
+      "types": "./dist/advisor-guidance.d.ts",
+      "default": "./dist/advisor-guidance.js"
     }
   },
   "dependencies": {
     "@agent-control-stack/shared": "0.1.0",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   }
 }

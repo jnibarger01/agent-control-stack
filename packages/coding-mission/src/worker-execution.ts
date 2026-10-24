@@ -1,9 +1,10 @@
 import { ControlStackError, stableHash } from "@agent-control-stack/shared";
+import { cuaAcceptanceDefect } from "./cua-evidence.js";
 import type { CodingMissionPorts } from "./controller.js";
 import type { FailureCategory, WorkUnitKind, WorkUnitPayload, VerificationPolicy } from "./mission-model.js";
 import type { CodingMissionStore } from "./store.js";
 
-export const EXECUTOR_LANES = ["coder", "jc", "dc", "mcp"] as const;
+export const EXECUTOR_LANES = ["coder", "jc", "dc", "mcp", "cua"] as const;
 export type ExecutorLane = (typeof EXECUTOR_LANES)[number];
 
 export interface ExecutionAuthorityRefs {
@@ -157,7 +158,7 @@ const TERMINAL_ATTEMPT_STATES = new Set<ExecutionAttemptRecord["state"]>([
   "rejected_stale"
 ]);
 
-function boundedText(value: string, max = 500): string {
+export function boundedText(value: string, max = 500): string {
   const scrubbed = value
     .replace(/authorization\s*[:=]\s*[^\s]+/giu, "authorization=[redacted]")
     .replace(/(?:token|password|secret)\s*[:=]\s*[^\s]+/giu, "[redacted]")
@@ -469,6 +470,17 @@ export class WorkUnitExecutionLedger {
       const governed = this.store.db
         .prepare("SELECT 1 AS present FROM mission_authority WHERE mission_id = ?")
         .get(input.missionId);
+      if (!governed && input.lane === "cua") {
+        // CUA drives a real browser, so it runs only inside a governed mission whose authority is verified per dispatch.
+        this.store.recordMissionEvent(
+          input.missionId,
+          "authority.denied",
+          { operation: "dispatch", unitId: input.unitId, lane: input.lane, reason: "cua_requires_governed_mission" },
+          input.now
+        );
+        denial = new ControlStackError("dispatch_authority_denied", "dispatch refused: cua_requires_governed_mission");
+        return undefined;
+      }
       if (governed) {
         let refusal: string | undefined;
         if (!this.options.authority) {
@@ -914,6 +926,9 @@ export class WorkUnitExecutionLedger {
       return "result receipts are malformed";
     }
     if (result.outcome === "succeeded" && !result.result) return "successful result is missing result evidence";
+    // CUA results are evidence-bound: receipts are rebuilt from the committed, verified checkpoints in this same
+    // transaction, and a worker-reported receipt list or success that does not match them is refused.
+    if (row.executor_lane === "cua") return cuaAcceptanceDefect(this.store.db, row.attempt_id, result);
     return undefined;
   }
 
