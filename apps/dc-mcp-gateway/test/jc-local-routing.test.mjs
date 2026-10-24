@@ -148,7 +148,7 @@ test('routing: implicit missing policy is uniform local; precedence is tool > pr
   const table = { default: 'local', providers: {}, tools: {} };
   assert.equal(resolveAuthorizer(table, 'read_file'), 'local');
   assert.equal(resolveAuthorizer(table, 'nope'), undefined);
-  assert.equal(Object.keys(JC_TOOL_PROVIDERS).length, 36);
+  assert.equal(Object.keys(JC_TOOL_PROVIDERS).length, 37);
 });
 
 test('stripAuthorityMeta removes capability and acs* metadata and keeps the rest', () => {

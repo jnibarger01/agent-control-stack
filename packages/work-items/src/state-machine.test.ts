@@ -1007,7 +1007,8 @@ describe("work item state machine", () => {
         { version: 71, name: "execution_receipts", filename: "071_execution_receipts.sql" },
         { version: 72, name: "cua_browser_execution", filename: "072_cua_browser_execution.sql" },
         { version: 73, name: "advisor_consultations", filename: "073_advisor_consultations.sql" },
-        { version: 74, name: "advisor_consultation_fencing", filename: "074_advisor_consultation_fencing.sql" }
+        { version: 74, name: "advisor_consultation_fencing", filename: "074_advisor_consultation_fencing.sql" },
+        { version: 75, name: "jace_commander_context_pack", filename: "075_jace_commander_context_pack.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])

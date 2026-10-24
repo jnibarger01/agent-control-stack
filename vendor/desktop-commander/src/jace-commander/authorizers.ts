@@ -14,7 +14,7 @@
  *
  * Presets are the only way to obtain a table without a policy file:
  *   managed     every tool acs-capability (default, identical to before)
- *   standalone  the 24 read-only tools local; the other 12 refused (identical)
+ *   standalone  the 25 read-only tools local; the other 12 refused (identical)
  *   local       every provider local (new); decisions come from class policy
  */
 import { JC_TOOL_POLICIES } from './contract.js';

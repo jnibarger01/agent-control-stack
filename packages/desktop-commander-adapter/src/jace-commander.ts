@@ -85,6 +85,9 @@ export function containJaceCommanderInvocation(
 ): void {
   for (const name of invocation.policy.pathArguments) {
     const value = invocation.arguments[name];
+    // An absent optional path argument names no path to contain; JC still contains whatever is
+    // actually used at execution. Wrapping `undefined` here made every omitted path argument fail.
+    if (value === undefined) continue;
     const paths = Array.isArray(value) ? value : [value];
     for (const requested of paths) {
       try {
