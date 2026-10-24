@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { Route, Routes, useLocation, useParams } from "react-router";
 import { LiveProvider, useAudit, useAgent, useAgents, useApprovals, useConnector, useConnectors, useExecution, useExecutor, useExecutors, useOverview, useQueue, useStreamState, useTrace } from "./data/live";
 import type { EventSourceFactory } from "./data/stream";
@@ -15,6 +16,9 @@ import { SystemPage } from "./features/system/SystemPage";
 import { QueuePage } from "./features/queue/QueuePage";
 import { TracePage } from "./features/trace/TracePage";
 import { Shell } from "./shell/Shell";
+import { abbrUiEnabled } from "./features/black-box/flag";
+
+const BlackBoxPage = lazy(() => import("./features/black-box/BlackBoxPage").then((mod) => ({ default: mod.BlackBoxPage })));
 
 function CommandRoute() {
   const query = useOverview();
@@ -93,6 +97,7 @@ function titleFor(pathname: string): string {
   if (pathname.startsWith("/executors")) return "Executors";
   if (pathname.startsWith("/connectors/")) return "Connector";
   if (pathname.startsWith("/connectors")) return "Connectors";
+  if (pathname.startsWith("/black-box")) return "Black Box";
   if (pathname === "/") return "Command";
   return "Not found";
 }
@@ -121,6 +126,9 @@ function Frame() {
         <Route path="/executors/:id" element={<ExecutorRoute />} />
         <Route path="/connectors" element={<ConnectorsRoute />} />
         <Route path="/connectors/:id" element={<ConnectorRoute />} />
+        {abbrUiEnabled() ? (
+          <Route path="/black-box" element={<Suspense fallback={null}><BlackBoxPage /></Suspense>} />
+        ) : null}
         <Route path="*" element={<EmptyState title="Page not found">Use the navigation to pick a page.</EmptyState>} />
       </Routes>
     </Shell>
