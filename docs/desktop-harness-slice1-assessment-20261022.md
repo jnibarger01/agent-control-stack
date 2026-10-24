@@ -6,6 +6,8 @@ Supersedes `docs/desktop-harness-reconciliation-20261022.md` (the earlier lighte
 
 Evidence tags: **[V]** verified by me in source or by running it this session; **[L]** taken from an existing ledger or REA document, not re-verified; **[H]** hypothesis.
 
+> **Correction added 2026-10-23 (Slice 2).** This report says `POST /executions/consume` is **absent** (sections 4, 6 and 8, and blocker F-1). That is not true of the harness worktree as it stands after this report was written. My grep output was truncated and I over-read it, and the worktree also changed afterwards: migration 053, `execution-consume.ts`, the `server.ts` route and executor-side enforcement are present as uncommitted work, with 180 focused tests and a 50-check isolated live chain passing. Treat F-1, S5 and the "build consume" items in sections 7 and 8 as superseded. Findings S3, S4, S6, R-1 and the bridge-gate notes F-4 to F-6 were not re-examined here, and the sandbox items may also have moved. See `docs/slice-2-execution-authority-evidence-20261023.md` in the harness worktree for the current state, including new findings (credential readable via `/proc`, unauthenticated allow response).
+
 ## 1. Repository inventory (all 7 paths exist)
 
 | Path | Branch | HEAD | Tracked diffs | Untracked | Notes |
