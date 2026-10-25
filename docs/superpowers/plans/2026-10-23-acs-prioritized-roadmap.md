@@ -24,15 +24,16 @@ Status key: **DONE** = merged, tested, integrated and accepted for its stated ou
 | 2 | Approval-replay hardening | IMPL (merged; integration unverified) | Merged as #402, `dff50089` "harden approval replay (base-grant approver, current plan, full decision audit)". Threat model T03 in `docs/threat-model.md:145`. |
 | 3 | JC path boundaries and alias parity | PARTIAL | Path-boundary matching specified in `docs/protocol/change-sets.md:292`. No alias-parity implementation found. |
 | 4 | Governed run timeline | PARTIAL | Attempts and lease projections in the Mission Control work queue. No single queued/executing/stalled/verified timeline found. |
-| 5 | DC scheduler visibility | PARTIAL | `packages/desktop-commander-adapter/src/concurrency-scheduler/` and queue/lease references on main. Read-only queue and lease endpoint not confirmed. |
-| 6 | Mission-scoped autonomy grants | PARTIAL (planned) | Plan in `docs/superpowers/plans/2026-10-02-retire-global-admin-mode.md`; a separate grants-plan branch exists (`origin/docs/mission-scoped-grants-plan`). Global admin mode is still in place. |
+| 5 | DC scheduler visibility | IMPL (API available; UI unverified) | `apps/gateway/src/server.ts` exposes read-protected `GET /api/dc/scheduler` (active/queued snapshot); `apps/gateway/src/dc-capability-issue.test.ts` checks HTTP 200. Operator UI parity and release acceptance remain unverified. |
+| 6 | Mission-scoped autonomy grants | IMPL (gateway/coder; other lanes/UI incomplete) | `apps/gateway/src/server.ts` supports work-item authority grants; `docs/runbooks/governed-coding-missions.md` documents issue, bind, verify and revoke behavior for the coder lane. Governed mode is off by default, JC/DC drivers and operator UI remain incomplete, and global admin mode remains in place. |
 | 7 | Outcome Engine PR checklist | IMPL | `docs/outcome-engine.md` and ADR 0028. CLI `acs outcome accept/evaluate/show/list` (`apps/cli/src/outcome.ts`). Read-only: it never merges or comments. Integration into the merge path is incomplete. |
-| 8 | Failed-mission evidence replay | PARTIAL | `packages/evidence` and `apps/evidence-mcp` exist. Replay over recorded events not confirmed. |
+| 8 | Failed-mission evidence replay | IMPL (flight-record replay; operator workflow unverified) | `packages/coding-mission/src/flight-recorder.ts` implements `readMissionFlightRecord`; `packages/coding-mission/src/recovery-runtime.test.ts` exercises recovery/replay. End-user failed-mission replay UX, cross-run coverage and rollout acceptance remain unverified. |
 | 9 | React Mission Control consolidation | IMPL (merged; rollout incomplete) | `apps/mission-control-web` on main, default-root flag, `/legacy` fallback. Rollout and hardening are not complete. |
 | 10 | Bounded black-box recorder | DRAFT | PR #406 `feat(black-box): Agent Black Box recorder, flagged off by default` (draft, mergeable, checks green). Live integration incomplete. |
 
 ## Corrections from the 2026-10-24 check
 
+- Items 5, 6 and 8 also have verified API/runtime implementations. They remain IMPL because UI, lane coverage or rollout acceptance is incomplete or unverified.
 - Item 7 is implemented. Integration is open.
 - Item 9's implementation is merged; integration, rollout and hardening are open. Legacy stays as fallback. Do not mark the outcome DONE yet.
 - Item 10 is a draft PR, not merged. Live integration is open.
