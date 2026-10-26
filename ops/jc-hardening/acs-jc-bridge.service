@@ -1,0 +1,33 @@
+[Unit]
+Description=Isolated Jace Commander bridge
+After=network-online.target acs-core.service
+Requires=acs-core.service
+[Service]
+Type=simple
+User=acs-jc
+Group=acs-jc
+WorkingDirectory=/opt/acs-runtime/current/apps/dc-mcp-gateway
+EnvironmentFile=/etc/acs-secrets/acs-jc.env
+Environment=BRIDGE_PROFILE=jace-commander
+Environment=BRIDGE_PORT=8003
+Environment=ACS_MANAGED_MODE=1
+ExecStart=/usr/bin/node bridge.js
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StateDirectory=acs-jc
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/acs-jc
+[Install]
+WantedBy=multi-user.target
