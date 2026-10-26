@@ -93,17 +93,18 @@ export function isLoopbackRedirectUri(uri) {
 
 /**
  * RFC 8252 section 7.3: a loopback redirect may use any port, but only on the same host and path as a
- * registered loopback redirect. Query strings and fragments are never allowed.
+ * registered loopback redirect, including its query. Fragments and userinfo are forbidden.
  */
 export function matchesRegisteredLoopback(redirectUri, registeredUris = []) {
   let u;
   try { u = new URL(redirectUri); } catch { return false; }
   if (u.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname)) return false;
-  if (u.search || u.hash || u.username || u.password) return false;
+  if (u.hash || u.username || u.password) return false;
   return registeredUris.some((registered) => {
     try {
       const r = new URL(registered);
-      return r.protocol === 'http:' && r.hostname === u.hostname && r.pathname === u.pathname;
+      return r.protocol === 'http:' && r.hostname === u.hostname && r.pathname === u.pathname &&
+        r.search === u.search && !r.hash && !r.username && !r.password;
     } catch { return false; }
   });
 }
