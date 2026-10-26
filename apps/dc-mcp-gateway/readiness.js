@@ -36,3 +36,19 @@ export function dcBridgeReady(authority, { managed }) {
     authority.bridge?.upstreamStarted === true
   );
 }
+
+/** Managed JC readiness uses explicit, non-secret authority assertions only. */
+export function jcBridgeReady(authority) {
+  return !!(
+    authority && typeof authority === 'object' &&
+    authority.variant === 'jc' &&
+    authority.configuredExecutionMode === 'managed' &&
+    authority.childMode === 'managed' &&
+    authority.authoritative === true &&
+    authority.bridge?.hasUpstreamPair === true &&
+    authority.bridge?.upstreamStarted === true &&
+    authority.bridge?.initialized === true &&
+    authority.enforcement?.executionTokenConfigured === true &&
+    authority.enforcement?.capabilityVerificationConfigured === true
+  );
+}

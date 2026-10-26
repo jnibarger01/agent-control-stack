@@ -19,7 +19,7 @@ import { saveJson } from './atomic-json.js';
 import { ClientInfoCache, createClientObserver, extractClientInfo } from './client-attribution.js';
 import { localRoutingFromEnv, stripAuthorityMeta } from './jc-routing.js';
 import { managedModeFromEnv, jcModeFromEnv, identityAttribution, capabilityTransport, acsPost, isToolsCall, dcRuntimeIdentityFromState, issueRuntimeBootstrap, completeRuntimeBootstrap, injectRuntimeBootstrap } from './managed.js';
-import { dcBridgeReady } from './readiness.js';
+import { dcBridgeReady, jcBridgeReady } from './readiness.js';
 import { REPORTABLE_REFRESH_FAILURES, bearerChallenge, classifyBearer, createAuthEventReporter, equalSecrets, resolveRefresh } from './auth-health.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -775,10 +775,10 @@ function proxyInitializeWithAttestation(req, res, bodyBuf, identity, challenge, 
 // ---------------------------------------------------------------------------
 // /ready + /authority support (hardening item #2)
 // ---------------------------------------------------------------------------
-async function checkAcsIssuanceReady() {
-  if (!MANAGED.enabled || !MANAGED.acsGatewayUrl) return { reachable: false, detail: 'ACS managed issuance not configured' };
+async function checkAcsIssuanceReady(config = MANAGED) {
+  if (!config.enabled || !config.acsGatewayUrl) return { reachable: false, detail: 'ACS managed issuance not configured' };
   try {
-    const url = new URL('/readyz', MANAGED.acsGatewayUrl);
+    const url = new URL('/readyz', config.acsGatewayUrl);
     const r = await fetch(url, { signal: AbortSignal.timeout(3000) });
     return { reachable: r.ok, httpStatus: r.status };
   } catch (e) {
@@ -806,6 +806,18 @@ const server = http.createServer(async (req, res) => {
     // local health (no auth; contains no data)
     if (pathName === '/healthz') { log('GET', '/healthz', 200); return send(res, 200, { ok: true, service: 'desktop-commander-mcp-gateway' }); }
     if (pathName === '/health') { log('GET', '/health', 200); return send(res, 200, { ok: true, pid: process.pid, service: 'desktop-commander-mcp-gateway' }); }
+
+    if (pathName === '/jc/ready' && req.method === 'GET') {
+      const configured = !!(JC.enabled && !JC.acsOptional && !JC_LOCAL.enabled && JC.acsGatewayUrl && JC.acsGatewayToken && GATEWAY_EXECUTION_TOKEN);
+      const [acs, bridge] = configured
+        ? await Promise.all([checkAcsIssuanceReady(JC), fetchBridgeAuthority(JC_UPSTREAM)])
+        : [{ reachable: false }, { ok: false }];
+      const bridgeReady = bridge.ok && jcBridgeReady(bridge.data);
+      const issuanceReady = acs.reachable === true;
+      const ready = configured && bridgeReady && issuanceReady;
+      log('GET', '/jc/ready', ready ? 200 : 503);
+      return send(res, ready ? 200 : 503, { ready, configured, bridgeReady, issuanceReady });
+    }
 
     // /ready and /authority (hardening item #2): non-secret structured state
     // only — never capability payloads, keys, tokens, or credentials.
