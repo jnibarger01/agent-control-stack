@@ -1,0 +1,30 @@
+[Unit]
+Description=Default-deny Jace Commander public ingress
+After=network-online.target acs-jc-edge.service
+Requires=acs-jc-edge.service
+[Service]
+Type=simple
+User=acs-ingress
+Group=acs-ingress
+WorkingDirectory=/opt/acs-runtime/current/apps/dc-mcp-gateway
+EnvironmentFile=/etc/acs-secrets/acs-ingress.env
+Environment=GATEWAY_PORT=8010
+Environment=PUBLIC_INGRESS_PORT=8011
+ExecStart=/usr/bin/node public-edge-proxy.js
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ProtectHome=yes
+[Install]
+WantedBy=multi-user.target
