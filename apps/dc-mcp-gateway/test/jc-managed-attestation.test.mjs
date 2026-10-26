@@ -86,8 +86,10 @@ test('attested initialization and discovery work; every subsequent method requir
   assert.equal(discovered.status, 200);
   assert.match(await discovered.text(), /result/);
   const denied = await f.post({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'acs_read', arguments: { view: 'health' } } }, sessionHeaders);
-  assert.equal(denied.status, 200);
-  assert.match(await denied.text(), /"decision":"denied"/);
+  // The bridge refuses a capability-less tools/call itself: the executor (stub) must never receive it.
+  assert.equal(denied.status, 403);
+  assert.match(await denied.text(), /ACS capability required/);
+  assert.doesNotMatch(fs.readFileSync(path.join(f.state, 'received.jsonl'), 'utf8'), /"tools\/call"/);
   const closed = await fetch(`${f.base}/mcp`, { method: 'DELETE', headers: { ...f.headers, ...sessionHeaders } });
   assert.ok([200, 202, 204].includes(closed.status));
 });
@@ -103,11 +105,33 @@ test('real managed JC child refuses execution without an ACS capability', async 
   await response.text();
   const headers = { 'mcp-session-id': response.headers.get('mcp-session-id') };
   const result = await f.post({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'write_file', arguments: { path: path.join(f.state, 'must-not-exist'), content: 'unauthorized' } } }, headers);
-  assert.equal(result.status, 200);
-  const text = await result.text();
-  assert.match(text, /JC_CAPABILITY_MISSING/);
-  assert.match(text, /"isError":true/);
+  // Refused by the bridge before forwarding: the executor never runs the call, so nothing is written.
+  const resultBody = await result.text();
+  assert.equal(result.status, 403, resultBody);
+  assert.match(resultBody, /ACS capability required/);
   assert.equal(fs.existsSync(path.join(f.state, 'must-not-exist')), false);
+});
+
+test('real managed JC child independently rejects a forged ACS capability envelope', async (t) => {
+  // The bridge accepts a capability envelope's presence; only the executor can verify its signature. A forged envelope
+  // must be forwarded and rejected there, with nothing written.
+  const { publicKey } = generateKeyPairSync('ed25519');
+  const f = await fixture(t, {
+    DC_ARGS: `${path.resolve(root, '../../vendor/desktop-commander/dist/jace-commander/cli.js')} serve`,
+    JC_ACS_PUBLIC_KEY: publicKey.export({ format: 'pem', type: 'spki' }),
+  });
+  const response = await f.post(init);
+  assert.equal(response.status, 200);
+  await response.text();
+  const headers = { 'mcp-session-id': response.headers.get('mcp-session-id') };
+  const target = path.join(f.state, 'forged-must-not-exist');
+  const forged = { version: 'acs.jc.v1', capabilityId: 'forged', signature: 'AAAA', tool: 'write_file' };
+  const result = await f.post({ jsonrpc: '2.0', id: 8, method: 'tools/call', params: { name: 'write_file', arguments: { path: target, content: 'forged' }, _meta: { acsCapability: forged } } }, headers);
+  const text = await result.text();
+  assert.equal(result.status, 200);
+  assert.match(text, /JC_CAPABILITY_[A-Z_]+/);
+  assert.match(text, /"isError":true/);
+  assert.equal(fs.existsSync(target), false);
 });
 
 for (const overrides of [

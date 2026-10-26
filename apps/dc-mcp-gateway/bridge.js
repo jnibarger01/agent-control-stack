@@ -436,6 +436,13 @@ function governedRouteBindings(messages) {
     .filter((route) => route.capability);
 }
 
+/** True for a tools/call that carries no ACS capability envelope (missing, null, or not an object). */
+function isUnauthorizedManagedToolCall(msg) {
+  if (!msg || typeof msg !== "object" || msg.method !== "tools/call") return false;
+  const capability = msg.params?._meta?.[ACS_GUARD_META_KEY];
+  return typeof capability !== "object" || capability === null;
+}
+
 function sendJsonRpcError(res, status, code, message) {
   if (res.headersSent) return res.destroy();
   res.writeHead(status, { "Content-Type": "application/json" });
@@ -1275,6 +1282,12 @@ const httpServer = http.createServer(async (req, res) => {
     if (req.method === "POST") body = await readJsonBody(req);
     if (req.method === "POST") {
       const messages = Array.isArray(body) ? body : [body];
+      // Managed JC (ACS-authorized) mode: every tools/call must already carry an ACS capability envelope. Refuse the
+      // whole request here, before session creation or forwarding, so an unauthorized call never reaches the executor.
+      // The executor still verifies the capability itself; this check is the bridge's own, independent gate.
+      if (JC && MANAGED && messages.some(isUnauthorizedManagedToolCall)) {
+        return sendJsonRpcError(res, 403, -32002, "ACS capability required for this tool call");
+      }
       const initialization = messages.some(isInitialize);
       if (!session && !initialization) {
         reportAbandonedRoutes(

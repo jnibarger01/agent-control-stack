@@ -1,0 +1,54 @@
+# Jace Commander public edge: default-deny route allowlist in front of the OAuth gateway. Runs as jc-edge.
+# Loopback only. The TLS terminator (Tailscale Serve/Funnel, reviewed separately) is the only thing that connects.
+# It holds NO secrets. Install only after the public-exposure gate in docs/jace-commander-service-isolation.md is approved.
+[Unit]
+Description=Jace Commander public edge (route allowlist, loopback)
+After=network-online.target jace-commander-gateway.service
+Wants=jace-commander-gateway.service
+
+[Service]
+Type=simple
+User=jc-edge
+Group=jc-edge
+WorkingDirectory=/opt/agent-control-stack/apps/dc-mcp-gateway
+EnvironmentFile=/etc/jace-commander/edge.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /opt/agent-control-stack/apps/dc-mcp-gateway/edge/ingress.js
+ExecStartPre=/usr/bin/test -s /etc/jace-commander/edge.env
+Restart=on-failure
+RestartSec=5
+
+# --- sandbox -------------------------------------------------------------------------------------
+StateDirectory=jace-commander/edge
+StateDirectoryMode=0700
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateUsers=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+ReadOnlyPaths=/opt/agent-control-stack/apps/dc-mcp-gateway
+# Loopback only in both directions: the edge accepts from the TLS terminator on loopback and talks to the gateway on loopback.
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target
