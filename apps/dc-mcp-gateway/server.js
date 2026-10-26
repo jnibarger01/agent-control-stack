@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { saveJson } from './atomic-json.js';
+import { assertPublicHttpsUrl, matchesRegisteredLoopback } from './cimd-guard.js';
 import { ClientInfoCache, createClientObserver, extractClientInfo } from './client-attribution.js';
 import { localRoutingFromEnv, stripAuthorityMeta } from './jc-routing.js';
 import { managedModeFromEnv, jcModeFromEnv, identityAttribution, capabilityTransport, acsPost, isToolsCall, dcRuntimeIdentityFromState, issueRuntimeBootstrap, completeRuntimeBootstrap, injectRuntimeBootstrap } from './managed.js';
@@ -328,9 +329,11 @@ async function resolveClient(clientId) {
   const cached = cimdCache.get(clientId);
   if (cached && cached._fetched + 3600_000 > Date.now()) return cached;
   try {
+    // SSRF guard: public https hosts only, and no redirects (a redirect could point at internal addresses).
+    await assertPublicHttpsUrl(clientId);
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 5000);
-    const r = await fetch(clientId, { signal: ctrl.signal, headers: { accept: 'application/json' } });
+    const r = await fetch(clientId, { signal: ctrl.signal, redirect: 'error', headers: { accept: 'application/json' } });
     clearTimeout(t);
     if (!r.ok) return null;
     const doc = await r.json();
@@ -347,13 +350,9 @@ async function resolveClient(clientId) {
 }
 
 function validRedirect(client, redirectUri) {
-  try {
-    const u = new URL(redirectUri);
-    if (client.redirect_uris.includes(redirectUri)) return true;
-    // loopback redirect allowed per RFC 8252 for native-ish clients
-    if ((u.hostname === '127.0.0.1' || u.hostname === 'localhost') && u.protocol === 'http:') return true;
-  } catch { /* noop */ }
-  return false;
+  if (client.redirect_uris.includes(redirectUri)) return true;
+  // Loopback: any port, but only on a host and path the client registered (RFC 8252 §7.3).
+  return matchesRegisteredLoopback(redirectUri, client.redirect_uris);
 }
 
 // ---------------------------------------------------------------------------
