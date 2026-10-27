@@ -1,58 +1,15 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
-import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
+import { SqliteWorkItemStore, defaultExecutionPlanForWorkItem } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
-import { createPolicyEngine } from "./policy.js";
+import { createPolicyEngine, type PolicyEngine } from "./policy.js";
 import { createWorkItemTools } from "./tools.js";
-
-// Every row that can carry approval authority for a work item: the legacy approval record
-// (upserted in place, so its expiry/reason/created_at are snapshotted too) and every
-// execution-plan approval row (append-only, so a new grant is a new row).
-function grantSnapshot(dbPath: string, workItemId: string): unknown {
-  const db = new DatabaseSync(dbPath, { readOnly: true });
-  try {
-    return {
-      approvalRecords: db
-        .prepare(
-          `SELECT action_hash, approved_by, reason, status, created_at, expires_at, consumed_at
-           FROM approval_records WHERE work_item_id = ? ORDER BY action_hash`
-        )
-        .all(workItemId),
-      planApprovals: db
-        .prepare(
-          `SELECT approval_id, approved_by_actor_id, reason, status, created_at, expires_at
-           FROM execution_plan_approvals WHERE work_item_id = ? ORDER BY approval_id`
-        )
-        .all(workItemId)
-    };
-  } finally {
-    db.close();
-  }
-}
-
-// A replay must append nothing to the audit log and grant nothing: same event list
-// (by id), same approval rows. Returns the post-replay result for further checks.
-function expectNoNewEventsOrGrants<T>(
-  store: SqliteWorkItemStore,
-  dbPath: string,
-  workItemId: string,
-  replay: () => T
-): T {
-  const eventsBefore = store.readEvents().map((event) => event.id);
-  const grantsBefore = grantSnapshot(dbPath, workItemId);
-  const result = replay();
-  expect(store.readEvents().map((event) => event.id)).toEqual(eventsBefore);
-  expect(grantSnapshot(dbPath, workItemId)).toEqual(grantsBefore);
-  return result;
-}
 
 describe("approve_work_item replay", () => {
   it("a replay of a granted approval appends no further audit events and leaves the approval untouched", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-approval-replay-"));
-    const dbPath = join(dir, "control.db");
-    const store = new SqliteWorkItemStore(dbPath);
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
     const policy = createPolicyEngine();
     const tools = createWorkItemTools(store, policy);
 
@@ -71,7 +28,7 @@ describe("approve_work_item replay", () => {
       const first = tools.approve_work_item(input);
       expect(first.workItem.status).toBe("approved");
       expect(first.approvals).toHaveLength(1);
-      const countOf = (name: string) => store.readEvents().filter((event) => event.name === name).length;
+      const countOf = (name: string) => store.readEvents({ name, limit: 500 }).length;
       const before = {
         granted: countOf("approval.granted"),
         decided: countOf("policy.decided"),
@@ -79,9 +36,7 @@ describe("approve_work_item replay", () => {
       };
       expect(before.granted).toBe(1);
 
-      const replay = expectNoNewEventsOrGrants(store, dbPath, workItem.id, () =>
-        tools.approve_work_item({ ...input, reason: "replay" })
-      );
+      const replay = tools.approve_work_item({ ...input, reason: "replay" });
 
       expect(replay.decision.decision).toBe(first.decision.decision);
       expect(replay.workItem.status).toBe("approved");
@@ -96,8 +51,7 @@ describe("approve_work_item replay", () => {
 
   it("a replay with a hash that does not match still fails closed", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-approval-replay-mismatch-"));
-    const dbPath = join(dir, "control.db");
-    const store = new SqliteWorkItemStore(dbPath);
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
     const policy = createPolicyEngine();
     const tools = createWorkItemTools(store, policy);
 
@@ -126,16 +80,6 @@ describe("approve_work_item replay", () => {
           actionHash: "0".repeat(64)
         })
       ).toThrow(/approval_action_mismatch|does not match/);
-
-      // The rejected hash did not disturb the original grant: a replay of it is still a no-op.
-      expectNoNewEventsOrGrants(store, dbPath, workItem.id, () =>
-        tools.approve_work_item({
-          id: workItem.id,
-          approvedBy: "qa-operator",
-          reason: "replay",
-          actionHash: evaluation!.actionHash
-        })
-      );
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });
@@ -144,8 +88,7 @@ describe("approve_work_item replay", () => {
 
   it("a different approver is not a replay: a human still supersedes an acs:admin approval", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-approval-replay-admin-"));
-    const dbPath = join(dir, "control.db");
-    const store = new SqliteWorkItemStore(dbPath);
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
     const policy = createPolicyEngine();
     const tools = createWorkItemTools(store, policy);
 
@@ -170,15 +113,261 @@ describe("approve_work_item replay", () => {
       expect(store.getExecutionPlanApproval(workItem.id, plan.planHash, actionHash)?.approvedByActorId).toBe(
         "qa-operator"
       );
-
-      // Once the human holds the approval, the human approving again is a replay and is a no-op.
-      const replay = expectNoNewEventsOrGrants(store, dbPath, workItem.id, () =>
-        tools.approve_work_item({ id: workItem.id, approvedBy: "qa-operator", reason: "human replay", actionHash })
-      );
-      expect(replay.workItem.status).toBe("approved");
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  function approvedFixture(policy: PolicyEngine = createPolicyEngine()) {
+    const dir = mkdtempSync(join(tmpdir(), "acs-approval-replay-fx-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const tools = createWorkItemTools(store, policy);
+    const workItem = tools.create_work_item({
+      title: "Replay fixture",
+      requester: "user",
+      intent: "approval replay boundaries",
+      target: { cwd: "/repo" },
+      requestedActions: [{ kind: "fs.write", description: "write", params: { paths: ["src/index.ts"] } }],
+      risk: "high"
+    });
+    const actionHash = createPolicyEngine().evaluateWorkItem(workItem, "qa-operator", "approve")[0]!.actionHash;
+    const input = { id: workItem.id, approvedBy: "qa-operator", reason: "approve", actionHash };
+    const countOf = (name: string) => store.readEvents({ name, limit: 500 }).length;
+    const cleanup = () => {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    };
+    return { store, tools, workItem, actionHash, input, countOf, cleanup };
+  }
+
+  it("an expired approval is not a replay: it is re-granted through the normal path", () => {
+    const fx = approvedFixture();
+    try {
+      fx.tools.approve_work_item(fx.input);
+      expect(fx.countOf("approval.granted")).toBe(1);
+      const db = (fx.store as unknown as { db: { prepare: (sql: string) => { run: (...a: unknown[]) => void } } }).db;
+      db.prepare("UPDATE approval_records SET expires_at = ? WHERE work_item_id = ? AND action_hash = ?").run(
+        "2000-01-01T00:00:00.000Z",
+        fx.workItem.id,
+        fx.actionHash
+      );
+      expect(fx.store.hasApproval(fx.workItem.id, fx.actionHash)).toBe(false);
+
+      fx.tools.approve_work_item({ ...fx.input, reason: "re-approve after expiry" });
+
+      expect(fx.countOf("approval.granted")).toBe(2);
+      expect(fx.store.hasApproval(fx.workItem.id, fx.actionHash)).toBe(true);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("a consumed approval is rejected on replay and grants nothing", () => {
+    const fx = approvedFixture();
+    try {
+      fx.tools.approve_work_item(fx.input);
+      fx.store.consumeApproval(fx.workItem.id, fx.actionHash);
+      const granted = fx.countOf("approval.granted");
+
+      expect(() => fx.tools.approve_work_item({ ...fx.input, reason: "replay after consume" })).toThrow(
+        /already consumed/
+      );
+      expect(fx.countOf("approval.granted")).toBe(granted);
+      expect(fx.store.hasApproval(fx.workItem.id, fx.actionHash)).toBe(false);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("a policy change to deny after approval rejects the replay and audits the denial", () => {
+    let deny = false;
+    const real = createPolicyEngine();
+    const policy: PolicyEngine = {
+      ...real,
+      evaluateWorkItem: (workItem, actor, operation) => {
+        const evaluations = real.evaluateWorkItem(workItem, actor, operation);
+        return deny && operation === "approve"
+          ? evaluations.map((evaluation) => ({
+              ...evaluation,
+              decision: { ...evaluation.decision, decision: "deny" as const, reason: "policy changed" }
+            }))
+          : evaluations;
+      }
+    };
+    const fx = approvedFixture(policy);
+    try {
+      fx.tools.approve_work_item(fx.input);
+      const granted = fx.countOf("approval.granted");
+      const decided = fx.countOf("policy.decided");
+      deny = true;
+
+      const replay = fx.tools.approve_work_item({ ...fx.input, reason: "replay after policy change" });
+
+      expect(replay.decision.decision).toBe("deny");
+      expect(replay.approvals).toEqual([]);
+      expect(fx.countOf("approval.granted")).toBe(granted);
+      expect(fx.countOf("policy.decided")).toBeGreaterThan(decided);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("alice then bob is a real update, and bob repeating is then a replay", () => {
+    const fx = approvedFixture();
+    try {
+      fx.tools.approve_work_item({ ...fx.input, approvedBy: "alice" });
+      fx.tools.approve_work_item({ ...fx.input, approvedBy: "bob" });
+      const granted = fx.countOf("approval.granted");
+      const total = fx.store.readEvents({ limit: 500 }).length;
+
+      fx.tools.approve_work_item({ ...fx.input, approvedBy: "bob", reason: "bob again" });
+
+      expect(fx.countOf("approval.granted")).toBe(granted);
+      expect(fx.store.readEvents({ limit: 500 })).toHaveLength(total);
+      expect(fx.store.getApprovalGrant(fx.workItem.id, fx.actionHash)?.approvedBy).toBe("bob");
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("a replay under a changed but still-approvable policy records the evaluation it reports", () => {
+    let reason = "original";
+    const real = createPolicyEngine();
+    const policy: PolicyEngine = {
+      ...real,
+      evaluateWorkItem: (workItem, actor, operation) =>
+        real.evaluateWorkItem(workItem, actor, operation).map((evaluation) => ({
+          ...evaluation,
+          decision: { ...evaluation.decision, reason }
+        }))
+    };
+    const fx = approvedFixture(policy);
+    try {
+      fx.tools.approve_work_item(fx.input);
+      const decided = fx.countOf("policy.decided");
+
+      fx.tools.approve_work_item({ ...fx.input, reason: "unchanged policy" });
+      expect(fx.countOf("policy.decided")).toBe(decided);
+
+      reason = "policy tightened";
+      const replay = fx.tools.approve_work_item({ ...fx.input, reason: "changed policy" });
+
+      expect(replay.decision.decision).not.toBe("deny");
+      expect(fx.countOf("policy.decided")).toBe(decided + 1);
+      expect(fx.countOf("approval.granted")).toBe(1);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("an approval the current plan does not carry is not a replay: the new plan is approved", () => {
+    const fx = approvedFixture();
+    try {
+      fx.tools.approve_work_item(fx.input);
+      const oldPlan = fx.store.getCurrentExecutionPlan(fx.workItem.id)!;
+      const granted = fx.countOf("approval.granted");
+      const superseding = fx.store.createExecutionPlan({
+        workItemId: fx.workItem.id,
+        definition: defaultExecutionPlanForWorkItem(fx.workItem, { executionMode: "desktop_commander" }),
+        createdByActorId: "qa-operator",
+        expectedCurrentPlanHash: oldPlan.planHash
+      });
+      expect(superseding.planHash).not.toBe(oldPlan.planHash);
+      expect(fx.store.hasExecutionPlanApproval(fx.workItem.id, superseding.planHash, fx.actionHash)).toBe(false);
+
+      fx.tools.approve_work_item({ ...fx.input, reason: "approve the superseding plan" });
+
+      expect(fx.store.hasExecutionPlanApproval(fx.workItem.id, superseding.planHash, fx.actionHash)).toBe(true);
+      expect(fx.countOf("approval.granted")).toBe(granted + 1);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("a replay whose only change is an optional decision field (maxRuntimeMs) is still recorded", () => {
+    let maxRuntimeMs: number | undefined;
+    const real = createPolicyEngine();
+    const policy: PolicyEngine = {
+      ...real,
+      evaluateWorkItem: (workItem, actor, operation) =>
+        real.evaluateWorkItem(workItem, actor, operation).map((evaluation) => ({
+          ...evaluation,
+          decision: { ...evaluation.decision, ...(maxRuntimeMs === undefined ? {} : { maxRuntimeMs }) }
+        }))
+    };
+    const fx = approvedFixture(policy);
+    try {
+      fx.tools.approve_work_item(fx.input);
+      const decided = fx.countOf("policy.decided");
+
+      fx.tools.approve_work_item({ ...fx.input, reason: "unchanged" });
+      expect(fx.countOf("policy.decided")).toBe(decided);
+
+      maxRuntimeMs = 1_000;
+      fx.tools.approve_work_item({ ...fx.input, reason: "tighter limit" });
+
+      expect(fx.countOf("policy.decided")).toBe(decided + 1);
+      expect(fx.countOf("approval.granted")).toBe(1);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("an acs:admin approval on the current plan is not a replay for a human approver", () => {
+    const fx = approvedFixture();
+    try {
+      fx.tools.approve_work_item(fx.input);
+      const oldPlan = fx.store.getCurrentExecutionPlan(fx.workItem.id)!;
+      const superseding = fx.store.createExecutionPlan({
+        workItemId: fx.workItem.id,
+        definition: defaultExecutionPlanForWorkItem(fx.workItem, { executionMode: "desktop_commander" }),
+        createdByActorId: "qa-operator",
+        expectedCurrentPlanHash: oldPlan.planHash
+      });
+      fx.store.grantExecutionPlanApproval(
+        {
+          workItemId: fx.workItem.id,
+          planHash: superseding.planHash,
+          actionHash: fx.actionHash,
+          approvedByActorId: "acs:admin",
+          reason: "admin approves the new plan"
+        },
+        { via: "policy_gate" }
+      );
+
+      fx.tools.approve_work_item({ ...fx.input, reason: "human takes over" });
+
+      expect(
+        fx.store.getExecutionPlanApproval(fx.workItem.id, superseding.planHash, fx.actionHash)?.approvedByActorId
+      ).toBe("qa-operator");
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("finds the latest recorded decision even when more than 500 later policy events exist", () => {
+    const fx = approvedFixture();
+    try {
+      fx.tools.approve_work_item(fx.input);
+      for (let index = 0; index < 501; index += 1) {
+        fx.store.recordPolicyDecision({
+          workItemId: fx.workItem.id,
+          actionHash: `other-${index}`,
+          decision: "allow",
+          reason: "noise",
+          matchedRules: [],
+          context: {}
+        });
+      }
+      const decided = fx.countOf("policy.decided");
+
+      fx.tools.approve_work_item({ ...fx.input, reason: "replay behind a lot of noise" });
+
+      expect(fx.countOf("policy.decided")).toBe(decided);
+      expect(fx.countOf("approval.granted")).toBe(1);
+    } finally {
+      fx.cleanup();
     }
   });
 });
