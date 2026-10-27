@@ -50,3 +50,19 @@ The classic console is only removed after **one full release cycle with no rollb
 - `npm run test:mission-control-web-e2e` passes on the release candidate.
 
 Removal then consists of deleting the classic renderer and its client script from `apps/control-ui` (`render/`, `client-script.ts`, `styles.ts`, `premium-styles.ts` and the panel modules), the `/legacy` and `/dashboard/*` routes, the goldens and `scripts/verify-mission-control.mjs`, while keeping `apps/control-ui/src/read-model/*`, `redaction.ts` and the types the mappers use. Removing it also removes the rollback path, so make it a separate, explicitly approved change.
+
+## Open-items summary (floating assistant)
+
+The Mission Control web app shows a floating orange button. "Summarize today's open items" calls
+`POST /api/mission-control/summaries/open-items` and streams the answer into the panel.
+
+- Authority: the route uses the same `requireRead` check as the other Mission Control read endpoints. The
+  client sends no data. The gateway builds the context from the active work items the session can already read,
+  projected to `id`, `title`, `status`, `risk`, and `updatedAt`, capped at 50 items, and redacted before it is sent upstream.
+- Model: the OpenAI-compatible Responses path (`ACS_INFERENCE_ENABLED`, `ACS_OPENAI_API_KEY`), with
+  `ACS_OPEN_ITEMS_SUMMARY_MODEL` on the `ACS_INFERENCE_ALLOWED_MODELS` allowlist. Unset means 503 `summary_unavailable`.
+- Transport: same-origin `fetch` POST with a `text/event-stream` body (`delta`, `done`, `error` events). No CSP change and no token on the page.
+- Audit: each call writes `inference.request_allowed` and `inference.upstream_completed` or `inference.upstream_failed`
+  to the hash-chained inference audit log (`ACS_INFERENCE_AUDIT_LOG`). Prompts and answers are not logged.
+- Rate limit: 20 requests per minute per client.
+- Not covered: the ChatGPT MCP widget (`ui://acs/dashboard-v1`) is a separate surface and is not changed.
