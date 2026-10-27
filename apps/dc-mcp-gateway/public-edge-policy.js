@@ -13,7 +13,7 @@ function unique(params, key) {
 export function allowedPublicRoute(method, rawUrl, body = '', jcResource) {
   if (typeof rawUrl !== 'string' || !rawUrl.startsWith('/') ||
       rawUrl.includes('#') || rawUrl.includes('\\') ||
-      /[\x00-\x20\x7f]/.test(rawUrl) || /%0[ad]/i.test(rawUrl) ||
+      [...rawUrl].some((char) => char.charCodeAt(0) <= 32 || char.charCodeAt(0) === 127) || /%0[ad]/i.test(rawUrl) ||
       /%(?![0-9a-f]{2})/i.test(rawUrl)) return false;
   const pathname = rawUrl.split('?')[0];
   // Compare raw paths, never decoded or normalized equivalents.
