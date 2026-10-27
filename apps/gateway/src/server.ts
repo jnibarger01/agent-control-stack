@@ -2,6 +2,8 @@ import { probeExecutableVersion } from "@agent-control-stack/agent-cli";
 import { advisorPortFromEnv } from "./advisor-consultation.js";
 import { registerMissionDispatchRoutes } from "./mission-dispatch-routes.js";
 import { registerDashboardRoutes, eventReadOptions } from "./dashboard-routes.js";
+import { openItemsSummaryConfigFromEnv, registerOpenItemsSummaryRoute } from "./open-items-summary.js";
+import { HashChainedInferenceAuditSink, openAiCompatibleConfigFromEnv } from "./moa/openai-compatible.js";
 import { registerCsrfGuard } from "./csrf-guard.js";
 import {
   MISSION_CONTROL_WEB_CSP,
@@ -1407,6 +1409,18 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     requireRead,
     missionControlWebDefaultRoot: () => missionControlWebDefaultRoot(options.missionControlWeb),
     sendError
+  });
+
+  const openItemsInference = openAiCompatibleConfigFromEnv();
+  registerOpenItemsSummaryRoute(app, {
+    requireRead,
+    workItems,
+    config: openItemsSummaryConfigFromEnv(openItemsInference),
+    audit: openItemsInference ? new HashChainedInferenceAuditSink(openItemsInference.auditLogPath) : undefined,
+    actorFor: (request) => {
+      const credential = gatewayCredentialForRequest(request, auth);
+      return credential ? requesterForCredential(credential) : "user";
+    }
   });
 
   app.get("/mcp/tools", async (request, reply) => {
