@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { NavLink } from "react-router";
+import { NavLink, useLocation } from "react-router";
 import type { OverviewReadModel } from "@agent-control-stack/mission-control-contract";
 import { Kbd, StaleBanner, StatusPill, type Tone } from "../design/primitives";
 import { useTheme } from "../design/theme";
@@ -38,6 +38,7 @@ function LiveIndicator({ stream }: { stream: StreamState }) {
 const themeLabel = { system: "System", dark: "Dark", light: "Light" } as const;
 
 export function Shell({ overview, stream, children, title, subtitle }: { overview: OverviewReadModel | undefined; stream: StreamState; children: ReactNode; title: string; subtitle?: ReactNode }) {
+  const location = useLocation();
   const { choice, cycle } = useTheme();
   const [palette, setPalette] = useState(false);
   useEffect(() => {
@@ -109,7 +110,7 @@ export function Shell({ overview, stream, children, title, subtitle }: { overvie
         <main id="main" tabIndex={-1} className="px-5 py-6 lg:px-8">{children}</main>
       </div>
       <Palette open={palette} onClose={() => setPalette(false)} />
-      <OpenItemsAssistant />
+      {location.pathname === "/" && <OpenItemsAssistant />}
     </div>
   );
 }

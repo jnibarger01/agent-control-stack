@@ -65,7 +65,9 @@ export function buildOpenItemsPrompt(items: readonly OpenItemProjection[]): { in
     "Lead with blocked, failed, quarantined, and needs_approval items. Then group the rest by status. Keep the summary under 12 bullet points.",
     "If the list is empty, say there are no open items."
   ].join("\n");
-  const input = `<open_items>\n${JSON.stringify({ count: items.length, items }, null, 2)}\n</open_items>`;
+  // Escape < and > so a title containing "</open_items>" cannot close the data block early.
+  const json = JSON.stringify({ count: items.length, items }, null, 2).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
+  const input = `<open_items>\n${json}\n</open_items>`;
   return { instructions, input };
 }
 
