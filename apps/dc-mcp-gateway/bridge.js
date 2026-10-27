@@ -10,7 +10,7 @@
  * may reuse JSON-RPC ids without response crossover.
  */
 import http from "node:http";
-import { randomUUID, webcrypto, createHmac, timingSafeEqual } from "node:crypto";
+import { randomUUID, webcrypto, createHmac, timingSafeEqual, createPrivateKey, createPublicKey, sign } from "node:crypto";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createHash } from "node:crypto";
@@ -123,7 +123,27 @@ if (JC_LOCAL && !EXECUTION_TOKEN) {
   console.error("bridge: JC_PRESET=local requires DC_GATEWAY_EXECUTION_TOKEN so gateway attestation can be enforced; refusing to start");
   process.exit(1);
 }
-const GATEWAY_ATTESTATION_KEY = process.env.DC_GATEWAY_ATTESTATION_KEY || "";
+// Gateway attribution is signed with an Ed25519 PRIVATE key that only this bridge holds. The executor receives the
+// derived PUBLIC key and nothing that can sign, so a process able to read the executor's environment cannot mint
+// gateway identity. (The retired shared HMAC secret is never forwarded to the executor.)
+const GATEWAY_SIGNING_KEY = (() => {
+  const pem = process.env.DC_GATEWAY_ATTESTATION_SIGNING_KEY || "";
+  if (!pem) return null;
+  try {
+    const key = createPrivateKey(pem);
+    if (key.asymmetricKeyType !== "ed25519") throw new Error("key is not Ed25519");
+    return key;
+  } catch (error) {
+    console.error(`bridge: DC_GATEWAY_ATTESTATION_SIGNING_KEY is not a usable Ed25519 private key (${error.message}); refusing to start`);
+    process.exit(1);
+  }
+})();
+const GATEWAY_ATTESTATION_PUBLIC_PEM = GATEWAY_SIGNING_KEY
+  ? createPublicKey(GATEWAY_SIGNING_KEY).export({ type: "spki", format: "pem" }).toString()
+  : "";
+if (process.env.DC_GATEWAY_ATTESTATION_KEY) {
+  console.error("bridge: DC_GATEWAY_ATTESTATION_KEY is retired and ignored; configure DC_GATEWAY_ATTESTATION_SIGNING_KEY (Ed25519). Gateway attribution is not signed until then.");
+}
 const PIPELINE_ACS_PUBLIC_KEY = process.env.DC_ACS_CAPABILITY_PUBLIC_KEY || "";
 const PIPELINE_ACS_KEY_ID = process.env.DC_ACS_CAPABILITY_KEY_ID || "";
 // ACS capability verification material for the native managed child. The child
@@ -185,7 +205,7 @@ const CHILD_ENV = {
   LANG: process.env.LANG || "C.UTF-8",
   TMPDIR: process.env.TMPDIR || "/tmp",
   NODE_ENV: process.env.NODE_ENV || "production",
-  ...(GATEWAY_ATTESTATION_KEY ? { DC_GATEWAY_ATTESTATION_KEY: GATEWAY_ATTESTATION_KEY } : {}),
+  ...(GATEWAY_ATTESTATION_PUBLIC_PEM ? { DC_GATEWAY_ATTESTATION_PUBLIC_KEY: GATEWAY_ATTESTATION_PUBLIC_PEM } : {}),
   ...(PIPELINE_ACS_PUBLIC_KEY
     ? {
         DC_ACS_CAPABILITY_PUBLIC_KEY: PIPELINE_ACS_PUBLIC_KEY,
@@ -302,6 +322,12 @@ function verifyAttestation(value, agentHeader) {
 }
 
 function injectAttestation(msg, headers) {
+  // Client-written attribution never reaches the executor: only a bridge-signed envelope may carry _meta.gateway.
+  if (msg?.params?._meta && typeof msg.params._meta === "object" && "gateway" in msg.params._meta) {
+    const stripped = { ...msg.params._meta };
+    delete stripped.gateway;
+    msg = { ...msg, params: { ...msg.params, _meta: stripped } };
+  }
   if (!EXECUTION_TOKEN) return msg;
   const att = headers["x-dc-attestation"];
   if (!att) return msg; // local loopback callers retain legacy pass-through behavior
@@ -312,13 +338,13 @@ function injectAttestation(msg, headers) {
   const clientId = String(payload.client_id || "");
   const jti = String(payload.jti || "");
   const iat = Date.now();
-  const material = `${sub}.${clientId}.${jti}.${iat}`;
-  const sig = createHmac("sha256", EXECUTION_TOKEN).update(material).digest("base64url");
   const meta = { ...(msg.params?._meta || {}) };
   meta.agent = agent.startsWith("chatgpt:") ? agent : `chatgpt:${agent}`;
-  // Force-overwrite client-writable provenance fields. Desktop Commander
-  // independently verifies this HMAC before trusting gateway identity.
-  meta.gateway = { verified: true, sub, client_id: clientId, jti, iat, sig };
+  if (GATEWAY_SIGNING_KEY) {
+    // Ed25519 over the same bytes the executor verifies. Without a signing key no envelope is minted (fail closed).
+    const sig = sign(null, Buffer.from(`${sub}.${clientId}.${jti}.${iat}`, "utf8"), GATEWAY_SIGNING_KEY).toString("base64url");
+    meta.gateway = { verified: true, sub, client_id: clientId, jti, iat, sig };
+  }
   meta.transport = "oauth-gateway";
   msg.params = { ...(msg.params || {}), _meta: meta };
   return msg;
@@ -1152,7 +1178,7 @@ function computeAuthority() {
       sessionCount: pair ? pair.sessions.size : 0
     },
     enforcement: {
-      gatewayAttestationActive: !!GATEWAY_ATTESTATION_KEY,
+      gatewayAttestationActive: !!GATEWAY_SIGNING_KEY,
       capabilityVerificationActive: !!PIPELINE_ACS_PUBLIC_KEY,
       executionTokenConfigured: !!EXECUTION_TOKEN,
       leaseAndFencingEnforced: executorLease.active && !executorLease.ambiguous

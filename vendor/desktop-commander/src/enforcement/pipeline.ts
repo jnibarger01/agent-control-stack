@@ -9,12 +9,14 @@
  *   DC_NETWORK_PROFILE=none|restricted|full   default network profile for calls
  *                                             that carry no capability (default: full)
  *   DC_DISABLE_EXECUTOR_LEASE=1      opt-out of the singleton executor lease
- *   DC_GATEWAY_ATTESTATION_KEY=...   shared HMAC secret for trusted gateway
- *                                     transport attribution; when set, requests
- *                                     carrying _meta.gateway must carry a valid
- *                                     bridge HMAC (see the TRUST CHAIN note
- *                                     below) or they are rejected fail-closed.
- *                                     Unset = behavior unchanged (backwards compat).
+ *   DC_GATEWAY_ATTESTATION_PUBLIC_KEY=...  PEM Ed25519 PUBLIC key of the bridge's
+ *                                     attestation signer. When set, requests carrying
+ *                                     _meta.gateway must carry a valid Ed25519 signature
+ *                                     (see the TRUST CHAIN note below) or are rejected
+ *                                     fail-closed. Unset = behavior unchanged. This
+ *                                     process never holds a signing key or shared secret.
+ *   DC_GATEWAY_ATTESTATION_KEY       RETIRED. Ignored (with a warning): a shared secret in
+ *                                     the executor lets model-run commands forge gateway identity.
  *   DC_ACS_CAPABILITY_PUBLIC_KEY=... base64url SPKI Ed25519 public key of the
  *                                     ACS capability issuer. With (optionally)
  *                                     DC_ACS_CAPABILITY_KEY_ID, any request
@@ -57,7 +59,7 @@ export interface EnforcementPass {
   networkGuard?: NetworkGuardSummary;
   /**
    * Present (true) when the request carried a TRUSTED gateway attestation
-   * (HMAC-verified under DC_GATEWAY_ATTESTATION_KEY). Callers should record
+   * (Ed25519-verified under DC_GATEWAY_ATTESTATION_PUBLIC_KEY). Callers should record
    * the transport as GATEWAY_TRANSPORT_VERIFIED for such requests.
    */
   gatewayTrusted?: true;
@@ -119,15 +121,16 @@ export function agentFromMeta(meta: unknown): string {
  * TRUST CHAIN: the OAuth gateway holds GATEWAY_EXECUTION_TOKEN (a shared HMAC
  * secret). It authenticates the caller (x-dc-* headers), then the bridge
  * injects `params._meta.gateway = { sig, sub, client_id, jti, iat }` where
- * `sig = base64url(HMAC-SHA256(GATEWAY_EXECUTION_TOKEN, `${sub}.${client_id}.${jti}.${iat}`))`
+ * `sig = base64url(Ed25519.sign(BRIDGE_SIGNING_KEY, `${sub}.${client_id}.${jti}.${iat}`))`
  * (iat = epoch milliseconds). The bridge verifies the OAuth claims BEFORE
  * signing, so a valid sig means "gateway-vetted identity", not a client
- * self-report. Desktop Commander verifies that signature with the SAME
- * secret, supplied as DC_GATEWAY_ATTESTATION_KEY. `_meta.gateway.verified`
- * is display-only: a direct client can set verified=true itself, so the
- * boolean alone is NEVER trusted — only the HMAC is.
+ * self-report. Desktop Commander verifies the signature with the bridge's
+ * PUBLIC key only (DC_GATEWAY_ATTESTATION_PUBLIC_KEY). The executor cannot
+ * sign, so a process that can read this environment still cannot mint gateway
+ * identity. `_meta.gateway.verified` is display-only: a client can set
+ * verified=true itself, so the boolean alone is NEVER trusted — only the signature is.
  *
- * When DC_GATEWAY_ATTESTATION_KEY is unset, gateway attribution is not
+ * When DC_GATEWAY_ATTESTATION_PUBLIC_KEY is unset, gateway attribution is not
  * enforced and behavior is unchanged (backwards compatible).
  */
 
@@ -142,10 +145,30 @@ export const GATEWAY_TRANSPORT_VERIFIED = 'oauth-gateway->mcp (verified)';
 /** How far an attestation's iat may drift from now. */
 const GATEWAY_ATTESTATION_WINDOW_MS = 10 * 60 * 1000;
 
-/** The shared HMAC secret DC uses to verify bridge attestations, when configured. */
-export function gatewayAttestationKey(): string | undefined {
-  const key = process.env.DC_GATEWAY_ATTESTATION_KEY;
-  return key && key.length > 0 ? key : undefined;
+let retiredAttestationKeyWarned = false;
+
+/**
+ * The bridge's Ed25519 PUBLIC key, when configured. Undefined when unset or not an Ed25519 public key; while
+ * configured-but-invalid, gateway attribution is untrusted (fail closed in isTrustedGatewayMeta).
+ */
+export function gatewayAttestationPublicKey(): crypto.KeyObject | undefined {
+  const pem = process.env.DC_GATEWAY_ATTESTATION_PUBLIC_KEY;
+  if (!pem) return undefined;
+  try {
+    const key = crypto.createPublicKey(pem);
+    return key.asymmetricKeyType === 'ed25519' ? key : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** True when gateway attribution is configured (a public key is set), whether or not it parses. */
+export function gatewayAttestationConfigured(): boolean {
+  if (process.env.DC_GATEWAY_ATTESTATION_KEY && !retiredAttestationKeyWarned) {
+    retiredAttestationKeyWarned = true;
+    console.error('desktop-commander: DC_GATEWAY_ATTESTATION_KEY is retired and ignored; configure DC_GATEWAY_ATTESTATION_PUBLIC_KEY (Ed25519). Gateway attribution is untrusted until then.');
+  }
+  return !!process.env.DC_GATEWAY_ATTESTATION_PUBLIC_KEY;
 }
 
 function gatewayFromMeta(meta: unknown): Record<string, unknown> | undefined {
@@ -154,33 +177,18 @@ function gatewayFromMeta(meta: unknown): Record<string, unknown> | undefined {
   return gw && typeof gw === 'object' ? (gw as Record<string, unknown>) : undefined;
 }
 
-/** Recompute the expected base64url HMAC sig over the attestation fields. */
-function expectedGatewaySig(key: string, gw: Record<string, unknown>): string {
-  const material = `${gw.sub}.${gw.client_id}.${gw.jti}.${gw.iat}`;
-  return crypto.createHmac('sha256', key).update(material).digest('base64url');
-}
-
-function timingSafeEqualStr(a: string, b: string): boolean {
-  const ab = Buffer.from(a, 'utf8');
-  const bb = Buffer.from(b, 'utf8');
-  if (ab.length !== bb.length) {
-    // Compare a digest of each to keep the comparison constant-time even
-    // across length mismatch.
-    crypto.timingSafeEqual(Buffer.from(sha256Hex(a), 'hex'), Buffer.from(sha256Hex(b), 'hex'));
-    return false;
-  }
-  return crypto.timingSafeEqual(ab, bb);
+/** The exact bytes the bridge signs: `${sub}.${client_id}.${jti}.${iat}`. */
+function gatewayMaterial(gw: Record<string, unknown>): Buffer {
+  return Buffer.from(`${gw.sub}.${gw.client_id}.${gw.jti}.${gw.iat}`, 'utf8');
 }
 
 /**
- * True ONLY when DC_GATEWAY_ATTESTATION_KEY is set and the request's
- * _meta.gateway carries a structurally complete attestation whose HMAC
- * verifies under that key, with iat inside the 10-minute window and a
- * non-empty jti. A bare `verified: true` boolean (client-set) never
- * satisfies this — the signature is the trust anchor.
+ * True ONLY when DC_GATEWAY_ATTESTATION_PUBLIC_KEY is a valid Ed25519 key and the request's _meta.gateway carries a
+ * structurally complete attestation whose Ed25519 signature verifies under it, with iat inside the 10-minute window
+ * and a non-empty jti. A bare `verified: true` boolean (client-set) never satisfies this — the signature is the anchor.
  */
 export function isTrustedGatewayMeta(meta: unknown, now: number = Date.now()): boolean {
-  const key = gatewayAttestationKey();
+  const key = gatewayAttestationPublicKey();
   if (!key) return false;
   const gw = gatewayFromMeta(meta);
   if (!gw) return false;
@@ -191,7 +199,9 @@ export function isTrustedGatewayMeta(meta: unknown, now: number = Date.now()): b
   if (typeof gw.iat !== 'number' || !Number.isFinite(gw.iat)) return false;
   if (Math.abs(now - gw.iat) > GATEWAY_ATTESTATION_WINDOW_MS) return false;
   if (typeof gw.sig !== 'string' || !gw.sig) return false;
-  return timingSafeEqualStr(gw.sig, expectedGatewaySig(key, gw));
+  const sig = Buffer.from(gw.sig, 'base64url');
+  if (sig.length !== 64) return false;
+  return crypto.verify(null, gatewayMaterial(gw), key, sig);
 }
 
 /** Trusted gateway identity for audit events, or undefined when untrusted. */
@@ -519,9 +529,9 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
   const enforcementOff = process.env.DC_ENFORCEMENT === 'off';
 
   // 0. Trusted gateway attestation (fail-closed). Only enforced when
-  //    DC_GATEWAY_ATTESTATION_KEY is configured — env unset means behavior is
+  //    DC_GATEWAY_ATTESTATION_PUBLIC_KEY is configured — env unset means behavior is
   //    unchanged (no new rejections). When set, any request presenting
-  //    _meta.gateway MUST carry a valid bridge HMAC (isTrustedGatewayMeta);
+  //    _meta.gateway MUST carry a valid bridge Ed25519 signature (isTrustedGatewayMeta);
   //    a self-claimed verified:true boolean is not a trust anchor. Like
   //    capability verification, this runs regardless of DC_ENFORCEMENT —
   //    transport trust is not optional where an attestation key exists.
@@ -530,13 +540,13 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
   // On an ACS gateway-configured executor, omitting attribution must not
   // downgrade a request to the local lane. Direct ACS stdio runtimes without
   // a gateway key retain their separate transport contract.
-  if (gatewayAttestationKey() && (acsCapabilityPublicKeyEnv() || gatewayFromMeta(ctx.meta))) {
+  if (gatewayAttestationConfigured() && (acsCapabilityPublicKeyEnv() || gatewayFromMeta(ctx.meta))) {
     if (!isTrustedGatewayMeta(ctx.meta, now)) {
       return {
         allowed: false,
         kind: 'capability-rejected',
         code: 'GATEWAY_ATTESTATION_INVALID',
-        message: 'gateway attestation invalid: _meta.gateway failed HMAC verification (verified flag alone is not trusted; sig/sub/client_id/jti/iat must verify under DC_GATEWAY_ATTESTATION_KEY within 10 minutes)',
+        message: 'gateway attestation invalid: _meta.gateway failed Ed25519 verification (verified flag alone is not trusted; sig/sub/client_id/jti/iat must verify under DC_GATEWAY_ATTESTATION_PUBLIC_KEY within 10 minutes)',
         classification,
       };
     }

@@ -61,7 +61,8 @@ export async function authorizeManagedToolCall(
   args: Record<string, unknown>,
   meta: unknown,
 ): Promise<ManagedAcsAuthorizationMetadata | undefined> {
-  return (await getManagedAcsGuard()).authorize(toolName, args, meta);
+  // The final-boundary fence runs here, so every managed call that reaches a handler has passed it.
+  return (await getManagedAcsGuard()).authorizeAtBoundary(toolName, args, meta);
 }
 
 /** Handshake state without creating a guard as a side effect of health checks. */

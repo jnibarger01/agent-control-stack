@@ -1,30 +1,53 @@
+# Default-deny public ingress for Jace Commander (route allowlist). Canonical unit. Runs as acs-ingress.
+# Runs edge/ingress.js (the reviewed, hardened ingress), NOT the earlier public-edge-proxy.js draft.
+# Holds NO secrets. Loopback only. Funnel may proxy ONLY to 127.0.0.1:8011, and Funnel stays off until approved.
 [Unit]
-Description=Default-deny Jace Commander public ingress
+Description=Default-deny Jace Commander public ingress (loopback)
 After=network-online.target acs-jc-edge.service
-Requires=acs-jc-edge.service
+Wants=acs-jc-edge.service
+
 [Service]
 Type=simple
 User=acs-ingress
 Group=acs-ingress
 WorkingDirectory=/opt/acs-runtime/current/apps/dc-mcp-gateway
 EnvironmentFile=/etc/acs-secrets/acs-ingress.env
-Environment=GATEWAY_PORT=8010
-Environment=PUBLIC_INGRESS_PORT=8011
-ExecStart=/usr/bin/node public-edge-proxy.js
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /opt/acs-runtime/current/apps/dc-mcp-gateway/edge/ingress.js
+ExecStartPre=/usr/bin/test -s /etc/acs-secrets/acs-ingress.env
 Restart=on-failure
 RestartSec=5
-UMask=0077
-NoNewPrivileges=yes
-PrivateTmp=yes
-PrivateDevices=yes
+
+# --- sandbox -------------------------------------------------------------------------------------
+StateDirectory=acs-ingress
+StateDirectoryMode=0700
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
 ProtectSystem=strict
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ProtectHome=yes
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateUsers=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+ReadOnlyPaths=/opt/acs-runtime
+IPAddressDeny=any
+IPAddressAllow=localhost
+
 [Install]
 WantedBy=multi-user.target

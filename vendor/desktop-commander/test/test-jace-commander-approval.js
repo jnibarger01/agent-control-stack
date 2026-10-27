@@ -534,7 +534,10 @@ await test('review hardening: approvals are bound to the caller; restart trusts 
   // Over direct stdio the client writes _meta itself: never believed unless the bridge vouches.
   assert.equal(callerPrincipal({ gateway: { sub: 'alice', client_id: 'c1' } }, false), undefined);
 
-  const info = await makeApprover();
+  // This case checks principal-scoped binding through the legacy, self-asserted approve. Approving a principal-bound
+  // record there needs the audited opt-out; principal separation itself is covered by
+  // test-jace-commander-principal-separation.js.
+  const info = await makeApprover({ allowSelfAssertedSeparation: true });
   const client = new ApproverClient(info.config.requestSocket, RUNTIME, 2000);
   const args = { path: path.join(root, 'bound.txt'), content: 'x' };
   const alice = await client.authorize('write_file', args, 'alice|c1');

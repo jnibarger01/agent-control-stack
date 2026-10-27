@@ -43,7 +43,28 @@ export type ManagedAcsRejectionCode =
   | 'ACS_CAPABILITY_NONCE_REPLAY'
   | 'ACS_RUNTIME_IDENTITY_MISSING'
   | 'ACS_RUNTIME_IDENTITY_DRIFT'
-  | 'ACS_RUNTIME_IDENTITY_REVOKED';
+  | 'ACS_RUNTIME_IDENTITY_REVOKED'
+  | 'ACS_ATTEMPT_CANCELLED'
+  | 'ACS_LEASE_EXPIRED'
+  | 'ACS_LEASE_SUPERSEDED'
+  | 'ACS_ATTEMPT_STATE_UNKNOWN'
+  | 'ACS_CONTAINED';
+
+/**
+ * Execution-time fence (ACS review P0). A capability is valid until its expiry in isolation, so cancellation of its
+ * attempt must be checked at the final boundary. The check reports ACS's current state for the attempt and lease.
+ * `live` is the only verdict that admits execution. `superseded` means the lease epoch has moved on. Anything else,
+ * including a thrown error or an unanswerable check, is refused: an unknown state is never treated as live.
+ */
+export type AttemptFenceVerdict = 'live' | 'cancelled' | 'expired' | 'superseded';
+export interface AttemptFenceClaims {
+  runtimeId: string;
+  workItemId: string;
+  attemptId: string;
+  leaseId: string;
+  leaseEpoch: number;
+}
+export type AttemptFence = (claims: AttemptFenceClaims) => AttemptFenceVerdict | Promise<AttemptFenceVerdict>;
 
 export class ManagedAcsAuthorizationError extends Error {
   constructor(public readonly code: ManagedAcsRejectionCode) {
@@ -446,6 +467,16 @@ export interface ManagedAcsGuardOptions {
   now?: () => number;
   maxReplayEntries?: number;
   replayDirectory?: string;
+  /**
+   * Final-boundary attempt fence (see AttemptFence). When configured, `authorizeAtBoundary` refuses any capability whose
+   * attempt is not live. Unset keeps the previous behaviour; deployments must configure it before they rely on cancellation.
+   */
+  attemptFence?: AttemptFence;
+  /**
+   * Containment tripwire: after this many consecutive `ACS_ATTEMPT_STATE_UNKNOWN` refusals, the guard contains itself and
+   * refuses all new execution until restart. Default 3. A deterministic rule, not an advisory signal.
+   */
+  unknownStateContainmentThreshold?: number;
 }
 
 export class ManagedAcsGuard {
@@ -455,6 +486,9 @@ export class ManagedAcsGuard {
   private readonly maxReplayEntries: number;
   private readonly allowedScopes: readonly AcsScope[];
   private publicKey: crypto.KeyObject | undefined;
+  // Containment is in-memory, cleared only by a restart, and read from nothing else: no environment switch can reset it.
+  private contained: { reason: string } | undefined;
+  private consecutiveUnknownStates = 0;
 
   constructor(private readonly options: ManagedAcsGuardOptions) {
     this.now = options.now ?? Date.now;
@@ -518,6 +552,58 @@ export class ManagedAcsGuard {
   /** Non-secret runtime-identity handshake state (for health reporting only). */
   identityStatus(): 'standalone' | 'missing' | 'active' | 'drift' | 'revoked' {
     return this.options.mode === 'standalone' ? 'standalone' : this.identityState;
+  }
+
+  /**
+   * Full authorization including the execution-time attempt fence. Use this at the final boundary, not `authorize`.
+   * The capability is verified first (signature, replay, time, invocation). Only then is the attempt checked, so a
+   * cancelled or superseded attempt is refused even while its capability is still inside its validity window.
+   */
+  async authorizeAtBoundary(
+    toolName: string,
+    actualArguments: Record<string, unknown>,
+    meta: unknown,
+  ): Promise<ManagedAcsAuthorizationMetadata | undefined> {
+    // A contained guard admits nothing new. Checked first, so a refused call does not consume its nonce.
+    if (this.contained) reject('ACS_CONTAINED');
+    const authorization = this.authorize(toolName, actualArguments, meta);
+    const fence = this.options.attemptFence;
+    if (!authorization || !fence) return authorization;
+    let verdict: AttemptFenceVerdict | 'unknown';
+    try {
+      verdict = await fence({
+        runtimeId: authorization.runtimeId,
+        workItemId: authorization.workItemId,
+        attemptId: authorization.attemptId,
+        leaseId: authorization.leaseId,
+        leaseEpoch: authorization.leaseEpoch,
+      });
+    } catch {
+      verdict = 'unknown';
+    }
+    if (verdict !== 'live' && verdict !== 'cancelled' && verdict !== 'expired' && verdict !== 'superseded') verdict = 'unknown';
+    if (verdict === 'unknown') {
+      // Deterministic tripwire: repeated unanswerable attempt state means the authority is unreachable or misbehaving.
+      this.consecutiveUnknownStates += 1;
+      const threshold = this.options.unknownStateContainmentThreshold ?? 3;
+      if (this.consecutiveUnknownStates >= threshold) this.contain('attempt-state-unknown');
+      reject('ACS_ATTEMPT_STATE_UNKNOWN');
+    }
+    this.consecutiveUnknownStates = 0;
+    if (verdict === 'live') return authorization;
+    if (verdict === 'cancelled') reject('ACS_ATTEMPT_CANCELLED');
+    if (verdict === 'expired') reject('ACS_LEASE_EXPIRED');
+    reject('ACS_LEASE_SUPERSEDED');
+  }
+
+  /** Contain the guard: all new execution is refused until restart. Idempotent; the first reason is kept. */
+  contain(reason: string): void {
+    if (this.contained === undefined) this.contained = { reason };
+  }
+
+  /** Containment state for health reporting. The reason is a fixed, non-secret label. */
+  containmentStatus(): { contained: boolean; reason?: string } {
+    return this.contained ? { contained: true, reason: this.contained.reason } : { contained: false };
   }
 
   authorize(

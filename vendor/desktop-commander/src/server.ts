@@ -14,7 +14,7 @@ import {
     type InitializeRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 import { zodToJsonSchema } from "zod-to-json-schema";
-import { preExecuteEnforcement, attestRequest, attestResult, requestHash, agentFromMeta, extractCapability, getApprovalStore, GATEWAY_TRANSPORT_VERIFIED } from './enforcement/pipeline.js';
+import { preExecuteEnforcement, attestRequest, attestResult, requestHash, agentFromMeta, extractCapability, getApprovalStore, GATEWAY_TRANSPORT_VERIFIED, gatewayAttestationConfigured } from './enforcement/pipeline.js';
 // Item #5: pending approval requests live in the pipeline-owned store until
 // an approver (Telegram hook, UI, or the ACS orchestrator) resolves them;
 // the enforcement gate consults the same store for approval re-execution.
@@ -1858,7 +1858,7 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
     const enforcementTransport = (gate.allowed && gate.gatewayTrusted)
         ? GATEWAY_TRANSPORT_VERIFIED
         : (enforcementAgent === 'local' ? 'mcp->local' : 'chatgpt->oauth-gateway->mcp');
-    const auditAgent = (process.env.DC_GATEWAY_ATTESTATION_KEY && !(gate.allowed && gate.gatewayTrusted))
+    const auditAgent = (gatewayAttestationConfigured() && !(gate.allowed && gate.gatewayTrusted))
         ? 'unknown'
         : enforcementAgent;
     const attestAgent = auditAgent;

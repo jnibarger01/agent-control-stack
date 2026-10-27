@@ -26,9 +26,14 @@ Status: STAGED, NOT ACTIVATED. Do not expose the existing OAuth gateway directly
 - Roll back by stopping the **new** system units and restoring backed-up state and pre-cutover private services. Do not perform a rollback without checking database divergence/active tokens.
 
 ## Current implementation
-- `apps/dc-mcp-gateway/public-edge-policy.js`: pure allowlist with tests.
-- `apps/dc-mcp-gateway/public-edge-proxy.js`: private loopback proxy, no credentials; pinned `127.0.0.1:8010` upstream.
-- `ops/jc-hardening/*.service`: staging templates. Root installation, credentials, state migration, and executor separation are **not** done.
-- Source tests: `cd apps/dc-mcp-gateway && npm test`; systemd syntax check: `systemd-analyze verify ops/jc-hardening/*.service`.
+- **Canonical units (this directory):** `acs-jc-public-ingress.service` (runs `apps/dc-mcp-gateway/edge/ingress.js`),
+  `acs-jc-edge.service` (OAuth gateway), `acs-jc-bridge.service` (bridge; drops the executor to `acs-jc-exec` via setpriv).
+  The executor identity is declared in `acs-jc.sysusers.conf`, and its state directory in `acs-jc.tmpfiles.conf`.
+- **Tooling:** `migrate-acs-jc-identities.sh` (dry-run by default; `--apply` as root; `--rollback`) and `preflight.sh`
+  (read-only; fails closed; never prints a secret). Full design, residual risks, parity, and approvals: `docs/jace-commander-service-isolation.md`.
+- Gateway attribution is signed by the bridge with Ed25519. The executor holds only the public key.
+- `apps/dc-mcp-gateway/public-edge-policy.js` and `public-edge-proxy.js` are the earlier drafts. The canonical ingress is `edge/ingress.js`.
+- **Not done:** root installation, real identities, secret provisioning, state migration, and live cutover. Those need approval.
+- Source tests: `cd apps/dc-mcp-gateway && npm test`; unit syntax: `systemd-analyze verify ops/jc-hardening/acs-jc-*.service`.
 
 Hard rule: test and approve isolated services and the public route boundary **before** enabling Funnel. Never treat `No serve config` as permission to enable an unrestricted route.

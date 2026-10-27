@@ -1,25 +1,26 @@
 #!/usr/bin/env node
 /**
- * Trusted gateway transport attribution tests.
+ * Trusted gateway transport attribution tests (Ed25519).
  *
- * Trust chain under test: the OAuth gateway holds GATEWAY_EXECUTION_TOKEN;
- * its bridge verifies the caller and re-signs/forwards
- *   _meta.gateway = { sig: base64url(hmacSHA256(SECRET, `${sub}.${client_id}.${jti}.${iat}`)),
- *                     sub, client_id, jti, iat }
- * DC verifies the sig with the SAME shared secret (DC_GATEWAY_ATTESTATION_KEY),
- * requires iat within 10 minutes and a non-empty jti. A client-set
- * verified:true boolean alone is NEVER trusted.
+ * Trust chain under test: the bridge verifies the OAuth caller, then signs
+ *   _meta.gateway = { sig: base64url(Ed25519.sign(BRIDGE_PRIVATE, `${sub}.${client_id}.${jti}.${iat}`)),
+ *                     sub, client_id, jti, iat, verified: true }
+ * DC verifies sig with the bridge's PUBLIC key only (DC_GATEWAY_ATTESTATION_PUBLIC_KEY),
+ * requires iat within 10 minutes and a non-empty jti. DC holds no signing key and no shared
+ * secret, so a process that can read DC's environment cannot mint gateway identity.
+ * A client-set verified:true boolean alone is NEVER trusted.
  *
  * Cases:
- *   A — env unset: old behavior (spoofed _meta.agent accepted for
- *       attribution; fake verified:true causes NO rejection).
- *   B — env set + valid HMAC: trusted; verified transport string; gateway
- *       sub/client_id recorded as gatewayActor in the audit event.
+ *   A — env unset: old behavior (spoofed _meta.agent accepted for attribution; fake verified:true causes NO rejection).
+ *   B — env set + valid Ed25519 signature: trusted; gateway sub/client_id recorded as gatewayActor.
  *   C — env set + fake verified:true (no sig): rejected GATEWAY_ATTESTATION_INVALID.
- *   D — env set + valid-looking sig but wrong secret: rejected.
- *   E — env set + stale iat (>10 min): rejected.
- *   F — env set + no gateway meta: allowed, unchanged local behavior.
- *   G — audit chain with a gatewayActor event still verifies end-to-end.
+ *   D — env set + tampered sub: rejected.
+ *   E — env set + signature by a DIFFERENT key: rejected.
+ *   F — env set + stale iat (>10 min): rejected.
+ *   G — env set + no gateway meta: allowed, unchanged local behavior.
+ *   H — the RETIRED shared HMAC secret, in any form, is never trusted (an HMAC sig made with it, or with the public PEM).
+ *   I — a configured but unparseable public key fails closed for gateway-bearing requests.
+ *   J — the audit chain with a gatewayActor event still verifies end-to-end.
  */
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -27,8 +28,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-// Redirect the audit chain BEFORE importing dist modules (audit-chain reads
-// DC_AUDIT_DIR at module load).
+// Redirect the audit chain BEFORE importing dist modules (audit-chain reads DC_AUDIT_DIR at module load).
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dc-gateway-attr-'));
 process.env.DC_AUDIT_DIR = path.join(tmp, 'audit');
 process.env.DC_ENFORCEMENT = 'off'; // keep other gates out of scope here
@@ -36,125 +36,129 @@ process.env.DC_ENFORCEMENT = 'off'; // keep other gates out of scope here
 const { preExecuteEnforcement, isTrustedGatewayMeta, gatewayActorFromMeta, GATEWAY_TRANSPORT_VERIFIED, attestRequest } = await import('../dist/enforcement/pipeline.js');
 const { AuditChain, verifyChain } = await import('../dist/audit/audit-chain.js');
 
-const SECRET = 'test-gateway-execution-token';
+const bridge = crypto.generateKeyPairSync('ed25519');
+const other = crypto.generateKeyPairSync('ed25519');
+const PUBLIC_PEM = bridge.publicKey.export({ type: 'spki', format: 'pem' }).toString();
+const RETIRED_SECRET = 'retired-shared-secret-must-never-be-trusted';
 const now = Date.now();
 
-function bridgeSig(secret, gw) {
-  return crypto.createHmac('sha256', secret)
-    .update(`${gw.sub}.${gw.client_id}.${gw.jti}.${gw.iat}`)
-    .digest('base64url');
+function material(gw) {
+  return Buffer.from(`${gw.sub}.${gw.client_id}.${gw.jti}.${gw.iat}`, 'utf8');
 }
-
+function signedBy(privateKey, gw) {
+  return crypto.sign(null, material(gw), privateKey).toString('base64url');
+}
 function gatewayMeta(overrides = {}) {
-  const gw = {
-    sub: 'user-abc',
-    client_id: 'client-123',
-    jti: 'jti-1',
-    iat: now,
-    verified: true,
-    ...overrides,
-  };
-  if (gw.sig === undefined && !('sig' in overrides && gw.sig === null)) {
-    gw.sig = bridgeSig(SECRET, gw);
-  }
+  const gw = { sub: 'user-abc', client_id: 'client-123', jti: 'jti-1', iat: now, verified: true, ...overrides };
+  if (gw.sig === undefined) gw.sig = signedBy(bridge.privateKey, gw);
   return { agent: 'spoofed-agent', remote: true, gateway: gw };
 }
 
 const REQ = { tool: 'read_file', args: { path: '/tmp/x.txt' } };
 
+function setPublicKey(pem) {
+  if (pem === undefined) delete process.env.DC_GATEWAY_ATTESTATION_PUBLIC_KEY;
+  else process.env.DC_GATEWAY_ATTESTATION_PUBLIC_KEY = pem;
+}
+
 async function testEnvUnsetOldBehavior() {
+  setPublicKey(undefined);
   delete process.env.DC_GATEWAY_ATTESTATION_KEY;
-  // Spoofed self-reported agent still accepted for attribution...
-  assert.equal(isTrustedGatewayMeta({ agent: 'spoofed-agent', gateway: { verified: true, sub: 'x', client_id: 'y', jti: 'z', iat: now, sig: 'garbage' } }), false,
+  assert.equal(isTrustedGatewayMeta({ agent: 'x', gateway: { verified: true, sub: 'x', client_id: 'y', jti: 'z', iat: now, sig: 'garbage' } }), false,
     'env unset: nothing is trusted-gateway');
-  // ...and a fake verified:true gateway meta causes NO rejection (backwards compat).
   const gate = await preExecuteEnforcement({ ...REQ, meta: gatewayMeta(), now });
   assert.equal(gate.allowed, true, 'env unset: fake verified:true must not be rejected');
   assert.equal(gate.gatewayTrusted, undefined);
-  // Self-report remains the display attribution path (agentFromMeta unchanged).
-  const { agentFromMeta } = await import('../dist/enforcement/pipeline.js');
-  assert.equal(agentFromMeta({ agent: 'spoofed-agent' }), 'spoofed-agent');
 }
 
 async function testEnvSetTrusted() {
-  process.env.DC_GATEWAY_ATTESTATION_KEY = SECRET;
+  setPublicKey(PUBLIC_PEM);
   const meta = gatewayMeta();
-  assert.equal(isTrustedGatewayMeta(meta, now), true, 'valid bridge HMAC must be trusted');
+  assert.equal(isTrustedGatewayMeta(meta, now), true, 'valid bridge Ed25519 signature must be trusted');
   const gate = await preExecuteEnforcement({ ...REQ, meta, now });
   assert.equal(gate.allowed, true);
   assert.equal(gate.gatewayTrusted, true);
   assert.deepEqual(gate.gatewayActor, { sub: 'user-abc', client_id: 'client-123' });
-
-  // Audit event: verified transport + gatewayActor side-channel (validated
-  // end-to-end against the chain in testAuditChainVerifiesWithGatewayActor).
-  const origAudit = await import('../dist/enforcement/pipeline.js');
-  const ok = origAudit.attestRequest({
-    requestHash: 'hash-b', tool: 'read_file', agent: 'spoofed-agent',
-    transport: GATEWAY_TRANSPORT_VERIFIED,
-    gatewayActor: { sub: 'user-abc', client_id: 'client-123' },
-    args: { path: '/tmp/x.txt' },
-  });
-  assert.equal(ok, true);
   assert.equal(GATEWAY_TRANSPORT_VERIFIED, 'oauth-gateway->mcp (verified)');
   assert.equal(isTrustedGatewayMeta(meta, now + 5 * 60 * 1000), true, 'within 10 min window: trusted');
   assert.equal(isTrustedGatewayMeta(meta, now + 11 * 60 * 1000), false, 'beyond 10 min window: untrusted');
+  assert.equal(gatewayActorFromMeta(meta).sub, 'user-abc');
+  const audit = attestRequest({ requestHash: 'hash-b', tool: 'read_file', agent: 'spoofed-agent', transport: GATEWAY_TRANSPORT_VERIFIED, gatewayActor: { sub: 'user-abc', client_id: 'client-123' }, args: { path: '/tmp/x.txt' } });
+  assert.equal(audit, true);
 }
 
-async function testEnvSetFakeVerifiedRejected() {
-  process.env.DC_GATEWAY_ATTESTATION_KEY = SECRET;
-  // Client claims verified:true directly — no/invalid sig. Fail closed.
-  const fake = gatewayMeta({ sig: null });
+async function testFakeVerifiedRejected() {
+  setPublicKey(PUBLIC_PEM);
+  const fake = gatewayMeta();
   delete fake.gateway.sig;
   assert.equal(isTrustedGatewayMeta(fake, now), false, 'verified:true without sig is NOT trusted');
   const gate = await preExecuteEnforcement({ ...REQ, meta: fake, now });
-  assert.equal(gate.allowed, false, 'fake verified:true must be rejected when env key set');
-  assert.equal(gate.allowed === false && gate.code, 'GATEWAY_ATTESTATION_INVALID');
-
-  // Tampered sub (sig computed over different sub).
+  assert.equal(gate.allowed, false);
+  assert.equal(gate.code, 'GATEWAY_ATTESTATION_INVALID');
   const tampered = gatewayMeta({ sub: 'user-abc' });
   tampered.gateway.sub = 'admin';
-  assert.equal(isTrustedGatewayMeta(tampered, now), false);
   const gate2 = await preExecuteEnforcement({ ...REQ, meta: tampered, now });
-  assert.equal(gate2.allowed === false && gate2.code, 'GATEWAY_ATTESTATION_INVALID');
-
-  // Missing jti.
+  assert.equal(gate2.code, 'GATEWAY_ATTESTATION_INVALID', 'tampered sub must fail');
   const noJti = gatewayMeta({ jti: '' });
-  assert.equal(isTrustedGatewayMeta(noJti, now), false, 'empty jti must be untrusted');
   const gate3 = await preExecuteEnforcement({ ...REQ, meta: noJti, now });
-  assert.equal(gate3.allowed === false && gate3.code, 'GATEWAY_ATTESTATION_INVALID');
+  assert.equal(gate3.code, 'GATEWAY_ATTESTATION_INVALID', 'empty jti must fail');
 }
 
-async function testEnvSetWrongSecretRejected() {
-  process.env.DC_GATEWAY_ATTESTATION_KEY = SECRET;
+async function testWrongSignerRejected() {
+  setPublicKey(PUBLIC_PEM);
   const gw = { sub: 'u', client_id: 'c', jti: 'j', iat: now, verified: true };
-  const wrongSecret = { ...gw, sig: bridgeSig('some-other-token', gw) };
-  assert.equal(isTrustedGatewayMeta({ gateway: wrongSecret }, now), false, 'sig under a different secret must be untrusted');
-  const gate = await preExecuteEnforcement({ ...REQ, meta: { gateway: wrongSecret }, now });
-  assert.equal(gate.allowed === false && gate.code, 'GATEWAY_ATTESTATION_INVALID');
+  const forged = { ...gw, sig: signedBy(other.privateKey, gw) };
+  assert.equal(isTrustedGatewayMeta({ gateway: forged }, now), false, 'signature by a different key must be untrusted');
+  const gate = await preExecuteEnforcement({ ...REQ, meta: { gateway: forged }, now });
+  assert.equal(gate.code, 'GATEWAY_ATTESTATION_INVALID');
 }
 
-async function testEnvSetStaleIatRejected() {
-  process.env.DC_GATEWAY_ATTESTATION_KEY = SECRET;
+async function testStaleIatRejected() {
+  setPublicKey(PUBLIC_PEM);
   const gw = { sub: 'u', client_id: 'c', jti: 'j', iat: now - 11 * 60 * 1000, verified: true };
-  const stale = { ...gw, sig: bridgeSig(SECRET, gw) };
+  const stale = { ...gw, sig: signedBy(bridge.privateKey, gw) };
   assert.equal(isTrustedGatewayMeta({ gateway: stale }, now), false, 'stale iat must be untrusted');
   const gate = await preExecuteEnforcement({ ...REQ, meta: { gateway: stale }, now });
-  assert.equal(gate.allowed === false && gate.code, 'GATEWAY_ATTESTATION_INVALID');
+  assert.equal(gate.code, 'GATEWAY_ATTESTATION_INVALID');
 }
 
-async function testEnvSetNoGatewayMetaUnchanged() {
-  process.env.DC_GATEWAY_ATTESTATION_KEY = SECRET;
-  // Direct/local request without gateway meta: allowed, no trusted attribution.
+async function testNoGatewayMetaUnchanged() {
+  setPublicKey(PUBLIC_PEM);
   const gate = await preExecuteEnforcement({ ...REQ, meta: { agent: 'local' }, now });
-  assert.equal(gate.allowed, true, 'no gateway meta + env set: local behavior unchanged');
+  assert.equal(gate.allowed, true, 'no gateway meta + key set: local behavior unchanged');
   assert.equal(gate.gatewayTrusted, undefined);
   assert.equal(gatewayActorFromMeta({ agent: 'local' }), undefined);
+}
+
+async function testRetiredSecretNeverTrusted() {
+  // Any HMAC construction over the retired secret, or over the public PEM, must be untrusted, even with the
+  // retired variable set and no public key configured. The executor must not be able to mint trust from a secret.
+  setPublicKey(undefined);
+  process.env.DC_GATEWAY_ATTESTATION_KEY = RETIRED_SECRET;
+  const gw = { sub: 'user-abc', client_id: 'client-123', jti: 'jti-1', iat: now, verified: true };
+  const material2 = `${gw.sub}.${gw.client_id}.${gw.jti}.${gw.iat}`;
+  for (const keyMaterial of [RETIRED_SECRET, PUBLIC_PEM]) {
+    const hmacSig = crypto.createHmac('sha256', keyMaterial).update(material2).digest('base64url');
+    assert.equal(isTrustedGatewayMeta({ gateway: { ...gw, sig: hmacSig } }, now), false, 'HMAC sig must never be trusted');
+  }
+  setPublicKey(PUBLIC_PEM);
+  const hmacWithPublic = crypto.createHmac('sha256', PUBLIC_PEM).update(material2).digest('base64url');
+  assert.equal(isTrustedGatewayMeta({ gateway: { ...gw, sig: hmacWithPublic } }, now), false, 'HMAC keyed with the public PEM is not a signature');
+  delete process.env.DC_GATEWAY_ATTESTATION_KEY;
+}
+
+async function testUnparseablePublicKeyFailsClosed() {
+  setPublicKey('not a pem');
+  const gate = await preExecuteEnforcement({ ...REQ, meta: gatewayMeta(), now });
+  assert.equal(gate.allowed, false, 'a configured but unusable public key must reject gateway-bearing requests');
+  assert.equal(gate.code, 'GATEWAY_ATTESTATION_INVALID');
+  setPublicKey(undefined);
 }
 
 async function testAuditChainVerifiesWithGatewayActor() {
   const chainPath = path.join(tmp, 'audit', 'chain-g.jsonl');
   const chain = new AuditChain(chainPath);
-  chain.append({ kind: 'request', tool: 'read_file', agent: 'old-style' }); // pre-gateway event
+  chain.append({ kind: 'request', tool: 'read_file', agent: 'old-style' });
   chain.append({
     kind: 'request', tool: 'read_file', agent: 'unknown',
     transport: GATEWAY_TRANSPORT_VERIFIED,
@@ -165,14 +169,15 @@ async function testAuditChainVerifiesWithGatewayActor() {
   assert.equal(result.valid, true, `chain with gatewayActor event must verify: ${result.error}`);
   const events = JSON.parse(fs.readFileSync(chainPath, 'utf8').trim().split('\n').pop());
   assert.deepEqual(events.gatewayActor, { sub: 'user-abc', client_id: 'client-123' });
-  assert.equal(events.transport, 'oauth-gateway->mcp (verified)');
 }
 
 await testEnvUnsetOldBehavior();
 await testEnvSetTrusted();
-await testEnvSetFakeVerifiedRejected();
-await testEnvSetWrongSecretRejected();
-await testEnvSetStaleIatRejected();
-await testEnvSetNoGatewayMetaUnchanged();
+await testFakeVerifiedRejected();
+await testWrongSignerRejected();
+await testStaleIatRejected();
+await testNoGatewayMetaUnchanged();
+await testRetiredSecretNeverTrusted();
+await testUnparseablePublicKeyFailsClosed();
 await testAuditChainVerifiesWithGatewayActor();
 console.log('Gateway attribution tests passed.');

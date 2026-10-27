@@ -55,8 +55,8 @@ export interface AuditEvent {
   transport?: 'chatgpt' | 'oauth-gateway' | 'mcp' | string;
   /**
    * Trusted gateway attribution (additive, optional): present only when the
-   * request's _meta.gateway attestation HMAC-verified under
-   * DC_GATEWAY_ATTESTATION_KEY. Old events without this field remain
+   * request's _meta.gateway attestation Ed25519-verified under
+   * DC_GATEWAY_ATTESTATION_PUBLIC_KEY. Old events without this field remain
    * verifiable (the field is hashed like any other when present).
    */
   gatewayActor?: { sub: string; client_id: string };
@@ -121,9 +121,15 @@ function legacyCanonicalJson(value: unknown): string {
 }
 
 /** Pick the canonicalization matching an event's stored cv version. */
-function canonicalJsonForEvent(event: Record<string, unknown>): string {
+/** The exact bytes a record is hashed (and MACed) over. Exported so an external verifier can recompute it. */
+export function canonicalJsonForEvent(event: Record<string, unknown>): string {
   if (event.cv === CANONICAL_VERSION) return canonicalJson(event);
   return legacyCanonicalJson(event);
+}
+
+/** Keyed MAC over a canonical record body. Only a holder of `key` can produce a valid value. */
+function hmacHex(key: Buffer, data: string): string {
+  return crypto.createHmac('sha256', key).update(data, 'utf8').digest('hex');
 }
 
 export function sha256Hex(data: string | Buffer): string {
@@ -256,9 +262,16 @@ function lastEvent(filePath: string): StoredEvent | null {
 
 export class AuditChain {
   private filePath: string;
+  private readonly macKey: Buffer | undefined;
 
-  constructor(filePath?: string) {
+  /**
+   * `macKey`, when given, adds a keyed MAC to every record. Without it an attacker who can write the file can rewrite a
+   * record and recompute the whole chain undetected. With it, the rewrite also needs the key. The key must be held
+   * outside the process that writes the chain; it is taken as an argument and never read from the environment.
+   */
+  constructor(filePath?: string, options?: { macKey?: Buffer }) {
     ensureDirs();
+    this.macKey = options?.macKey;
     this.filePath = filePath ?? monthFile();
   }
 
@@ -286,15 +299,19 @@ export class AuditChain {
       const prev = lastEvent(this.filePath);
       const prevHash = prev ? prev.hash : GENESIS_HASH;
       const seq = prev ? prev.seq + 1 : 1;
-      const full: Omit<StoredEvent, 'hash'> = {
+      const body: Record<string, unknown> = {
         ...event,
         cv: CANONICAL_VERSION, // canonicalization version (see canonicalJsonForEvent)
         ts: event.ts ?? new Date().toISOString(),
         seq,
         prevHash,
-      } as Omit<StoredEvent, 'hash'>;
-      const hash = sha256Hex(canonicalJsonForEvent(full as Record<string, unknown>));
-      const stored = { ...full, hash } as StoredEvent;
+      };
+      // The MAC covers the record content and its linkage. It is stored in the record, and the hash covers it too.
+      const withMac = this.macKey
+        ? { ...body, mac: hmacHex(this.macKey, canonicalJsonForEvent(body)) }
+        : body;
+      const hash = sha256Hex(canonicalJsonForEvent(withMac));
+      const stored = { ...withMac, hash } as StoredEvent;
       appendLine(this.filePath, stored);
       return stored;
     });
@@ -378,14 +395,30 @@ export interface VerifyResult {
 
 /**
  * Walk the full chain at `path` and validate every link's hash and linkage.
+ *
+ * With `macKey`, every record must also carry a MAC that verifies under that key. This detects a rewrite that recomputes
+ * the hashes (which an unkeyed chain cannot detect), and a stripped MAC. Without a key, verification proves internal
+ * consistency only.
  */
-export function verifyChain(filePath: string): VerifyResult {
+export function verifyChain(filePath: string, options?: { macKey?: Buffer }): VerifyResult {
   const events = readChainFile(filePath);
   let prevHash = GENESIS_HASH;
   for (let i = 0; i < events.length; i++) {
     const { hash, ...rest } = events[i];
     if (rest.prevHash !== prevHash) {
       return { valid: false, events: events.length, brokenAt: i, error: `prevHash mismatch at seq ${events[i].seq}` };
+    }
+    if (options?.macKey) {
+      const { mac, ...unmacced } = rest as Record<string, unknown>;
+      if (typeof mac !== 'string') {
+        return { valid: false, events: events.length, brokenAt: i, error: `missing mac at seq ${events[i].seq}` };
+      }
+      const expectedMac = hmacHex(options.macKey, canonicalJsonForEvent(unmacced));
+      const a = Buffer.from(mac, 'utf8');
+      const b = Buffer.from(expectedMac, 'utf8');
+      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+        return { valid: false, events: events.length, brokenAt: i, error: `mac mismatch at seq ${events[i].seq}` };
+      }
     }
     // cv:2 events use the lossless recursive canonicalization; events written
     // before cv existed are hashed with the legacy (lossy) form so old files

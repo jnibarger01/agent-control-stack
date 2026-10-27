@@ -3,6 +3,7 @@
 // BRIDGE_PROFILE=jace-commander as `stub-jc.mjs serve`). Records its argv and every
 // JSON-RPC message it receives under $JC_STATE_DIR so tests can prove what
 // reached the executor, and echoes the transported capability on tools/call.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
@@ -10,9 +11,14 @@ import readline from 'node:readline';
 const stateDir = process.env.JC_STATE_DIR;
 if (!stateDir) { console.error('stub-jc: JC_STATE_DIR required'); process.exit(1); }
 fs.mkdirSync(stateDir, { recursive: true });
+const envNames = Object.keys(process.env).filter((k) => k.startsWith('JC_') || k.startsWith('DC_') || k.startsWith('ACS_') || k.startsWith('DESKTOP_COMMANDER_')).sort();
+// SHA-256 of each forwarded value, never the value itself: lets a test prove a secret did not reach the executor.
+const digest = (value) => crypto.createHash('sha256').update(String(value ?? ''), 'utf8').digest('hex');
+const envDigests = Object.fromEntries(envNames.map((k) => [k, digest(process.env[k])]));
 fs.writeFileSync(path.join(stateDir, 'argv.json'), JSON.stringify({
   argv: process.argv.slice(2),
-  env: Object.keys(process.env).filter((k) => k.startsWith('JC_') || k.startsWith('DC_') || k.startsWith('ACS_') || k.startsWith('DESKTOP_COMMANDER_')).sort(),
+  env: envNames,
+  envDigests,
   runtimeId: process.env.JC_RUNTIME_ID,
 }));
 if (process.argv.slice(2).includes('--standalone')) { console.error('stub-jc: --standalone must never be used'); process.exit(2); }

@@ -1,33 +1,68 @@
+# Jace Commander MCP bridge (managed, ACS-authorized). Canonical unit. Runs as acs-jc.
+#
+# Holds: the gateway-attestation SECRET (verifies x-dc-attestation), the Ed25519 SIGNING key (signs _meta.gateway),
+# and its own ACS worker token (result reporting). It never holds the gateway's OAuth signing key, consent passphrase,
+# or ACS JC gateway token (preflight.sh enforces this).
+#
+# The executor is started by the bridge through setpriv as acs-jc-exec, a different uid with NO secrets. It receives
+# only the derived PUBLIC attestation key and the ACS public key. See docs/jace-commander-service-isolation.md.
 [Unit]
-Description=Isolated Jace Commander bridge
+Description=Isolated Jace Commander bridge (managed, loopback)
 After=network-online.target acs-core.service
-Requires=acs-core.service
+Wants=network-online.target acs-core.service
+
 [Service]
 Type=simple
 User=acs-jc
 Group=acs-jc
 WorkingDirectory=/opt/acs-runtime/current/apps/dc-mcp-gateway
 EnvironmentFile=/etc/acs-secrets/acs-jc.env
+Environment=NODE_ENV=production
 Environment=BRIDGE_PROFILE=jace-commander
 Environment=BRIDGE_PORT=8003
 Environment=ACS_MANAGED_MODE=1
-ExecStart=/usr/bin/node bridge.js
+Environment=JC_STATE_DIR=/var/lib/acs-jc/state
+Environment=DC_CMD=/usr/bin/setpriv
+Environment="DC_ARGS=--reuid=acs-jc-exec --regid=acs-jc-exec --init-groups --inh-caps=-all --bounding-set=-all /usr/bin/node /opt/acs-runtime/current/vendor/desktop-commander/dist/jace-commander/cli.js serve"
+ExecStart=/usr/bin/node /opt/acs-runtime/current/apps/dc-mcp-gateway/bridge.js
+ExecStartPre=/usr/bin/test -s /etc/acs-secrets/acs-jc.env
+ExecStartPre=/usr/bin/test -r /opt/acs-runtime/current/vendor/desktop-commander/dist/jace-commander/cli.js
 Restart=on-failure
 RestartSec=5
-UMask=0077
-NoNewPrivileges=yes
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectSystem=strict
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# --- sandbox -------------------------------------------------------------------------------------
+# CAP_SETUID/CAP_SETGID only, so setpriv can drop the executor to acs-jc-exec. Nothing else is kept.
 StateDirectory=acs-jc
 StateDirectoryMode=0700
-ReadWritePaths=/var/lib/acs-jc
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_SETUID CAP_SETGID
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+UMask=0077
+# MemoryDenyWriteExecute is deliberately NOT set: V8 needs writable+executable pages for JIT.
+# The executor inherits this mount namespace, so its state directory must be writable here.
+ReadWritePaths=/var/lib/acs-jc /var/lib/acs-jc-exec
+ReadOnlyPaths=/opt/acs-runtime
+# Loopback only. PARITY COST: this also applies to the executor. git_fetch and git_push need remote network and fail
+# until an explicit host decision allows specific git hosts.
+IPAddressDeny=any
+IPAddressAllow=localhost
+
 [Install]
 WantedBy=multi-user.target

@@ -87,6 +87,24 @@ export interface ApproverdConfig {
    * literal `true`, may not be combined with `passkey`, and is recorded in the audit chain on every start.
    */
   allowSelfAssertedPrivileged?: boolean;
+  /**
+   * Explicit opt-out for principal separation. By default, a record bound to a requester principal can be approved
+   * only by an authenticated passkey operator who is NOT that principal. The legacy `decide` op authenticates nothing
+   * (its approverId is a self-asserted string), so it cannot prove separation and is refused for such records. Set the
+   * literal `true` to accept self-asserted approvals on principal-bound records anyway; recorded in the audit chain.
+   */
+  allowSelfAssertedSeparation?: boolean;
+}
+
+/** The subject a requester principal names: `sub|client`, with an optional `chatgpt:` prefix on the subject. */
+export function principalSubject(principal: string): string {
+  const head = principal.split('|')[0];
+  return head.startsWith('chatgpt:') ? head.slice('chatgpt:'.length) : head;
+}
+
+/** True when an authenticated operator id is the requester principal (same subject, or the whole principal). */
+export function operatorIsPrincipal(operatorId: string, principal: string): boolean {
+  return operatorId === principal || operatorId === principalSubject(principal) || operatorId === principal.split('|')[0];
 }
 
 export interface ApproverdPasskeyConfig {
@@ -239,6 +257,8 @@ export class Approverd {
       throw new TypeError('approverd requires a `passkey` config block for privileged approvals; set allowSelfAssertedPrivileged:true to opt out explicitly (audited)');
     }
     if (passkey !== undefined && optOut === true) throw new TypeError('allowSelfAssertedPrivileged cannot be combined with a `passkey` block');
+    const separationOptOut = config.allowSelfAssertedSeparation;
+    if (separationOptOut !== undefined && separationOptOut !== true && separationOptOut !== false) throw new TypeError('allowSelfAssertedSeparation must be a boolean');
     if (passkey !== undefined) {
       if (!passkey || typeof passkey.trustAnchorPath !== 'string' || !path.isAbsolute(passkey.trustAnchorPath)) throw new TypeError('passkey.trustAnchorPath must be an absolute path');
       assertRelyingPartyShape(passkey.rpId, passkey.origin);
@@ -439,6 +459,11 @@ export class Approverd {
     if (this.passkeyConfigured && message.decision === 'approve' && this.passkeyClasses.has(record.riskClass)) return { ok: false, code: 'PASSKEY_REQUIRED' };
     // The human must have seen THIS invocation: the client echoes its hash.
     if (message.confirmHash !== record.invocationHash) return { ok: false, code: 'CONFIRMATION_MISMATCH' };
+    // Principal separation: the legacy op authenticates nothing, so it cannot show that the decider is not the
+    // requester. Approving a principal-bound record here needs the explicit, audited opt-out.
+    if (message.decision === 'approve' && record.principal !== undefined && this.config.allowSelfAssertedSeparation !== true) {
+      return { ok: false, code: 'PRINCIPAL_SEPARATION_REQUIRES_PASSKEY' };
+    }
     const action = message.decision === 'approve' ? 'approved' : 'rejected';
     if (!this.auditAppend('approval_decision', { approvalId: record.id, action, approverId: message.approverId,
       // Node has no SO_PEERCRED: the socket group proves only that SOME decide-group member acted.
@@ -527,6 +552,10 @@ export class Approverd {
       return { ok: false, code: 'CONFIRMATION_MISMATCH' };
     }
     if (!ID_PATTERN.test(accepted.operatorId)) return { ok: false, code: 'PASSKEY_DENIED' };
+    // Principal separation on the authenticated operator: the requester may not approve their own request.
+    if (record.principal !== undefined && operatorIsPrincipal(accepted.operatorId, record.principal)) {
+      return { ok: false, code: 'SELF_APPROVAL_DENIED' };
+    }
     if (!this.auditAppend('approval_decision', { approvalId: record.id, action: 'approved', approverId: accepted.operatorId,
       approverIdAssurance: 'webauthn-uv', credentialId: accepted.credentialId, protocol: JC_DECIDE_PROTOCOL_VERSION, invocationHash: record.invocationHash })) {
       return { ok: false, code: 'AUDIT_UNAVAILABLE' };

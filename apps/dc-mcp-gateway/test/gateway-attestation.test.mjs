@@ -88,12 +88,16 @@ const BR = `http://127.0.0.1:${brPort}`;
 const BR2 = `http://127.0.0.1:${br2Port}`;
 const ORIGIN = `http://127.0.0.1:${gwPort}`;
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc-gw-test-'));
+// The bridge signs gateway attribution with an Ed25519 private key only it holds; the executor gets the public key.
+const attestationSigner = crypto.generateKeyPairSync('ed25519');
+const SIGNING_PEM = attestationSigner.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
 const stubPath = path.join(ROOT, 'test', 'stub-dc.mjs');
 
 const bridge = startProc(path.join(ROOT, 'bridge.js'), {
   BRIDGE_PORT: String(brPort),
   ACS_MANAGED_MODE: '0',
   DC_GATEWAY_EXECUTION_TOKEN: EXEC_TOKEN,
+  DC_GATEWAY_ATTESTATION_SIGNING_KEY: SIGNING_PEM,
   DC_CMD: process.execPath,
   DC_ARGS: stubPath,
   DC_CWD: ROOT,
@@ -102,6 +106,7 @@ const bridge2 = startProc(path.join(ROOT, 'bridge.js'), {
   BRIDGE_PORT: String(br2Port),
   ACS_MANAGED_MODE: '0',
   DC_GATEWAY_EXECUTION_TOKEN: EXEC_TOKEN,
+  DC_GATEWAY_ATTESTATION_SIGNING_KEY: SIGNING_PEM,
   DC_CMD: process.execPath,
   DC_ARGS: stubPath,
   DC_CWD: ROOT,
@@ -167,10 +172,11 @@ try {
   assert.equal(typeof fwd.params._meta.gateway.iat, 'number');
   assert.ok(Number.isFinite(fwd.params._meta.gateway.iat));
   const gw = fwd.params._meta.gateway;
-  const expectedGatewaySig = crypto.createHmac('sha256', EXEC_TOKEN)
-    .update(`${gw.sub}.${gw.client_id}.${gw.jti}.${gw.iat}`)
-    .digest('base64url');
-  assert.equal(gw.sig, expectedGatewaySig, 'gateway meta HMAC must verify under the shared key');
+  assert.equal(
+    crypto.verify(null, Buffer.from(`${gw.sub}.${gw.client_id}.${gw.jti}.${gw.iat}`, 'utf8'), attestationSigner.publicKey, Buffer.from(gw.sig, 'base64url')),
+    true,
+    'gateway meta Ed25519 signature must verify under the bridge public key',
+  );
   assert.equal(fwd.params._meta.transport, 'oauth-gateway', 'client transport must be force-overwritten');
   assert.notEqual(gw.sub, 'forged', 'client gateway metadata must be force-overwritten');
   console.log('attested identity + signed _meta.gateway injection: OK');

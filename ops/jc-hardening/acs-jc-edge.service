@@ -1,7 +1,13 @@
+# Jace Commander OAuth gateway (authorization server and ACS capability REQUESTER). Canonical unit. Runs as acs-edge.
+#
+# Holds: the OAuth signing key, the consent passphrase, the attestation SECRET (shared with the bridge, to verify
+# x-dc-attestation), and the gateway's own ACS JC token. It must NOT hold the bridge's Ed25519 signing key or the
+# bridge's ACS worker token (preflight.sh enforces this). Loopback only; the public ingress proxies to it.
 [Unit]
-Description=Isolated Jace Commander OAuth gateway
+Description=Isolated Jace Commander OAuth gateway (loopback)
 After=network-online.target acs-jc-bridge.service
-Requires=acs-jc-bridge.service
+Wants=network-online.target acs-jc-bridge.service
+
 [Service]
 Type=simple
 User=acs-edge
@@ -9,26 +15,45 @@ Group=acs-edge
 WorkingDirectory=/opt/acs-runtime/current/apps/dc-mcp-gateway
 EnvironmentFile=/etc/acs-secrets/acs-edge.env
 Environment=NODE_ENV=production
-Environment=GATEWAY_PORT=8010
 Environment=DATA_DIR=/var/lib/acs-edge
-ExecStart=/usr/bin/node server.js
+Environment=GATEWAY_PORT=8010
+ExecStart=/usr/bin/node /opt/acs-runtime/current/apps/dc-mcp-gateway/server.js
+ExecStartPre=/usr/bin/test -s /etc/acs-secrets/acs-edge.env
 Restart=on-failure
 RestartSec=5
-UMask=0077
-NoNewPrivileges=yes
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectSystem=strict
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-ProtectClock=yes
-RestrictSUIDSGID=yes
-LockPersonality=yes
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-ProtectHome=yes
+
+# --- sandbox -------------------------------------------------------------------------------------
 StateDirectory=acs-edge
 StateDirectoryMode=0700
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateUsers=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
 ReadWritePaths=/var/lib/acs-edge
+ReadOnlyPaths=/opt/acs-runtime
+# Loopback only: the bridge and the ACS gateway are reached on loopback. Add an ACS address here explicitly if it is remote.
+IPAddressDeny=any
+IPAddressAllow=localhost
+
 [Install]
 WantedBy=multi-user.target

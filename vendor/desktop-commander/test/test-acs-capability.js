@@ -290,14 +290,14 @@ async function testNonceReplayProtection() {
     assert.equal(results.filter((r) => !r.allowed && r.code === 'ACS_CAPABILITY_REPLAY').length, 7);
 
     resetConsumedAcsNoncesForTest();
-    const previousAttestKey = process.env.DC_GATEWAY_ATTESTATION_KEY;
-    process.env.DC_GATEWAY_ATTESTATION_KEY = 'nonce-test-attestation-key';
+    const previousAttestKey = process.env.DC_GATEWAY_ATTESTATION_PUBLIC_KEY;
+    process.env.DC_GATEWAY_ATTESTATION_PUBLIC_KEY = crypto.generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString();
     const early = buildEnvelope();
     const rejected = await gateWith({ DC_ACS_CAPABILITY_PUBLIC_KEY: keys.publicBase64url }, early);
     assert.equal(rejected.allowed, false);
     assert.equal(rejected.code, 'GATEWAY_ATTESTATION_INVALID');
-    if (previousAttestKey === undefined) delete process.env.DC_GATEWAY_ATTESTATION_KEY;
-    else process.env.DC_GATEWAY_ATTESTATION_KEY = previousAttestKey;
+    if (previousAttestKey === undefined) delete process.env.DC_GATEWAY_ATTESTATION_PUBLIC_KEY;
+    else process.env.DC_GATEWAY_ATTESTATION_PUBLIC_KEY = previousAttestKey;
     const onTime = await gateWith({ DC_ACS_CAPABILITY_PUBLIC_KEY: keys.publicBase64url }, early);
     assert.equal(onTime.allowed, true);
 
@@ -314,8 +314,9 @@ async function testNonceReplayProtection() {
 }
 
 async function testGatewayAcsRequiresAttribution() {
-  const previous = process.env.DC_GATEWAY_ATTESTATION_KEY;
-  process.env.DC_GATEWAY_ATTESTATION_KEY = 'isolated-gateway-test-key';
+  const previous = process.env.DC_GATEWAY_ATTESTATION_PUBLIC_KEY;
+  const bridgeKeys = crypto.generateKeyPairSync('ed25519');
+  process.env.DC_GATEWAY_ATTESTATION_PUBLIC_KEY = bridgeKeys.publicKey.export({ type: 'spki', format: 'pem' }).toString();
   process.env.DC_ACS_CAPABILITY_PUBLIC_KEY = keys.publicBase64url;
   try {
     for (const gateway of [undefined, null, 'malformed', {}, { verified: true }]) {
@@ -325,15 +326,14 @@ async function testGatewayAcsRequiresAttribution() {
       assert.equal(result.code, 'GATEWAY_ATTESTATION_INVALID');
     }
     const gateway = { verified: true, sub: 'test-subject', client_id: 'test-client', jti: 'test-jti', iat: Date.now() };
-    gateway.sig = crypto.createHmac('sha256', process.env.DC_GATEWAY_ATTESTATION_KEY)
-      .update(`${gateway.sub}.${gateway.client_id}.${gateway.jti}.${gateway.iat}`).digest('base64url');
+    gateway.sig = crypto.sign(null, Buffer.from(`${gateway.sub}.${gateway.client_id}.${gateway.jti}.${gateway.iat}`, 'utf8'), bridgeKeys.privateKey).toString('base64url');
     const allowed = await preExecuteEnforcement({ ...REQ,
       meta: { capability: buildEnvelope(), gateway } });
     assert.equal(allowed.allowed, true, 'valid ACS capability plus signed gateway attribution is accepted');
     assert.equal(allowed.gatewayTrusted, true);
   } finally {
-    if (previous === undefined) delete process.env.DC_GATEWAY_ATTESTATION_KEY;
-    else process.env.DC_GATEWAY_ATTESTATION_KEY = previous;
+    if (previous === undefined) delete process.env.DC_GATEWAY_ATTESTATION_PUBLIC_KEY;
+    else process.env.DC_GATEWAY_ATTESTATION_PUBLIC_KEY = previous;
   }
 }
 
