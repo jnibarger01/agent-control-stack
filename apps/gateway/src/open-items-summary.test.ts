@@ -139,6 +139,37 @@ describe("streamOpenItemsSummary", () => {
   });
 });
 
+describe("streamOpenItemsSummary upstream cleanup", () => {
+  const openStream = (frames: string[]) => {
+    const state = { cancelled: false };
+    const fetchImpl = (async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            // Terminal frames arrive, but the upstream never closes its body.
+            for (const frame of frames) controller.enqueue(encoder.encode(frame));
+          },
+          cancel() {
+            state.cancelled = true;
+          }
+        }),
+        { status: 200, headers: { "content-type": "text/event-stream" } }
+      )) as typeof fetch;
+    return { state, fetchImpl };
+  };
+
+  it.each([
+    ["a completion frame", 'data: {"type":"response.completed"}\n\n'],
+    ["[DONE]", "data: [DONE]\n\n"],
+    ["a failure frame", 'data: {"type":"response.failed"}\n\n'],
+    ["an unreadable frame", "data: not-json\n\n"]
+  ])("cancels the upstream body after %s", async (_name, frame) => {
+    const { state, fetchImpl } = openStream([frame]);
+    await collect(streamOpenItemsSummary({ config, items: projected, fetchImpl, signal: new AbortController().signal }));
+    expect(state.cancelled).toBe(true);
+  });
+});
+
 describe("openItemsSummaryConfigFromEnv", () => {
   it("enables only with inference on and a model from the inference allowlist", () => {
     const inference = {
@@ -167,6 +198,7 @@ function routeApp(options: {
   fetchImpl?: typeof fetch;
   items?: WorkItem[];
   events?: InferenceAuditEvent[];
+  timeoutMs?: number;
 }) {
   const app = Fastify();
   const events = options.events ?? [];
@@ -185,7 +217,8 @@ function routeApp(options: {
     audit: options.config ? audit : undefined,
     actorFor: () => "user",
     fetchImpl: options.fetchImpl,
-    newRequestId: () => "sum_test"
+    newRequestId: () => "sum_test",
+    ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs })
   });
   return { app, events };
 }
@@ -246,6 +279,25 @@ describe("POST open-items summary route", () => {
     expect(upstreamBodies[0]).not.toContain("SECRET INTENT TEXT");
     expect(upstreamBodies[0]).not.toContain("private output");
     expect(events.map((event) => event.type)).toEqual(["request_allowed", "upstream_completed"]);
+    await app.close();
+  });
+
+  it("ends a silent upstream at the deadline and audits it as failed", async () => {
+    const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            // Accepts the request, then never sends a frame until aborted.
+            init!.signal!.addEventListener("abort", () => controller.error(new Error("aborted")));
+          }
+        }),
+        { status: 200, headers: { "content-type": "text/event-stream" } }
+      )) as typeof fetch;
+    const { app, events } = routeApp({ config, fetchImpl, timeoutMs: 50 });
+    const res = await app.inject({ method: "POST", url: OPEN_ITEMS_SUMMARY_PATH });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('event: error\ndata: {"code":"upstream_timeout"}');
+    expect(events.map((event) => event.type)).toEqual(["request_allowed", "upstream_failed"]);
     await app.close();
   });
 
