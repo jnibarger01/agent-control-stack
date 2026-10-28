@@ -1,0 +1,86 @@
+/* Design tokens. Dark is the default; light follows the system unless [data-theme] is set. */
+:root {
+  --bg: #060a14;
+  --bg-glow: rgb(99 102 241 / 0.16);
+  --surface: #0c1322;
+  --surface-2: #121b2f;
+  --surface-3: #18233b;
+  --line: #1f2c47;
+  --line-strong: #2d3d60;
+  --ink: #e9eefc;
+  --muted: #94a3c4;
+  --faint: #7a89ac;
+  --accent: #7c93ff;
+  --accent-ink: #0a0f1f;
+  --accent-soft: rgb(124 147 255 / 0.14);
+  --violet: #a78bfa;
+  --cyan: #38bdf8;
+  --ok: #34d399;
+  --ok-soft: rgb(52 211 153 / 0.13);
+  --warn: #fbbf24;
+  --warn-soft: rgb(251 191 36 / 0.13);
+  --bad: #fb7185;
+  --bad-soft: rgb(251 113 133 / 0.14);
+  --info: #60a5fa;
+  --info-soft: rgb(96 165 250 / 0.14);
+  --shadow: 0 1px 0 rgb(255 255 255 / 0.03) inset, 0 12px 32px -16px rgb(0 0 0 / 0.7);
+  --radius: 14px;
+  --radius-sm: 9px;
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  --bg: #f3f5fb;
+  --bg-glow: rgb(99 102 241 / 0.1);
+  --surface: #ffffff;
+  --surface-2: #f6f8fd;
+  --surface-3: #eceff8;
+  --line: #dde3f1;
+  --line-strong: #c3cce2;
+  --ink: #0f172a;
+  --muted: #4f5d7a;
+  --faint: #5b6985;
+  --accent: #3b50d8;
+  --accent-ink: #ffffff;
+  --accent-soft: rgb(59 80 216 / 0.1);
+  --violet: #6d4fd6;
+  --cyan: #0369a1;
+  --ok: #036045;
+  --ok-soft: rgb(4 120 87 / 0.1);
+  --warn: #92400e;
+  --warn-soft: rgb(180 83 9 / 0.12);
+  --bad: #be123c;
+  --bad-soft: rgb(190 18 60 / 0.09);
+  --info: #1d4ed8;
+  --info-soft: rgb(29 78 216 / 0.09);
+  --shadow: 0 1px 2px rgb(15 23 42 / 0.06), 0 10px 28px -18px rgb(15 23 42 / 0.25);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --bg: #f3f5fb;
+    --bg-glow: rgb(99 102 241 / 0.1);
+    --surface: #ffffff;
+    --surface-2: #f6f8fd;
+    --surface-3: #eceff8;
+    --line: #dde3f1;
+    --line-strong: #c3cce2;
+    --ink: #0f172a;
+    --muted: #4f5d7a;
+    --faint: #5b6985;
+    --accent: #3b50d8;
+    --accent-ink: #ffffff;
+    --accent-soft: rgb(59 80 216 / 0.1);
+    --violet: #6d4fd6;
+    --cyan: #0369a1;
+    --ok: #036045;
+    --ok-soft: rgb(4 120 87 / 0.1);
+    --warn: #92400e;
+    --warn-soft: rgb(180 83 9 / 0.12);
+    --bad: #be123c;
+    --bad-soft: rgb(190 18 60 / 0.09);
+    --info: #1d4ed8;
+    --info-soft: rgb(29 78 216 / 0.09);
+    --shadow: 0 1px 2px rgb(15 23 42 / 0.06), 0 10px 28px -18px rgb(15 23 42 / 0.25);
+    color-scheme: light;
+  }
+}

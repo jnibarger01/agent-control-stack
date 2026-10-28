@@ -5,7 +5,7 @@ import {
   type BoundedCommandResult
 } from "@agent-control-stack/machine-controller";
 import { z } from "zod";
-import type { CheckSnapshot, MergeMethod, PullRequestSnapshot, PullRequestSource } from "./types.js";
+import type { CheckSnapshot, MergeMethod, PullRequestReader, PullRequestSnapshot, PullRequestSource } from "./types.js";
 
 const PAGE = 100;
 
@@ -28,6 +28,26 @@ const QUERY = `query($owner:String!,$name:String!){
   }
 }`;
 
+/**
+ * One pull request by number, any state, with the identity fields the open-PR list does not select: the base commit, the
+ * commit the check rollup belongs to, and the app behind each check run. A query only; there is no mutation here.
+ */
+export const PULL_REQUEST_BY_NUMBER_QUERY = `query($owner:String!,$name:String!,$number:Int!){
+  repository(owner:$owner,name:$name){
+    pullRequest(number:$number){
+      number title state isDraft isCrossRepository headRefName headRefOid baseRefName baseRefOid mergeable reviewDecision
+      author{login}
+      reviewThreads(first:${PAGE}){totalCount nodes{isResolved}}
+      files(first:${PAGE}){totalCount nodes{path}}
+      commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:${PAGE}){totalCount nodes{
+        __typename
+        ... on CheckRun{name status conclusion checkSuite{app{slug}}}
+        ... on StatusContext{context state}
+      }}}}}}
+    }
+  }
+}`;
+
 const CHECK_STATUSES = new Set(["COMPLETED", "IN_PROGRESS", "QUEUED", "PENDING", "WAITING", "REQUESTED"]);
 
 const contextSchema = z.discriminatedUnion("__typename", [
@@ -35,7 +55,11 @@ const contextSchema = z.discriminatedUnion("__typename", [
     __typename: z.literal("CheckRun"),
     name: z.string().min(1),
     status: z.string(),
-    conclusion: z.string().nullable().optional()
+    conclusion: z.string().nullable().optional(),
+    checkSuite: z
+      .object({ app: z.object({ slug: z.string() }).nullable() })
+      .nullable()
+      .optional()
   }),
   z.object({ __typename: z.literal("StatusContext"), context: z.string().min(1), state: z.string() })
 ]);
@@ -54,6 +78,10 @@ const pullSchema = z.object({
   headRefName: z.string().min(1),
   headRefOid: z.string().regex(/^[0-9a-f]{40}$/u),
   baseRefName: z.string().min(1),
+  baseRefOid: z
+    .string()
+    .regex(/^[0-9a-f]{40}$/u)
+    .optional(),
   mergeable: z.enum(["MERGEABLE", "CONFLICTING", "UNKNOWN"]),
   reviewDecision: z.enum(["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"]).nullable(),
   author: z.object({ login: z.string().min(1) }).nullable(),
@@ -69,6 +97,10 @@ const pullSchema = z.object({
     nodes: z.array(
       z.object({
         commit: z.object({
+          oid: z
+            .string()
+            .regex(/^[0-9a-f]{40}$/u)
+            .optional(),
           statusCheckRollup: z
             .object({
               contexts: z.object({ totalCount: z.number().int().nonnegative(), nodes: z.array(contextSchema) })
@@ -83,18 +115,26 @@ const pullSchema = z.object({
 type GqlPull = z.infer<typeof pullSchema>;
 type GqlContext = z.infer<typeof contextSchema>;
 
-function checkFrom(context: GqlContext): CheckSnapshot {
+function checkFrom(context: GqlContext, withIdentity: boolean): CheckSnapshot {
   if (context.__typename === "CheckRun") {
     // A status this code does not know is UNKNOWN, which the gate treats as not finished: never as passing.
     const status = (CHECK_STATUSES.has(context.status) ? context.status : "UNKNOWN") as CheckSnapshot["status"];
-    return { name: context.name, status, conclusion: context.conclusion ?? null };
+    return {
+      name: context.name,
+      status,
+      conclusion: context.conclusion ?? null,
+      ...(context.checkSuite !== undefined
+        ? { appSlug: context.checkSuite?.app?.slug ?? null, source: "check_run" as const }
+        : {})
+    };
   }
   // A commit status: SUCCESS / FAILURE / ERROR are final, PENDING / EXPECTED are not, anything else is unknown.
   const final = context.state === "SUCCESS" || context.state === "FAILURE" || context.state === "ERROR";
   return {
     name: context.context,
     status: final ? "COMPLETED" : context.state === "PENDING" || context.state === "EXPECTED" ? "PENDING" : "UNKNOWN",
-    conclusion: final ? context.state : null
+    conclusion: final ? context.state : null,
+    ...(withIdentity ? { appSlug: null, source: "status_context" as const } : {})
   };
 }
 
@@ -102,6 +142,9 @@ function checkFrom(context: GqlContext): CheckSnapshot {
 export function snapshotFromGraphQl(node: GqlPull): PullRequestSnapshot {
   const rollup = node.commits.nodes[0]?.commit.statusCheckRollup ?? null;
   const contexts = rollup?.contexts.nodes ?? [];
+  // Identity fields are attached only when the read selected them (the by-number query), so list snapshots are unchanged.
+  const withIdentity = node.baseRefOid !== undefined;
+  const checksCommitSha = node.commits.nodes[0]?.commit.oid;
   return {
     number: node.number,
     title: node.title,
@@ -112,10 +155,12 @@ export function snapshotFromGraphQl(node: GqlPull): PullRequestSnapshot {
     headRef: node.headRefName,
     headSha: node.headRefOid,
     baseRef: node.baseRefName,
+    ...(node.baseRefOid !== undefined ? { baseRefOid: node.baseRefOid } : {}),
+    ...(checksCommitSha !== undefined ? { checksCommitSha } : {}),
     mergeable: node.mergeable,
     reviewDecision: node.reviewDecision,
     unresolvedThreads: node.reviewThreads.nodes.filter((thread) => !thread.isResolved).length,
-    checks: contexts.map(checkFrom),
+    checks: contexts.map((context) => checkFrom(context, withIdentity)),
     changedFiles: node.files.nodes.map((file) => file.path),
     truncated: {
       threads: node.reviewThreads.totalCount > node.reviewThreads.nodes.length,
@@ -225,6 +270,53 @@ export function createGhPullRequestSource(repository: string, run: GhRunner = cr
       const pulls = envelope.data.data.repository.pullRequests;
       if (pulls.pageInfo.hasNextPage) throw new Error(`more than ${PAGE} open pull requests; refusing a partial view`);
       return pulls.nodes.map(parsePullRequestNode);
+    }
+  };
+}
+
+/**
+ * Reads one pull request by number through `gh`, any state. Read-only by construction: the only operation is
+ * PULL_REQUEST_BY_NUMBER_QUERY. A missing pull request, a malformed response, or a response without the base commit or
+ * the rollup commit is an error for the whole read, never a partial or defaulted snapshot.
+ */
+export function createGhPullRequestReader(repository: string, run: GhRunner = createGhRunner()): PullRequestReader {
+  const { owner, name } = parseRepository(repository);
+  return {
+    async getPullRequest(number) {
+      if (!Number.isSafeInteger(number) || number <= 0)
+        throw new Error("pull request number must be a positive integer");
+      const result = await run([
+        "api",
+        "graphql",
+        "-f",
+        `query=${PULL_REQUEST_BY_NUMBER_QUERY}`,
+        "-F",
+        `owner=${owner}`,
+        "-F",
+        `name=${name}`,
+        "-F",
+        `number=${number}`
+      ]);
+      if (result.exitCode !== 0) throw new Error(`gh graphql failed: ${result.stderr.trim().slice(0, 200)}`);
+      let json: unknown;
+      try {
+        json = JSON.parse(result.stdout);
+      } catch {
+        throw new Error("gh graphql returned unparseable output");
+      }
+      const envelope = z
+        .object({ data: z.object({ repository: z.object({ pullRequest: z.unknown().nullable() }) }) })
+        .safeParse(json);
+      if (!envelope.success) throw new Error("gh graphql returned no pull request data");
+      const node = envelope.data.data.repository.pullRequest;
+      if (node === null) throw new Error(`pull request #${number} not found`);
+      const snapshot = parsePullRequestNode(node);
+      if (snapshot.number !== number)
+        throw new Error(`gh returned pull request #${snapshot.number}, expected #${number}`);
+      if (snapshot.baseRefOid === undefined || snapshot.checksCommitSha === undefined) {
+        throw new Error(`pull request #${number} response lacks the base or rollup commit; refusing a partial view`);
+      }
+      return snapshot;
     }
   };
 }

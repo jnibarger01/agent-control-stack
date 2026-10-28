@@ -17,6 +17,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createTunnelSignaturePayload, resolveMcpAuthOptions } from "./auth.js";
 import { buildGateway, type GatewayAuthOptions, type GatewayCredential } from "./server.js";
 import { prepareHermesSourceFixture } from "./hermes-source-fixture.js";
+import { parseConnectorDetail } from "@agent-control-stack/mission-control-contract";
 
 const testAuth = { token: "t", actor: "user", actorId: "user" } as const;
 const oauthIssuer = "https://auth.example.test";
@@ -3250,6 +3251,61 @@ describe("gateway MCP transport", () => {
       if (!appClosed) {
         await app.close();
       }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds the connector detail to a session window the console contract accepts, active sessions first", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-tunnel-window-"));
+    const dbPath = join(dir, "control.db");
+    const { publicKey } = generateKeyPairSync("ed25519");
+    const app = buildTestGateway({ dbPath, logger: false });
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/connectors",
+        payload: {
+          id: "busy",
+          displayName: "Busy connector",
+          publicKeyPem: String(publicKey.export({ type: "spki", format: "pem" })),
+          allowedScopes: ["acs:work:read"]
+        }
+      });
+      expect(created.statusCode).toBe(201);
+      // Seed history straight through the store: the routes are covered elsewhere, and 1000 HTTP calls are slow.
+      const seed = new SqliteWorkItemStore(dbPath);
+      try {
+        // session_0 is the oldest row but still active; the 500 newer rows have already expired.
+        const now = Date.now();
+        seed.registerTunnelSession({
+          connectorId: "busy",
+          tunnelId: "tunnel_busy",
+          sessionId: "session_0",
+          now: new Date(now - 120_000),
+          expiresAt: new Date(now + 600_000).toISOString(),
+          actorId: testAuth.actorId
+        });
+        for (let i = 1; i <= 500; i += 1)
+          seed.registerTunnelSession({
+            connectorId: "busy",
+            tunnelId: "tunnel_busy",
+            sessionId: `session_${i}`,
+            now: new Date(now - 60_000),
+            expiresAt: new Date(now - 30_000).toISOString(),
+            actorId: testAuth.actorId
+          });
+      } finally {
+        seed.close();
+      }
+      const detail = await app.inject({ method: "GET", url: "/api/connectors/busy" });
+      expect(detail.statusCode).toBe(200);
+      const body = detail.json();
+      expect(parseConnectorDetail(body).ok).toBe(true);
+      expect(body.sessions).toHaveLength(500);
+      expect(body.sessionWindow).toEqual({ shown: 500, total: 501 });
+      expect(body.sessions[0]).toMatchObject({ sessionId: "session_0", effectiveStatus: "active" });
+    } finally {
+      await app.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });

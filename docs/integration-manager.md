@@ -53,6 +53,16 @@ its members; a pull request that only depends on one is `blocked_by_cycle`, and 
   disabled, so a merge driver named in an operator's `~/.gitconfig` cannot be selected by a pull request's `.gitattributes`.
 - Repository names follow GitHub's rules; `..`, `.` and anything else that could reach the API path as a segment is refused.
 
+## Reading one pull request by number
+
+`createGhPullRequestReader(repository, run)` returns a `PullRequestReader` with a single `getPullRequest(number)` method
+(any state). It uses `PULL_REQUEST_BY_NUMBER_QUERY`, a GraphQL query, and additionally selects the base commit
+(`baseRefOid`), the commit the check rollup belongs to (`checksCommitSha`), and the app behind each check run
+(`appSlug`, plus `source`: `check_run` or `status_context`). These fields are optional on the snapshot and absent from the
+open-pull-request list, so list snapshots are unchanged. A missing pull request, a number mismatch, a malformed response, or
+a response without the base or rollup commit is an error for the whole read. The Outcome Engine ([docs/outcome-engine.md](outcome-engine.md))
+uses this reader; it still reports `merged: false` and merges nothing.
+
 ## Fail-closed behavior
 
 - A head commit that is not in the clone, a base that cannot be read, or a merge that could not be evaluated is reported as

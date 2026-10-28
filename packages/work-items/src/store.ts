@@ -1528,6 +1528,11 @@ export interface WorkItemStore {
   recordPolicyDecision(input: PolicyDecisionRecord): StoredAuditEvent;
   recordApproval(input: ApprovalRecord): ApprovalGrant;
   hasApproval(workItemId: string, actionHash: string): boolean;
+  /** The current base approval record for an action hash (no state or expiry checks). */
+  getApprovalGrant(
+    workItemId: string,
+    actionHash: string
+  ): { approvedBy: string; status: string; expiresAt: string } | undefined;
   consumeApproval(workItemId: string, actionHash: string, options?: Date | ConsumeApprovalOptions): StoredAuditEvent;
   startWorkItem(id: string, workerId?: string, options?: ClaimOptions): ClaimedWorkItem;
   claimNextApprovedWorkItem(workerId: string, options?: ClaimOptions): ClaimedWorkItem | undefined;
@@ -1611,6 +1616,16 @@ export interface WorkItemStore {
     body?: Record<string, unknown>;
     attributes?: Record<string, string | number | boolean>;
   }): StoredAuditEvent;
+  /**
+   * Appends a system event unless one with the same name already carries the same value for `uniqueAttribute`. The
+   * check and the append share one IMMEDIATE transaction, so concurrent writers cannot both claim the same key.
+   */
+  recordSystemEventOnce(input: {
+    name: string;
+    uniqueAttribute: string;
+    body?: Record<string, unknown>;
+    attributes: Record<string, string | number | boolean>;
+  }): { event: StoredAuditEvent; recorded: boolean };
   /** Read the single canonical execution-mode row. null mode means missing or corrupt. */
   getExecutionMode(): {
     mode: "strict" | "admin" | null;
@@ -3347,8 +3362,12 @@ export class SqliteWorkItemStore implements WorkItemStore {
   ): ExecutionPlanApproval | undefined {
     const row = this.db
       .prepare(
+        // idx_execution_plan_approvals_one_granted allows at most one granted row per key; the
+        // ORDER BY keeps the choice deterministic (latest grant wins) should that ever not hold.
         `SELECT * FROM execution_plan_approvals
-         WHERE work_item_id = ? AND plan_hash = ? AND action_hash = ? AND status = 'granted' AND expires_at > ?`
+         WHERE work_item_id = ? AND plan_hash = ? AND action_hash = ? AND status = 'granted' AND expires_at > ?
+         ORDER BY created_at DESC, approval_id DESC
+         LIMIT 1`
       )
       .get(workItemId, planHash, actionHash, new Date().toISOString()) as unknown as
       ExecutionPlanApprovalRow | undefined;
@@ -7224,6 +7243,19 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
+  getApprovalGrant(
+    workItemId: string,
+    actionHash: string
+  ): { approvedBy: string; status: string; expiresAt: string } | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT approved_by, status, expires_at FROM approval_records WHERE work_item_id = ? AND action_hash = ?`
+      )
+      .get(workItemId, actionHash) as unknown as
+      { approved_by: string; status: string; expires_at: string } | undefined;
+    return row ? { approvedBy: row.approved_by, status: row.status, expiresAt: row.expires_at } : undefined;
+  }
+
   hasApproval(workItemId: string, actionHash: string): boolean {
     const row = this.db
       .prepare(
@@ -7972,6 +8004,32 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const attributes = { ...(input.attributes ?? {}), "work_item.id": workItemId };
       const event = this.appendAuditEvent(createEvent(name, input.body ?? {}, attributes));
       return { value: event, events: [event] };
+    });
+  }
+
+  recordSystemEventOnce(input: {
+    name: string;
+    uniqueAttribute: string;
+    body?: Record<string, unknown>;
+    attributes: Record<string, string | number | boolean>;
+  }): { event: StoredAuditEvent; recorded: boolean } {
+    const name = requiredString(input.name, "name");
+    const key = requiredString(input.uniqueAttribute, "uniqueAttribute");
+    // The key becomes part of a JSON path, so only plain dotted identifiers are accepted.
+    if (!/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/u.test(key)) {
+      throw new ControlStackError("invalid_request", "uniqueAttribute must be a dotted identifier");
+    }
+    const value = input.attributes[key];
+    if (typeof value !== "string" || value.length === 0) {
+      throw new ControlStackError("invalid_request", `attributes must carry the unique attribute ${key} as a string`);
+    }
+    return this.write((): { value: { event: StoredAuditEvent; recorded: boolean }; events: StoredAuditEvent[] } => {
+      const existing = this.db
+        .prepare(`SELECT * FROM audit_events WHERE name = ? AND json_extract(attributes, ?) = ? LIMIT 1`)
+        .get(name, `$."${key}"`, value) as unknown as EventRow | undefined;
+      if (existing) return { value: { event: rowToEvent(existing), recorded: false }, events: [] };
+      const event = this.appendAuditEvent(createEvent(name, input.body ?? {}, input.attributes));
+      return { value: { event, recorded: true }, events: [event] };
     });
   }
 

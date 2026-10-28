@@ -15,7 +15,11 @@ const authorityFiles = [
   ["apps/gateway/src/server.ts", { statements: 80, branches: 75, functions: 90, lines: 80 }],
   ["apps/gateway/src/tools/execute-approved.ts", { statements: 80, branches: 70, functions: 80, lines: 80 }],
   ["apps/worker/src/index.ts", { statements: 70, branches: 55, functions: 90, lines: 70 }],
-  ["packages/sandbox/src/index.ts", { statements: 90, branches: 80, functions: 90, lines: 90 }]
+  ["packages/sandbox/src/index.ts", { statements: 90, branches: 80, functions: 90, lines: 90 }],
+  // The Outcome Engine decides what a verdict says and stores it; these three carry the honesty and trust guarantees.
+  ["packages/outcome-engine/src/verdict.ts", { statements: 95, branches: 90, functions: 95, lines: 95 }],
+  ["packages/outcome-engine/src/ledger.ts", { statements: 88, branches: 70, functions: 85, lines: 88 }],
+  ["packages/outcome-engine/src/persist.ts", { statements: 95, branches: 90, functions: 95, lines: 95 }]
 ];
 
 let failed = false;

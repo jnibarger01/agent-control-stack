@@ -12,6 +12,7 @@
     }
   },
   "dependencies": {
-    "@agent-control-stack/work-items": "0.1.0"
+    "@agent-control-stack/work-items": "0.1.0",
+    "@agent-control-stack/mission-control-contract": "0.1.0"
   }
 }
