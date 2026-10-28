@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 /**
- * scripts/audit-gate.mjs: the documented node-forge exception must hold only
+ * scripts/audit-gate.mjs: a fixture exception must hold only
  * while it is the sole high/critical advisory on the package, no patched
  * release is published, and the package stays out of the production tree.
  * Synthetic `npm audit --json` reports; no network.
  */
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { evaluate, patchedVersions, reportShapeProblem } from '../scripts/audit-gate.mjs';
+import { evaluate as productionEvaluate, EXCEPTIONS, patchedVersions, reportShapeProblem } from '../scripts/audit-gate.mjs';
 
 const semver = createRequire(import.meta.url)('semver');
 const FORGE = 'GHSA-86w9-cpqp-85rv';
+const fixtureExceptions = [{ package: 'node-forge', advisory: FORGE, reason: 'Synthetic test exception only' }];
+const evaluate = (report, probes) => productionEvaluate(report, probes, fixtureExceptions);
 const advisory = (name, id, severity = 'high', range = '<=1.4.0') => ({
   source: 1, name, dependency: name, title: id, url: `https://github.com/advisories/${id}`, severity, range,
 });
@@ -29,7 +31,12 @@ const probes = (overrides = {}) => ({
 let passed = 0;
 const test = (name, fn) => { fn(); passed += 1; console.log(`  ✓ ${name}`); };
 
-test('accepts the documented exception when nothing else is wrong', () => {
+test('production no longer exempts the patched node-forge advisory', () => {
+  assert.deepEqual(EXCEPTIONS, []);
+  assert.equal(productionEvaluate(report(base()), probes()).problems.length, 2);
+});
+
+test('accepts a fixture exception when nothing else is wrong', () => {
   const result = evaluate(report(base()), probes());
   assert.deepEqual(result.problems, []);
   assert.deepEqual(result.accepted.map((item) => item.advisory), [FORGE]);
