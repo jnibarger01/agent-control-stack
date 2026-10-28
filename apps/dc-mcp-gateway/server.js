@@ -16,10 +16,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { saveJson } from './atomic-json.js';
+import { fetchClientMetadata, isAllowedRedirectUri, matchesRegisteredLoopback } from './cimd-guard.js';
 import { ClientInfoCache, createClientObserver, extractClientInfo } from './client-attribution.js';
 import { localRoutingFromEnv, stripAuthorityMeta } from './jc-routing.js';
 import { managedModeFromEnv, jcModeFromEnv, identityAttribution, capabilityTransport, acsPost, isToolsCall, dcRuntimeIdentityFromState, issueRuntimeBootstrap, completeRuntimeBootstrap, injectRuntimeBootstrap } from './managed.js';
-import { dcBridgeReady } from './readiness.js';
+import { dcBridgeReady, jcBridgeReady } from './readiness.js';
 import { REPORTABLE_REFRESH_FAILURES, bearerChallenge, classifyBearer, createAuthEventReporter, equalSecrets, resolveRefresh } from './auth-health.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -324,36 +325,25 @@ function log(method, path, status, note = '') {
 // ---------------------------------------------------------------------------
 async function resolveClient(clientId) {
   if (clients[clientId]) return clients[clientId];
-  if (!/^https:\/\//.test(clientId)) return null; // CIMD ids must be https URLs
+  if (typeof clientId !== 'string' || !/^https:\/\//.test(clientId)) return null; // CIMD ids must be https URLs
   const cached = cimdCache.get(clientId);
   if (cached && cached._fetched + 3600_000 > Date.now()) return cached;
   try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 5000);
-    const r = await fetch(clientId, { signal: ctrl.signal, headers: { accept: 'application/json' } });
-    clearTimeout(t);
-    if (!r.ok) return null;
-    const doc = await r.json();
-    if (!Array.isArray(doc.redirect_uris) || doc.redirect_uris.length === 0) return null;
-    const meta = {
-      redirect_uris: doc.redirect_uris,
-      token_endpoint_auth_method: doc.token_endpoint_auth_method || 'none',
-      grant_types: doc.grant_types || ['authorization_code'],
-      _fetched: Date.now(),
-    };
-    cimdCache.set(clientId, meta);
-    return meta;
-  } catch { return null; }
+    // Connection-time SSRF policy, no redirects, bounded time and size (see cimd-guard.js).
+    const meta = await fetchClientMetadata(clientId);
+    const doc = { ...meta, _fetched: Date.now() };
+    cimdCache.set(clientId, doc);
+    return doc;
+  } catch (err) {
+    console.warn(`gateway: client metadata rejected: ${logSafe(err && err.message)}`);
+    return null;
+  }
 }
 
 function validRedirect(client, redirectUri) {
-  try {
-    const u = new URL(redirectUri);
-    if (client.redirect_uris.includes(redirectUri)) return true;
-    // loopback redirect allowed per RFC 8252 for native-ish clients
-    if ((u.hostname === '127.0.0.1' || u.hostname === 'localhost') && u.protocol === 'http:') return true;
-  } catch { /* noop */ }
-  return false;
+  if (client.redirect_uris.includes(redirectUri)) return true;
+  // Loopback: any port, but only on a host and path the client registered (RFC 8252 §7.3).
+  return matchesRegisteredLoopback(redirectUri, client.redirect_uris);
 }
 
 // ---------------------------------------------------------------------------
@@ -420,7 +410,7 @@ async function handleAuthorize(req, res, q, laneHint = null) {
 
 async function handleConsent(req, res, body, laneHint = null) {
   const params = Object.fromEntries(new URLSearchParams(body.toString('utf8')).entries());
-  const { client_id, redirect_uri, scope, state, code_challenge } = params;
+  const { client_id, redirect_uri, scope, state, code_challenge, code_challenge_method } = params;
   const pass = params.passphrase || '';
   const passOk = pass.length > 0 && crypto.timingSafeEqual(
     Buffer.from(crypto.createHash('sha256').update(pass).digest()),
@@ -432,10 +422,14 @@ async function handleConsent(req, res, body, laneHint = null) {
   if (!lane) return send(res, 400, denyPage('Unknown resource.'), { 'Content-Type': 'text/html; charset=utf-8' });
   const resource = params.resource || lane.resource;
   if (resource !== lane.resource) return send(res, 400, denyPage('Resource does not belong to this OAuth lane.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  // The consent POST is a second entry point: it must enforce the same PKCE rule as /authorize, not trust the form.
+  if (code_challenge_method !== 'S256' || !isPkceChallenge(code_challenge)) return send(res, 400, denyPage('PKCE with S256 is required.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  const reqScope = (scope || 'mcp').split(' ').filter((s) => s === 'mcp' || s === 'openid' || s === 'email' || s === 'profile');
+  if (reqScope.length === 0) return send(res, 400, denyPage('No permitted scope requested.'), { 'Content-Type': 'text/html; charset=utf-8' });
   const code = randId();
   codes.set(code, {
-    client_id, redirect_uri, scope: scope || 'mcp', resource, issuer: lane.issuer,
-    code_challenge, exp: now() + CODE_TTL_S,
+    client_id, redirect_uri, scope: reqScope.join(' '), resource, issuer: lane.issuer,
+    code_challenge, code_challenge_method: 'S256', exp: now() + CODE_TTL_S,
   });
   const u = new URL(redirect_uri);
   u.searchParams.set('code', code);
@@ -444,6 +438,9 @@ async function handleConsent(req, res, body, laneHint = null) {
   return redirect(res, u.toString());
 }
 
+// RFC 7636 section 4.1 / 4.2: 43-128 unreserved characters.
+const isPkceVerifier = (v) => typeof v === 'string' && /^[A-Za-z0-9\-._~]{43,128}$/.test(v);
+const isPkceChallenge = (v) => typeof v === 'string' && /^[A-Za-z0-9\-_]{43}$/.test(v);
 const codes = new Map();
 setInterval(() => { const t = now(); for (const [c, g] of codes) if (g.exp < t) codes.delete(c); }, 60_000);
 
@@ -502,6 +499,7 @@ async function handleToken(req, res, body, laneHint = null) {
     if (client.client_secret && !equalSecrets(client.client_secret, client_secret)) return jsonError(res, 401, 'invalid_client', 'client auth failed');
     if (redirect_uri !== g.redirect_uri) return jsonError(res, 400, 'invalid_grant', 'redirect_uri mismatch');
     if (!code_verifier) return jsonError(res, 400, 'invalid_request', 'code_verifier required');
+    if (!isPkceVerifier(code_verifier)) return jsonError(res, 400, 'invalid_grant', 'PKCE verification failed');
     const expect = b64u(crypto.createHash('sha256').update(code_verifier).digest());
     const a = Buffer.from(expect); const b = Buffer.from(g.code_challenge);
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return jsonError(res, 400, 'invalid_grant', 'PKCE verification failed');
@@ -560,8 +558,8 @@ async function handleRegister(req, res, body, lane = DC_OAUTH_LANE) {
   let meta;
   try { meta = JSON.parse(body.toString('utf8')); } catch { return jsonError(res, 400, 'invalid_client_metadata', 'body must be JSON'); }
   const uris = meta.redirect_uris;
-  if (!Array.isArray(uris) || uris.length === 0 || !uris.every((u) => { try { new URL(u); return true; } catch { return false; } }))
-    return jsonError(res, 400, 'invalid_redirect_uri', 'redirect_uris must be a non-empty array of valid URIs');
+  if (!Array.isArray(uris) || uris.length === 0 || uris.length > 20 || !uris.every(isAllowedRedirectUri))
+    return jsonError(res, 400, 'invalid_redirect_uri', 'redirect_uris must be 1-20 https (or loopback http) URIs without fragments or userinfo');
   const grants = meta.grant_types || ['authorization_code'];
   if (!grants.every((g) => ['authorization_code', 'refresh_token'].includes(g)))
     return jsonError(res, 400, 'invalid_client_metadata', 'unsupported grant_types');
@@ -775,10 +773,10 @@ function proxyInitializeWithAttestation(req, res, bodyBuf, identity, challenge, 
 // ---------------------------------------------------------------------------
 // /ready + /authority support (hardening item #2)
 // ---------------------------------------------------------------------------
-async function checkAcsIssuanceReady() {
-  if (!MANAGED.enabled || !MANAGED.acsGatewayUrl) return { reachable: false, detail: 'ACS managed issuance not configured' };
+async function checkAcsIssuanceReady(config = MANAGED) {
+  if (!config.enabled || !config.acsGatewayUrl) return { reachable: false, detail: 'ACS managed issuance not configured' };
   try {
-    const url = new URL('/readyz', MANAGED.acsGatewayUrl);
+    const url = new URL('/readyz', config.acsGatewayUrl);
     const r = await fetch(url, { signal: AbortSignal.timeout(3000) });
     return { reachable: r.ok, httpStatus: r.status };
   } catch (e) {
@@ -806,6 +804,18 @@ const server = http.createServer(async (req, res) => {
     // local health (no auth; contains no data)
     if (pathName === '/healthz') { log('GET', '/healthz', 200); return send(res, 200, { ok: true, service: 'desktop-commander-mcp-gateway' }); }
     if (pathName === '/health') { log('GET', '/health', 200); return send(res, 200, { ok: true, pid: process.pid, service: 'desktop-commander-mcp-gateway' }); }
+
+    if (pathName === '/jc/ready' && req.method === 'GET') {
+      const configured = !!(JC.enabled && !JC.acsOptional && !JC_LOCAL.enabled && JC.acsGatewayUrl && JC.acsGatewayToken && GATEWAY_EXECUTION_TOKEN);
+      const [acs, bridge] = configured
+        ? await Promise.all([checkAcsIssuanceReady(JC), fetchBridgeAuthority(JC_UPSTREAM)])
+        : [{ reachable: false }, { ok: false }];
+      const bridgeReady = bridge.ok && jcBridgeReady(bridge.data);
+      const issuanceReady = acs.reachable === true;
+      const ready = configured && bridgeReady && issuanceReady;
+      log('GET', '/jc/ready', ready ? 200 : 503);
+      return send(res, ready ? 200 : 503, { ready, configured, bridgeReady, issuanceReady });
+    }
 
     // /ready and /authority (hardening item #2): non-secret structured state
     // only — never capability payloads, keys, tokens, or credentials.

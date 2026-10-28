@@ -85,11 +85,14 @@
     "openai": "^7.39.0"
   },
   "overrides": {
+    "@vercel/cli-config": {
+      "zod": "4.6.7"
+    },
     "brace-expansion@^2.0.0": "2.1.7",
     "brace-expansion@^5.0.0": "5.0.12",
     "browserslist": "4.28.7",
     "fast-uri": "3.1.7",
-    "fastify": "5.12.5",
+    "fastify": "5.12.7",
     "source-map-js": "1.2.2",
     "tinypool": "2.1.2"
   }

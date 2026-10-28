@@ -13,7 +13,7 @@ import {
     type CallToolRequest,
     type InitializeRequest,
 } from "@modelcontextprotocol/sdk/types.js";
-import { zodToJsonSchema } from "zod-to-json-schema";
+import { toolInputJsonSchema as zodToJsonSchema } from './tools/json-schema.js';
 import { preExecuteEnforcement, attestRequest, attestResult, requestHash, agentFromMeta, extractCapability, getApprovalStore, GATEWAY_TRANSPORT_VERIFIED } from './enforcement/pipeline.js';
 // Item #5: pending approval requests live in the pipeline-owned store until
 // an approver (Telegram hook, UI, or the ACS orchestrator) resolves them;

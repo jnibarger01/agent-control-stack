@@ -19,16 +19,8 @@ import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
-export const EXCEPTIONS = [
-  {
-    package: 'node-forge',
-    advisory: 'GHSA-86w9-cpqp-85rv',
-    reason:
-      'RSA PKCS#1 v1.5 signature verification flaw; no patched release (<= 1.4.0 is latest). ' +
-      'Only reachable through the dev-only @anthropic-ai/mcpb CLI, whose validate/pack commands ' +
-      'used by scripts/build-mcpb.cjs do not verify signatures. Not shipped or loaded at runtime.',
-  },
-];
+// node-forge now has a patched release; no advisory is currently exempt.
+export const EXCEPTIONS = [];
 
 const LEVELS = ['info', 'low', 'moderate', 'high', 'critical'];
 const FAIL_AT = LEVELS.indexOf('high');
@@ -73,7 +65,7 @@ export function patchedVersions(versions, range, semver) {
  * @param probes   { inProduction(pkg): boolean, publishedVersions(pkg): string[], semver }
  * @returns        { problems: string[], accepted: exception[] }
  */
-export function evaluate(report, probes) {
+export function evaluate(report, probes, exceptions = EXCEPTIONS) {
   const problems = [];
   const accepted = new Map();
 
@@ -90,7 +82,7 @@ export function evaluate(report, probes) {
       continue;
     }
     for (const advisory of failing) {
-      const exception = EXCEPTIONS.find((item) => item.advisory === advisory.id && item.package === advisory.package);
+      const exception = exceptions.find((item) => item.advisory === advisory.id && item.package === advisory.package);
       if (exception) accepted.set(exception.advisory, { exception, range: advisory.range });
       else problems.push(`${name} (${advisory.severity}): ${advisory.id} on ${advisory.package}`);
     }

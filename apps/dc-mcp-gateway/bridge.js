@@ -87,6 +87,15 @@ const DC_ARGS = process.env.DC_ARGS
         );
         process.exit(1);
       })();
+// A managed JC bridge must not advertise ACS authority over a child that
+// selects a different authorizer through its environment or command line.
+if (JC && MANAGED && (
+  (process.env.JC_PRESET !== undefined && process.env.JC_PRESET !== "managed") ||
+  DC_ARGS.some((arg, index) => arg === "--preset" && DC_ARGS[index + 1] !== "managed")
+)) {
+  console.error("bridge: managed jace-commander refuses a non-managed child preset; fix JC_PRESET or DC_ARGS");
+  process.exit(1);
+}
 if (MANAGED && DC_ARGS.includes("--standalone")) {
   console.error("bridge: managed mode refuses a --standalone executor; fix DC_ARGS");
   process.exit(1);
@@ -106,6 +115,10 @@ const EXECUTION_TOKEN = process.env.DC_GATEWAY_EXECUTION_TOKEN || "";
 // ADR 0026: under the local preset nothing but the authenticated gateway may reach the
 // child (no ACS capability stands behind read:allow), so gateway attestation is mandatory.
 const JC_LOCAL = JC && process.env.JC_PRESET === "local";
+if (JC && MANAGED && !EXECUTION_TOKEN) {
+  console.error("bridge: managed jace-commander requires DC_GATEWAY_EXECUTION_TOKEN; refusing to start");
+  process.exit(1);
+}
 if (JC_LOCAL && !EXECUTION_TOKEN) {
   console.error("bridge: JC_PRESET=local requires DC_GATEWAY_EXECUTION_TOKEN so gateway attestation can be enforced; refusing to start");
   process.exit(1);
@@ -263,7 +276,9 @@ function isInitialize(msg) {
 
 function verifyAttestation(value, agentHeader) {
   try {
-    const [body, sig] = String(value).split(".");
+    const parts = String(value).split(".");
+    if (JC && MANAGED && (parts.length !== 2 || !parts.every((part) => /^[A-Za-z0-9_-]+$/.test(part)))) return null;
+    const [body, sig] = parts;
     if (!body || !sig) return null;
     const expect = createHmac("sha256", EXECUTION_TOKEN).update(body).digest("base64url");
     const a = Buffer.from(sig);
@@ -271,6 +286,12 @@ function verifyAttestation(value, agentHeader) {
     if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
     const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
     const t = Math.floor(Date.now() / 1000);
+    if (JC && MANAGED) {
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+      if (typeof payload.sub !== "string" || !payload.sub.trim() || payload.sub !== agentHeader) return null;
+      if (!Number.isSafeInteger(payload.iat) || !Number.isSafeInteger(payload.exp)) return null;
+      if (payload.iat > t || payload.exp <= t || payload.exp <= payload.iat || payload.exp - payload.iat > 60) return null;
+    }
     if (typeof payload.exp !== "number" || payload.exp < t) return null;
     if (typeof payload.iat === "number" && payload.exp - payload.iat > 60) return null;
     if (agentHeader && payload.sub !== agentHeader) return null;
@@ -1075,8 +1096,8 @@ function computeJcAuthority() {
   return {
     variant: "jc",
     configuredExecutionMode: MANAGED ? "managed" : "unmanaged_gateway",
-    // The child is always started as `serve` (managed); there is no standalone path.
-    childMode: "managed",
+    // Managed bridges reject alternate child authorizers at startup.
+    childMode: JC_LOCAL ? "local" : "managed",
     bridge: {
       hasUpstreamPair: !!pair,
       upstreamStarted: !!pair?.upstreamStarted,
@@ -1203,6 +1224,12 @@ const httpServer = http.createServer(async (req, res) => {
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "not_found" }));
     return;
+  }
+
+  // Authenticate managed JC traffic before body parsing, session lookup, or
+  // result reporting. Unauthenticated capability metadata has no authority.
+  if (JC && MANAGED && !verifyAttestation(req.headers["x-dc-attestation"] || "", req.headers["x-dc-agent"])) {
+    return sendJsonRpcError(res, 401, -32001, "gateway attestation required");
   }
 
   if (JC_LOCAL && !verifyAttestation(req.headers["x-dc-attestation"] || "", req.headers["x-dc-agent"])) {
