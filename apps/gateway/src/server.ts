@@ -5353,6 +5353,7 @@ function isRateLimitedRoute(url: string): boolean {
     path === "/dashboard/policy-preview" ||
     // MCP client visibility: bridge reports and operator labelling write audit events, so they are limited too.
     path === "/mcp-clients/observe" ||
+    path === "/mcp-clients/auth-event" ||
     path.startsWith("/api/mission-dispatch") ||
     path === "/api/mcp-clients" ||
     path === "/api/mcp-clients/label" ||
