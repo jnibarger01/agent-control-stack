@@ -248,6 +248,10 @@ const operations = {
     "method": "POST",
     "path": "/mcp-clients/observe"
   },
+  "reportMcpClientAuthEvent": {
+    "method": "POST",
+    "path": "/mcp-clients/auth-event"
+  },
   "listMissionDispatches": {
     "method": "GET",
     "path": "/api/mission-dispatch"

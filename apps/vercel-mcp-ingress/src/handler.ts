@@ -25,7 +25,14 @@ export interface IngressAuthContext {
 }
 
 export type IngressAuthResult =
-  { ok: true; auth?: BridgeEncryptedAuthorization } | { ok: false; wwwAuthenticate?: string };
+  | { ok: true; auth?: BridgeEncryptedAuthorization }
+  | {
+      ok: false;
+      wwwAuthenticate?: string;
+      /** 401 (default) asks the client to sign in again; 503 means no verdict could be reached, so retry later. */
+      status?: 401 | 503;
+      retryAfterSeconds?: number;
+    };
 
 export type IngressAuthorizer = (
   request: Request,
@@ -74,6 +81,14 @@ export function createMcpIngressHandler(options: McpIngressOptions) {
       resultTopic,
       expiresAt
     });
+    if (authResult.ok === false && authResult.status === 503) {
+      // No credential verdict was possible. This is an outage, not an authentication failure: no challenge.
+      return jsonResponse(
+        503,
+        { error: "auth_unavailable" },
+        { "retry-after": String(authResult.retryAfterSeconds ?? 5) }
+      );
+    }
     if (authResult.ok === false) {
       const challenge = "wwwAuthenticate" in authResult ? authResult.wwwAuthenticate : undefined;
       return jsonResponse(401, { error: "unauthorized" }, challenge ? { "www-authenticate": challenge } : {});
