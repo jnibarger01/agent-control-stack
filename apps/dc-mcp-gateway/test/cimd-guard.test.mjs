@@ -264,6 +264,49 @@ test('a server that never answers is stopped by the timeout', async (t) => {
   assert.ok(Date.now() - started < 5000);
 });
 
+// A server that streams forever: reports how many bytes it wrote and resolves when the client hangs up.
+function streamingServer(head) {
+  const state = { sent: 0 };
+  state.closed = new Promise((resolveClosed) => {
+    state.ready = startServer((req, res) => {
+      res.writeHead(...head);
+      const chunk = 'a'.repeat(8192);
+      const timer = setInterval(() => { state.sent += chunk.length; res.write(chunk); }, 1);
+      res.on('close', () => { clearInterval(timer); resolveClosed(); });
+    });
+  });
+  return state;
+}
+
+for (const [name, head, maxBytes, pattern] of [
+  ['a non-200 status', [404, { 'content-type': 'application/json' }], undefined, /HTTP 404/],
+  ['a wrong content type', [200, { 'content-type': 'text/html' }], undefined, /application\/json/],
+  ['a declared content-length over the cap', [200, { 'content-type': 'application/json', 'content-length': String(10 * 1024 * 1024) }], 1024, /too large/],
+]) {
+  test(`a rejected response (${name}) is torn down, not drained`, async (t) => {
+    const state = streamingServer(head);
+    const { server, port } = await state.ready;
+    t.after(() => closeServer(server));
+    await assert.rejects(fetchFrom(port, { maxBytes, timeoutMs: 5000 }), pattern);
+    const hungUp = await Promise.race([state.closed.then(() => true), new Promise((r) => setTimeout(() => r(false), 1000))]);
+    assert.ok(hungUp, 'the client must close the rejected connection promptly');
+    assert.ok(state.sent < 1024 * 1024, `rejected response kept downloading (${state.sent} bytes)`);
+  });
+}
+
+test('a server that keeps trickling bytes is stopped by the absolute deadline', async (t) => {
+  const { server, port } = await startServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.write('{"client_id":"');
+    const timer = setInterval(() => res.write(' '), 20); // never idle long enough to trip the socket timeout
+    res.on('close', () => clearInterval(timer));
+  });
+  t.after(() => closeServer(server));
+  const started = Date.now();
+  await assert.rejects(fetchFrom(port, { timeoutMs: 300, maxBytes: 1024 * 1024 }), /timed out/);
+  assert.ok(Date.now() - started < 3000);
+});
+
 test('a connection failure is reported, not swallowed', async () => {
   // Port 1 on loopback is closed in the test environment, so the connect fails immediately.
   await assert.rejects(fetchFrom(1), /ECONNREFUSED|connect/);
