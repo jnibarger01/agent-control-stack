@@ -174,8 +174,10 @@ test('consent refuses a wrong passphrase', () =>
 // Token endpoint: PKCE verification, verifier format, single-use codes
 // ---------------------------------------------------------------------------
 
-async function issueCode(gw, { redirect = 'https://app.test/cb' } = {}) {
-  const { verifier, challenge } = pkce();
+const challengeFor = (verifier) => b64u(crypto.createHash('sha256').update(verifier).digest());
+
+async function issueCode(gw, { redirect = 'https://app.test/cb', verifier: chosen } = {}) {
+  const { verifier, challenge } = chosen === undefined ? pkce() : { verifier: chosen, challenge: challengeFor(chosen) };
   const consent = await gw.consent({ client_id: 'public-app', redirect_uri: redirect, code_challenge: challenge, code_challenge_method: 'S256' });
   assert.equal(consent.status, 302, `consent must issue a code: ${consent.status}`);
   const code = location(consent).searchParams.get('code');
@@ -208,10 +210,16 @@ test('a wrong verifier is refused and burns the code', () =>
 
 test('a verifier outside RFC 7636 length or alphabet is refused', () =>
   withGateway(async (gw) => {
-    const { code, redirect } = await issueCode(gw);
     for (const bad of ['short', 'a'.repeat(129), 'has space ' + 'a'.repeat(40), 'bad/char' + 'a'.repeat(40)]) {
+      // A fresh, unconsumed code per case whose challenge is the S256 of this very verifier: the hash
+      // comparison would accept it, so only the RFC 7636 format check can refuse it.
+      const { code, redirect } = await issueCode(gw, { verifier: bad });
       const r = await gw.token({ grant_type: 'authorization_code', code, code_verifier: bad, redirect_uri: redirect, client_id: 'public-app' });
-      assert.equal(r.status, 400, `verifier ${JSON.stringify(bad).slice(0, 20)} must be refused`);
+      const label = `verifier ${JSON.stringify(bad).slice(0, 20)}`;
+      assert.equal(r.status, 400, `${label} must be refused`);
+      const body = await r.json();
+      assert.equal(body.error, 'invalid_grant', `${label} must fail the PKCE check`);
+      assert.equal(body.error_description, 'PKCE verification failed', `${label} must be refused by the verifier check`);
     }
   }));
 
