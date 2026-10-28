@@ -82,10 +82,12 @@ describe("MoA ACS adapter", () => {
       source: "moa_aggregator"
     });
     const workItem = store.list({ status: "needs_approval" })[0]!;
-    const actionHash = createPolicyEngine().evaluateWorkItem(workItem, actor, "approve")[0]!.actionHash;
+    // The execution actor cannot approve its own high-risk work.
+    const approver = "independent-reviewer";
+    const actionHash = createPolicyEngine().evaluateWorkItem(workItem, approver, "approve")[0]!.actionHash;
     createWorkItemTools(store, createPolicyEngine()).approve_work_item({
       id: workItem.id,
-      approvedBy: actor,
+      approvedBy: approver,
       reason: "approve exact MoA action",
       actionHash
     });
