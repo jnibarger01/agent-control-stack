@@ -17,8 +17,10 @@
   "dependencies": {
     "@agent-control-stack/agent-cli": "0.1.0",
     "@agent-control-stack/gateway": "0.1.0",
+    "@agent-control-stack/integration-manager": "0.1.0",
     "@agent-control-stack/machine-controller": "0.1.0",
     "@agent-control-stack/mcp": "0.1.0",
+    "@agent-control-stack/outcome-engine": "0.1.0",
     "@agent-control-stack/policy-gate": "0.1.0",
     "@agent-control-stack/procedural-learning": "0.1.0",
     "@agent-control-stack/scheduler": "0.1.0",

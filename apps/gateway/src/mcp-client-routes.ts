@@ -1,7 +1,12 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest, preHandlerAsyncHookHandler } from "fastify";
 import { ControlStackError } from "@agent-control-stack/shared";
 import { MCP_CLIENT_LIVE_WINDOW_MS, McpClientError, type McpClientService, type McpLane } from "./mcp-clients.js";
-import { mcpClientClearBodySchema, mcpClientLabelBodySchema, mcpObservationBodySchema } from "./public-contracts.js";
+import {
+  mcpAuthEventBodySchema,
+  mcpClientClearBodySchema,
+  mcpClientLabelBodySchema,
+  mcpObservationBodySchema
+} from "./public-contracts.js";
 
 export interface McpClientRouteDeps {
   app: FastifyInstance;
@@ -90,6 +95,27 @@ export function registerMcpClientRoutes(deps: McpClientRouteDeps): void {
       return reply.code(202).send(result);
     } catch (error) {
       return fail(reply, error instanceof ControlStackError ? error : error);
+    }
+  });
+
+  /**
+   * The edge reports how a verified client's OAuth credentials fared (granted, refreshed, refused). Attribution only:
+   * it feeds Mission Control's "Reauthentication required" and never labels, approves or unblocks anything.
+   */
+  app.post("/mcp-clients/auth-event", { config: limit(600) }, async (request, reply) => {
+    try {
+      const workerId = requireBridge(request, reply);
+      if (!workerId) return;
+      const body = mcpAuthEventBodySchema.parse(request.body);
+      const lane = laneForBridge(workerId);
+      if (!lane || lane !== body.lane) {
+        return reply
+          .code(403)
+          .send({ error: "this bridge identity may not report for that lane", code: "mcp_lane_mismatch" });
+      }
+      return reply.code(202).send(service.recordAuthEvent(body));
+    } catch (error) {
+      return fail(reply, error);
     }
   });
 }

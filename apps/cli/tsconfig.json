@@ -23,7 +23,13 @@
       "path": "../../apps/worker"
     },
     {
+      "path": "../../packages/integration-manager"
+    },
+    {
       "path": "../../packages/machine-controller"
+    },
+    {
+      "path": "../../packages/outcome-engine"
     },
     {
       "path": "../../packages/policy-gate"
