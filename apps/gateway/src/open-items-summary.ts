@@ -17,6 +17,8 @@ export const OPEN_ITEMS_SUMMARY_PATH = "/api/mission-control/summaries/open-item
 export const OPEN_ITEMS_SUMMARY_MAX_ITEMS = 50;
 const TITLE_MAX_CHARS = 200;
 const MAX_OUTPUT_TOKENS = 700;
+/** Upper bound on one summary request, including a provider that accepts the request and then goes silent. */
+export const OPEN_ITEMS_SUMMARY_TIMEOUT_MS = 60_000;
 
 export interface OpenItemsSummaryConfig {
   apiKey: string;
@@ -35,7 +37,7 @@ export interface OpenItemProjection {
 export type OpenItemsSummaryEvent =
   | { type: "delta"; text: string }
   | { type: "done" }
-  | { type: "error"; code: "upstream_failed" | "upstream_unreachable" | "aborted" };
+  | { type: "error"; code: "upstream_failed" | "upstream_unreachable" | "upstream_timeout" | "aborted" };
 
 /** Projects active work items to the fields the summary may use. Redacts before truncating so a secret cannot be cut in half. */
 export function projectOpenItems(
@@ -163,6 +165,10 @@ export async function* streamOpenItemsSummary(args: {
   } catch {
     yield { type: "error", code: args.signal.aborted ? "aborted" : "upstream_failed" };
     return;
+  } finally {
+    // Release the upstream connection on every exit: completion, failure, a
+    // malformed frame, or the consumer stopping early.
+    await reader.cancel().catch(() => undefined);
   }
   // The stream closed without a completion frame: treat it as a failure, not a finished answer.
   yield { type: "error", code: "upstream_failed" };
@@ -189,6 +195,7 @@ export interface OpenItemsSummaryRouteDeps {
   actorFor: (request: FastifyRequest) => string;
   fetchImpl?: typeof fetch;
   newRequestId?: () => string;
+  timeoutMs?: number;
 }
 
 const hasNoBody = (body: unknown) =>
@@ -231,6 +238,11 @@ export function registerOpenItemsSummaryRoute(app: FastifyInstance, deps: OpenIt
       reply.raw.on("close", () => {
         if (!reply.raw.writableEnded) controller.abort();
       });
+      let timedOut = false;
+      const deadline = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, deps.timeoutMs ?? OPEN_ITEMS_SUMMARY_TIMEOUT_MS);
       reply.hijack();
       reply.raw.writeHead(200, {
         "content-type": "text/event-stream",
@@ -250,9 +262,10 @@ export function registerOpenItemsSummaryRoute(app: FastifyInstance, deps: OpenIt
           else if (event.type === "done") {
             finished = "completed";
             write("done", {});
-          } else write("error", { code: event.code });
+          } else write("error", { code: timedOut ? "upstream_timeout" : event.code });
         }
       } finally {
+        clearTimeout(deadline);
         audit.record({
           type: finished === "completed" ? "upstream_completed" : "upstream_failed",
           requestId,

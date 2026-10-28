@@ -14,6 +14,7 @@ import { HashChainedJsonlAuditSink } from "./audit-sink.js";
 import { SqliteMoaIdempotencyStore } from "./idempotency.js";
 import { createRoutingModelCaller } from "./model-caller.js";
 import {
+  type InferenceAuditSink,
   HashChainedInferenceAuditSink,
   openAiCompatibleConfigFromEnv,
   registerOpenAiCompatibleGateway
@@ -31,6 +32,12 @@ export interface MoaGatewayWiring {
   store: WorkItemStore;
   authenticate: (request: FastifyRequest) => Promise<{ actor: string } | null>;
   overrides?: MoaGatewayOverrides;
+  /**
+   * Inference audit sink shared with other routes that append to the same
+   * hash-chained log. Each sink tracks its own sequence and previous hash, so a
+   * second sink on the same file would fork the chain.
+   */
+  inferenceAudit?: InferenceAuditSink;
 }
 
 export function resolveMoaConfig(env: NodeJS.ProcessEnv = process.env): MoaConfig {
@@ -46,7 +53,7 @@ export async function registerMoaGateway(app: FastifyInstance, wiring: MoaGatewa
       apiKey: inference.apiKey,
       upstreamBaseUrl: inference.upstreamBaseUrl,
       allowedModels: inference.allowedModels,
-      audit: new HashChainedInferenceAuditSink(inference.auditLogPath),
+      audit: wiring.inferenceAudit ?? new HashChainedInferenceAuditSink(inference.auditLogPath),
       maxBodyBytes: inference.maxBodyBytes
     });
   }

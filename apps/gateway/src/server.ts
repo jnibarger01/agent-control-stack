@@ -1042,11 +1042,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   if (!mcpAuth?.oauth && !mcpAuth?.tunnel && process.env.NODE_ENV === "production") {
     app.log.warn("MCP OAuth/tunnel auth is disabled in production; set OAuth env or ACS_AUTH_MODE=tunnel_id");
   }
+  // One sink per inference audit log: the MoA inference proxy and the
+  // open-items summary append to the same hash chain, and each sink tracks its
+  // own sequence and previous hash.
+  const inferenceConfig = openAiCompatibleConfigFromEnv();
+  const inferenceAudit = inferenceConfig ? new HashChainedInferenceAuditSink(inferenceConfig.auditLogPath) : undefined;
   if (options.moa !== false) {
     app.register(async (instance) => {
       await registerMoaGateway(instance, {
         dbPath,
         store: workItems,
+        ...(inferenceAudit ? { inferenceAudit } : {}),
         authenticate: async (moaRequest) => {
           if (!auth) return null;
           const credential = gatewayCredentialForRequest(moaRequest, auth);
@@ -1411,12 +1417,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     sendError
   });
 
-  const openItemsInference = openAiCompatibleConfigFromEnv();
   registerOpenItemsSummaryRoute(app, {
     requireRead,
     workItems,
-    config: openItemsSummaryConfigFromEnv(openItemsInference),
-    audit: openItemsInference ? new HashChainedInferenceAuditSink(openItemsInference.auditLogPath) : undefined,
+    config: openItemsSummaryConfigFromEnv(inferenceConfig),
+    audit: inferenceAudit,
     actorFor: (request) => {
       const credential = gatewayCredentialForRequest(request, auth);
       return credential ? requesterForCredential(credential) : "user";
