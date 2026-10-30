@@ -30,9 +30,23 @@ jobs:
     timeout-minutes: 25
 
     steps:
+      # Merges made with GITHUB_TOKEN do not trigger `push` workflows on main,
+      # so the merge call below uses a GitHub App installation token instead.
+      - name: Mint merge token (GitHub App)
+        id: merge-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.ACS_MERGE_APP_ID }}
+          private-key: ${{ secrets.ACS_MERGE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
       - name: Review, gate, and merge
         env:
           GH_TOKEN: ${{ github.token }}
+          MERGE_TOKEN: ${{ steps.merge-token.outputs.token }}
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
         shell: bash
         run: |
@@ -286,7 +300,7 @@ jobs:
             exit 1
           fi
 
-          if ! merge_json="$(gh api               -H 'X-GitHub-Api-Version: 2026-03-10'               -X PUT "repos/$GITHUB_REPOSITORY/pulls/$PR/merge"               -f sha="$head_sha"               -f merge_method="$method"               -f merge_action=default 2>&1)"; then
+          if ! merge_json="$(GH_TOKEN="$MERGE_TOKEN" gh api               -H 'X-GitHub-Api-Version: 2026-03-10'               -X PUT "repos/$GITHUB_REPOSITORY/pulls/$PR/merge"               -f sha="$head_sha"               -f merge_method="$method"               -f merge_action=default 2>&1)"; then
             upsert_comment "BLOCK — GitHub rejected the merge after the review gate passed. Repository protections were not bypassed.
 
             Details: \`$merge_json\`"
