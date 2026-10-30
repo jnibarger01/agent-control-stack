@@ -1,11 +1,12 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { NavLink } from "react-router";
+import { NavLink, useLocation } from "react-router";
 import type { OverviewReadModel } from "@agent-control-stack/mission-control-contract";
 import { Kbd, StaleBanner, StatusPill, type Tone } from "../design/primitives";
 import { useTheme } from "../design/theme";
 import type { StreamState } from "../data/stream";
 import { NAV_ITEMS } from "./nav";
 import { Palette } from "./Palette";
+import { OpenItemsAssistant } from "../features/assistant/OpenItemsAssistant";
 
 export function ExecutionBadge({ execution }: { execution: OverviewReadModel["execution"] | undefined }) {
   if (!execution) return <StatusPill tone="unknown">Execution mode unknown</StatusPill>;
@@ -37,6 +38,7 @@ function LiveIndicator({ stream }: { stream: StreamState }) {
 const themeLabel = { system: "System", dark: "Dark", light: "Light" } as const;
 
 export function Shell({ overview, stream, children, title, subtitle }: { overview: OverviewReadModel | undefined; stream: StreamState; children: ReactNode; title: string; subtitle?: ReactNode }) {
+  const location = useLocation();
   const { choice, cycle } = useTheme();
   const [palette, setPalette] = useState(false);
   useEffect(() => {
@@ -108,6 +110,7 @@ export function Shell({ overview, stream, children, title, subtitle }: { overvie
         <main id="main" tabIndex={-1} className="px-5 py-6 lg:px-8">{children}</main>
       </div>
       <Palette open={palette} onClose={() => setPalette(false)} />
+      {location.pathname === "/" && <OpenItemsAssistant />}
     </div>
   );
 }

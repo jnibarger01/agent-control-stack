@@ -2,6 +2,8 @@ import { probeExecutableVersion } from "@agent-control-stack/agent-cli";
 import { advisorPortFromEnv } from "./advisor-consultation.js";
 import { registerMissionDispatchRoutes } from "./mission-dispatch-routes.js";
 import { registerDashboardRoutes, eventReadOptions } from "./dashboard-routes.js";
+import { openItemsSummaryConfigFromEnv, registerOpenItemsSummaryRoute } from "./open-items-summary.js";
+import { HashChainedInferenceAuditSink, openAiCompatibleConfigFromEnv } from "./moa/openai-compatible.js";
 import { registerCsrfGuard } from "./csrf-guard.js";
 import {
   MISSION_CONTROL_WEB_CSP,
@@ -1040,11 +1042,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   if (!mcpAuth?.oauth && !mcpAuth?.tunnel && process.env.NODE_ENV === "production") {
     app.log.warn("MCP OAuth/tunnel auth is disabled in production; set OAuth env or ACS_AUTH_MODE=tunnel_id");
   }
+  // One sink per inference audit log: the MoA inference proxy and the
+  // open-items summary append to the same hash chain, and each sink tracks its
+  // own sequence and previous hash.
+  const inferenceConfig = openAiCompatibleConfigFromEnv();
+  const inferenceAudit = inferenceConfig ? new HashChainedInferenceAuditSink(inferenceConfig.auditLogPath) : undefined;
   if (options.moa !== false) {
     app.register(async (instance) => {
       await registerMoaGateway(instance, {
         dbPath,
         store: workItems,
+        ...(inferenceAudit ? { inferenceAudit } : {}),
         authenticate: async (moaRequest) => {
           if (!auth) return null;
           const credential = gatewayCredentialForRequest(moaRequest, auth);
@@ -1407,6 +1415,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     requireRead,
     missionControlWebDefaultRoot: () => missionControlWebDefaultRoot(options.missionControlWeb),
     sendError
+  });
+
+  registerOpenItemsSummaryRoute(app, {
+    requireRead,
+    workItems,
+    config: openItemsSummaryConfigFromEnv(inferenceConfig),
+    audit: inferenceAudit,
+    actorFor: (request) => {
+      const credential = gatewayCredentialForRequest(request, auth);
+      return credential ? requesterForCredential(credential) : "user";
+    }
   });
 
   app.get("/mcp/tools", async (request, reply) => {
