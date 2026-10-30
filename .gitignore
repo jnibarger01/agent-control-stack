@@ -32,6 +32,7 @@ token*.json
 .agents/
 .claude/
 .codex/
+.harnesskit/
 .cursor/
 .vscode/
 .windsurfrules

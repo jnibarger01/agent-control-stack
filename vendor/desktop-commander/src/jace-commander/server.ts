@@ -52,6 +52,7 @@ import { checkPolicyConstraints, defaultAcsModes, loadJcPolicy, type JcPolicyLoa
 import { ApproverClient, ApproverUnavailable, type AuthorizeReply } from './approver-client.js';
 import { JcLocalTokenError, JcLocalTokenVerifier, type JcLocalAuthorization } from './local-token.js';
 import { jcConfigView, jcDoctor, jcPing } from './doctor.js';
+import { buildContextPack } from './context-pack.js';
 import { defaultDeniedRoots, getFileInfo, listDirectory, readFile, readMultipleFiles, type JcFsPolicy } from './filesystem.js';
 import { gitAdd, gitBranch, gitCommit, gitDiff, gitFetch, gitLog, gitPush, gitShow, gitStatus } from './git-ops.js';
 import { createDirectory, editBlock, moveFile, writeFile } from './mutations.js';
@@ -510,7 +511,8 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     move_file: async (args) => ok(await moveFile(args, fsPolicy)),
     edit_block: async (args) => ok(await editBlock(args, fsPolicy)),
     start_process: async (args) => ok(processes.start(args, fsPolicy)),
-    read_process_output: async (args) => ok(processes.output(args)),
+    read_process_output: async (args) => ok(await processes.output(args)),
+    context_pack: async (args) => ok(await buildContextPack(args as Parameters<typeof buildContextPack>[0], fsPolicy)),
     list_processes: async () => ok(processes.list()),
     kill_process: async (args) => ok(processes.kill(args)),
     git_status: async (args) => ok(await gitStatus(args, fsPolicy)),

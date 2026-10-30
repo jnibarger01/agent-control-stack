@@ -453,10 +453,15 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "execution; approval required in strict mode; no shell"
   ),
   read_process_output: row(
-    "Read buffered stdout and stderr for a process this server started.",
+    "Read buffered stdout and stderr for a process or shell session this server started. Pass the returned stdoutNextOffset / stderrNextOffset back as offset / stderrOffset to read only new output. stdoutSkipped reports the UTF-16 code units lost before the retained tail. Offsets and skipped counts are UTF-16 code units of the decoded text, not bytes. waitMs long-polls a running session for new output.",
     {
       type: "object",
-      properties: { sessionId: str("Session id"), offset: { type: "integer", minimum: 0 } },
+      properties: {
+        sessionId: str("Session id"),
+        offset: { type: "integer", minimum: 0, description: "Absolute stdout cursor (default 0)" },
+        stderrOffset: { type: "integer", minimum: 0, description: "Absolute stderr cursor (default 0)" },
+        waitMs: { type: "integer", minimum: 0, maximum: 30000, description: "Wait up to this long for new output when none is available" }
+      },
       required: ["sessionId"],
       additionalProperties: false
     },
@@ -487,6 +492,47 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "medium",
     true,
     "termination of a managed process; approval required in strict mode"
+  ),
+  context_pack: row(
+    "Assemble a deterministic, budgeted context pack from files and inline text. Each item carries provenance (source, content sha256, trust label), is redacted for common secret shapes, and is fenced as data unless its trust is operator. A file listed in pins with an expected sha256 is dropped as stale when its content differs, rather than read as current.",
+    {
+      type: "object",
+      properties: {
+        files: {
+          type: "array",
+          maxItems: 16,
+          items: str("Absolute path, contained to the filesystem roots")
+        },
+        pins: {
+          type: "object",
+          additionalProperties: { type: "string", pattern: "^[a-f0-9]{64}$" },
+          description: "Expected sha256 per path in files"
+        },
+        fileTrust: { type: "string", enum: ["operator", "repo", "tool-output", "external"] },
+        inline: {
+          type: "array",
+          maxItems: 16,
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string", minLength: 1, maxLength: 64 },
+              text: { type: "string", maxLength: 65536 },
+              trust: { type: "string", enum: ["operator", "repo", "tool-output", "external"] },
+              priority: { type: "integer", minimum: 0, maximum: 100 }
+            },
+            required: ["id", "text", "trust"],
+            additionalProperties: false
+          }
+        },
+        budgetTokens: { type: "integer", minimum: 1, maximum: 200000 }
+      },
+      additionalProperties: false
+    },
+    ["fs.read"],
+    "jc.fs.read",
+    "low",
+    false,
+    "read-only; file sources are contained to the filesystem roots"
   ),
   git_status: row(
     "Structured git status for a repository inside an allowed root.",
@@ -686,6 +732,7 @@ const TOOL_SURFACE: Readonly<Record<JcToolName, SurfaceRow>> = {
   move_file: surface("filesystem", ["from", "to"], ["mv"]),
   edit_block: surface("filesystem", ["path"], ["edit"]),
   start_process: surface("process", ["cwd"], ["start"]),
+  context_pack: surface("filesystem", ["files"], []),
   read_process_output: surface("process", [], ["output"]),
   list_processes: surface("process", [], ["ps"]),
   kill_process: surface("process", [], ["kill"]),
