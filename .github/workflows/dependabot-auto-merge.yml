@@ -64,6 +64,23 @@ jobs:
 
           echo "blocked=false" >> "$GITHUB_OUTPUT"
 
+      # Auto-merge is attributed to the token that enabled it; GITHUB_TOKEN
+      # merges do not trigger `push` workflows on main, so use a GitHub App token.
+      - name: Mint merge token (GitHub App)
+        id: merge-token
+        if: >
+          steps.gate.outputs.blocked != 'true' &&
+          (steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+           steps.meta.outputs.update-type == 'version-update:semver-minor')
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.ACS_MERGE_APP_ID }}
+          private-key: ${{ secrets.ACS_MERGE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
       - name: Enable auto-merge for patch and minor
         if: >
           steps.gate.outputs.blocked != 'true' &&
@@ -71,5 +88,5 @@ jobs:
            steps.meta.outputs.update-type == 'version-update:semver-minor')
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.merge-token.outputs.token }}
         run: gh pr merge --auto --squash "$PR_URL"
