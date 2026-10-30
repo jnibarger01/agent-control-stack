@@ -13,6 +13,9 @@ export default defineConfig({
       // Bundle the shared contract from source so the SPA never depends on a prior `tsc -b`.
       "@agent-control-stack/mission-control-contract": fileURLToPath(
         new URL("../../packages/mission-control-contract/src/index.ts", import.meta.url)
+      ),
+      "@agent-control-stack/black-box-recorder": fileURLToPath(
+        new URL("../../packages/black-box-recorder/src/index.ts", import.meta.url)
       )
     }
   },
