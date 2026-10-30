@@ -11,7 +11,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { secretScan } from '../execution/secret-scan-tool.js';
 import { jcChildEnv } from './child-env.js';
-import { containJcPath, type JcFsPolicy } from './filesystem.js';
+import { containJcPath, containJcWritePath, type JcFsPolicy } from './filesystem.js';
 import { IntegrationError } from './integrations.js';
 
 const exec = promisify(execFile);
@@ -41,10 +41,11 @@ async function git(repo: string, args: string[], maxBuffer = 1024 * 1024): Promi
   }
 }
 
-async function repoRoot(requested: unknown, policy: JcFsPolicy): Promise<string> {
+async function repoRoot(requested: unknown, policy: JcFsPolicy, writable = false): Promise<string> {
   const contained = containJcPath(requested, policy);
   const top = (await git(contained, ['rev-parse', '--show-toplevel'])).trim();
-  return containJcPath(top, policy);
+  // Read-only Git commands may still refresh metadata; never run them on home-only repos.
+  return (writable || policy.writeRoots !== undefined) ? containJcWritePath(top, policy) : containJcPath(top, policy);
 }
 
 function relativePath(input: unknown): string {
@@ -161,7 +162,7 @@ export async function gitShow(args: Record<string, unknown>, policy: JcFsPolicy)
 }
 
 export async function gitAdd(args: Record<string, unknown>, policy: JcFsPolicy): Promise<Record<string, unknown>> {
-  const repo = await repoRoot(args.repo, policy);
+  const repo = await repoRoot(args.repo, policy, true);
   if (!Array.isArray(args.paths) || args.paths.length < 1 || args.paths.length > 50) {
     throw new IntegrationError('invalid_argument', 'paths must contain 1 to 50 relative paths');
   }
@@ -171,7 +172,7 @@ export async function gitAdd(args: Record<string, unknown>, policy: JcFsPolicy):
 }
 
 export async function gitCommit(args: Record<string, unknown>, policy: JcFsPolicy): Promise<Record<string, unknown>> {
-  const repo = await repoRoot(args.repo, policy);
+  const repo = await repoRoot(args.repo, policy, true);
   if (typeof args.message !== 'string' || args.message.length < 1 || args.message.length > 500) {
     throw new IntegrationError('invalid_argument', 'message must be 1 to 500 characters');
   }
@@ -184,7 +185,7 @@ export async function gitCommit(args: Record<string, unknown>, policy: JcFsPolic
 }
 
 export async function gitFetch(args: Record<string, unknown>, policy: JcFsPolicy): Promise<Record<string, unknown>> {
-  const repo = await repoRoot(args.repo, policy);
+  const repo = await repoRoot(args.repo, policy, true);
   const remote = await configuredRemote(repo, args.remote);
   const text = await git(repo, ['fetch', '--no-recurse-submodules', remote]);
   return { repo, remote, text: text.slice(0, 20_000) };
@@ -196,7 +197,7 @@ export async function gitFetch(args: Record<string, unknown>, policy: JcFsPolicy
  * non-fast-forward (no force), and any commit the secret scan flags.
  */
 export async function gitPush(args: Record<string, unknown>, policy: JcFsPolicy): Promise<Record<string, unknown>> {
-  const repo = await repoRoot(args.repo, policy);
+  const repo = await repoRoot(args.repo, policy, true);
   const remote = await configuredRemote(repo, args.remote);
   if (typeof args.expectedHead !== 'string' || !SHA.test(args.expectedHead)) {
     throw new IntegrationError('invalid_argument', 'expectedHead must be the full 40-hex commit to push');
