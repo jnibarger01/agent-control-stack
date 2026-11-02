@@ -112,6 +112,16 @@ describe("evaluateGate", () => {
     expect(codes(verdict).sort()).toEqual(["changes_requested", "conflicting", "draft", "unresolved_threads"]);
   });
 
+  it("never reports a source change eligible: only docs may auto-merge, and sensitive docs still need a human", () => {
+    const verdictFor = (file: string) =>
+      codes(evaluateGate(pr({ number: 1, changedFiles: [file] }), DEFAULT_GATE_POLICY));
+    expect(verdictFor("docs/guide.md")).toEqual([]);
+    expect(verdictFor("README.md")).toEqual([]);
+    for (const file of ["apps/gateway/src/x.ts", "packages/a/README.md", "docs/keys.md", "vendor/x.js"]) {
+      expect(verdictFor(file), file).toContain("not_auto_mergeable_path");
+    }
+  });
+
   it("warns, without blocking, when no checks are reported", () => {
     const verdict = evaluateGate(pr({ number: 1, checks: [] }), DEFAULT_GATE_POLICY);
     expect(verdict.status).toBe("eligible");

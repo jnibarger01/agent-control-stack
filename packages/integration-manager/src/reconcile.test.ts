@@ -149,10 +149,10 @@ describe("reconcile", () => {
     const h1 = s.branch("branch-1", base, { "a.txt": "1\n" });
     const h2 = s.branch("branch-2", base, { "b.txt": "2\n" });
     const report = await run(s, [
-      pr({ number: 1, headSha: h1, changedFiles: ["a.txt", "shared.ts"] }),
-      pr({ number: 2, headSha: h2, changedFiles: ["shared.ts"] })
+      pr({ number: 1, headSha: h1, changedFiles: ["docs/a.md", "docs/shared.md"] }),
+      pr({ number: 2, headSha: h2, changedFiles: ["docs/shared.md"] })
     ]);
-    expect(find(report, 1).overlaps).toEqual([{ number: 2, files: ["shared.ts"] }]);
+    expect(find(report, 1).overlaps).toEqual([{ number: 2, files: ["docs/shared.md"] }]);
     expect(report.queue).toEqual([1, 2]);
   });
 

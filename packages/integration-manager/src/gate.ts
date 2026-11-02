@@ -57,6 +57,15 @@ export function evaluateGate(pr: PullRequestSnapshot, policy: GatePolicy): GateV
   }
   const touched = pr.changedFiles.filter((file) => policy.protectedPaths.includes(file));
   if (touched.length > 0) block("gate_policy_modified", `changes the merge policy itself: ${touched.join(", ")}`);
+  if (policy.autoMergePaths) {
+    // Only docs may land without a human. Anything else needs independent approval and a human merge.
+    const allow = new RegExp(policy.autoMergePaths.allowPattern, "i");
+    const sensitive = new RegExp(policy.autoMergePaths.sensitivePattern, "i");
+    const outside = pr.changedFiles.filter((file) => !allow.test(file) || sensitive.test(file));
+    if (outside.length > 0) {
+      block("not_auto_mergeable_path", `human merge required; not auto-mergeable: ${outside.join(", ")}`);
+    }
+  }
   const truncated = Object.entries(pr.truncated)
     .filter(([, cut]) => cut)
     .map(([what]) => what);

@@ -25,9 +25,14 @@ describe("external merge exposure model", () => {
       expect(modelled.has(name), `${name} can merge but is not in MODELLED_MERGE_PATHS`).toBe(true);
   });
 
-  it("the modelled conditions still appear in the workflows", () => {
+  it("the classifier keeps its safety conditions: trusted trigger, no PR code, no secrets, head-bound merge", () => {
     const jn = workflows.find(({ name }) => name === "jnibarger01-pr-review-merge.yml")?.text ?? "";
-    expect(jn).toContain("workflow_dispatch");
+    expect(jn).toContain("pull_request_target:");
+    expect(jn).not.toMatch(/pull_request:\s*\n/u);
+    expect(jn).not.toMatch(/actions\/checkout[\s\S]*?github\.event\.pull_request\.head/u);
+    expect(jn).not.toMatch(/secrets\./u);
+    expect(jn).not.toMatch(/create-github-app-token/u);
+    expect(jn).toContain("--match-head-commit");
     expect(jn).toContain("jnibarger01");
     const dependabot = workflows.find(({ name }) => name === "dependabot-auto-merge.yml")?.text ?? "";
     expect(dependabot).toMatch(/dependabot\[bot\]/u);
