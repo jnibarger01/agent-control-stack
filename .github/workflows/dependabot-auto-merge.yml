@@ -64,6 +64,21 @@ jobs:
 
           echo "blocked=false" >> "$GITHUB_OUTPUT"
 
+      - name: Verify merge App credentials are configured
+        if: >
+          steps.gate.outputs.blocked != 'true' &&
+          (steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+           steps.meta.outputs.update-type == 'version-update:semver-minor')
+        env:
+          HAS_APP_ID: ${{ secrets.ACS_MERGE_APP_ID != '' }}
+          HAS_APP_KEY: ${{ secrets.ACS_MERGE_APP_PRIVATE_KEY != '' }}
+        shell: bash
+        run: |
+          if [[ "$HAS_APP_ID" != "true" || "$HAS_APP_KEY" != "true" ]]; then
+            echo "BLOCK: merge App credentials are not configured. No auto-merge was enabled." >&2
+            exit 1
+          fi
+
       # Auto-merge is attributed to the token that enabled it; GITHUB_TOKEN
       # merges do not trigger `push` workflows on main, so use a GitHub App token.
       - name: Mint merge token (GitHub App)
