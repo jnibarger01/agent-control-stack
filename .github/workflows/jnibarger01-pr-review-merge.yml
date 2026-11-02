@@ -45,9 +45,11 @@ jobs:
           # auto-merges. Matched case-insensitively against every path in a PR,
           # including the previous name of a renamed file.
           SENSITIVE_RE='^\.github/|(^|/)CODEOWNERS$|^vendor/|auth|credential|secret|token|oauth|capab|approv|polic|execut|dispatch|gateway|relay|acs|lease|sandbox|permission|secur|key'
-          # Ordinary paths: the only areas eligible for auto-merge. Anything
+          # Ordinary paths: only documentation is eligible for unattended merge.
+          # A path name cannot show whether code implements authorization, so all
+          # source code, including apps/ and packages/, needs a human. Anything
           # not listed here is treated as sensitive (default deny).
-          ALLOW_RE='^(apps|packages|docs)/|^(README|CHANGELOG)\.md$|^package(-lock)?\.json$'
+          ALLOW_RE='^docs/|^(README|CHANGELOG)\.md$'
 
           block() { echo "BLOCK: $*" >&2; exit 1; }
           summary() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; }

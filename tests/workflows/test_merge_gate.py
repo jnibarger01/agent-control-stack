@@ -178,7 +178,7 @@ class StaticTests(unittest.TestCase):
 
 class ClassifierTests(Harness):
     def test_ordinary_change_enables_auto_merge_bound_to_head(self):
-        self.fixtures()
+        self.fixtures(files_list=files(("docs/guide.md", "", "modified")))
         res = self.gate()
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertTrue(self.enabled())
@@ -200,6 +200,16 @@ class ClassifierTests(Harness):
                 self.fixtures(files_list=files((path, "", "modified")))
                 self.gate()
                 self.assertFalse(self.enabled())
+                self.assertTrue(self.disabled())
+
+    def test_source_code_never_auto_merges_even_with_ordinary_names(self):
+        for path in ("packages/x/index.ts", "apps/web/handler.ts", "packages/checkout/util.ts",
+                     "packages/x/service.ts"):
+            with self.subTest(path=path):
+                self.setUp()
+                self.fixtures(files_list=files((path, "", "modified")))
+                self.gate()
+                self.assertFalse(self.enabled(), f"{path} must need a human")
                 self.assertTrue(self.disabled())
 
     def test_unclassified_path_is_sensitive_by_default(self):
