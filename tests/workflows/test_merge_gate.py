@@ -1,9 +1,12 @@
-"""Regression tests for the PR merge gate workflows.
+"""Regression tests for the PR merge classifier and Dependabot auto-merge.
 
-Static tests read the workflow YAML. Behavioral tests run the real step
-scripts under bash against a stub `gh` that records every call and never
-reaches GitHub. Run: python3 -m unittest tests/workflows/test_merge_gate.py
-Requires PyYAML.
+Static tests read the workflow files. Behavioural tests run the real `run:`
+scripts under bash against a stub `gh` with fixtures. The stub records calls
+and never reaches GitHub, so these tests check the workflow's own decisions,
+not GitHub's enforcement (approvals, required checks, head matching). Those
+platform behaviours are documented as unverified in the PR.
+
+Run: python3 -m unittest tests/workflows/test_merge_gate.py   (needs PyYAML)
 """
 import json
 import os
@@ -18,11 +21,22 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 GATE = ROOT / ".github/workflows/jnibarger01-pr-review-merge.yml"
 DEPENDABOT = ROOT / ".github/workflows/dependabot-auto-merge.yml"
-HEAD = "a" * 40
-OTHER_HEAD = "b" * 40
 REPO = "jnibarger01/agent-control-stack"
+HEAD = "a" * 40
+OTHER = "b" * 40
 GITHUB_TOKEN = "github-token-value-not-real"
-MERGE_TOKEN = "merge-token-value-not-real"
+
+GOOD_RULES = [
+    {"type": "required_status_checks", "parameters": {"required_status_checks": [
+        {"context": "check", "integration_id": 15368}, {"context": "test", "integration_id": 15368}]}},
+    {"type": "pull_request", "parameters": {
+        "require_last_push_approval": True, "dismiss_stale_reviews_on_push": True,
+        "required_reviewers": [{"file_patterns": [".github/**"], "minimum_approvals": 1, "reviewer": {}}]}},
+]
+CURRENT_RULES = [  # what main actually has today
+    {"type": "required_status_checks", "parameters": {"required_status_checks": [
+        {"context": "check"}, {"context": "test"}]}},
+]
 
 STUB = r'''#!/usr/bin/env bash
 label=github
@@ -33,245 +47,266 @@ jq_filter=""; prev=""
 for a in "$@"; do [[ "$prev" == "--jq" ]] && jq_filter="$a"; prev="$a"; done
 emit() { if [[ -n "$jq_filter" ]]; then jq -r "$jq_filter"; else cat; fi; }
 case "$args" in
-  *"pr edit"*) if [[ "${STUB_COPILOT:-unavailable}" == ok ]]; then exit 0; fi; echo "copilot unavailable" >&2; exit 1 ;;
-  *graphql*) emit < "$STUB_FIX/snapshot.json" ;;
-  *"/merge"*) if [[ "${STUB_MERGE_RC:-0}" == 0 ]]; then emit < "$STUB_FIX/merge_resp.json"; else emit < "$STUB_FIX/merge_resp.json"; exit 1; fi ;;
+  "pr merge"*|"pr comment"*) echo ok ;;
   *"/files"*) emit < "$STUB_FIX/files.json" ;;
-  *"/comments"*"-X PATCH"*|*"/comments"*"-X POST"*) echo '{}' ;;
-  *"/comments"*) echo "" ;;
-  *"/pulls/"*)
-    n=$(cat "$STUB_FIX/pr_calls" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$STUB_FIX/pr_calls"
-    if [[ "$n" -eq 1 ]]; then emit < "$STUB_FIX/pr_first.json"; else emit < "$STUB_FIX/pr_second.json"; fi ;;
-  *) echo '{"allow_merge_commit":true,"allow_squash_merge":true,"allow_rebase_merge":true}' | emit ;;
+  *"/rules/branches/"*) cat "$STUB_FIX/rules.json" ;;
+  *"/pulls/"*) cat "$STUB_FIX/pr.json" ;;
+  *) echo '{}' ;;
 esac
 '''
 
 
-def pr_json(author="jnibarger01", draft=False, head=HEAD, mergeable=True):
-    return {"state": "open", "user": {"login": author}, "draft": draft,
-            "head": {"sha": head}, "mergeable": mergeable}
+def pr(author="jnibarger01", draft=False, head=HEAD, base="main", state="open",
+       head_repo=REPO, changed=1):
+    return {"state": state, "draft": draft, "user": {"login": author}, "head": {"sha": head,
+            "repo": {"full_name": head_repo}}, "base": {"ref": base}, "changed_files": changed}
 
 
-def snapshot(mergeable="MERGEABLE", review="NONE", head=HEAD, threads=None, checks=None):
-    checks = checks if checks is not None else [
-        {"__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"}]
-    return {"data": {"repository": {"pullRequest": {
-        "state": "OPEN", "isDraft": False, "mergeable": mergeable,
-        "reviewDecision": None if review == "NONE" else review, "headRefOid": head,
-        "reviews": {"nodes": []},
-        "reviewThreads": {"nodes": threads or [], "pageInfo": {"hasNextPage": False}},
-        "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {
-            "nodes": checks, "pageInfo": {"hasNextPage": False}}}}}]},
-    }}}}
+def files(*rows):
+    """rows: (filename, previous_filename or '', status)"""
+    return [{"filename": n, "previous_filename": p or None, "status": s} for n, p, s in rows]
 
 
-def load_steps(path):
-    return yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]
+def load_run(path, step_name):
+    jobs = yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]
+    for job in jobs.values():
+        for step in job["steps"]:
+            if step.get("name") == step_name:
+                return step["run"], step.get("env", {})
+    raise KeyError(step_name)
 
 
-class StaticGateTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.gate = load_steps(GATE)["review-and-merge"]
-        cls.dep = load_steps(DEPENDABOT)["dependabot"]
-
-    def steps(self):
-        return self.gate["steps"]
-
-    def test_dispatch_only_from_main(self):
-        cond = self.gate["if"]
-        self.assertIn("github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'", cond)
-        # Without the ref guard, a dispatch from any branch would run that branch's gate.
-        self.assertNotIn("github.event_name == 'workflow_dispatch' ||", cond)
-
-    def test_token_minted_only_after_gate_writes_ready(self):
-        names = [s.get("name", "") for s in self.steps()]
-        mint_idx = next(i for i, s in enumerate(self.steps()) if s.get("id") == "merge-token")
-        gate_idx = next(i for i, s in enumerate(self.steps()) if s.get("id") == "gate")
-        self.assertLess(gate_idx, mint_idx)
-        self.assertEqual(self.steps()[mint_idx]["if"], "steps.gate.outputs.gate_ready == 'true'")
-        self.assertEqual(names[-1], "Merge")
-
-    def test_gate_step_never_sees_app_key_or_merge_token(self):
-        gate = self.steps()[0]
-        self.assertNotIn("MERGE_TOKEN", gate.get("env", {}))
-        self.assertNotIn("ACS_MERGE_APP_PRIVATE_KEY", json.dumps(gate))
-        self.assertNotIn("merge-token", json.dumps(gate))
-
-    def test_only_merge_step_uses_merge_token_and_put(self):
-        for step in self.steps():
-            text = json.dumps(step)
-            if step.get("name") == "Merge":
-                self.assertIn("steps.merge-token.outputs.token", text)
-                self.assertIn('GH_TOKEN="$MERGE_TOKEN" gh api', step["run"])
-                self.assertEqual(step["run"].count("-X PUT"), 1)
-            else:
-                self.assertNotIn("steps.merge-token", text)
-                self.assertNotIn("-X PUT", step.get("run", ""))
-
-    def test_no_merge_mint_or_put_without_gate_ready(self):
-        for step in self.steps():
-            if step.get("name") in ("Merge", "Mint merge token (GitHub App)"):
-                self.assertEqual(step["if"], "steps.gate.outputs.gate_ready == 'true'")
-
-    def test_dependabot_mints_only_after_credential_check_and_gate(self):
-        names = [s.get("name", "") for s in self.dep["steps"]]
-        check = names.index("Verify merge App credentials are configured")
-        mint = names.index("Mint merge token (GitHub App)")
-        self.assertLess(check, mint)
-        self.assertIn("steps.gate.outputs.blocked != 'true'", self.dep["steps"][mint]["if"])
-        enable = self.dep["steps"][-1]
-        self.assertEqual(enable["env"]["GH_TOKEN"], "${{ steps.merge-token.outputs.token }}")
-
-
-class GateBehaviourTests(unittest.TestCase):
-    """Runs the real review-gate script against the stub gh."""
-
+class Harness(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="merge-gate-test-"))
-        self.fix = self.tmp / "fix"
-        self.fix.mkdir()
-        self.bin = self.tmp / "bin"
-        self.bin.mkdir()
+        self.fix = self.tmp / "fix"; self.fix.mkdir()
+        self.bin = self.tmp / "bin"; self.bin.mkdir()
         (self.bin / "gh").write_text(STUB, encoding="utf-8")
         (self.bin / "gh").chmod(0o755)
         self.log = self.tmp / "calls.log"
-        self.out = self.tmp / "github_output"
-        self.out.write_text("")
-        self.run_script = load_steps(GATE)["review-and-merge"]["steps"][0]["run"]
-        self.merge_script = [s for s in load_steps(GATE)["review-and-merge"]["steps"]
-                             if s.get("name") == "Merge"][0]["run"]
+        self.summary = self.tmp / "summary.md"
+        self.log.write_text(""); self.summary.write_text("")
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def write(self, name, obj):
-        (self.fix / name).write_text(json.dumps(obj), encoding="utf-8")
+    def fixtures(self, pr_obj=None, files_list=None, rules=None):
+        (self.fix / "pr.json").write_text(json.dumps(pr_obj or pr()))
+        (self.fix / "files.json").write_text(json.dumps(files_list if files_list is not None else files(("packages/x/index.ts", "", "modified"))))
+        (self.fix / "rules.json").write_text(json.dumps(rules if rules is not None else GOOD_RULES))
 
-    def fixtures(self, pr_first=None, pr_second=None, snap=None, files=None, merge_resp=None):
-        self.write("pr_first.json", pr_first or pr_json())
-        self.write("pr_second.json", pr_second or pr_json())
-        self.write("snapshot.json", snap or snapshot())
-        self.write("files.json", files if files is not None else [])
-        self.write("merge_resp.json", merge_resp or {"merged": True})
-
-    def env(self, merge_rc=0, copilot="unavailable", pr_number="406", extra=None):
-        e = dict(os.environ)
-        e.update({
-            "PATH": f"{self.bin}:{e['PATH']}",
-            "STUB_LOG": str(self.log), "STUB_FIX": str(self.fix),
-            "STUB_MERGE_RC": str(merge_rc), "STUB_COPILOT": copilot,
-            "GITHUB_REPOSITORY": REPO, "PR_NUMBER": pr_number,
-            "GH_TOKEN": GITHUB_TOKEN, "MERGE_TOKEN": MERGE_TOKEN,
-            "GITHUB_OUTPUT": str(self.out), "HEAD_SHA": HEAD, "METHOD": "squash",
+    def run_step(self, path, step_name, extra_env=None, attested=True):
+        script, _ = load_run(path, step_name)
+        env = dict(os.environ)
+        env.update({
+            "PATH": f"{self.bin}:{env['PATH']}", "STUB_LOG": str(self.log), "STUB_FIX": str(self.fix),
+            "GH_TOKEN": GITHUB_TOKEN, "REPO": REPO, "PR": "7", "EXPECTED_HEAD": HEAD,
+            "ATTESTED_ACTIONS_CANNOT_APPROVE": "true" if attested else "",
+            "GITHUB_STEP_SUMMARY": str(self.summary),
         })
-        e.update(extra or {})
-        return e
-
-    def run_bash(self, script, env):
-        p = self.tmp / "step.sh"
-        p.write_text(script, encoding="utf-8")
+        env.update(extra_env or {})
+        p = self.tmp / "step.sh"; p.write_text(script)
         return subprocess.run(["bash", str(p)], env=env, capture_output=True, text=True, timeout=120)
 
+    def gate(self, **kw):
+        return self.run_step(GATE, "Classify and enable auto-merge", **kw)
+
     def calls(self):
-        return self.log.read_text().splitlines() if self.log.exists() else []
+        return self.log.read_text().splitlines()
 
-    def outputs(self):
-        return self.out.read_text()
+    def enabled(self):
+        return any(" pr merge " in c and "--auto" in c and f"--match-head-commit {HEAD}" in c for c in self.calls())
 
-    def gate_ready(self):
-        return "gate_ready=true" in self.outputs()
+    def disabled(self):
+        return any("--disable-auto" in c for c in self.calls())
+
+    def assert_no_merge_endpoint(self):
+        self.assertFalse(any("-X PUT" in c or "/merge" in c and "pulls/" in c for c in self.calls()),
+                         "classifier must never call the merge endpoint directly")
 
     def assert_blocked(self, res):
         self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
-        self.assertFalse(self.gate_ready(), "BLOCK must not write gate_ready")
-        self.assertFalse(any("-X PUT" in c for c in self.calls()),
-                         "BLOCK must not invoke the merge API")
+        self.assertFalse(self.enabled(), "BLOCK must not enable auto-merge")
+        self.assert_no_merge_endpoint()
 
-class GateTests(GateBehaviourTests):
-    def test_happy_path_passes_gate_without_merging(self):
+
+class StaticTests(unittest.TestCase):
+    def setUp(self):
+        self.gate = yaml.safe_load(GATE.read_text())
+        self.dep = yaml.safe_load(DEPENDABOT.read_text())
+        self.texts = {p: p.read_text() for p in (GATE, DEPENDABOT)}
+
+    def test_only_pull_request_target_and_no_dispatch(self):
+        for d in (self.gate, self.dep):
+            self.assertEqual(list(d[True].keys()), ["pull_request_target"])
+        for t in self.texts.values():
+            self.assertNotIn("workflow_dispatch", t)
+
+    def test_no_checkout_of_any_code(self):
+        for t in self.texts.values():
+            self.assertNotIn("actions/checkout", t)
+            self.assertNotIn("git fetch", t)
+            self.assertNotIn("gh pr checkout", t)
+
+    def test_no_app_key_or_merge_credential(self):
+        for t in self.texts.values():
+            self.assertNotIn("create-github-app-token", t)
+            self.assertNotIn("ACS_MERGE_APP", t)
+        self.assertNotIn("secrets.", self.texts[GATE])
+
+    def test_no_direct_merge_endpoint_call(self):
+        for t in self.texts.values():
+            self.assertNotIn("-X PUT", t)
+            self.assertNotIn("/merge\"", t)
+
+    def test_least_privilege_permissions(self):
+        for d in (self.gate, self.dep):
+            self.assertEqual(d["permissions"], {"contents": "read", "pull-requests": "write"})
+
+    def test_pr_fields_only_reach_shell_through_env(self):
+        for t in self.texts.values():
+            for bad in ("github.event.pull_request.title", "github.event.pull_request.body",
+                        "github.event.pull_request.head.ref"):
+                self.assertNotIn("${{ " + bad, t, f"{bad} interpolated into a shell script")
+
+    def test_fork_and_non_owner_handled_in_script_not_by_skipping(self):
+        # Ineligible PRs still report the required check, so the gate cannot silently disappear.
+        job = self.gate["jobs"]["classify"]
+        self.assertNotIn("if", job)
+        self.assertEqual(job["name"], "PR review and merge gate")
+
+
+class ClassifierTests(Harness):
+    def test_ordinary_change_enables_auto_merge_bound_to_head(self):
         self.fixtures()
-        res = self.run_bash(self.run_script, self.env())
+        res = self.gate()
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-        self.assertTrue(self.gate_ready())
-        self.assertIn(f"head_sha={HEAD}", self.outputs())
-        self.assertFalse(any("-X PUT" in c for c in self.calls()), "gate step must not merge")
+        self.assertTrue(self.enabled())
+        self.assert_no_merge_endpoint()
 
-    def test_conflicting_pr_blocks(self):
-        self.fixtures(snap=snapshot(mergeable="CONFLICTING"))
-        self.assert_blocked(self.run_bash(self.run_script, self.env()))
-
-    def test_changes_requested_blocks(self):
-        self.fixtures(snap=snapshot(review="CHANGES_REQUESTED"))
-        self.assert_blocked(self.run_bash(self.run_script, self.env()))
-
-    def test_failed_check_blocks(self):
-        self.fixtures(snap=snapshot(checks=[
-            {"__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "FAILURE"}]))
-        self.assert_blocked(self.run_bash(self.run_script, self.env()))
-
-    def test_unresolved_thread_blocks(self):
-        threads = [{"isResolved": False, "comments": {"nodes": []}}]
-        self.fixtures(snap=snapshot(threads=threads))
-        self.assert_blocked(self.run_bash(self.run_script, self.env()))
-
-    def test_head_moved_during_review_blocks(self):
-        self.fixtures(pr_second=pr_json(head=OTHER_HEAD))
-        self.assert_blocked(self.run_bash(self.run_script, self.env()))
-
-    def test_policy_file_self_modification_blocks(self):
-        self.fixtures(files=[{"filename": ".github/workflows/jnibarger01-pr-review-merge.yml"}])
-        self.assert_blocked(self.run_bash(self.run_script, self.env()))
-
-    def test_non_owner_pr_is_ignored_without_merge_readiness(self):
-        self.fixtures(pr_first=pr_json(author="someone-else"), pr_second=pr_json(author="someone-else"))
-        res = self.run_bash(self.run_script, self.env())
+    def test_gate_edits_its_own_workflow_is_sensitive(self):
+        self.fixtures(files_list=files((".github/workflows/jnibarger01-pr-review-merge.yml", "", "modified")),
+                      pr_obj=pr(changed=1))
+        res = self.gate()
         self.assertEqual(res.returncode, 0)
-        self.assertFalse(self.gate_ready())
+        self.assertFalse(self.enabled())
+        self.assertTrue(self.disabled())
 
-    def test_draft_pr_is_ignored(self):
-        self.fixtures(pr_first=pr_json(draft=True))
-        res = self.run_bash(self.run_script, self.env())
-        self.assertEqual(res.returncode, 0)
-        self.assertFalse(self.gate_ready())
+    def test_sensitive_paths_never_auto_merge(self):
+        for path in (".github/workflows/check.yml", "CODEOWNERS", "vendor/desktop-commander/x.js",
+                     "packages/auth/session.ts", "apps/gateway/relay.ts", "packages/policy/rules.ts"):
+            with self.subTest(path=path):
+                self.setUp()
+                self.fixtures(files_list=files((path, "", "modified")))
+                self.gate()
+                self.assertFalse(self.enabled())
+                self.assertTrue(self.disabled())
 
-    def test_missing_mergeable_on_final_read_blocks(self):
-        self.fixtures(pr_second=pr_json(mergeable=False))
-        self.assert_blocked(self.run_bash(self.run_script, self.env()))
+    def test_unclassified_path_is_sensitive_by_default(self):
+        self.fixtures(files_list=files(("tsconfig.json", "", "modified")))
+        self.gate()
+        self.assertFalse(self.enabled())
+        self.assertTrue(self.disabled())
 
+    def test_rename_out_of_protected_path_is_still_sensitive(self):
+        self.fixtures(files_list=files(("docs/moved.md", ".github/workflows/check.yml", "renamed")))
+        self.gate()
+        self.assertFalse(self.enabled())
+        self.assertTrue(self.disabled())
 
-class MergeStepTests(GateBehaviourTests):
-    """Runs the real Merge step script."""
+    def test_incomplete_file_list_fails_closed(self):
+        self.fixtures(pr_obj=pr(changed=3), files_list=files(("packages/a.ts", "", "modified")))
+        self.assert_blocked(self.gate())
 
-    def test_merge_uses_app_token_only_for_put(self):
-        self.fixtures(merge_resp={"merged": True})
-        res = self.run_bash(self.merge_script, self.env())
-        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-        puts = [c for c in self.calls() if "-X PUT" in c]
-        self.assertEqual(len(puts), 1)
-        self.assertTrue(puts[0].startswith("merge |"), puts[0])
-        reads = [c for c in self.calls() if "-X PUT" not in c and " | " in c]
-        self.assertTrue(all(c.startswith("github |") for c in reads), reads)
-        self.assertNotIn(MERGE_TOKEN, self.log.read_text())
-
-    def test_merge_pins_reviewed_head_sha(self):
+    def test_file_api_failure_fails_closed(self):
         self.fixtures()
-        self.run_bash(self.merge_script, self.env())
-        put = [c for c in self.calls() if "-X PUT" in c][0]
-        self.assertIn(f"sha={HEAD}", put)
-
-    def test_rejected_merge_blocks_and_comments_without_token_value(self):
-        self.fixtures(merge_resp={"message": "Pull Request is not mergeable"})
-        res = self.run_bash(self.merge_script, self.env(merge_rc=1))
+        (self.fix / "files.json").unlink()  # stub will emit nothing useful; force parse failure below
+        (self.fix / "files.json").write_text("not json")
+        res = self.gate()
         self.assertNotEqual(res.returncode, 0)
-        comments = [c for c in self.calls() if "/comments" in c and "-X POST" in c]
-        self.assertTrue(comments, "rejected merge must post a BLOCK comment")
-        self.assertNotIn(MERGE_TOKEN, self.log.read_text())
+        self.assertFalse(self.enabled())
 
-    def test_merged_false_blocks(self):
-        self.fixtures(merge_resp={"merged": False, "message": "nope"})
-        res = self.run_bash(self.merge_script, self.env(merge_rc=0))
-        self.assertNotEqual(res.returncode, 0)
+    def test_head_moved_since_event_blocks(self):
+        self.fixtures(pr_obj=pr(head=OTHER))
+        self.assert_blocked(self.gate())
+
+    def test_missing_integration_binding_blocks_current_main(self):
+        self.fixtures(rules=CURRENT_RULES)
+        res = self.gate()
+        self.assert_blocked(res)
+        self.assertIn("not bound to an app", res.stderr)
+
+    def test_missing_review_protection_blocks(self):
+        self.fixtures(rules=[GOOD_RULES[0]])
+        self.assert_blocked(self.gate())
+
+    def test_missing_actions_attestation_blocks(self):
+        self.fixtures()
+        self.assert_blocked(self.gate(attested=False))
+
+    def test_draft_fork_and_non_owner_do_not_enable(self):
+        for obj in (pr(draft=True), pr(head_repo="someone/fork"), pr(author="someone-else")):
+            with self.subTest(pr=obj):
+                self.setUp()
+                self.fixtures(pr_obj=obj)
+                res = self.gate()
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertFalse(self.enabled())
+                self.assert_no_merge_endpoint()
+
+    def test_closed_pr_does_nothing(self):
+        self.fixtures(pr_obj=pr(state="closed"))
+        res = self.gate()
+        self.assertEqual(res.returncode, 0)
+        self.assertFalse(self.enabled())
+
+    def test_token_value_never_reaches_stub_arguments(self):
+        self.fixtures()
+        self.gate()
+        self.assertNotIn(GITHUB_TOKEN, self.log.read_text())
+
+
+class DependabotTests(Harness):
+    DEP_ENV = {"UPDATE_TYPE": "version-update:semver-patch", "PR_LABELS": ""}
+
+    def dep(self, **extra):
+        env = dict(self.DEP_ENV); env.update(extra)
+        return self.run_step(DEPENDABOT, "Classify and enable auto-merge", extra_env=env)
+
+    def test_patch_manifest_bump_enables_auto_merge(self):
+        self.fixtures(files_list=files(("package.json", "", "modified"), ("package-lock.json", "", "modified")),
+                      pr_obj=pr(author="dependabot[bot]", changed=2))
+        res = self.dep()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertTrue(self.enabled())
+        self.assert_no_merge_endpoint()
+
+    def test_major_update_never_enables(self):
+        self.fixtures(files_list=files(("package.json", "", "modified")), pr_obj=pr(author="dependabot[bot]"))
+        self.dep(UPDATE_TYPE="version-update:semver-major")
+        self.assertFalse(self.enabled())
+        self.assertTrue(self.disabled())
+
+    def test_parked_label_never_enables(self):
+        self.fixtures(files_list=files(("package.json", "", "modified")), pr_obj=pr(author="dependabot[bot]"))
+        self.dep(PR_LABELS="deps-parked")
+        self.assertFalse(self.enabled())
+
+    def test_source_change_in_dependabot_pr_never_enables(self):
+        self.fixtures(files_list=files(("packages/x/index.ts", "", "modified")), pr_obj=pr(author="dependabot[bot]"))
+        self.dep()
+        self.assertFalse(self.enabled())
+        self.assertTrue(self.disabled())
+
+    def test_unknown_update_type_blocks(self):
+        self.fixtures(pr_obj=pr(author="dependabot[bot]"))
+        res = self.dep(UPDATE_TYPE="")
+        self.assert_blocked(res)
+
+    def test_protections_unverified_block(self):
+        self.fixtures(rules=CURRENT_RULES, pr_obj=pr(author="dependabot[bot]"),
+                      files_list=files(("package.json", "", "modified")))
+        self.assert_blocked(self.dep())
 
 
 if __name__ == "__main__":

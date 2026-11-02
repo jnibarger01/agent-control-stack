@@ -1,19 +1,22 @@
 name: Dependabot auto-merge
 
-# Patch/minor only. Majors and anything labeled deps-major or deps-parked are
-# hard-blocked from auto-merge (CoS policy after ACS #102 slip).
+# Patch/minor dependency bumps only, from the default-branch copy of this file.
+# No checkout, no App or other secrets. Auto-merge is enabled only after the
+# same protection checks as the PR classifier, and bound to the classified head.
+# Majors, labelled parked bumps, and any change outside dependency manifests
+# are left for a human.
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, reopened, synchronize, labeled, unlabeled]
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
 
 jobs:
   dependabot:
     runs-on: ubuntu-latest
-    if: github.actor == 'dependabot[bot]'
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - name: Fetch Dependabot metadata
         id: meta
@@ -21,87 +24,68 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Hard-block majors and parked deps from auto-merge
-        id: gate
+      - name: Classify and enable auto-merge
         env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
           UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-        run: |
-          set -euo pipefail
-          blocked=0
-          reason=""
-
-          case "$UPDATE_TYPE" in
-            version-update:semver-major)
-              blocked=1
-              reason="semver-major"
-              gh pr edit "$PR_URL" --add-label "deps-major" || true
-              ;;
-          esac
-
-          IFS=',' read -r -a labels <<< "$PR_LABELS"
-          for label in "${labels[@]}"; do
-            case "$label" in
-              deps-major|deps-parked)
-                blocked=1
-                reason="${reason:+$reason; }label:$label"
-                ;;
-            esac
-          done
-
-          if [ "$blocked" = "1" ]; then
-            echo "blocked=true" >> "$GITHUB_OUTPUT"
-            echo "Auto-merge hard-blocked ($reason)."
-            # Cancel any previously enabled auto-merge (e.g. misclassified group bump).
-            gh pr merge --disable-auto "$PR_URL" || true
-            if [ "$UPDATE_TYPE" = "version-update:semver-major" ] || [[ ",$PR_LABELS," == *",deps-major,"* ]]; then
-              gh pr comment "$PR_URL" --body "Major / parked dependency bump — human review only (ACS #86; CoS policy after #102). Auto-merge disabled." || true
-            fi
-            exit 0
-          fi
-
-          echo "blocked=false" >> "$GITHUB_OUTPUT"
-
-      - name: Verify merge App credentials are configured
-        if: >
-          steps.gate.outputs.blocked != 'true' &&
-          (steps.meta.outputs.update-type == 'version-update:semver-patch' ||
-           steps.meta.outputs.update-type == 'version-update:semver-minor')
-        env:
-          HAS_APP_ID: ${{ secrets.ACS_MERGE_APP_ID != '' }}
-          HAS_APP_KEY: ${{ secrets.ACS_MERGE_APP_PRIVATE_KEY != '' }}
+          ATTESTED_ACTIONS_CANNOT_APPROVE: ${{ vars.ACS_ATTESTED_ACTIONS_CANNOT_APPROVE_PRS }}
         shell: bash
         run: |
-          if [[ "$HAS_APP_ID" != "true" || "$HAS_APP_KEY" != "true" ]]; then
-            echo "BLOCK: merge App credentials are not configured. No auto-merge was enabled." >&2
-            exit 1
+          set -euo pipefail
+
+          block() { echo "BLOCK: $*" >&2; exit 1; }
+          summary() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
+
+          # Hard blocks: majors and parked bumps are never auto-merged.
+          if [[ "$UPDATE_TYPE" == "version-update:semver-major" ]]; then
+            gh pr merge --disable-auto "$PR" >/dev/null 2>&1 || true
+            summary "Major update: human review only."; exit 0
           fi
+          IFS=',' read -r -a labels <<< "$PR_LABELS"
+          for label in "${labels[@]}"; do
+            case "$label" in deps-major|deps-parked)
+              gh pr merge --disable-auto "$PR" >/dev/null 2>&1 || true
+              summary "Parked label ($label): human review only."; exit 0 ;;
+            esac
+          done
+          case "$UPDATE_TYPE" in
+            version-update:semver-patch|version-update:semver-minor) ;;
+            *) block "unrecognised update type '$UPDATE_TYPE'" ;;
+          esac
 
-      # Auto-merge is attributed to the token that enabled it; GITHUB_TOKEN
-      # merges do not trigger `push` workflows on main, so use a GitHub App token.
-      - name: Mint merge token (GitHub App)
-        id: merge-token
-        if: >
-          steps.gate.outputs.blocked != 'true' &&
-          (steps.meta.outputs.update-type == 'version-update:semver-patch' ||
-           steps.meta.outputs.update-type == 'version-update:semver-minor')
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
-        with:
-          app-id: ${{ secrets.ACS_MERGE_APP_ID }}
-          private-key: ${{ secrets.ACS_MERGE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-          permission-pull-requests: write
+          pr_json="$(gh api "repos/$REPO/pulls/$PR")" || block "could not read PR #$PR"
+          [[ "$(jq -r '.head.sha' <<<"$pr_json")" == "$EXPECTED_HEAD" ]] || block "head moved; a newer run will classify it"
+          [[ "$(jq -r '.base.ref' <<<"$pr_json")" == "main" ]] || block "base is not main"
+          changed_files="$(jq -r '.changed_files' <<<"$pr_json")"
 
-      - name: Enable auto-merge for patch and minor
-        if: >
-          steps.gate.outputs.blocked != 'true' &&
-          (steps.meta.outputs.update-type == 'version-update:semver-patch' ||
-           steps.meta.outputs.update-type == 'version-update:semver-minor')
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ steps.merge-token.outputs.token }}
-        run: gh pr merge --auto --squash "$PR_URL"
+          # Protection evidence, same requirements as the PR classifier.
+          rules="$(gh api "repos/$REPO/rules/branches/main")" || block "could not read branch rules"
+          for ctx in check test; do
+            jq -e --arg c "$ctx" '[.[] | select(.type=="required_status_checks")
+              | .parameters.required_status_checks[]? | select(.context==$c and .integration_id != null)] | length > 0' \
+              <<<"$rules" >/dev/null || block "required check '$ctx' is not bound to an app on main"
+          done
+          jq -e '[.[] | select(.type=="pull_request") | .parameters
+            | select(.require_last_push_approval==true and .dismiss_stale_reviews_on_push==true)] | length > 0' \
+            <<<"$rules" >/dev/null || block "review protection not verified on main"
+          [[ "$ATTESTED_ACTIONS_CANNOT_APPROVE" == "true" ]] || block "Actions can-approve setting not attested"
+
+          # Only dependency manifests may change.
+          MANIFEST_RE='(^|/)(package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$'
+          files_tsv="$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[] | [.filename, (.previous_filename // "-")] | @tsv')" \
+            || block "could not list changed files"
+          rows="$(grep -c . <<<"$files_tsv" || true)"
+          [[ "$rows" == "$changed_files" ]] || block "file list incomplete ($rows of $changed_files)"
+          while IFS=$'\t' read -r name prev; do
+            for p in "$name" "$prev"; do
+              [[ -n "$p" && "$p" != "-" ]] || continue
+              grep -Eq "$MANIFEST_RE" <<<"$p" || { gh pr merge --disable-auto "$PR" >/dev/null 2>&1 || true; summary "Non-manifest change ($p): human review only."; exit 0; }
+            done
+          done <<<"$files_tsv"
+
+          gh pr merge --auto --squash --match-head-commit "$EXPECTED_HEAD" "$PR"
+          summary "Result: auto-merge enabled for $UPDATE_TYPE on head $EXPECTED_HEAD."
