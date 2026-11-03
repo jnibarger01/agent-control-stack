@@ -357,8 +357,16 @@ function isRequestingActor(context: PolicyContext): boolean {
   );
 }
 
+/**
+ * Self-approval of a high/critical-risk item: the acting principal is the one
+ * that requested the work. Compares against both `requester` and
+ * `requesterSubject` — Jace Commander / Desktop Commander items are created
+ * with requester "agent" and the real (attested) actor in `requesterSubject`,
+ * so comparing only `requester` let the subject self-approve its own items
+ * over the generic work-item path (policy.ts documents this intent).
+ */
 function isSelfApproval(context: PolicyContext): boolean {
-  return context.operation === "approve" && requiresRiskApproval(context) && context.actor === context.requester;
+  return context.operation === "approve" && requiresRiskApproval(context) && isRequestingActor(context);
 }
 
 function requiresRiskApproval(context: PolicyContext): boolean {

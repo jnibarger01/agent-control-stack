@@ -10,12 +10,25 @@ const workflow = readFileSync(
   "utf8"
 );
 
+/** Any text that can merge a pull request, or enable auto-merge for one. */
+const MERGE_CALL =
+  /gh pr merge|--auto\b|pulls\/[^\s"]*\/merge|\/merge\b|pulls?\.merge|enablePullRequestAutoMerge|mergePullRequest|github-script/u;
+/** The hotfix replaces the gate with a job that fails closed and holds no merge capability. */
+const gateDisabled = !MERGE_CALL.test(workflow);
+
 /**
- * This engine reports on the repository's own merge gate and must never be more permissive than it. These tests read the
- * workflow itself, so changing the workflow without changing the engine (or the other way round) fails here.
+ * This engine reports on the repository's own merge gate and must never be more permissive than it. While the gate is
+ * disabled, these tests assert that it cannot merge. Once it is live again, the original mirror assertions apply.
  */
 describe("the default gate policy matches the workflow it mirrors", () => {
-  it("allows only the author the workflow acts on", () => {
+  it.runIf(gateDisabled)("the disabled gate cannot merge and fails closed", () => {
+    expect(MERGE_CALL.test("gh pr merge --auto --squash")).toBe(true);
+    expect(MERGE_CALL.test("await github.rest.pulls.merge({})")).toBe(true);
+    expect(workflow).toMatch(/exit 1/u);
+    expect(workflow).not.toMatch(/contents: write|pull-requests: write/u);
+  });
+
+  it.skipIf(gateDisabled)("allows only the author the workflow acts on", () => {
     const authors = [...workflow.matchAll(/author" != "([^"]+)"/gu)].map((m) => m[1]);
     expect(authors.length).toBeGreaterThan(0);
     expect([...new Set(authors)]).toEqual([...DEFAULT_GATE_POLICY.allowedAuthors!]);
@@ -23,7 +36,7 @@ describe("the default gate policy matches the workflow it mirrors", () => {
     expect([...new Set(inline)]).toEqual([...DEFAULT_GATE_POLICY.allowedAuthors!]);
   });
 
-  it("protects exactly the files the workflow refuses to auto-merge a change to", () => {
+  it.skipIf(gateDisabled)("protects exactly the files the workflow refuses to auto-merge a change to", () => {
     const block = workflow.match(/policy_changes="[\s\S]*?\)"/u)?.[0] ?? "";
     const files = [...block.matchAll(/\.filename == "([^"]+)"/gu)].map((m) => m[1]).sort();
     expect(files).toEqual([...DEFAULT_GATE_POLICY.protectedPaths].sort());
@@ -41,19 +54,22 @@ describe("the default gate policy matches the workflow it mirrors", () => {
     expect(evaluateGate(pr({ number: 1 }), DEFAULT_GATE_POLICY).status).toBe("eligible");
   });
 
-  it("selects the merge method in the workflow's order", () => {
+  it("selects the merge method in the documented order", () => {
+    expect(selectMergeMethod({ allow_merge_commit: true, allow_squash_merge: true, allow_rebase_merge: true })).toBe(
+      "merge"
+    );
+  });
+
+  it.skipIf(gateDisabled)("selects the merge method in the workflow's order", () => {
     const order = [
       ...workflow.matchAll(/\.(allow_(?:merge_commit|squash_merge|rebase_merge))' <<<"\$repo_json"\)" == "true"/gu)
     ].map((m) => m[1]);
     expect(order).toEqual(["allow_merge_commit", "allow_squash_merge", "allow_rebase_merge"]);
     const methods = [...workflow.matchAll(/method="(merge|squash|rebase)"/gu)].map((m) => m[1]);
     expect(methods).toEqual(["merge", "squash", "rebase"]);
-    expect(selectMergeMethod({ allow_merge_commit: true, allow_squash_merge: true, allow_rebase_merge: true })).toBe(
-      "merge"
-    );
   });
 
-  it("applies the same blocking rules the workflow states", () => {
+  it.skipIf(gateDisabled)("applies the same blocking rules the workflow states", () => {
     for (const phrase of [
       "has merge conflicts",
       "requests changes",
