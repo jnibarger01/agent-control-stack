@@ -47,6 +47,8 @@ export type IngestDraft = {
   trustLevel: TrustLevel;
   metadata?: Record<string, unknown>;
   sourceRecordRef?: string | null;
+  /** ACS signature over signedPayload(draft). Only a valid one from a trusted key can keep an authority trust level. */
+  provenance?: { keyId: string; signature: string };
 };
 
 export type FindingSeverity = "info" | "low" | "medium" | "high";

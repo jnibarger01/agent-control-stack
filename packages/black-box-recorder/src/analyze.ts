@@ -64,6 +64,27 @@ export function recomputeFindings(store: RecorderStore, observationWindowMs = 12
       detectedAt: conflict.ingestedAt,
     });
   }
+  return boundFindings(store);
+}
+
+/** Retained findings are capped. A cut is reported as a finding, never silently dropped. */
+export const MAX_FINDINGS = 2000;
+
+function boundFindings(store: RecorderStore): Finding[] {
+  if (store.findings.length <= MAX_FINDINGS) return store.findings;
+  const dropped = store.findings.length - MAX_FINDINGS;
+  store.findings.length = MAX_FINDINGS;
+  store.findings.push({
+    findingId: "find_abbr.findings_truncated",
+    ruleId: "abbr.findings_truncated",
+    ruleVersion: 1,
+    severity: "info",
+    scope: "snapshot",
+    runId: "unscoped",
+    summary: `${dropped} finding(s) were not retained because the bound of ${MAX_FINDINGS} was reached.`,
+    relatedEventIds: [],
+    detectedAt: new Date(0).toISOString(),
+  });
   return store.findings;
 }
 

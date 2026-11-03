@@ -81,6 +81,24 @@ describe("recorder hardening", () => {
     expect(third.status).toBe("rejected");
   });
 
+  test("run annotations are capped: a new run beyond the cap is refused, an existing run still updates", () => {
+    const store = new RecorderStore({ enabled: true, maxRuns: 2 });
+    expect(store.annotate("r1", { agent: "a" })).toBe(true);
+    expect(store.annotate("r2", { agent: "b" })).toBe(true);
+    expect(store.annotate("r3", { agent: "c" })).toBe(false);
+    expect(store.annotations.has("r3")).toBe(false);
+    expect(store.annotate("r1", { tool: "t" })).toBe(true);
+    expect(store.annotations.size).toBe(2);
+  });
+
+  test("conflicts are capped with the same bound as records", async () => {
+    const store = new RecorderStore({ enabled: true, maxEvents: 1 });
+    await store.ingest(base);
+    for (let i = 0; i < 5; i++) await store.ingest({ ...base, metadata: { sequence: 100 + i } });
+    expect(store.conflicts.length).toBe(1);
+    expect(store.events.size).toBe(1);
+  });
+
   test("duplicate detection digests redacted content, so a secret cannot be recovered from the digest", async () => {
     const one = new RecorderStore({ enabled: true });
     const two = new RecorderStore({ enabled: true });
