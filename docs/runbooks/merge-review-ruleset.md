@@ -52,3 +52,21 @@ without this attestation.
 I could not read the Actions approval setting or the branch-protection API with the token available to this session
 (it returned 403 for the classic branch-protection endpoint). The ruleset above is read from the rulesets API only. The
 owner needs to confirm the settings in the GitHub UI.
+
+## Known limitation: merges made with GITHUB_TOKEN do not re-run main CI
+
+The classifier merges with `GITHUB_TOKEN`. GitHub does not start normal push workflows for events made with that token,
+so `check`, `Vitest Tests` and `dc-execution-chain` do not run on the new `main` commit after an unattended merge. The
+checks did run on the PR head before the merge. Nothing re-verifies `main` afterwards.
+
+This limitation is accepted temporarily (decision A). It is not resolved.
+
+What exists now:
+
+- `scripts/post-merge-verify.py` is read-only. It asks GitHub for the check runs on one commit and exits non-zero unless
+  every required check concluded `success` on that exact commit. It can read and report only. It has no merge,
+  approve, comment, dispatch or settings capability.
+- It is not wired to any workflow trigger. It must not be activated until a reviewed change proves, against the actual
+  merged `main` commit, that it runs and reports correctly.
+
+Activation requires the owner's approval and must keep the verifier without merge authority.
