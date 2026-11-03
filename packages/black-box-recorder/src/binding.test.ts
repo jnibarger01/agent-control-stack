@@ -62,6 +62,21 @@ describe("authorization and verification are bound to their context", () => {
     expect(row?.authorization.state).toBe("allowed");
   });
 
+  test("a stale or late grant does not authorize an execution that happened before it", async () => {
+    const row = await runWith([
+      signed(
+        draft({
+          producerEventId: "a9",
+          eventType: "authorization.allowed",
+          sourceTimestamp: at(5),
+          metadata: { decisionId: "d1", actor: "jace" }
+        })
+      ),
+      signed(execution("e9", "d1"))
+    ]);
+    expect(row?.authorization.state).not.toBe("allowed");
+  });
+
   test("a signed authorization with no decision or actor is not authorization", async () => {
     const row = await runWith([
       signed(draft({ producerEventId: "a2", eventType: "authorization.allowed", metadata: {} }))

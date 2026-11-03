@@ -524,9 +524,21 @@ function authState(events: RecorderEvent[], coverage?: string): AuthState {
   if (grants.length > 0) {
     // Every execution in the run must be bound to a decision that was actually granted. A grant for another decision
     // does not authorize this run, and an execution with no decision is not explained by any grant.
-    const decisions = new Set(grants.map((event) => event.metadata.decisionId));
+    // A grant only covers executions at or after its own timestamp. A grant recorded later is stale for earlier work.
+    const grantedAt = new Map<unknown, number>();
+    for (const grant of grants) {
+      const at = Date.parse(grant.sourceTimestamp ?? "");
+      if (!Number.isFinite(at)) continue;
+      const prior = grantedAt.get(grant.metadata.decisionId);
+      grantedAt.set(grant.metadata.decisionId, prior === undefined ? at : Math.min(prior, at));
+    }
     const executed = events.filter((event) => event.eventType.startsWith("execution") || SUCCESS_TYPES.has(event.eventType));
-    const unbound = executed.some((event) => typeof event.metadata.decisionId !== "string" || !decisions.has(event.metadata.decisionId));
+    const unbound = executed.some((event) => {
+      const decision = event.metadata.decisionId;
+      const grantTime = grantedAt.get(decision);
+      const executedAt = Date.parse(event.sourceTimestamp ?? "");
+      return typeof decision !== "string" || grantTime === undefined || !Number.isFinite(executedAt) || executedAt < grantTime;
+    });
     return unbound ? "unknown" : "allowed";
   }
   if (
