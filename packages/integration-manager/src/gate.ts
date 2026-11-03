@@ -65,6 +65,10 @@ export function evaluateGate(pr: PullRequestSnapshot, policy: GatePolicy): GateV
     if (outside.length > 0) {
       block("not_auto_mergeable_path", `human merge required; not auto-mergeable: ${outside.join(", ")}`);
     }
+    const unverified = pr.unverifiedOriginFiles ?? [];
+    if (unverified.length > 0) {
+      block("not_auto_mergeable_path", `renamed or copied file, previous name unknown: ${unverified.join(", ")}`);
+    }
   }
   const truncated = Object.entries(pr.truncated)
     .filter(([, cut]) => cut)

@@ -39,6 +39,8 @@ export interface PullRequestSnapshot {
   unresolvedThreads: number;
   checks: CheckSnapshot[];
   changedFiles: string[];
+  /** Changed paths whose previous name is unknown (renamed or copied, or change type not returned). Fails closed. */
+  unverifiedOriginFiles?: string[];
   /** True when the source had more review threads, checks or files than it returned. Never silently truncated. */
   truncated: { threads: boolean; checks: boolean; files: boolean };
 }

@@ -122,6 +122,14 @@ describe("evaluateGate", () => {
     }
   });
 
+  it("blocks a renamed or copied file whose previous name the classifier cannot see", () => {
+    const verdict = evaluateGate(
+      pr({ number: 1, changedFiles: ["docs/new.md"], unverifiedOriginFiles: ["docs/new.md"] }),
+      DEFAULT_GATE_POLICY
+    );
+    expect(codes(verdict)).toContain("not_auto_mergeable_path");
+  });
+
   it("warns, without blocking, when no checks are reported", () => {
     const verdict = evaluateGate(pr({ number: 1, checks: [] }), DEFAULT_GATE_POLICY);
     expect(verdict.status).toBe("eligible");
