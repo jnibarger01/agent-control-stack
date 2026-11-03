@@ -127,6 +127,11 @@ class Harness(unittest.TestCase):
     def assert_blocked(self, res):
         self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertFalse(self.enabled(), "BLOCK must not enable auto-merge")
+        # Stricter than enabled(): no auto-merge call of any kind, for any head, may run on a blocked path.
+        self.assertFalse(
+            any(" pr merge " in c and "--auto" in c for c in self.calls()),
+            "BLOCK must not issue any auto-merge request",
+        )
         self.assert_no_merge_endpoint()
 
 
