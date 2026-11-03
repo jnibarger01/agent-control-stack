@@ -506,19 +506,28 @@ function isSuccessClaim(event: RecorderEvent): boolean {
   return false;
 }
 
+/** Only signed ACS records, or records a caller explicitly granted, can establish authority. */
+const TRUSTED_AUTHORITY: ReadonlySet<string> = new Set(["acs_authoritative", "independently_verified"]);
+const GRANT_TYPES: ReadonlySet<string> = new Set(["approval.granted", "authorization.allowed", "capability.issued"]);
+
 function authState(events: RecorderEvent[], coverage?: string): AuthState {
   if (events.some((event) => event.eventType === "authorization.denied" || event.eventType === "approval.rejected")) {
     return "denied";
   }
-  if (
-    events.some(
-      (event) =>
-        event.eventType === "approval.granted" ||
-        event.eventType === "authorization.allowed" ||
-        event.eventType === "capability.issued",
-    )
-  ) {
-    return "allowed";
+  const grants = events.filter(
+    (event) =>
+      TRUSTED_AUTHORITY.has(event.trustLevel) &&
+      GRANT_TYPES.has(event.eventType) &&
+      typeof event.metadata.decisionId === "string" &&
+      typeof event.metadata.actor === "string",
+  );
+  if (grants.length > 0) {
+    // Every execution in the run must be bound to a decision that was actually granted. A grant for another decision
+    // does not authorize this run, and an execution with no decision is not explained by any grant.
+    const decisions = new Set(grants.map((event) => event.metadata.decisionId));
+    const executed = events.filter((event) => event.eventType.startsWith("execution") || SUCCESS_TYPES.has(event.eventType));
+    const unbound = executed.some((event) => typeof event.metadata.decisionId !== "string" || !decisions.has(event.metadata.decisionId));
+    return unbound ? "unknown" : "allowed";
   }
   if (
     events.some(
@@ -533,7 +542,15 @@ function authState(events: RecorderEvent[], coverage?: string): AuthState {
 
 function verifyState(events: RecorderEvent[], coverage?: string): VerifyState {
   if (events.some((event) => event.eventType === "verification.failed")) return "failed";
-  if (events.some((event) => event.eventType === "verification.passed")) return "verified";
+  // A pass counts only from trusted authority and only when it names an execution in this same run.
+  const bound = events.some(
+    (event) =>
+      TRUSTED_AUTHORITY.has(event.trustLevel) &&
+      event.eventType === "verification.passed" &&
+      typeof event.metadata.executionEventId === "string" &&
+      events.some((other) => other.eventId === event.metadata.executionEventId && other.eventType.startsWith("execution")),
+  );
+  if (bound) return "verified";
   if (events.some((event) => isSuccessClaim(event))) return "unverified";
   if (coverage === "list-projection") return "not_loaded";
   return "unknown";

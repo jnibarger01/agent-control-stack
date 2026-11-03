@@ -69,7 +69,7 @@ describe("black box recorder", () => {
   });
 
   test("identical ingest is one record; conflicting identity is kept and flagged", async () => {
-    const store = new RecorderStore({ enabled: true, grantTrust: () => true });
+    const store = new RecorderStore({ enabled: true });
     const draft = {
       producerEventId: "evt-1",
       component: "acs-gateway",
@@ -123,16 +123,16 @@ describe("black box recorder", () => {
     expect(row?.sourceReleases.length).toBe(2);
   });
 
-  test("verified fixture is complete and release is not invented on the live focus run", async () => {
+  test("bundled fixtures are never authoritative: they cannot show verified or allowed, and release is not invented on the live focus run", async () => {
+    // Bundled data is unsigned. Its claims of authority or verification must not become production-authoritative states.
     const fixture = await loadLane("fixture");
     const verified = summarize(fixture).find((item) => item.runId === "fixture-verified");
-    expect(verified?.verification.state).toBe("verified");
-    expect(verified?.authorization.state).toBe("allowed");
-    expect(verified?.evidence.completeness).toBe("complete");
+    expect(verified?.verification.state).not.toBe("verified");
+    expect(verified?.authorization.state).not.toBe("allowed");
 
     const live = await loadLane("live");
     const focus = summarize(live).find((item) => item.runId === LIVE_FOCUS_RUN);
-    expect(focus?.authorization.state).toBe("allowed");
+    expect(focus?.authorization.state).not.toBe("allowed");
     expect(focus?.verification.state).toBe("unverified");
     expect(focus?.sourceReleases[0]).toBe("unreleased");
     expect(focus?.evidence.eventCount).toBe(22);

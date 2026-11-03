@@ -38,9 +38,9 @@ export const capture = {
 };
 
 export async function loadLane(lane: "live" | "fixture"): Promise<RecorderStore> {
-  // The bundled snapshot and fixtures are repository data reviewed in git. They carry no signature, so granting their
-  // declared trust is an explicit, documented decision of this loader. Records from any other source stay untrusted.
-  const store = new RecorderStore({ enabled: true, grantTrust: () => true });
+  // Bundled snapshot and fixture data is unsigned repository content. It can be shown, but it is never authoritative:
+  // no trust is granted here, so its authority claims stay untrusted and cannot produce allowed or verified states.
+  const store = new RecorderStore({ enabled: true });
   if (lane === "fixture") {
     for (const run of FIXTURE_RUNS) {
       store.annotate(run.annotation.runId, run.annotation);
