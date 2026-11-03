@@ -5,6 +5,12 @@ import { redact, redactField } from "./redact.js";
 import type { Finding, IngestDraft, IngestResult, RecorderEvent, RunAnnotation, TrustLevel } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
 
+/** The event id the store assigns to a producer event. Shared so a verification can name its execution event. */
+export async function recorderEventIdFor(component: string, producerEventId: string): Promise<string> {
+  const producerKey = `${redactField(component) ?? ""}\0${redactField(producerEventId) ?? ""}`;
+  return `rec_${(await sha256Hex(producerKey)).slice(0, 24)}`;
+}
+
 export type RecorderStoreOptions = {
   /** Ingestion is refused unless this is true. Defaults to the ABBR_ENABLED flag. */
   enabled?: boolean;

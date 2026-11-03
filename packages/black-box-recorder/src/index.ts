@@ -26,7 +26,7 @@ export type {
 } from "./types.js";
 export { canonicalJson, envelopeForDigest, sha256Hex } from "./canonical.js";
 export { containsSensitiveResidue, redact, redactField } from "./redact.js";
-export { RecorderStore, type RecorderStoreOptions } from "./store.js";
+export { RecorderStore, recorderEventIdFor, type RecorderStoreOptions } from "./store.js";
 export {
   exportRun,
   orderEvents,
@@ -39,3 +39,5 @@ export {
 export { FIXTURE_RUNS } from "./fixture.js";
 export { LIVE_FOCUS_RUN, capture, loadLane } from "./load.js";
 export { recorderFeatureEnabled } from "./flag.js";
+export { toRecorderDraft, type AcsExecutionRow } from "./acs-emitter.js";
+// signRecordDraft is intentionally NOT exported: it holds key handling and must stay out of the browser bundle.

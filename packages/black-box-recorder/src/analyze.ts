@@ -519,25 +519,38 @@ function authState(events: RecorderEvent[], coverage?: string): AuthState {
       TRUSTED_AUTHORITY.has(event.trustLevel) &&
       GRANT_TYPES.has(event.eventType) &&
       typeof event.metadata.decisionId === "string" &&
-      typeof event.metadata.actor === "string",
+      typeof event.metadata.actor === "string" &&
+      typeof event.metadata.capabilityId === "string",
   );
   if (grants.length > 0) {
     // Every execution in the run must be bound to a decision that was actually granted. A grant for another decision
     // does not authorize this run, and an execution with no decision is not explained by any grant.
     // A grant only covers executions at or after its own timestamp. A grant recorded later is stale for earlier work.
+    // The capability is bound too: a grant for one tool invocation does not cover another invocation of the same decision.
     const grantedAt = new Map<unknown, number>();
+    const grantedCapabilities = new Map<unknown, Set<unknown>>();
     for (const grant of grants) {
       const at = Date.parse(grant.sourceTimestamp ?? "");
       if (!Number.isFinite(at)) continue;
       const prior = grantedAt.get(grant.metadata.decisionId);
       grantedAt.set(grant.metadata.decisionId, prior === undefined ? at : Math.min(prior, at));
+      const caps = grantedCapabilities.get(grant.metadata.decisionId) ?? new Set<unknown>();
+      caps.add(grant.metadata.capabilityId);
+      grantedCapabilities.set(grant.metadata.decisionId, caps);
     }
     const executed = events.filter((event) => event.eventType.startsWith("execution") || SUCCESS_TYPES.has(event.eventType));
     const unbound = executed.some((event) => {
       const decision = event.metadata.decisionId;
       const grantTime = grantedAt.get(decision);
       const executedAt = Date.parse(event.sourceTimestamp ?? "");
-      return typeof decision !== "string" || grantTime === undefined || !Number.isFinite(executedAt) || executedAt < grantTime;
+      const capabilityGranted = grantedCapabilities.get(decision)?.has(event.metadata.capabilityId) === true;
+      return (
+        typeof decision !== "string" ||
+        grantTime === undefined ||
+        !Number.isFinite(executedAt) ||
+        executedAt < grantTime ||
+        !capabilityGranted
+      );
     });
     return unbound ? "unknown" : "allowed";
   }
