@@ -10,15 +10,15 @@ repository owner in GitHub. This document does not change them.
 Ruleset `CI required for merge` (id 22526882) currently requires only `check` and `test`. Add a `pull_request` rule to
 the same ruleset, or to a new ruleset that targets `refs/heads/main`:
 
-| Setting | Value | Why the classifier needs it |
-| --- | --- | --- |
-| Require a pull request before merging | on | No direct pushes to `main`. |
-| Required approving reviews | at least 1 | An independent human must approve. |
-| Require approval of the most recent reviewable push | on | An approval cannot carry over to a newer head. |
-| Dismiss stale pull request approvals when new commits are pushed | on | Matches the classifier's stale-dismissal check. |
-| Require review from Code Owners | on, with a `CODEOWNERS` entry covering `.github/**` | Matches the path-scoped reviewer check. |
-| Required status checks | `check`, `test` | Already present. Keep bound to the GitHub Actions app. |
-| Bypass list | empty | No actor can skip the rules. |
+| Setting                                                          | Value                                               | Why the classifier needs it                            |
+| ---------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------ |
+| Require a pull request before merging                            | on                                                  | No direct pushes to `main`.                            |
+| Required approving reviews                                       | at least 1                                          | An independent human must approve.                     |
+| Require approval of the most recent reviewable push              | on                                                  | An approval cannot carry over to a newer head.         |
+| Dismiss stale pull request approvals when new commits are pushed | on                                                  | Matches the classifier's stale-dismissal check.        |
+| Require review from Code Owners                                  | on, with a `CODEOWNERS` entry covering `.github/**` | Matches the path-scoped reviewer check.                |
+| Required status checks                                           | `check`, `test`                                     | Already present. Keep bound to the GitHub Actions app. |
+| Bypass list                                                      | empty                                               | No actor can skip the rules.                           |
 
 The classifier reads these through `repos/{repo}/rules/branches/main` and fails closed if `require_last_push_approval`,
 `dismiss_stale_reviews_on_push`, a `.github/**` required reviewer, or an app-bound `check`/`test` is missing.
