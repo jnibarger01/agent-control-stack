@@ -1,8 +1,7 @@
 const SENSITIVE_KEY =
   /secret|password|passwd|token|authorization|cookie|api[-_]?key|private[-_]?key|credential|stdout|stderr|^prompt$|env$/i;
 
-const SENSITIVE_VALUE =
-  /^(bearer\s+\S+|sk-[a-z0-9]{8,}|-----BEGIN [A-Z ]*PRIVATE)/i;
+const SENSITIVE_VALUE = /^(bearer\s+\S+|sk-[a-z0-9_-]{8,}|-----BEGIN [A-Z ]*PRIVATE)/i;
 
 const JWT = /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}/;
 
@@ -30,7 +29,13 @@ export function redact(value: unknown, depth = 0): unknown {
   return null;
 }
 
-function redactString(value: string): string {
+/** Redacts a single identity or reference field with the same rules as metadata. Null stays null. */
+export function redactField(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  return redactString(value);
+}
+
+export function redactString(value: string): string {
   if (SENSITIVE_VALUE.test(value) || JWT.test(value)) return "[redacted]";
   if (value.length > MAX_STRING) return `${value.slice(0, MAX_STRING)}…[truncated]`;
   return value;
@@ -39,8 +44,8 @@ function redactString(value: string): string {
 export function containsSensitiveResidue(value: unknown): boolean {
   const text = JSON.stringify(value);
   return /\[redacted\]/.test(text)
-    ? /Bearer\s+[A-Za-z0-9._~+/-]+=*|sk-[a-zA-Z0-9]{8,}|-----BEGIN |stdout|\/home\/jacen/.test(
-        text.replaceAll("[redacted]", ""),
+    ? /Bearer\s+[A-Za-z0-9._~+/-]+=*|sk-[a-zA-Z0-9_-]{8,}|-----BEGIN |stdout|\/home\/jacen/.test(
+        text.replaceAll("[redacted]", "")
       )
-    : /Bearer\s+[A-Za-z0-9._~+/-]+=*|sk-[a-zA-Z0-9]{8,}|-----BEGIN |\/home\/jacen/.test(text);
+    : /Bearer\s+[A-Za-z0-9._~+/-]+=*|sk-[a-zA-Z0-9_-]{8,}|-----BEGIN |\/home\/jacen/.test(text);
 }

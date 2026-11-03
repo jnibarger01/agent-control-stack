@@ -25,8 +25,8 @@ export type {
   VerifyState
 } from "./types.js";
 export { canonicalJson, envelopeForDigest, sha256Hex } from "./canonical.js";
-export { containsSensitiveResidue, redact } from "./redact.js";
-export { RecorderStore } from "./store.js";
+export { containsSensitiveResidue, redact, redactField } from "./redact.js";
+export { RecorderStore, type RecorderStoreOptions } from "./store.js";
 export {
   exportRun,
   orderEvents,

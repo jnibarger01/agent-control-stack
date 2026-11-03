@@ -22,14 +22,19 @@ describe("black box recorder", () => {
       "execute-approved",
       "secret-broker"
     ];
-    const files = readdirSync(new URL(".", import.meta.url)).filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts"));
+    const files = readdirSync(new URL(".", import.meta.url)).filter(
+      (name) => name.endsWith(".ts") && !name.endsWith(".test.ts")
+    );
     for (const name of files) {
       const text = readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
       const imports = text
         .split("\n")
         .filter((line) => line.includes("from ") || line.trimStart().startsWith("import "));
       for (const token of banned) {
-        expect(imports.some((line) => line.includes(token)), `${name} imports ${token}`).toBe(false);
+        expect(
+          imports.some((line) => line.includes(token)),
+          `${name} imports ${token}`
+        ).toBe(false);
       }
     }
   });
@@ -64,7 +69,7 @@ describe("black box recorder", () => {
   });
 
   test("identical ingest is one record; conflicting identity is kept and flagged", async () => {
-    const store = new RecorderStore();
+    const store = new RecorderStore({ enabled: true, grantTrust: () => true });
     const draft = {
       producerEventId: "evt-1",
       component: "acs-gateway",
@@ -101,9 +106,9 @@ describe("black box recorder", () => {
     expect(row).toBeTruthy();
     expect(row?.authorization.state).toBe("unknown");
     expect(row?.authorization.state).not.toBe("denied");
-    expect(store.findings.some((item) => item.ruleId === "abbr.missing-authorization" && item.runId === row?.runId)).toBe(
-      true
-    );
+    expect(
+      store.findings.some((item) => item.ruleId === "abbr.missing-authorization" && item.runId === row?.runId)
+    ).toBe(true);
   });
 
   test("validator failure stays authoritative over producer success", async () => {
@@ -131,9 +136,9 @@ describe("black box recorder", () => {
     expect(focus?.verification.state).toBe("unverified");
     expect(focus?.sourceReleases[0]).toBe("unreleased");
     expect(focus?.evidence.eventCount).toBe(22);
-    expect(live.findings.some((item) => item.ruleId === "abbr.unverified-success" && item.runId === LIVE_FOCUS_RUN)).toBe(
-      true
-    );
+    expect(
+      live.findings.some((item) => item.ruleId === "abbr.unverified-success" && item.runId === LIVE_FOCUS_RUN)
+    ).toBe(true);
     expect(live.findings.some((item) => item.ruleId === "abbr.spawn-accepted-process-exit")).toBe(true);
     expect(live.findings.some((item) => item.ruleId === "abbr.audit-chain-break")).toBe(false);
   });

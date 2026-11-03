@@ -1,11 +1,7 @@
 export const SCHEMA_VERSION = 1 as const;
 
 export type TrustLevel =
-  | "acs_authoritative"
-  | "independently_verified"
-  | "authenticated_producer"
-  | "untrusted_claim"
-  | "unknown";
+  "acs_authoritative" | "independently_verified" | "authenticated_producer" | "untrusted_claim" | "unknown";
 
 export type IntegrityStatus = "valid" | "conflict" | "unverifiable";
 
@@ -110,4 +106,5 @@ export type RunAnnotation = {
 
 export type IngestResult =
   | { status: "created" | "duplicate"; event: RecorderEvent }
-  | { status: "conflict"; event: RecorderEvent; rejectedSha256: string };
+  | { status: "conflict"; event: RecorderEvent; rejectedSha256: string }
+  | { status: "disabled" | "rejected"; reason: string };
