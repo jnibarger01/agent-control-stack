@@ -538,7 +538,12 @@ function authState(events: RecorderEvent[], coverage?: string): AuthState {
       caps.add(grant.metadata.capabilityId);
       grantedCapabilities.set(grant.metadata.decisionId, caps);
     }
-    const executed = events.filter((event) => event.eventType.startsWith("execution") || SUCCESS_TYPES.has(event.eventType));
+    // Only trusted execution evidence constrains a grant. Unsigned rows are not evidence and cannot poison a valid chain.
+    const executed = events.filter(
+      (event) =>
+        TRUSTED_AUTHORITY.has(event.trustLevel) &&
+        (event.eventType.startsWith("execution") || SUCCESS_TYPES.has(event.eventType)),
+    );
     const unbound = executed.some((event) => {
       const decision = event.metadata.decisionId;
       const grantTime = grantedAt.get(decision);
@@ -573,7 +578,13 @@ function verifyState(events: RecorderEvent[], coverage?: string): VerifyState {
       TRUSTED_AUTHORITY.has(event.trustLevel) &&
       event.eventType === "verification.passed" &&
       typeof event.metadata.executionEventId === "string" &&
-      events.some((other) => other.eventId === event.metadata.executionEventId && other.eventType.startsWith("execution")),
+      events.some(
+        (other) =>
+          other.eventId === event.metadata.executionEventId &&
+          TRUSTED_AUTHORITY.has(other.trustLevel) &&
+          other.eventType.startsWith("execution") &&
+          other.metadata.outcome === "succeeded",
+      ),
   );
   if (bound) return "verified";
   if (events.some((event) => isSuccessClaim(event))) return "unverified";

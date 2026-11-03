@@ -6,8 +6,16 @@ import type { Finding, IngestDraft, IngestResult, RecorderEvent, RunAnnotation, 
 import { SCHEMA_VERSION } from "./types.js";
 
 /** The event id the store assigns to a producer event. Shared so a verification can name its execution event. */
-export async function recorderEventIdFor(component: string, producerEventId: string): Promise<string> {
-  const producerKey = `${redactField(component) ?? ""}\0${redactField(producerEventId) ?? ""}`;
+/**
+ * Authoritative and untrusted records live in separate slots. An unsigned claim can therefore never occupy the id of a
+ * signed record, and cannot make a signed verification point at unsigned evidence.
+ */
+export async function recorderEventIdFor(
+  component: string,
+  producerEventId: string,
+  authority: "authoritative" | "untrusted" = "authoritative"
+): Promise<string> {
+  const producerKey = `${redactField(component) ?? ""}\0${redactField(producerEventId) ?? ""}\0${authority}`;
   return `rec_${(await sha256Hex(producerKey)).slice(0, 24)}`;
 }
 
@@ -31,6 +39,7 @@ export type RecorderStoreOptions = {
 };
 
 const DEFAULT_MAX_EVENTS = 10_000;
+const TRUSTED_AUTHORITY_LEVELS: ReadonlySet<TrustLevel> = new Set(["acs_authoritative", "independently_verified"]);
 const DEFAULT_MAX_RUNS = 10_000;
 const UNGRANTED: ReadonlySet<TrustLevel> = new Set([
   "acs_authoritative",
@@ -96,7 +105,8 @@ export class RecorderStore {
       producerEventId: redactField(draft.producerEventId) ?? "",
       identityRef: redactField(draft.identityRef)
     };
-    const producerKey = `${source.component}\0${source.producerEventId}`;
+    const authority = TRUSTED_AUTHORITY_LEVELS.has(trustLevel) ? "authoritative" : "untrusted";
+    const producerKey = `${source.component}\0${source.producerEventId}\0${authority}`;
     const eventId = `rec_${(await sha256Hex(producerKey)).slice(0, 24)}`;
     const partial = {
       eventId,
