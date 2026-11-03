@@ -112,22 +112,26 @@ describe("evaluateGate", () => {
     expect(codes(verdict).sort()).toEqual(["changes_requested", "conflicting", "draft", "unresolved_threads"]);
   });
 
-  it("never reports a source change eligible: only docs may auto-merge, and sensitive docs still need a human", () => {
-    const verdictFor = (file: string) =>
-      codes(evaluateGate(pr({ number: 1, changedFiles: [file] }), DEFAULT_GATE_POLICY));
-    expect(verdictFor("docs/guide.md")).toEqual([]);
-    expect(verdictFor("README.md")).toEqual([]);
+  it("keeps a source change mergeable by a human, but never auto-mergeable: only plain docs pass the classifier's rules", () => {
+    const autoWarning = (file: string) =>
+      evaluateGate(pr({ number: 1, changedFiles: [file] }), DEFAULT_GATE_POLICY).warnings.some((w) =>
+        w.startsWith("not auto-mergeable")
+      );
+    expect(autoWarning("docs/guide.md")).toBe(false);
+    expect(autoWarning("README.md")).toBe(false);
     for (const file of ["apps/gateway/src/x.ts", "packages/a/README.md", "docs/keys.md", "vendor/x.js"]) {
-      expect(verdictFor(file), file).toContain("not_auto_mergeable_path");
+      expect(autoWarning(file), file).toBe(true);
+      expect(evaluateGate(pr({ number: 1, changedFiles: [file] }), DEFAULT_GATE_POLICY).status, file).toBe("eligible");
     }
   });
 
-  it("blocks a renamed or copied file whose previous name the classifier cannot see", () => {
+  it("warns that a renamed or copied file cannot be auto-merged, because its previous name is not visible", () => {
     const verdict = evaluateGate(
       pr({ number: 1, changedFiles: ["docs/new.md"], unverifiedOriginFiles: ["docs/new.md"] }),
       DEFAULT_GATE_POLICY
     );
-    expect(codes(verdict)).toContain("not_auto_mergeable_path");
+    expect(verdict.warnings.join(" ")).toMatch(/previous name/);
+    expect(verdict.status).toBe("eligible");
   });
 
   it("warns, without blocking, when no checks are reported", () => {

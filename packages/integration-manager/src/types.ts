@@ -61,7 +61,6 @@ export type GateBlockerCode =
   | "fork_pull_request"
   | "author_not_allowed"
   | "gate_policy_modified"
-  | "not_auto_mergeable_path"
   | "truncated_signals"
   | "conflicting"
   | "changes_requested"

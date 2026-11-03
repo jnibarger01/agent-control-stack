@@ -57,17 +57,18 @@ export function evaluateGate(pr: PullRequestSnapshot, policy: GatePolicy): GateV
   }
   const touched = pr.changedFiles.filter((file) => policy.protectedPaths.includes(file));
   if (touched.length > 0) block("gate_policy_modified", `changes the merge policy itself: ${touched.join(", ")}`);
+  // Auto-merge eligibility is separate from merge eligibility. A source change stays mergeable by a human, so it is
+  // reported as a warning, not a blocker. The classifier is what decides whether GitHub may merge it unattended.
   if (policy.autoMergePaths) {
-    // Only docs may land without a human. Anything else needs independent approval and a human merge.
     const allow = new RegExp(policy.autoMergePaths.allowPattern, "i");
     const sensitive = new RegExp(policy.autoMergePaths.sensitivePattern, "i");
     const outside = pr.changedFiles.filter((file) => !allow.test(file) || sensitive.test(file));
     if (outside.length > 0) {
-      block("not_auto_mergeable_path", `human merge required; not auto-mergeable: ${outside.join(", ")}`);
+      warnings.push(`not auto-mergeable, human merge required: ${outside.join(", ")}`);
     }
     const unverified = pr.unverifiedOriginFiles ?? [];
     if (unverified.length > 0) {
-      block("not_auto_mergeable_path", `renamed or copied file, previous name unknown: ${unverified.join(", ")}`);
+      warnings.push(`not auto-mergeable, renamed or copied file with unknown previous name: ${unverified.join(", ")}`);
     }
   }
   const truncated = Object.entries(pr.truncated)

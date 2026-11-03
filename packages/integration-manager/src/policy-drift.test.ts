@@ -48,8 +48,8 @@ describe("the default gate policy matches the classifier it mirrors", () => {
       "CODEOWNERS"
     ];
     for (const file of samples) {
-      const engineAdmits = evaluateGate(pr({ number: 1, changedFiles: [file] }), DEFAULT_GATE_POLICY).blockers.every(
-        (b) => b.code !== "not_auto_mergeable_path"
+      const engineAdmits = !evaluateGate(pr({ number: 1, changedFiles: [file] }), DEFAULT_GATE_POLICY).warnings.some(
+        (w) => w.startsWith("not auto-mergeable")
       );
       expect(engineAdmits && !classifierAdmits(file), file).toBe(false);
     }
