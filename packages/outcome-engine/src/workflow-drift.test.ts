@@ -13,25 +13,44 @@ const workflows = readdirSync(workflowsDir)
   .filter((name) => name.endsWith(".yml"))
   .map((name) => ({ name, text: readFileSync(join(workflowsDir, name), "utf8") }));
 
-/** Pins the model of "what else can merge a pull request" to the workflows themselves, so drift fails loudly. */
+/** Text that can merge a pull request or enable auto-merge for one. */
+const MERGE_CALL =
+  /gh pr merge|--auto\b|pulls\/[^\s"]*\/merge|\/merge\b|pulls?\.merge|enablePullRequestAutoMerge|mergePullRequest|github-script/u;
+
+/**
+ * Pins the model of "what else can merge a pull request" to the workflows themselves, so drift fails loudly.
+ * The hotfix disables the merge gate and Dependabot auto-merge. While no workflow can merge, the tests assert that;
+ * once a merge path returns, the original assertions about the modelled conditions apply again.
+ */
 describe("external merge exposure model", () => {
+  const mergers = workflows.filter(({ text }) => MERGE_CALL.test(text)).map(({ name }) => name);
+  const mergeDisabled = mergers.length === 0;
+
+  it("the merge-call detector recognises a real merge call", () => {
+    expect(MERGE_CALL.test("gh pr merge --auto --squash")).toBe(true);
+    expect(MERGE_CALL.test("await github.rest.pulls.merge({})")).toBe(true);
+  });
+
   it("every workflow that can merge is a modelled one", () => {
     const modelled = new Set(MODELLED_MERGE_PATHS.map((path) => path.workflow.split("/").pop()));
-    const mergers = workflows
-      .filter(({ text }) => /gh pr merge|--auto\b|pulls\/[^\s"]*\/merge|\/merge\b/u.test(text))
-      .map(({ name }) => name);
-    expect(mergers.length).toBeGreaterThan(0);
     for (const name of mergers)
       expect(modelled.has(name), `${name} can merge but is not in MODELLED_MERGE_PATHS`).toBe(true);
   });
 
-  it("the modelled conditions still appear in the workflows", () => {
+  it.skipIf(mergeDisabled)("the modelled conditions still appear in the workflows", () => {
     const jn = workflows.find(({ name }) => name === "jnibarger01-pr-review-merge.yml")?.text ?? "";
     expect(jn).toContain("workflow_dispatch");
     expect(jn).toContain("jnibarger01");
     const dependabot = workflows.find(({ name }) => name === "dependabot-auto-merge.yml")?.text ?? "";
     expect(dependabot).toMatch(/dependabot\[bot\]/u);
     expect(dependabot).toMatch(/gh pr merge[^\n]*--auto[^\n]*--squash|--auto[^\n]*--squash/u);
+  });
+
+  it.runIf(mergeDisabled)("the disabled merge workflows fail closed", () => {
+    const jn = workflows.find(({ name }) => name === "jnibarger01-pr-review-merge.yml")?.text ?? "";
+    const dependabot = workflows.find(({ name }) => name === "dependabot-auto-merge.yml")?.text ?? "";
+    expect(jn).toMatch(/exit 1/u);
+    expect(dependabot).toMatch(/if: \$\{\{ false \}\}/u);
   });
 
   it("never reports exposure as none", () => {
