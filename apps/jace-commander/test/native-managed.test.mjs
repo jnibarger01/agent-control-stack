@@ -69,7 +69,8 @@ try {
  assert.equal(fs.existsSync(path.join(root,'nested','keep')),true);
  ok(await call('delete_file',{path:binary}));assert.equal(fs.existsSync(binary),false);
  mode='outage';
- assert.equal(code(await call('privileged_exec',{argv:['/usr/bin/id']})),'upstream_unreachable');
+ // An ACS outage is ACS_UNAVAILABLE and never reaches the root helper.
+ assert.equal(code(await call('privileged_exec',{argv:['/usr/bin/id']})),'ACS_UNAVAILABLE');
  assert.equal(helperCalls,0);
  console.log('native managed MCP: approval, revoke, expiry, epoch, principal, outage, replay, arguments, PTY, binary, delete PASS');
 } finally {await client.close();fs.rmSync(tmp,{recursive:true,force:true});}
