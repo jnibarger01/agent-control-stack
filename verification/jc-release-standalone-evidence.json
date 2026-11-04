@@ -1,9 +1,9 @@
 {
   "verdict": "PASS",
-  "date": "2026-11-04T12:28:23.635Z",
-  "commit": "514c35a4111f0c004f4e5d254d8d4eb1b15f8f21",
+  "date": "2026-11-04T16:08:58.735Z",
+  "commit": "c7fd91b994cc733f78373205284492c8cbcccdc0",
   "version": "1.0.0",
-  "stage": "/home/jacen/.cache/jc-release-verify-Y4Ei4c/jace-commander-1.0.0",
+  "stage": "/home/jacen/.cache/jc-release-verify-KTHsD5/jace-commander-1.0.0",
   "maskedPath": "/home/jacen/projects",
   "steps": {
     "isolation": [
@@ -13,7 +13,7 @@
     "install": {
       "status": 0,
       "tail": [
-        "added 124 packages in 566ms"
+        "added 124 packages in 569ms"
       ]
     },
     "dependencyGraph": {
@@ -64,7 +64,7 @@
     },
     "mcpSession": {
       "verdict": "PASS",
-      "release": "/home/jacen/.cache/jc-release-verify-Y4Ei4c/jace-commander-1.0.0",
+      "release": "/home/jacen/.cache/jc-release-verify-KTHsD5/jace-commander-1.0.0",
       "node": "v26.13.0",
       "mcpSdkVersion": "1.32.2",
       "server": {
