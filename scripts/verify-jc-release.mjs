@@ -62,7 +62,8 @@ try {
   evidence.steps.isolation = visible.stdout.trim().split('\n');
   if (!/vendor-absent/.test(visible.stdout) || visible.stdout.trim().split('\n')[0] !== '0') throw new Error(`checkouts are visible inside the verification namespace: ${visible.stdout}`);
 
-  const install = isolated(stage, ['npm', 'install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', '--no-package-lock']);
+  // A fresh lockfile is resolved from the registry (npm audit needs one; the monorepo lock is not used).
+  const install = isolated(stage, ['npm', 'install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund']);
   evidence.steps.install = { status: install.status, tail: install.stdout.trim().split('\n').slice(-2) };
   if (install.status !== 0) throw new Error(`npm install failed:\n${install.stderr}`);
 
@@ -78,12 +79,17 @@ try {
   if ([...packages].some((entry) => /desktop-commander|^@agent-control-stack\//.test(entry))) throw new Error('release depends on Desktop Commander or a workspace package');
 
   const audit = isolated(stage, ['npm', 'audit', '--omit=dev', '--json']);
+  let parsedAudit;
   try {
-    const parsed = JSON.parse(audit.stdout);
-    evidence.steps.shippedAudit = { vulnerabilities: parsed.metadata?.vulnerabilities, findings: Object.entries(parsed.vulnerabilities ?? {}).map(([name, value]) => `${value.severity} ${name}`) };
+    parsedAudit = JSON.parse(audit.stdout);
   } catch {
-    evidence.steps.shippedAudit = { error: 'audit unavailable (offline?)', stderr: audit.stderr.slice(0, 500) };
+    parsedAudit = { error: { code: 'unparsable', summary: audit.stderr.slice(0, 500) } };
   }
+  // An audit that did not run (ENOLOCK, offline) must never read as "no findings".
+  if (parsedAudit.error || !parsedAudit.metadata?.vulnerabilities) {
+    throw new Error(`shipped-graph audit did not run: ${JSON.stringify(parsedAudit.error ?? parsedAudit).slice(0, 300)}`);
+  }
+  evidence.steps.shippedAudit = { vulnerabilities: parsedAudit.metadata.vulnerabilities, findings: Object.entries(parsedAudit.vulnerabilities ?? {}).map(([name, value]) => `${value.severity} ${name}`) };
 
   // Full suite from the installed release (outside every repository; Node's
   // resolution from ~/.cache never walks into $HOME/projects).
