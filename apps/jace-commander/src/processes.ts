@@ -5,14 +5,14 @@
  * read-only filesystem outside the roots, masked credential stores and
  * control-plane state. A policy without a proven sandbox launches nothing.
  */
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { jcChildEnv } from './child-env.js';
 import { containJcPath, type JcFsPolicy } from './filesystem.js';
-import { assertSandboxReady, sandboxArgv } from './sandbox.js';
+import { assertSandboxReady, killSandboxNamespace, processStartTicks, sandboxArgv } from './sandbox.js';
 import { IntegrationError } from './integrations.js';
 
 const MAX_OUTPUT = 256 * 1024;
@@ -25,7 +25,9 @@ interface Stream { data: Buffer; start: number; end: number }
 interface Session {
   sessionId: string; pid: number; argv: string[]; cwd: string; owner: string;
   stdout: Stream; stderr: Stream; exitCode: number | null; signal: string | null;
-  done: boolean; child: ChildProcessWithoutNullStreams; timer: NodeJS.Timeout;
+  done: boolean; child: ChildProcess; timer: NodeJS.Timeout;
+  /** Host PID and start time of the sandbox PID-namespace init (bubblewrap --info-fd). */
+  sandboxPid?: number; sandboxStart?: string;
 }
 export interface ProcessRegistry {
   start(args: Record<string, unknown>, policy: JcFsPolicy, owner?: string): Record<string, unknown>;
@@ -90,6 +92,7 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
     if (s.done) return;
     try { process.kill(-s.pid,'SIGTERM'); } catch { s.child.kill('SIGTERM'); }
     const timer = setTimeout(() => {
+      killSandboxNamespace(s.sandboxPid,s.sandboxStart);
       try { process.kill(-s.pid,'SIGKILL'); } catch { /* already gone */ }
     },KILL_GRACE_MS);
     timer.unref();
@@ -98,7 +101,8 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
   function launch(argv: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number, owner: string | undefined, policy: JcFsPolicy): Session {
     if (!policy.workload) throw new IntegrationError('JC_SANDBOX_UNAVAILABLE', 'no workload sandbox is configured; nothing ran');
     assertSandboxReady(policy.workload.policy, policy.workload.homeDir, policy.workload.stateDir);
-    const sandboxed = sandboxArgv(policy.workload.policy, argv, cwd);
+    const isolated = policy.workload.policy.isolation === 'bwrap';
+    const sandboxed = sandboxArgv(policy.workload.policy, argv, cwd, isolated ? { infoFd: 3 } : {});
     // The sandbox has a private /tmp; never point a workload at a host temp dir.
     const workloadEnv = policy.workload.policy.isolation === 'bwrap' ? { ...env, TMPDIR: '/tmp' } : env;
     if (sessions.size >= MAX_SESSIONS) {
@@ -106,17 +110,30 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
       if (!finished) throw new IntegrationError('too_many_processes','at most 32 managed processes may run at once');
       sessions.delete(finished.sessionId);
     }
-    const child = spawn(sandboxed[0]!,sandboxed.slice(1),{cwd,env:workloadEnv,shell:false,stdio:'pipe',detached:true});
+    const child = spawn(sandboxed[0]!,sandboxed.slice(1),{cwd,env:workloadEnv,shell:false,stdio:isolated?['pipe','pipe','pipe','pipe']:'pipe',detached:true});
     if (!child.pid) { child.on('error',()=>{}); throw new IntegrationError('start_failed','process did not start'); }
     const stream = (): Stream => ({data:Buffer.alloc(0),start:0,end:0});
     const s: Session = {sessionId:'proc_'+randomBytes(16).toString('hex'),pid:child.pid,argv,cwd,owner:owner ?? 'stdio',
       stdout:stream(),stderr:stream(),exitCode:null,signal:null,done:false,child,
       timer:setTimeout(()=>terminate(s),timeoutMs)};
-    child.stdout.on('data',(chunk: Buffer)=>append(s.stdout,chunk));
-    child.stderr.on('data',(chunk: Buffer)=>append(s.stderr,chunk));
-    child.stdin.on('error',()=>{});
+    child.stdout!.on('data',(chunk: Buffer)=>append(s.stdout,chunk));
+    child.stderr!.on('data',(chunk: Buffer)=>append(s.stderr,chunk));
+    child.stdin!.on('error',()=>{});
+    if (isolated) {
+      let info='';
+      const infoStream = child.stdio[3] as NodeJS.ReadableStream | null;
+      infoStream?.on('data',(chunk: Buffer)=>{
+        info+=chunk.toString('utf8');
+        const pid=Number(/"child-pid"\s*:\s*(\d+)/.exec(info)?.[1]);
+        if (pid && !s.sandboxPid) { s.sandboxPid=pid; s.sandboxStart=processStartTicks(pid); }
+      });
+      infoStream?.on('error',()=>{});
+    }
     child.on('error',()=>{s.done=true;s.exitCode=-1;clearTimeout(s.timer);});
-    child.on('close',(code,signal)=>{try { process.kill(-s.pid,'SIGKILL'); } catch { /* group already gone */ } s.done=true;s.exitCode=code;s.signal=signal;clearTimeout(s.timer);});
+    // The moment bubblewrap itself exits, take down its whole PID namespace:
+    // a workload must never survive (or keep running unobserved after) its session.
+    child.on('exit',()=>{killSandboxNamespace(s.sandboxPid,s.sandboxStart);});
+    child.on('close',(code,signal)=>{killSandboxNamespace(s.sandboxPid,s.sandboxStart); try { process.kill(-s.pid,'SIGKILL'); } catch { /* group already gone */ } s.done=true;s.exitCode=code;s.signal=signal;clearTimeout(s.timer);});
     sessions.set(s.sessionId,s);
     return s;
   }
@@ -177,9 +194,9 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
     async interact(args,owner) {
       const s=find(args.sessionId,owner);
       if (typeof args.input!=='string'||Buffer.byteLength(args.input)>64*1024) invalid('input must be bounded text');
-      if (s.done || s.child.stdin.destroyed) throw new IntegrationError('process_exited','process has exited');
+      if (s.done || !s.child.stdin || s.child.stdin.destroyed) throw new IntegrationError('process_exited','process has exited');
       const stdoutOffset=s.stdout.end,stderrOffset=s.stderr.end;
-      await new Promise<void>((resolve,reject)=>s.child.stdin.write(args.input as string,(error)=>error?reject(new IntegrationError('process_exited','stdin closed')):resolve()));
+      await new Promise<void>((resolve,reject)=>s.child.stdin!.write(args.input as string,(error)=>error?reject(new IntegrationError('process_exited','stdin closed')):resolve()));
       // A terminal echoes input immediately; keep collecting until the output
       // has been quiet for QUIET_MS (or waitMs elapses / the process exits), so
       // the command's own output is returned, not just the echo.
@@ -206,7 +223,9 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
       // the grace deadline), so a caller never observes a "killed" process running.
       const until=Date.now()+KILL_GRACE_MS+2000;
       while (!s.done && Date.now()<until) await new Promise((resolve)=>setTimeout(resolve,10));
-      return {sessionId:s.sessionId,pid:s.pid,signal:'SIGTERM',escalatesAfterMs:KILL_GRACE_MS,exited:s.done,exitSignal:s.signal};
+      return {sessionId:s.sessionId,pid:s.pid,signal:'SIGTERM',escalatesAfterMs:KILL_GRACE_MS,exited:s.done,exitSignal:s.signal,
+        // Diagnostics: the process itself exited, but its output streams were still open.
+        ...(s.done ? {} : {exitObserved:s.child.exitCode!==null || s.child.signalCode!==null})};
     },
     close() { for (const s of sessions.values()) terminate(s); }
   };

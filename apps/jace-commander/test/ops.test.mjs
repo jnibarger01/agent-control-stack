@@ -213,7 +213,7 @@ await test('kill_process terminates a managed process; list_processes reports it
   const killed = await call('kill_process', { sessionId: started.structuredContent.sessionId });
   okResult(killed);
   // kill_process returns only once the sandboxed process group is gone.
-  assert.equal(killed.structuredContent.exited, true);
+  assert.equal(killed.structuredContent.exited, true, JSON.stringify(killed.structuredContent));
   const output = await call('read_process_output', { sessionId: started.structuredContent.sessionId });
   assert.equal(output.structuredContent.running, false);
   assert.equal(output.structuredContent.signal, 'SIGTERM');

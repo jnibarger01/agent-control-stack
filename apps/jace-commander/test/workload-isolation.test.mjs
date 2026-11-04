@@ -143,6 +143,30 @@ try {
     assert.doesNotMatch(fs.readFileSync(leak, 'utf8'), new RegExp(CANARY));
   });
 
+  await test('no workload survives kill or timeout, even when killed during sandbox startup', async () => {
+    const survivors = (marker) => fs.readdirSync('/proc').filter((pid) => /^\d+$/.test(pid)).filter((pid) => {
+      try {
+        return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').includes(marker);
+      } catch {
+        return false;
+      }
+    });
+    for (let round = 0; round < 60; round += 1) {
+      // A unique sleep duration marks this round's workload in the host process table.
+      const marker = `${300 + round}.${process.pid % 1000}`;
+      const started = registry.start({ argv: ['/bin/sleep', marker], cwd: work, timeoutMs: 60_000 }, policy, 'alice');
+      // Sweep the kill across bubblewrap's startup (fork -> die-with-parent armed -> exec).
+      await new Promise((resolve) => setTimeout(resolve, round % 15));
+      const killed = await registry.kill({ sessionId: started.sessionId }, 'alice');
+      assert.equal(killed.exited, true, JSON.stringify(killed));
+      assert.deepEqual(survivors(marker), [], `round ${round}: sandboxed workload survived kill`);
+    }
+    const timedMarker = `299.${process.pid % 1000}`;
+    const timed = await registry.run({ command: `exec /bin/sleep ${timedMarker}`, cwd: work, timeoutMs: 200, waitMs: 3000 }, policy, 'alice');
+    assert.equal(timed.running, false);
+    assert.deepEqual(survivors(timedMarker), [], 'workload survived its timeout');
+  });
+
   await test('fail closed: no sandbox, a missing bwrap, or isolation=none in managed mode never runs anything', async () => {
     await assert.rejects(registry.run({ command: 'true', cwd: work }, { roots: [work], deniedRoots: [] }, 'alice'), /JC_SANDBOX_UNAVAILABLE|no workload sandbox/);
     const broken = workloadPolicy({ JC_BWRAP_PATH: '/nonexistent/bwrap' });
