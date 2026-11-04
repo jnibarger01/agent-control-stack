@@ -57,7 +57,7 @@ describe("/device/verify exposure with ACS_DEVICE_CLIENT_IDS set", () => {
       }
     });
 
-  it("shows exactly Device, Public key fingerprint and Requested scopes, escaped, and nothing else", async () => {
+  it("shows the requesting client, device, fingerprint and actual scopes without secrets", async () => {
     const gateway = await app("acs-cli,ares-studio");
     try {
       const issued = await code(gateway, "ares-studio", `Alice's ARES <script>alert(1)</script>`);
@@ -74,7 +74,9 @@ describe("/device/verify exposure with ACS_DEVICE_CLIENT_IDS set", () => {
       expect(page.statusCode).toBe(200);
       const html = page.body;
       const labels = [...html.matchAll(/<dt>([^<]+)<\/dt>/g)].map((m) => m[1]);
-      expect(labels).toEqual(["Device", "Public key fingerprint", "Requested scopes"]);
+      expect(labels).toEqual(["Client ID", "Device", "Public key fingerprint", "Requested scopes"]);
+      expect(html).toContain("<dt>Client ID</dt><dd>ares-studio</dd>");
+      expect(html).toContain("acs:work:create, acs:work:read");
       expect(html).not.toContain("<script>alert(1)</script>");
       expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
       for (const forbidden of [
@@ -146,8 +148,4 @@ describe("/device/verify exposure with ACS_DEVICE_CLIENT_IDS set", () => {
       await unset.close();
     }
   });
-
-  // Observed gap, deliberately not asserted either way: the page does not name the requesting client_id, so a human
-  // approving an "ares-studio" request sees only the free-text device name, the key fingerprint and the scopes.
-  it.todo("shows the requesting client id to the approving human");
 });

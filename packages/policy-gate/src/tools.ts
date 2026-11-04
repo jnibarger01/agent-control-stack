@@ -7,7 +7,9 @@ import {
   DEFAULT_WORK_ITEM_LIST_LIMIT,
   defaultExecutionPlanForWorkItem,
   executionActionHash,
+  executionPlanSubjectInputHash,
   aresItemTargetsWorker,
+  isAresWorkItem,
   listWorkItemsSchema,
   resolveExecutionBackend,
   rejectRequestSchema,
@@ -597,11 +599,25 @@ function gateWorkerClaimByIdInTransaction(
 }
 
 function ensureExecutionPlan(store: WorkItemStore, workItem: WorkItem, actor: string) {
+  const existing = store.getCurrentExecutionPlan(workItem.id);
+  if (isAresWorkItem(workItem) && existing && existing.subjectInputHash !== executionPlanSubjectInputHash(workItem)) {
+    throw new ControlStackError(
+      "ares_plan_input_mismatch",
+      "ARES approval plan does not match current principal and inputs"
+    );
+  }
+  if (isAresWorkItem(workItem) && existing && existing.definition.constraints.executionMode !== "ares") {
+    throw new ControlStackError(
+      "ares_plan_mode_mismatch",
+      "ARES requires a new ARES execution plan and fresh approval"
+    );
+  }
   return (
-    store.getCurrentExecutionPlan(workItem.id) ??
+    existing ??
     store.createExecutionPlan({
       workItemId: workItem.id,
-      // The execution backend is a process-wide deployment setting. Gateway
+      // ARES derives its own explicit mode from the action kind. For local workers,
+      // the execution backend is a process-wide deployment setting. Gateway
       // (approval) and worker (claim) must share ACS_EXECUTION_BACKEND so the
       // plan hash is consistent; the worker additionally fails closed if the
       // admitted plan's mode does not match its configured backend.

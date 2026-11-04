@@ -134,6 +134,7 @@ import {
   submitWorkResultSchema,
   executionActionHash,
   aresItemTargetsWorker,
+  assertAresResultBinding,
   workItemCreatedEvent,
   workItemSchema,
   workItemStatusEvent,
@@ -8271,6 +8272,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
   submitWorkResult(input: unknown): WorkItem {
     const parsed = submitWorkResultSchema.parse(input);
     const accepted = this.write(() => {
+      assertAresResultBinding(this.getRequired(parsed.workItemId), parsed);
       const result = this.acceptResultInTransaction(parsed);
       const isNewResult = result.events.some((event) => event.name === "execution_result.accepted");
       if (isNewResult) {
@@ -8651,6 +8653,18 @@ export class SqliteWorkItemStore implements WorkItemStore {
     }
     if (!plan || plan.planHash !== attempt.plan_hash || input.planHash !== attempt.plan_hash) {
       throw new ControlStackError("attempt_plan_mismatch", "result plan does not match the persisted current plan");
+    }
+    if (
+      input.simulationMetadata.executionMode === "ares" &&
+      (plan.subjectInputHash !== executionPlanSubjectInputHash(workItem) ||
+        plan.definition.constraints.executionMode !== "ares" ||
+        (input.simulationMetadata.approvalId !== undefined &&
+          input.simulationMetadata.approvalId !== lease.approval_id))
+    ) {
+      throw new ControlStackError(
+        "ares_result_binding_mismatch",
+        "ARES result must match its approved execution plan and lease approval"
+      );
     }
     const actionHash = executionActionHash(workItem);
     const workspaceHash = stableHash({

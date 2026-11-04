@@ -308,6 +308,7 @@ function renderDeviceVerifyPage(input: {
   return devicePage(`
     <h2>Approve this device?</h2>
     <dl>
+      <dt>Client ID</dt><dd>${escapeHtml(summary.clientId)}</dd>
       <dt>Device</dt><dd>${escapeHtml(summary.deviceName)}</dd>
       <dt>Public key fingerprint</dt><dd><code>${escapeHtml(summary.devicePublicKeyFingerprint)}</code></dd>
       <dt>Requested scopes</dt><dd>${escapeHtml(summary.requestedScopes.join(", "))}</dd>

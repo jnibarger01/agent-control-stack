@@ -1,6 +1,6 @@
 import { ControlStackError, domainHash } from "@agent-control-stack/shared";
 import { z } from "zod";
-import { actionRequestSchema, targetSchema, type WorkItem } from "./work-item.js";
+import { actionRequestSchema, isAresWorkItem, targetSchema, type WorkItem } from "./work-item.js";
 
 export const EXECUTION_PLAN_SCHEMA_VERSION = "acs.execution-plan.v1" as const;
 export const WORKER_PROTOCOL_VERSION = "acs.worker.v2" as const;
@@ -33,7 +33,7 @@ export const executionPlanDefinitionSchema = z
     steps: z.array(executionPlanStepSchema).min(1).max(128),
     constraints: z
       .object({
-        executionMode: z.enum(["dry_run", "desktop_commander"]),
+        executionMode: z.enum(["dry_run", "desktop_commander", "ares"]),
         network: z.literal("none"),
         localGitOnly: z.literal(true),
         allowPush: z.literal(false),
@@ -219,7 +219,7 @@ export function defaultExecutionPlanForWorkItem(
       successCriteria: []
     })),
     constraints: {
-      executionMode: options.executionMode ?? "dry_run",
+      executionMode: isAresWorkItem(workItem) ? "ares" : (options.executionMode ?? "dry_run"),
       network: "none",
       localGitOnly: true,
       allowPush: false,

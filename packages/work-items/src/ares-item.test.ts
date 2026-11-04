@@ -99,7 +99,8 @@ describe("the one definition of an ARES work item", () => {
   });
 
   it("fails closed for a stored mixed item: targeting uses the broader 'mentions' definition", () => {
-    // Such an item cannot be created any more; if one exists from elsewhere, only its named worker may claim it.
+    // Even a named worker must not claim malformed persisted ARES work.
     expect(aresItemTargetsWorker(item(["ares.analyze.local", "system.status"], ["ares"]), "other-worker")).toBe(false);
+    expect(aresItemTargetsWorker(item(["ares.analyze.local", "system.status"], ["ares"]), "ares")).toBe(false);
   });
 });

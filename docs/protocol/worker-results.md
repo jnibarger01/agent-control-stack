@@ -1,12 +1,14 @@
 # Protocol Specification: Worker Results
 
-ACS Wave 2 models a complete worker lifecycle without running a real command. The worker claims an approved item, receives an opaque lease, performs a dry-run simulation, and submits one immutable result.
+The default ACS worker models a complete lifecycle without running a real command.
+The [ARES external worker contract](ares-worker.md) adds approved ARES executions and
+lease-bound `ares` results; these ACS tests do not prove live adapter execution. The worker claims an approved item, receives an opaque lease, performs a dry-run simulation, and submits one immutable result.
 
 ## Endpoint
 
 `POST /work-items/:id/results`
 
-Authentication is required. The configured credential must resolve to the `agent` role and a bound worker ID. The request body worker ID must equal that binding. Anonymous, malformed, non-worker, and wrong-worker requests fail closed before protected result lookup.
+Authentication is required. The configured credential must resolve to the `worker` role with `acs:worker` scope and a bound worker ID. The request body worker ID must equal that binding. Anonymous, malformed, non-worker, and wrong-worker requests fail closed before protected result lookup.
 
 ## Canonical request
 
@@ -34,7 +36,8 @@ Authentication is required. The configured credential must resolve to the `agent
 }
 ```
 
-The schema is strict. Identifiers and idempotency keys are bounded; timestamps must parse and finish no earlier than start; stdout/stderr, structured output, errors, resource usage, and artifacts are capped. Secret-like structured keys, credentials, raw environment variables, and unrestricted path metadata are rejected. Simulation metadata must explicitly state `dry_run` and `simulated: true`.
+The schema is strict. Identifiers and idempotency keys are bounded; timestamps must parse and finish no earlier than start; stdout/stderr, structured output, errors, resource usage, and artifacts are capped. Secret-like structured keys, credentials, raw environment variables, and unrestricted path metadata are rejected. Default worker simulation metadata must explicitly state `dry_run` and `simulated: true`.
+Approved external ARES work uses the strict `ares` metadata variant described in its contract.
 
 Worker-submittable outcomes are `succeeded`, `failed`, `cancelled`, and `worker_infrastructure_failure`. `blocked` and `lease_expired` are ACS-derived outcomes and cannot be submitted through the public route.
 

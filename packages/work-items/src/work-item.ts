@@ -1,4 +1,4 @@
-import { createEvent, createId, stableHash, type AuditEvent } from "@agent-control-stack/shared";
+import { ControlStackError, createEvent, createId, stableHash, type AuditEvent } from "@agent-control-stack/shared";
 import { z } from "zod";
 
 export const requesterSchema = z.enum(["user", "agent", "system"]);
@@ -456,14 +456,58 @@ function assertAresActionShape(requestedActions: readonly { kind: string }[]): v
 /**
  * ARES Studio items name their executor in target.services. Unlike the registry-agent target rule
  * (which only binds registered agents), this binds unconditionally: a worker that is not named can
- * never claim an `ares.*` item, by id or by claim-next. Non-ARES items are unaffected. It uses the broad
- * definition on purpose, so a malformed stored item is still bound to its named worker.
+ * never claim an `ares.*` item, by id or by claim-next. Non-ARES items are unaffected. Items in the
+ * broader ares.* namespace must also satisfy the strict shape, including when loaded from storage.
  */
 export function aresItemTargetsWorker(
   workItem: Pick<WorkItem, "target" | "requestedActions">,
   workerId: string
 ): boolean {
-  return !mentionsAresKind(workItem) || (workItem.target.services ?? []).includes(workerId);
+  return (
+    !mentionsAresKind(workItem) || (isAresWorkItem(workItem) && (workItem.target.services ?? []).includes(workerId))
+  );
+}
+
+/** Validate ARES receipt labels against ACS-owned work and attempt identity, inside result acceptance. */
+export function assertAresResultBinding(
+  workItem: Pick<WorkItem, "requestedActions" | "target">,
+  input: Pick<SubmitWorkResultInput, "simulationMetadata" | "attemptId" | "structuredOutput" | "workerId">
+): void {
+  const metadata = input.simulationMetadata;
+  const ares = isAresWorkItem(workItem);
+  if ((mentionsAresKind(workItem) && !ares) || ares !== (metadata.executionMode === "ares")) {
+    throw new ControlStackError("result_mode_mismatch", "result mode does not match the work item");
+  }
+  if (!ares || metadata.executionMode !== "ares") return;
+  const action = workItem.requestedActions[0]!;
+  if (
+    !aresItemTargetsWorker(workItem, input.workerId) ||
+    !input.attemptId ||
+    metadata.requestId !== input.attemptId ||
+    metadata.toolName !== action.kind
+  ) {
+    throw new ControlStackError(
+      "ares_result_binding_mismatch",
+      "ARES receipt does not match the approved action and attempt"
+    );
+  }
+  // ARES's local argument digest uses its own canonical form. ACS binds that digest as part of
+  // the exact approved params rather than pretending the local principal or digest is ACS authority.
+  if (action.params.aresArgsHash !== undefined) {
+    const argsHash = hashSchema.parse(action.params.aresArgsHash);
+    const digest = input.structuredOutput.resultDigest;
+    if (
+      input.structuredOutput.aresArgsHash !== argsHash ||
+      !(digest === null || (typeof digest === "string" && /^[a-f0-9]{64}$/u.test(digest))) ||
+      metadata.invocationFingerprint !==
+        stableHash({ domain: "ares.invocation.v1", attemptId: input.attemptId, argsHash, resultDigest: digest })
+    ) {
+      throw new ControlStackError(
+        "ares_result_binding_mismatch",
+        "ARES receipt does not match the approved argument digest"
+      );
+    }
+  }
 }
 
 export function executionActionHash(

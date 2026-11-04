@@ -1367,13 +1367,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
+  const deviceClientIds = deviceClientIdsFromEnv(process.env.ACS_DEVICE_CLIENT_IDS);
   registerDeviceAuthRoutes(app, {
     store: deviceAuthStore,
     // Public device-flow client ids (RFC 8628 public clients, no secret). Default: the acs CLI only.
     // ARES Studio links each human's ACS identity with its own id (e.g. ACS_DEVICE_CLIENT_IDS=acs-cli,ares-studio).
-    ...(deviceClientIdsFromEnv(process.env.ACS_DEVICE_CLIENT_IDS)
-      ? { allowedClientIds: deviceClientIdsFromEnv(process.env.ACS_DEVICE_CLIENT_IDS) }
-      : {}),
+    ...(deviceClientIds ? { allowedClientIds: deviceClientIds } : {}),
     auth,
     authLockout,
     rateLimiter,
@@ -4177,6 +4176,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       const workItem = tools.get_work_item({ id: request.params.id });
       if (!workItem) {
         return reply.code(404).send({ error: "work item not found" });
+      }
+      if (isAresWorkItem(workItem)) {
+        if (!requireHumanApprovalActor(request, reply, auth)) return;
+        if ((workItem.target.services ?? []).includes(actor)) {
+          return reply
+            .code(403)
+            .send({ error: "ARES executor cannot approve its own work", code: "approval_self_denied" });
+        }
       }
       const toolParams = workItem.requestedActions[0]?.params;
       const dcTool = typeof toolParams?.tool === "string" ? toolParams.tool : undefined;
