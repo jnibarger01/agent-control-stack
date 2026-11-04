@@ -235,7 +235,9 @@ This is implemented in `agent-control-stack`. See
   `/oauth/token`), with an Ed25519 device key proving possession
   (`acs-device-code-proof-v1`). It works like DC's "open URL, approve, CLI
   polls" pairing. Credentials are stored `0600` in `~/.jace-commander/`, and
-  `JC_ACS_TOKEN` overrides them for services.
+  `JC_ACS_TOKEN` overrides them for services. It is only the model-facing
+  `acs_read` credential: JC's live authority check uses the separate
+  `JC_ACS_AUTHORITY_TOKEN(_FILE)` and never falls back to `JC_ACS_TOKEN`.
 * **jace-auth** is the IdP behind ACS (`ACS_OAUTH_ISSUER`, audience
   `…/resources/agent-control-stack`), so ACS sessions and tokens can come from
   jace-auth. Jace Commander needs no direct jace-auth client.

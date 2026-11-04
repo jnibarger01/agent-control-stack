@@ -15,6 +15,12 @@ rollout approval (nothing was deployed, published or reconfigured).
 | 4. Standalone runtime | Closed | `npm run jc:verify-release`: clean install outside all repos with `$HOME/projects` masked, 123 runtime packages all inside the release, 30/30 + 27/27 suites, real MCP SDK client session (11 checks), 309 resolved modules all inside the release; chain e2e 27/27 against an installed release |
 | 5. Hardening | Done for this scope | defects fixed below; docs and templates updated |
 
+## Final hardening (on 318c5f25)
+
+- No ACS token fallback: the live authority check and bridge readiness accept only `JC_ACS_AUTHORITY_TOKEN(_FILE)`; `JC_ACS_TOKEN` and the worker token never count (unit + bridge + e2e regression tests).
+- Least privilege proven in the real chain: JC's authority token is a separate `service` credential with `acs:read` only; ACS refuses it for approve, issue, result submission and work-item creation; the worker token stays bridge-only for result submission.
+- Production runtime pinned: the CachyOS unit launches `~/.local/lib/jace-commander/current` with `JC_REQUIRE_INSTALLED_RELEASE=1`; the bridge refuses the checkout, writable or unmarked releases, a missing `JC_RUNTIME_DIR` and `DC_ARGS` overrides, and reports the release in `/authority`.
+
 ## Defects found and fixed in this continuation
 
 - Live authority check unusable against real ACS (model-facing token, never set) -> dedicated read-scoped credential; mismatch reasons reported.

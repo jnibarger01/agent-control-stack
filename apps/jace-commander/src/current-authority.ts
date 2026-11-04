@@ -8,7 +8,9 @@
  * expiry) and makes an ACS outage a refusal, never a local fallback.
  *
  * The read uses a dedicated read-scoped credential (JC_ACS_AUTHORITY_TOKEN or
- * JC_ACS_AUTHORITY_TOKEN_FILE), distinct from the model-facing acs_read token.
+ * JC_ACS_AUTHORITY_TOKEN_FILE) and nothing else: never the model-facing
+ * acs_read token (JC_ACS_TOKEN) and never the bridge's worker token. Without it
+ * every non-read call is refused.
  */
 import fs from 'node:fs';
 import type { JcAuthorization } from './contract.js';
@@ -57,16 +59,18 @@ export function assertCurrentAuthority(body: unknown, auth: JcAuthorization, pri
   if (mismatch) throw new IntegrationError('JC_AUTHORITY_REVOKED', `ACS no longer confirms this exact execution authority (${mismatch})`);
 }
 
-/** The read-scoped credential JC uses to confirm authority. Never the model-facing token unless nothing else is set. */
+/**
+ * The dedicated read-scoped credential JC uses to confirm authority. There is
+ * deliberately no fallback: an absent variable, or an unreadable or empty file,
+ * means "not configured" and every non-read call fails closed.
+ */
 export function authorityToken(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  if (env.JC_ACS_AUTHORITY_TOKEN) return env.JC_ACS_AUTHORITY_TOKEN;
-  if (env.JC_ACS_AUTHORITY_TOKEN_FILE) {
-    try {
-      const value = fs.readFileSync(env.JC_ACS_AUTHORITY_TOKEN_FILE, 'utf8').trim();
-      if (value) return value;
-    } catch {
-      return undefined;
-    }
+  const direct = env.JC_ACS_AUTHORITY_TOKEN?.trim();
+  if (direct) return direct;
+  if (!env.JC_ACS_AUTHORITY_TOKEN_FILE) return undefined;
+  try {
+    return fs.readFileSync(env.JC_ACS_AUTHORITY_TOKEN_FILE, 'utf8').trim() || undefined;
+  } catch {
+    return undefined;
   }
-  return env.JC_ACS_TOKEN || undefined;
 }

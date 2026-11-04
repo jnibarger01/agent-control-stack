@@ -32,6 +32,9 @@ const JC_KEY_ID = "e2e-jc-key";
 const OPERATOR_TOKEN = "e2e-jc-operator-token";
 const JC_BRIDGE_TOKEN = "e2e-jc-bridge-token";
 const DC_BRIDGE_TOKEN = "e2e-jc-unused-dc-bridge-token";
+/** JC's current-authority credential: acs:read ONLY (no write, approve or worker scope). */
+export const JC_AUTHORITY_READ_TOKEN = "e2e-jc-authority-read-only-token";
+export const JC_BRIDGE_WORKER_TOKEN = JC_BRIDGE_TOKEN;
 
 export function requireJaceCommanderBuild(): void {
   if (!existsSync(JC_CLI)) {
@@ -73,6 +76,15 @@ export async function startJcAcs(box: Sandbox, allowedRoots: string[]): Promise<
       actorId: "acs-jc-bridge",
       roles: ["service", "worker"],
       scopes: ["acs:read", "acs:write", "acs:worker"]
+    },
+    {
+      // Least privilege: what JC's live authority check needs, and nothing more.
+      id: "jc-authority-reader",
+      token: JC_AUTHORITY_READ_TOKEN,
+      actor: "agent",
+      actorId: "acs-jc-authority-reader",
+      roles: ["service"],
+      scopes: ["acs:read"]
     },
     {
       id: "dc-bridge",
@@ -122,8 +134,9 @@ export async function startJcBridge(
   box: Sandbox,
   acs: JcAcsHandle,
   fsRoots: string[],
-  options: { jcDir?: string } = {}
+  options: { jcDir?: string; authorityToken?: string | null } = {}
 ): Promise<ServiceProcess> {
+  const authorityToken = options.authorityToken === undefined ? JC_AUTHORITY_READ_TOKEN : options.authorityToken;
   const port = await freePort();
   return startNodeService(
     "bridge.js",
@@ -136,7 +149,10 @@ export async function startJcBridge(
       ...(options.jcDir ? { JC_DC_DIR: options.jcDir } : {}),
       // Run the chain against an installed release instead of the source tree
       // (apps/jace-commander/deploy/install-user-release.sh -> $PREFIX/current).
-      ...(!options.jcDir && process.env.JC_E2E_RUNTIME_DIR ? { JC_RUNTIME_DIR: process.env.JC_E2E_RUNTIME_DIR } : {}),
+      // ...with the production pin: the bridge refuses anything but a read-only installed release.
+      ...(!options.jcDir && process.env.JC_E2E_RUNTIME_DIR
+        ? { JC_RUNTIME_DIR: process.env.JC_E2E_RUNTIME_DIR, JC_REQUIRE_INSTALLED_RELEASE: "1" }
+        : {}),
       JC_ACS_PUBLIC_KEY: acs.publicKey,
       JC_ACS_KEY_ID: JC_KEY_ID,
       JC_RUNTIME_ID,
@@ -151,9 +167,9 @@ export async function startJcBridge(
       // permit is held for the full lease and the executor serializes forever.
       ACS_GATEWAY_URL: acs.url,
       ACS_WORKER_TOKEN: JC_BRIDGE_TOKEN,
-      // Read-scoped credential JC uses to confirm current ACS authority before
-      // every non-read call (apps/jace-commander/src/current-authority.ts).
-      JC_ACS_AUTHORITY_TOKEN: JC_BRIDGE_TOKEN
+      // JC's live authority check uses its own acs:read-only credential, never
+      // the worker token above (apps/jace-commander/src/current-authority.ts).
+      ...(authorityToken ? { JC_ACS_AUTHORITY_TOKEN: authorityToken } : {})
     },
     port,
     "/healthz"

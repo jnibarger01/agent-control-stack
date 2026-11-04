@@ -30,6 +30,8 @@ import {
   type ServiceProcess
 } from "../support/chain-harness.js";
 import {
+  JC_AUTHORITY_READ_TOKEN,
+  JC_BRIDGE_WORKER_TOKEN,
   jcAccessToken,
   requireJaceCommanderBuild,
   startJcAcs,
@@ -114,12 +116,12 @@ interface Stack {
 }
 
 /** A complete, independent chain: real ACS, edge, interceptor, bridge, native JC. */
-async function startStack(prefix: string): Promise<Stack> {
+async function startStack(prefix: string, options: { authorityToken?: string | null } = {}): Promise<Stack> {
   const box = sandbox(prefix);
   const project = join(box.workspace, "project");
   mkdirSync(project, { recursive: true });
   const acs = await startJcAcs(box, [box.workspace]);
-  const bridge = await startJcBridge(box, acs, [box.workspace]);
+  const bridge = await startJcBridge(box, acs, [box.workspace], { authorityToken: options.authorityToken });
   const interceptor = startInterceptor(bridge.port);
   const port = await interceptor.listen();
   const edge = await startJcEdge(box, acs, { ...bridge, port });
@@ -274,6 +276,57 @@ describe.skipIf(!E2E_ENABLED)("E2E JC-3: native JC under authenticated ACS autho
     expect(bobInput.call.body.result.structuredContent.error.code).toBe("not_found");
     const killed = await approved(stack, alice, "kill_process", { sessionId });
     expect(killed.call.body.result.isError, JSON.stringify(killed.call.body)).toBeUndefined();
+  });
+
+  it("JC's authority token is acs:read only: ACS lets it read the work item and refuses every mutation", async () => {
+    const { alice, project, acs } = stack;
+    const held = heldForApproval(await alice.call("run_command", { command: "true", cwd: project }));
+    const as = (token: string) => ({ authorization: `Bearer ${token}`, "content-type": "application/json" });
+    const read = await fetch(`${acs.url}/work-items/${held.workItemId}`, { headers: as(JC_AUTHORITY_READ_TOKEN) });
+    expect(read.status).toBe(200);
+    const attempts = [
+      ["approve", `/work-items/${held.workItemId}/approve`, { actionHash: held.actionHash, reason: "self-approval attempt" }],
+      ["issue a capability", "/jc/capability/issue", { tool: "run_command", arguments: { command: "true", cwd: project } }],
+      ["submit a result", `/work-items/${held.workItemId}/results`, { outcome: "succeeded" }],
+      ["create a work item", "/work-items", { title: "x", intent: "x", target: {} }]
+    ] as const;
+    for (const [what, path, body] of attempts) {
+      const response = await fetch(`${acs.url}${path}`, { method: "POST", headers: as(JC_AUTHORITY_READ_TOKEN), body: JSON.stringify(body) });
+      expect([401, 403], `the read-only authority token could ${what} (HTTP ${response.status})`).toContain(response.status);
+    }
+    // The approve attempt above did not approve anything: it still needs the operator.
+    expect((await operatorRead(`/work-items/${held.workItemId}`)).workItem.status).not.toBe("running");
+    // Distinct tokens: the worker token is never JC's authority token.
+    expect(JC_AUTHORITY_READ_TOKEN).not.toBe(JC_BRIDGE_WORKER_TOKEN);
+  });
+
+  it("without the dedicated authority token an approved call is refused and the lane is not ready", async () => {
+    const bare = await startStack("acs-jc-noauthority-e2e-", { authorityToken: null });
+    try {
+      const marker = join(bare.project, "unauthorized.txt");
+      const args = { command: `touch ${marker}`, cwd: bare.project, waitMs: 5000 };
+      const held = heldForApproval(await bare.alice.call("run_command", args));
+      expect(await bare.acs.approve(held.workItemId, held.actionHash)).toBe(200);
+      const refused = await bare.alice.call("run_command", args);
+      expect(refused.body.result?.isError, JSON.stringify(refused.body)).toBe(true);
+      expect(refused.body.result.structuredContent.error.code).toBe("ACS_UNAVAILABLE");
+      expect(refused.body.result.structuredContent.error.message).toMatch(/JC_ACS_AUTHORITY_TOKEN/);
+      expect(existsSync(marker)).toBe(false);
+      const authority = await (await fetch(`http://127.0.0.1:${bare.bridge.port}/authority`)).json();
+      expect(authority.enforcement.currentAuthorityCredentialConfigured).toBe(false);
+      const ready = await fetch(`${bare.edge.origin}/jc/ready`);
+      expect(ready.status).toBe(503);
+      expect((await ready.json()).bridgeReady).toBe(false);
+    } finally {
+      await bare.stop();
+    }
+  });
+
+  it("with the dedicated read-only token the lane reports ready", async () => {
+    const authority = await (await fetch(`http://127.0.0.1:${stack.bridge.port}/authority`)).json();
+    expect(authority.enforcement.currentAuthorityCredentialConfigured).toBe(true);
+    const ready = await fetch(`${stack.edge.origin}/jc/ready`);
+    expect(await ready.json()).toMatchObject({ bridgeReady: true });
   });
 
   it("a lease revoked after issuance is refused by JC before anything runs", async () => {
