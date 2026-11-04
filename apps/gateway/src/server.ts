@@ -93,7 +93,6 @@ import {
   workItemToolNames,
   ACS_ADMIN_APPROVER,
   ACS_ADMIN_APPROVAL_REASON,
-  ARES_ACTION_KINDS,
   adminExecutionGate,
   observeLiveManagedAuthority,
   policyContextAuditReceipt,
@@ -125,6 +124,7 @@ import {
   isHeartbeatExpired,
   resolveTraceProducerConfig,
   validateHeartbeatTtl,
+  isAresWorkItem,
   WorkerIdentityRegistry,
   type RegisteredConnector,
   type RegisteredTunnelSession,
@@ -1371,7 +1371,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     store: deviceAuthStore,
     // Public device-flow client ids (RFC 8628 public clients, no secret). Default: the acs CLI only.
     // ARES Studio links each human's ACS identity with its own id (e.g. ACS_DEVICE_CLIENT_IDS=acs-cli,ares-studio).
-    ...(deviceClientIdsFromEnv(process.env.ACS_DEVICE_CLIENT_IDS) ? { allowedClientIds: deviceClientIdsFromEnv(process.env.ACS_DEVICE_CLIENT_IDS) } : {}),
+    ...(deviceClientIdsFromEnv(process.env.ACS_DEVICE_CLIENT_IDS)
+      ? { allowedClientIds: deviceClientIdsFromEnv(process.env.ACS_DEVICE_CLIENT_IDS) }
+      : {}),
     auth,
     authLockout,
     rateLimiter,
@@ -4337,8 +4339,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         // admission-permit lanes; this route never becomes a way around them.
         const target = tools.get_work_item({ id: body.workItemId });
         if (!target) return reply.code(404).send({ error: "work item not found" });
-        const kinds = target.requestedActions.map((action) => action.kind);
-        if (kinds.length !== 1 || !ARES_ACTION_KINDS.has(kinds[0] ?? "")) {
+        if (!isAresWorkItem(target)) {
           return reply
             .code(403)
             .send({ error: "exact-item claim is limited to ARES actions", code: "worker_claim_kind_forbidden" });
@@ -4405,15 +4406,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           // The "ares" execution mode is valid only for ARES work items, and ARES work items may only be
           // reported as real ARES executions — never as a DC/JC result or a simulated dry run.
           const resultItem = tools.get_work_item({ id: body.workItemId });
-          const aresItem = Boolean(
-            resultItem &&
-            resultItem.requestedActions.length === 1 &&
-            ARES_ACTION_KINDS.has(resultItem.requestedActions[0]?.kind ?? "")
-          );
+          const aresItem = Boolean(resultItem && isAresWorkItem(resultItem));
           if (aresItem !== (body.simulationMetadata.executionMode === "ares")) {
-            return reply
-              .code(403)
-              .send({ error: "execution mode does not match the work item's action kind", code: "result_mode_mismatch" });
+            return reply.code(403).send({
+              error: "execution mode does not match the work item's action kind",
+              code: "result_mode_mismatch"
+            });
           }
         }
         const admissionBinding = body.attemptId ? admissionPermits.get(body.attemptId) : undefined;
@@ -5201,9 +5199,17 @@ function projectRegistryFreshness(
 /** Comma-separated device-flow client ids; undefined keeps the default (acs-cli). Malformed ids fail closed. */
 export function deviceClientIdsFromEnv(raw: string | undefined): string[] | undefined {
   if (raw === undefined || !raw.trim()) return undefined;
-  const ids = [...new Set(raw.split(",").map((id) => id.trim()).filter(Boolean))];
+  const ids = [
+    ...new Set(
+      raw
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean)
+    )
+  ];
   for (const id of ids) {
-    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(id)) throw new Error(`ACS_DEVICE_CLIENT_IDS contains an invalid client id: ${id}`);
+    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(id))
+      throw new Error(`ACS_DEVICE_CLIENT_IDS contains an invalid client id: ${id}`);
   }
   return ids;
 }

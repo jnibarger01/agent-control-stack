@@ -397,6 +397,7 @@ const statusEvents: Record<WorkItemStatus, (typeof WorkItemEvent)[keyof typeof W
 
 export function createWorkItem(input: unknown, now = new Date().toISOString()): WorkItem {
   const parsed = createWorkItemSchema.parse(input);
+  assertAresActionShape(parsed.requestedActions);
   const status =
     parsed.status === "pending_policy" && (parsed.risk === "high" || parsed.risk === "critical")
       ? "needs_approval"
@@ -411,13 +412,58 @@ export function createWorkItem(input: unknown, now = new Date().toISOString()): 
 }
 
 /**
+ * ARES Studio actions. This is the ONE definition of which action kinds belong to ARES; policy-gate and the gateway
+ * import it from here.
+ */
+export const ARES_ACTION_KIND_LIST = [
+  "ares.analyze.local",
+  "ares.adapter.ghidra",
+  "ares.adapter.rea",
+  "ares.spec.seal",
+  "ares.oracle.run",
+  "ares.task.decide"
+] as const;
+export const ARES_ACTION_KINDS: ReadonlySet<string> = new Set(ARES_ACTION_KIND_LIST);
+
+/** An ARES work item has exactly one requested action and it is a known ares.* kind. The strict definition. */
+export function isAresWorkItem(workItem: Pick<WorkItem, "requestedActions">): boolean {
+  const [only, ...rest] = workItem.requestedActions;
+  return only !== undefined && rest.length === 0 && ARES_ACTION_KINDS.has(only.kind);
+}
+
+/** Any requested action, known or not, in the ares.* namespace. The broader definition, used to fail closed. */
+export function mentionsAresKind(workItem: Pick<WorkItem, "requestedActions">): boolean {
+  return workItem.requestedActions.some((action) => action.kind.startsWith("ares."));
+}
+
+/**
+ * ARES items cannot be mixed: an item that mentions ares.* must be a strict ARES item. This removes the only way
+ * the strict and broad definitions could disagree about a stored item.
+ */
+function assertAresActionShape(requestedActions: readonly { kind: string }[]): void {
+  const candidate = { requestedActions } as Pick<WorkItem, "requestedActions">;
+  if (mentionsAresKind(candidate) && !isAresWorkItem(candidate)) {
+    throw new z.ZodError([
+      {
+        code: "custom",
+        path: ["requestedActions"],
+        message: "an ares.* work item must have exactly one requested action, and it must be a known ARES action kind"
+      }
+    ]);
+  }
+}
+
+/**
  * ARES Studio items name their executor in target.services. Unlike the registry-agent target rule
  * (which only binds registered agents), this binds unconditionally: a worker that is not named can
- * never claim an `ares.*` item, by id or by claim-next. Non-ARES items are unaffected.
+ * never claim an `ares.*` item, by id or by claim-next. Non-ARES items are unaffected. It uses the broad
+ * definition on purpose, so a malformed stored item is still bound to its named worker.
  */
-export function aresItemTargetsWorker(workItem: Pick<WorkItem, "target" | "requestedActions">, workerId: string): boolean {
-  const ares = workItem.requestedActions.some((action) => action.kind.startsWith("ares."));
-  return !ares || (workItem.target.services ?? []).includes(workerId);
+export function aresItemTargetsWorker(
+  workItem: Pick<WorkItem, "target" | "requestedActions">,
+  workerId: string
+): boolean {
+  return !mentionsAresKind(workItem) || (workItem.target.services ?? []).includes(workerId);
 }
 
 export function executionActionHash(

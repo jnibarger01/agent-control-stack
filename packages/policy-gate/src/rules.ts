@@ -6,6 +6,7 @@ import {
   inferCommandEffects,
   type CommandEffectTag
 } from "./command-effects.js";
+import { ARES_ACTION_KIND_LIST, ARES_ACTION_KINDS } from "@agent-control-stack/work-items";
 import type { PolicyContext, PolicyDecision } from "./policy.js";
 
 export type PolicyRiskLevel = "read_only" | "safe_mutation" | "requires_approval" | "destructive" | "forbidden";
@@ -207,20 +208,11 @@ function isSudo(command: string[]): boolean {
   return command[0] === "sudo" || command.includes("sudo");
 }
 
-/**
- * ARES Studio privileged actions (identify in Room A, Ghidra/REA adapter runs, SPEC seal, oracle run,
- * task decision). ARES executes them as the registered "ares" worker only after a human approval of the
- * exact action hash; the requesting human can never approve their own request.
- */
-const ARES_ACTION_KIND_LIST = [
-  "ares.analyze.local",
-  "ares.adapter.ghidra",
-  "ares.adapter.rea",
-  "ares.spec.seal",
-  "ares.oracle.run",
-  "ares.task.decide"
-] as const;
-export const ARES_ACTION_KINDS: ReadonlySet<string> = new Set(ARES_ACTION_KIND_LIST);
+// ARES Studio privileged actions (identify in Room A, Ghidra/REA adapter runs, SPEC seal, oracle run, task decision).
+// The kind list lives in work-items (ARES_ACTION_KIND_LIST) so there is a single definition. ARES executes them as the
+// registered "ares" worker only after a human approval of the exact action hash; the requesting human can never
+// approve their own request.
+export { ARES_ACTION_KINDS };
 
 /** Action kinds policy evaluates. Anything else is denied as unknown (fail closed). */
 export const SUPPORTED_ACTION_KINDS: readonly string[] = Object.freeze([
