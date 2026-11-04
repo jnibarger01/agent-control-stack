@@ -11,6 +11,7 @@
  */
 import os from 'node:os';
 import path from 'node:path';
+import { authorityToken } from './current-authority.js';
 
 export const DEFAULT_TAILNET_HOST = 'cachyos-x8664.tailaa6d41.ts.net';
 
@@ -58,6 +59,8 @@ export interface JcConfig {
   gatewayMetaTrusted: boolean;
   /** Raw workload-sandbox settings (sandbox.ts builds the policy with the preset). */
   sandboxEnv: Readonly<Record<string, string | undefined>>;
+  /** Read-scoped ACS credential for the live authority check (non-enumerable: never serialized). */
+  readonly acsAuthorityToken?: string;
 }
 
 function httpUrl(raw: string, name: string): string {
@@ -93,7 +96,7 @@ export function loadJcConfig(env: NodeJS.ProcessEnv = process.env): JcConfig {
   const timeout = Number(env.JC_REQUEST_TIMEOUT_MS ?? 8000);
   if (!Number.isInteger(timeout) || timeout < 100 || timeout > 60_000) throw new Error('JC_REQUEST_TIMEOUT_MS must be an integer in [100, 60000]');
   const runtimeId = env.JC_RUNTIME_ID ?? `jc-${os.hostname().replace(/[^A-Za-z0-9._:-]/g, '-')}`.slice(0, 128);
-  return {
+  const config: JcConfig = {
     homeDir: env.HOME ? path.resolve(env.HOME) : home,
     stateDir,
     publicMcpUrl: httpUrl(env.JC_PUBLIC_MCP_URL ?? `https://${DEFAULT_TAILNET_HOST}/jc/mcp`, 'JC_PUBLIC_MCP_URL'),
@@ -133,4 +136,6 @@ export function loadJcConfig(env: NodeJS.ProcessEnv = process.env): JcConfig {
     ].map((name) => [name, env[name] ?? (name === 'XDG_RUNTIME_DIR' ? process.env.XDG_RUNTIME_DIR : undefined)]))),
     mirrorMaxPending: boundedInt(env.JC_ACS_MIRROR_MAX_PENDING, 5000, 10, 1_000_000, 'JC_ACS_MIRROR_MAX_PENDING'),
   };
+  Object.defineProperty(config, 'acsAuthorityToken', { value: authorityToken(env), enumerable: false, writable: false });
+  return config;
 }

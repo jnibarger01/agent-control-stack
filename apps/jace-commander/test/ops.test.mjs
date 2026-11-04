@@ -30,6 +30,7 @@ sh(['remote', 'add', 'origin', bare]);
 
 const issuer = makeIssuer();
 const env = {
+  JC_ACS_AUTHORITY_TOKEN: 'test-authority-read-token',
   HOME: home,
   JC_STATE_DIR: stateDir,
   JC_RUNTIME_ID: 'jc-test-runtime',

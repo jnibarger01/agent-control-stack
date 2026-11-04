@@ -26,6 +26,7 @@ execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo, env: gitEnv });
 fs.writeFileSync(path.join(root, 'existing.txt'), 'original\n');
 const issuer = makeIssuer();
 const config = loadJcConfig({
+  JC_ACS_AUTHORITY_TOKEN: 'test-authority-read-token',
   HOME: root,
   JC_STATE_DIR: path.join(root, '.jc'),
   JC_FS_ROOTS: root,

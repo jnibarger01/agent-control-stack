@@ -19,6 +19,7 @@ import { makeIssuer, authorityFetch } from './fixtures/jc-mint.js';
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'jc-parity-')));
 const issuer = makeIssuer();
 const config = loadJcConfig({
+  JC_ACS_AUTHORITY_TOKEN: 'test-authority-read-token',
   HOME: root,
   JC_STATE_DIR: path.join(root, '.jc'),
   JC_FS_ROOTS: root,

@@ -150,6 +150,9 @@ const JC_CHILD_ENV_KEYS = [
   "XDG_RUNTIME_DIR",
   "JC_ACS_URL",
   "JC_ACS_TOKEN",
+  // Read-scoped credential JC uses to confirm current ACS authority before every non-read call.
+  "JC_ACS_AUTHORITY_TOKEN",
+  "JC_ACS_AUTHORITY_TOKEN_FILE",
   "JC_SWARM_URL",
   "JC_SWARM_TOKEN",
   "JC_VISUALIZER_URL",

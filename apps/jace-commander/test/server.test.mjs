@@ -20,6 +20,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'jc-server-'));
 const issuer = makeIssuer();
 delete process.env.JC_ACS_TOKEN;
 const config = loadJcConfig({
+  JC_ACS_AUTHORITY_TOKEN: 'test-authority-read-token',
   HOME: tmp,
   JC_STATE_DIR: path.join(tmp, 'state'),
   JC_RUNTIME_ID: 'jc-test-runtime',
