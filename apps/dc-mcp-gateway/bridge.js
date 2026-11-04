@@ -1107,6 +1107,18 @@ function breakGlassStatus(file) {
     detail: `break-glass marker held by pid ${status.pid}`
   };
 }
+function jcAuthorityCredentialConfigured() {
+  if (process.env.JC_ACS_AUTHORITY_TOKEN) return true;
+  const file = process.env.JC_ACS_AUTHORITY_TOKEN_FILE;
+  if (file) {
+    try {
+      return fs.readFileSync(file, "utf8").trim().length > 0;
+    } catch {
+      return false;
+    }
+  }
+  return !!process.env.JC_ACS_TOKEN;
+}
 function computeJcAuthority() {
   const initialized = !!(pair && pair.initializedOnce);
   return {
@@ -1126,7 +1138,9 @@ function computeJcAuthority() {
     runtime: { dir: JC_DIR, entrypoint: DC_ARGS[0], monorepoDefault: JC_DIR === MONOREPO_JC_DIR },
     enforcement: {
       executionTokenConfigured: !!EXECUTION_TOKEN,
-      capabilityVerificationConfigured: !!(process.env.JC_ACS_PUBLIC_KEY && process.env.JC_ACS_KEY_ID)
+      capabilityVerificationConfigured: !!(process.env.JC_ACS_PUBLIC_KEY && process.env.JC_ACS_KEY_ID),
+      // Without the read-scoped authority credential JC refuses every non-read call.
+      currentAuthorityCredentialConfigured: jcAuthorityCredentialConfigured()
     },
     authoritative: !!pair && initialized
   };

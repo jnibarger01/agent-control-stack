@@ -49,6 +49,7 @@ export function jcBridgeReady(authority) {
     authority.bridge?.upstreamStarted === true &&
     authority.bridge?.initialized === true &&
     authority.enforcement?.executionTokenConfigured === true &&
-    authority.enforcement?.capabilityVerificationConfigured === true
+    authority.enforcement?.capabilityVerificationConfigured === true &&
+    authority.enforcement?.currentAuthorityCredentialConfigured === true
   );
 }

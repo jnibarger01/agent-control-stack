@@ -1,58 +1,160 @@
 # Jace Commander native runtime
 
-Jace Commander owns its MCP server, filesystem, terminal, process registry, credential scanner, document readers and capability verifier. It neither imports nor starts Desktop Commander. Shared ACS contracts are embedded by the canonical generator so the package also builds outside this monorepo.
+Jace Commander (JC) is an independent MCP computer-control runtime: it owns its
+MCP server, terminal and PTY engine, process registry, filesystem tools,
+document readers, git operations, credential scanner, capability verifier and
+workload sandbox. It neither imports nor starts Desktop Commander, and it has no
+workspace dependencies: the ACS tool contract is embedded by the canonical
+generator (`npm run jc-contracts:generate`). ACS is the sole authority for every
+privileged action.
+
+```text
+AI client --HTTPS/OAuth--> edge (apps/dc-mcp-gateway/server.js, 127.0.0.1:8010)
+   --per-call acs.jc.v1 issuance--> ACS (127.0.0.1:3000)
+   --attested--> bridge.js (BRIDGE_PROFILE=jace-commander, 127.0.0.1:8003)
+   --stdio--> jace-commander serve (this package, managed preset)
+        verify capability (Ed25519, exact tool/arguments/runtime/scopes/expiry, single-use nonce)
+        confirm CURRENT authority with ACS (work item running, lease active, approval bound)
+        run the workload in a bubblewrap sandbox
+   --terminal result--> ACS (audited execution_result, releases the admission permit)
+```
 
 ## Build and verify
 
 From the repository root:
 
-- `npm test -w apps/jace-commander`
-- `npm run jc-contracts:check`
-- `npm run jc:verify-independence`
+| Command | What it proves |
+| --- | --- |
+| `npm test -w apps/jace-commander` | 30 suites: contract, tools, terminal/PTY, sandbox isolation, live authority, documents, approval, privileged helper |
+| `ACS_DC_E2E=1 npx vitest run tests/e2e/acs-jc-mcp` | Real chain: OAuth edge, bridge, native JC and authenticated ACS (27 tests, incl. revocation, lease expiry, replay, principal isolation, audited outcome) |
+| `npm run jc:verify-release` | Clean install outside every repository, runtime deps only, with `$HOME/projects` masked; dependency graph, shipped-graph audit, full suite, real MCP client session, module-resolution trace. Evidence: `verification/jc-release-standalone-evidence.json` |
+| `npm run jc:verify-independence` | Copy-out build and test with no workspace or vendor tree |
+| `npm run jc-contracts:check` | Embedded manifest matches the canonical ACS contract |
 
-The independence verifier makes a physical copy under /tmp, installs only this package's declared dependencies, builds it, and runs its complete test suite without workspace files or a Desktop Commander tree. Standalone installation uses `npm install && npm test` inside this package. Node >=24.16 and /usr/bin/python3 are needed; the latter allocates POSIX PTYs with the standard library. Linux is the supported terminal platform.
+Set `JC_E2E_RUNTIME_DIR=<release>/current` to run the chain e2e against an
+installed release instead of the source tree. Linux, Node >= 24.16,
+`/usr/bin/python3` (PTY allocation) and bubblewrap (`/usr/bin/bwrap`) are required.
 
-## Managed execution
+## Authorization
 
-Use `node apps/jace-commander/dist/cli.js serve` behind the authenticated bridge. The bridge defaults to this native package; `JC_RUNTIME_DIR` can select another native build. `JC_DC_DIR` remains a deprecated directory alias but now expects the native dist/cli.js layout.
+- Every managed call needs an ACS-issued `acs.jc.v1` capability bound to the
+  exact tool, arguments, runtime, scopes, expiry and a single-use nonce. JC only
+  verifies; it holds no signing key.
+- Every managed non-read call then reads the work item and attempt lease from
+  ACS with a dedicated read-scoped credential (`JC_ACS_AUTHORITY_TOKEN_FILE`,
+  or `JC_ACS_AUTHORITY_TOKEN`) and requires that ACS still confirms that exact
+  authority: work item `running`, requester = authenticated principal, matching
+  action and invocation hash, lease `active` and unexpired, same fencing epoch,
+  plan and approval. Refusals name the failed binding (`lease_not_active`,
+  `lease_expired`, `requester_mismatch`, ...). No credential, an ACS outage or
+  any mismatch refuses execution; there is no cached success and no fallback.
+- Process sessions belong to the authenticated subject and OAuth client that
+  started them; other principals cannot list, read, write to or kill them.
+- `standalone` (read-only) and `local` presets remain explicit compatibility
+  modes; the managed bridge refuses both and `--standalone`.
 
-Every managed call needs an ACS Ed25519 capability with exact tool, arguments, runtime, scopes, expiry and single-use nonce bindings. Every managed non-read operation additionally reads the current work item and attempt lease from ACS before dispatch. Missing credentials, an outage, a revoked or expired lease, a changed fencing epoch, plan, approval or invocation, and a mismatched authenticated principal all refuse execution. The privileged helper independently verifies the capability again. JC never mints capabilities.
+## Workload isolation
 
-The bridge stamps authenticated gateway metadata. Process sessions belong to that subject and OAuth client; another principal cannot list, read, write stdin to, or kill them. Missing gateway identity refuses process tools. Direct stdio has one local transport owner.
+Every workload (`run_command`, `start_terminal_session` / `interact_with_process`,
+`start_process`, all git operations) runs in a bubblewrap sandbox
+(`src/sandbox.ts`), enforced by kernel namespaces even though it runs as the JC
+account's UID:
 
-Legacy local-policy and read-only standalone presets remain explicit compatibility modes. The managed bridge rejects either preset and rejects --standalone; neither is an outage fallback. This release does not enable or deploy either mode.
+- **PID/IPC/UTS namespaces**: JC, the bridge and every host process are
+  invisible; `/proc/<pid>/environ` (gateway execution token, ACS tokens) cannot be
+  read and nothing outside can be signalled or traced.
+- **Filesystem**: `/` read-only; only `JC_FS_ROOTS` (+ `JC_SANDBOX_WRITABLE`) are
+  writable, so no dotfile/autostart/unit persistence. Masked (empty, read-only):
+  credential stores (`~/.ssh`, `~/.gnupg`, cloud CLIs, `~/.netrc`, keyrings, ...),
+  `~/.config/acs`, JC/gateway state and env files, `$XDG_RUNTIME_DIR` (user bus,
+  agent and X auth sockets), and the database/config of every ACS checkout
+  reachable from the roots. Private `/tmp` and devpts. JC's runtime, its
+  `node_modules`, the bridge and `~/.config/systemd` are read-only.
+- **Capabilities**: all dropped; nested user namespaces disabled, so masks
+  cannot be undone.
+- **Network**: own network namespace by default (`JC_WORKLOAD_NETWORK=none`);
+  `host` is an explicit opt-in. git fetch/push get the network with only the
+  ssh agent socket and `known_hosts` re-exposed (key files stay masked).
+- **Lifetime**: each sandbox's PID-namespace init is recorded (`--info-fd`) and
+  killed on kill, timeout, exit and shutdown, so no workload outlives its session.
+- **Fail closed**: a startup self-test must pass before a managed or local preset
+  serves; otherwise every workload tool returns `JC_SANDBOX_UNAVAILABLE`.
+  `JC_WORKLOAD_ISOLATION=none` is refused in managed mode and never forwarded by
+  the bridge.
 
-## New tools and compatibility
+Residual risks: with `JC_WORKLOAD_NETWORK=host` a workload can reach host
+loopback services and abstract sockets (every JC/ACS/edge endpoint still
+requires credentials the workload cannot see). An approved command can modify
+anything inside the filesystem roots, including code that other, unsandboxed
+tools later execute; keep the JC release, the edge and the running ACS outside
+the roots (or list them in `JC_SANDBOX_READONLY`).
 
-The 36 existing tool schemas retain their required fields and existing property types. Four approval-gated tools are added:
+## Tools and compatibility
 
-| Tool                   | Behavior                                                                         |
-| ---------------------- | -------------------------------------------------------------------------------- |
-| run_command            | Shell command with contained cwd, bounded timeout and optional PTY; CLI: jc run  |
-| start_terminal_session | Interactive PTY; each stdin call requires its own capability                     |
-| interact_with_process  | Approved exact stdin text to an owned session; CLI: jc send                      |
-| delete_file            | Contained unlink or recursive delete; root and .git deletion refused; CLI: jc rm |
+The 36 original tool schemas are preserved (`test/fixtures/jc-tools-baseline-v1.json`;
+only optional properties were added). Four approval-gated tools are new:
 
-write_file additionally accepts optional encoding=utf8 or base64. Base64 must be canonical. read_process_output accepts separate absolute byte cursors and waitMs, and returns nextStdoutOffset/nextStderrOffset plus retained-buffer starts. The legacy offset remains accepted and applies to both streams; consumers should migrate to byte cursors for streaming.
+| Tool | Behavior |
+| --- | --- |
+| `run_command` | Shell command (configured shells only, default `/bin/bash`) with contained cwd, bounded timeout, optional PTY; CLI `jc run` |
+| `start_terminal_session` | Interactive PTY shell; every input is separately approved |
+| `interact_with_process` | Approved exact input to an owned session; waits for output to go quiet; CLI `jc send` |
+| `delete_file` | Contained unlink or recursive delete; roots and `.git` refused; CLI `jc rm` |
 
-The default shell is /bin/bash. JC_SHELLS is a colon-separated administrator configuration of absolute shell paths. The caller cannot select any other shell. Caller environment overrides are restricted to LANG, LC_ALL, LC_CTYPE, TZ, TERM, COLORTERM, NO_COLOR and FORCE_COLOR. Parent credentials and signing keys are not forwarded.
+`write_file` accepts `encoding: base64` for binary content. `read_process_output`
+accepts per-stream byte cursors (`stdoutOffset`/`stderrOffset`) and `waitMs` and
+returns `nextStdoutOffset`/`nextStderrOffset`; the legacy `offset` still applies to
+both streams. `kill_process` returns once the process group is gone
+(`exited: true`). `read_file` parses pdf (unpdf), docx and xlsx (pizzip, JC-owned
+readers; xlsx returns raw cell values without number formatting).
 
-## Security limits
+## Deployment (CachyOS user services)
 
-A contained cwd is not an OS filesystem sandbox. An explicitly approved shell command runs with the JC account's operating-system privileges and can access that account's files. Environment filtering does not isolate a same-UID process from /proc or credential files. A separate executor identity or OS sandbox is required to enforce account-level credential isolation; it has not been configured by this change. PTY output merges stderr into stdout, as terminal devices do. Non-PTY calls retain separate streams.
+Templates: `apps/dc-mcp-gateway/deploy/systemd/jace-commander-mcp.service` (bridge
++ native JC on 127.0.0.1:8003) and `apps/dc-mcp-gateway/deploy/jace-commander-bridge.env.example`.
+The unit pins the non-secret managed settings (`JC_PRESET=managed`,
+`JC_WORKLOAD_ISOLATION=bwrap`, `JC_WORKLOAD_NETWORK=none`,
+`JC_ACS_AUTHORITY_TOKEN_FILE`) and loads secrets and site values from
+`~/.config/acs/jc-bridge.env` (plain `KEY=VALUE` lines; no JSON or multi-line
+values, which systemd's `EnvironmentFile` would mangle). It uses `/usr/bin/node`
+(no version-manager shims) and binds loopback only.
 
-The current-authority read is a pre-dispatch check, not a transaction spanning ACS and the operating system. Revocation does not retroactively undo an already started command. Process timeouts and server shutdown terminate the managed process group; tools do not claim containment against a hostile program deliberately escaping its process group.
+Production layout: install a read-only release outside `JC_FS_ROOTS` with
+`apps/jace-commander/deploy/install-user-release.sh` (default
+`~/.local/lib/jace-commander/releases/<version>-<commit>` plus an atomically
+switched `current` symlink) and set `JC_RUNTIME_DIR=%h/.local/lib/jace-commander/current`.
 
-Local JSONL traces record hashes and authority identifiers, not raw commands, stdin or environment values. ACS remains the canonical result and audit authority; bridge result submission preserves that path.
+Readiness: the bridge's `/authority` reports the native runtime path and
+`enforcement.{executionTokenConfigured, capabilityVerificationConfigured,
+currentAuthorityCredentialConfigured}`; the edge's `/jc/ready` is ready only when
+all hold and ACS issuance is reachable.
 
-## Migration (prepared, not executed)
+## Migration from the Desktop Commander-hosted JC
 
-Do not change live services until review and explicit rollout approval.
+Prepared, not executed. Do not change live services without review and explicit
+rollout approval.
 
-1. Build and run the verification commands above; review migration 076 and check its number against current main and open PRs. 075 is already reserved by other work. 076 is a local candidate and has not been reserved by a draft PR.
-2. Apply the additive ACS migration through the normal deployment procedure. Existing databases are not edited by these development tests.
-3. Review the managed templates under apps/dc-mcp-gateway/deploy. The user unit uses %h/projects/agent-control-stack, /usr/bin/node, and %h/.config/acs/jc-bridge.env. Use EnvironmentFile directly; do not shell-source JSON credentials.
-4. Privately configure matching ACS/JC filesystem roots, public verification key, key ID and runtime ID; JC_ACS_TOKEN needs read access to the authoritative work-item/lease route. Existing dedicated worker result credentials remain bridge-only.
-5. With rollout approval, reload/restart the JC bridge and validate loopback :8003/authority plus the edge /jc/ready. The intended public URL is https://cachyos-x8664.tailaa6d41.ts.net/jc/mcp. No endpoint publication, live credentials, gateway :3000, Tailscale configuration or privileged helper installation was changed here.
+1. Verify: `npm test -w apps/jace-commander`, `ACS_DC_E2E=1 npx vitest run tests/e2e/acs-jc-mcp`, `npm run jc:verify-release`.
+2. Apply ACS migration 076 (`jace_commander_native_tools`) through the normal
+   procedure. 075 is claimed by two unmerged branches; neither touches what 076
+   rebuilds and the runner applies any missing version, so either order works.
+3. Provision a read-scoped (`acs:read`) ACS credential for JC into
+   `~/.config/acs/jc-authority.token` (0600). Without it every mutation fails closed
+   and `/jc/ready` stays not ready.
+4. Install the release (`install-user-release.sh`) and update the env file: the
+   template in the repository could not be edited by the automation that
+   produced this change (a local guardrail protects `*.env*` paths), so add by
+   hand, or rely on the unit's `Environment=` lines:
+   `JC_ACS_AUTHORITY_TOKEN_FILE`, `JC_RUNTIME_DIR`, optionally
+   `JC_WORKLOAD_NETWORK=host`, `JC_SANDBOX_HIDE` (ACS data dirs outside any
+   checkout, e.g. a live instance's `storage`), `JC_SANDBOX_WRITABLE` (caches such
+   as `~/.npm`). Keep `ACS_GATEWAY_URL`/`ACS_WORKER_TOKEN` (result submission) set.
+5. Replace the old unit with the template, `systemctl --user daemon-reload`, restart
+   `jace-commander-mcp`, and check `127.0.0.1:8003/authority` (`runtime.dir` must be
+   the native release, never `vendor/desktop-commander`) and the edge `/jc/ready`.
+6. Rollback: re-point `current` at the previous release, or set
+   `JC_RUNTIME_DIR` back, and restart. The vendor Desktop Commander tree is not
+   used by JC and is unaffected either way.
 
-An independent security review, real ACS-to-native-JC execution evidence, production credential-isolation design, migration reservation/preflight and the repository's full check remain release gates until separately verified.
+The public endpoint `https://cachyos-x8664.tailaa6d41.ts.net/jc/mcp`, Tailscale
+Serve, live credentials and the privileged helper were not changed by this work.

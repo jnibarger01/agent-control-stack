@@ -71,8 +71,9 @@ describe.skipIf(!E2E_ENABLED)("E2E JC-1: read-only filesystem via /jc/mcp (MCP +
     const authority = (await (await fetch(`http://127.0.0.1:${bridge.port}/authority`)).json()) as {
       runtime: { dir: string; monorepoDefault: boolean };
     };
-    expect(authority.runtime.monorepoDefault).toBe(true);
-    expect(realpathSync(authority.runtime.dir)).toBe(realpathSync(JC_ROOT));
+    const installed = process.env.JC_E2E_RUNTIME_DIR;
+    expect(authority.runtime.monorepoDefault).toBe(!installed);
+    expect(realpathSync(authority.runtime.dir)).toBe(realpathSync(installed ?? JC_ROOT));
     expect(authority.runtime.dir).not.toMatch(/desktop-commander/);
   });
 
