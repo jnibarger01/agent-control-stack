@@ -12,6 +12,7 @@ import { promisify } from 'node:util';
 import { scanPatch, type PatchScanResult } from './credential-scan.js';
 import { jcChildEnv } from './child-env.js';
 import { containJcPath, type JcFsPolicy } from './filesystem.js';
+import { assertSandboxReady, sandboxArgv } from './sandbox.js';
 import { IntegrationError } from './integrations.js';
 
 const exec = promisify(execFile);
@@ -26,13 +27,22 @@ const SAFE_CONFIG = [
 ];
 const MAX_PUSH_SCAN_BYTES = 2 * 1024 * 1024;
 
-async function git(repo: string, args: string[], maxBuffer = 1024 * 1024): Promise<string> {
+async function git(policy: JcFsPolicy, repo: string, args: string[], maxBuffer = 1024 * 1024, network: 'none' | 'host' = 'none'): Promise<string> {
+  // Git runs inside the workload sandbox too: a workload can rewrite .git/config
+  // (core.sshCommand, filters, helpers), and that code must never run with
+  // sight of JC's control plane.
+  if (!policy.workload) throw new IntegrationError('JC_SANDBOX_UNAVAILABLE', 'no workload sandbox is configured; nothing ran');
+  assertSandboxReady(policy.workload.policy, policy.workload.homeDir, policy.workload.stateDir);
+  // SSH_AUTH_SOCK lets an approved fetch/push use the operator's agent; key files stay masked.
+  const env = jcChildEnv({ GIT_TERMINAL_PROMPT: '0' }, network === 'host' ? ['SSH_AUTH_SOCK'] : []);
+  const agent = network === 'host' && env.SSH_AUTH_SOCK ? [env.SSH_AUTH_SOCK] : [];
+  const knownHosts = network === 'host' ? [path.join(policy.workload.homeDir, '.ssh', 'known_hosts')] : [];
+  const argv = sandboxArgv(policy.workload.policy, ['git', ...SAFE_CONFIG, '-C', repo, ...args], repo, { network, bindBack: agent, roBindBack: knownHosts });
   try {
-    const result = await exec('git', [...SAFE_CONFIG, '-C', repo, ...args], {
+    const result = await exec(argv[0]!, argv.slice(1), {
       timeout: 30_000,
       maxBuffer,
-      // SSH_AUTH_SOCK lets an approved fetch/push use the operator's agent.
-      env: jcChildEnv({ GIT_TERMINAL_PROMPT: '0' }, ['SSH_AUTH_SOCK']),
+      env: policy.workload.policy.isolation === 'bwrap' ? { ...env, TMPDIR: '/tmp' } : env,
     });
     return result.stdout;
   } catch (error) {
@@ -43,7 +53,7 @@ async function git(repo: string, args: string[], maxBuffer = 1024 * 1024): Promi
 
 async function repoRoot(requested: unknown, policy: JcFsPolicy): Promise<string> {
   const contained = containJcPath(requested, policy);
-  const top = (await git(contained, ['rev-parse', '--show-toplevel'])).trim();
+  const top = (await git(policy, contained, ['rev-parse', '--show-toplevel'])).trim();
   return containJcPath(top, policy);
 }
 
@@ -56,11 +66,11 @@ function relativePath(input: unknown): string {
   return input;
 }
 
-async function currentBranch(repo: string): Promise<string> {
+async function currentBranch(policy: JcFsPolicy, repo: string): Promise<string> {
   // symbolic-ref also works on an unborn branch (before the first commit).
   let branch: string;
   try {
-    branch = (await git(repo, ['symbolic-ref', '--quiet', '--short', 'HEAD'])).trim();
+    branch = (await git(policy, repo, ['symbolic-ref', '--quiet', '--short', 'HEAD'])).trim();
   } catch {
     throw new IntegrationError('detached_head', 'HEAD is detached; check out a branch first');
   }
@@ -68,17 +78,17 @@ async function currentBranch(repo: string): Promise<string> {
   return branch;
 }
 
-async function configuredRemote(repo: string, requested: unknown): Promise<string> {
+async function configuredRemote(policy: JcFsPolicy, repo: string, requested: unknown): Promise<string> {
   const remote = requested === undefined ? 'origin' : requested;
   if (typeof remote !== 'string' || !REMOTE.test(remote)) throw new IntegrationError('invalid_argument', 'remote must be a configured remote name');
-  const remotes = (await git(repo, ['remote'])).split('\n').map((line) => line.trim()).filter(Boolean);
+  const remotes = (await git(policy, repo, ['remote'])).split('\n').map((line) => line.trim()).filter(Boolean);
   if (!remotes.includes(remote)) throw new IntegrationError('remote_not_configured', `remote "${remote}" is not configured in this repository`);
   return remote;
 }
 
 export async function gitStatus(args: Record<string, unknown>, policy: JcFsPolicy): Promise<Record<string, unknown>> {
   const repo = await repoRoot(args.repo, policy);
-  const text = await git(repo, ['status', '--porcelain=v1', '-b']);
+  const text = await git(policy, repo, ['status', '--porcelain=v1', '-b']);
   const lines = text.split('\n').filter(Boolean);
   const header = lines[0] ?? '';
   const branchPart = header.replace(/^## /, '').split('...')[0] ?? '';
@@ -97,7 +107,7 @@ export async function gitStatus(args: Record<string, unknown>, policy: JcFsPolic
   }
   let head: string;
   try {
-    head = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+    head = (await git(policy, repo, ['rev-parse', 'HEAD'])).trim();
   } catch {
     head = '';
   }
@@ -120,7 +130,7 @@ export async function gitDiff(args: Record<string, unknown>, policy: JcFsPolicy)
   const gitArgs = ['diff', '--no-ext-diff', '--no-textconv', '--'];
   if (args.staged === true) gitArgs.splice(1, 0, '--cached');
   if (args.path !== undefined) gitArgs.push(relativePath(args.path));
-  const diff = await git(repo, gitArgs);
+  const diff = await git(policy, repo, gitArgs);
   return { repo, staged: args.staged === true, truncated: diff.length > 200_000, diff: diff.slice(0, 200_000) };
 }
 
@@ -130,7 +140,7 @@ export async function gitLog(args: Record<string, unknown>, policy: JcFsPolicy):
   if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 100) {
     throw new IntegrationError('invalid_argument', 'limit must be an integer from 1 to 100');
   }
-  const text = await git(repo, ['log', '-n', String(limit), '--format=%H%x09%s']);
+  const text = await git(policy, repo, ['log', '-n', String(limit), '--format=%H%x09%s']);
   const commits = text.split('\n').filter(Boolean).map((line) => {
     const [sha, subject] = line.split('\t');
     return { sha, subject };
@@ -140,10 +150,10 @@ export async function gitLog(args: Record<string, unknown>, policy: JcFsPolicy):
 
 export async function gitBranch(args: Record<string, unknown>, policy: JcFsPolicy): Promise<Record<string, unknown>> {
   const repo = await repoRoot(args.repo, policy);
-  const text = await git(repo, ['branch', '--format=%(refname:short)']);
+  const text = await git(policy, repo, ['branch', '--format=%(refname:short)']);
   let current: string | null;
   try {
-    current = await currentBranch(repo);
+    current = await currentBranch(policy, repo);
   } catch {
     current = null;
   }
@@ -156,7 +166,7 @@ export async function gitShow(args: Record<string, unknown>, policy: JcFsPolicy)
   if (rev !== 'HEAD' && (typeof rev !== 'string' || !SHA.test(rev))) {
     throw new IntegrationError('invalid_argument', 'rev must be HEAD or a full 40-hex commit');
   }
-  const text = await git(repo, ['show', '--no-ext-diff', '--no-textconv', '--stat', '--format=%H%n%s', String(rev)]);
+  const text = await git(policy, repo, ['show', '--no-ext-diff', '--no-textconv', '--stat', '--format=%H%n%s', String(rev)]);
   return { repo, rev, text: text.slice(0, 100_000) };
 }
 
@@ -166,7 +176,7 @@ export async function gitAdd(args: Record<string, unknown>, policy: JcFsPolicy):
     throw new IntegrationError('invalid_argument', 'paths must contain 1 to 50 relative paths');
   }
   const paths = args.paths.map((item) => relativePath(item));
-  await git(repo, ['add', '--', ...paths]);
+  await git(policy, repo, ['add', '--', ...paths]);
   return { repo, added: paths };
 }
 
@@ -175,18 +185,18 @@ export async function gitCommit(args: Record<string, unknown>, policy: JcFsPolic
   if (typeof args.message !== 'string' || args.message.length < 1 || args.message.length > 500) {
     throw new IntegrationError('invalid_argument', 'message must be 1 to 500 characters');
   }
-  const branch = await currentBranch(repo);
-  const staged = (await git(repo, ['diff', '--cached', '--name-only'])).split('\n').filter(Boolean);
+  const branch = await currentBranch(policy, repo);
+  const staged = (await git(policy, repo, ['diff', '--cached', '--name-only'])).split('\n').filter(Boolean);
   if (staged.length === 0) throw new IntegrationError('nothing_staged', 'nothing is staged; run git_add first');
-  await git(repo, ['commit', '--no-verify', '-m', args.message]);
-  const head = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+  await git(policy, repo, ['commit', '--no-verify', '-m', args.message]);
+  const head = (await git(policy, repo, ['rev-parse', 'HEAD'])).trim();
   return { repo, branch, head, files: staged, message: args.message };
 }
 
 export async function gitFetch(args: Record<string, unknown>, policy: JcFsPolicy): Promise<Record<string, unknown>> {
   const repo = await repoRoot(args.repo, policy);
-  const remote = await configuredRemote(repo, args.remote);
-  const text = await git(repo, ['fetch', '--no-recurse-submodules', remote]);
+  const remote = await configuredRemote(policy, repo, args.remote);
+  const text = await git(policy, repo, ['fetch', '--no-recurse-submodules', remote], 1024 * 1024, 'host');
   return { repo, remote, text: text.slice(0, 20_000) };
 }
 
@@ -197,21 +207,21 @@ export async function gitFetch(args: Record<string, unknown>, policy: JcFsPolicy
  */
 export async function gitPush(args: Record<string, unknown>, policy: JcFsPolicy): Promise<Record<string, unknown>> {
   const repo = await repoRoot(args.repo, policy);
-  const remote = await configuredRemote(repo, args.remote);
+  const remote = await configuredRemote(policy, repo, args.remote);
   if (typeof args.expectedHead !== 'string' || !SHA.test(args.expectedHead)) {
     throw new IntegrationError('invalid_argument', 'expectedHead must be the full 40-hex commit to push');
   }
-  const branch = await currentBranch(repo);
+  const branch = await currentBranch(policy, repo);
   if (args.branch !== undefined && args.branch !== branch) {
     throw new IntegrationError('invalid_argument', 'branch must be the currently checked out branch');
   }
-  const head = (await git(repo, ['rev-parse', 'HEAD'])).trim();
+  const head = (await git(policy, repo, ['rev-parse', 'HEAD'])).trim();
   if (head !== args.expectedHead) {
     throw new IntegrationError('head_moved', `HEAD is ${head}, not the approved ${args.expectedHead}`);
   }
   let patch: string;
   try {
-    patch = await git(repo, ['log', '-p', '--no-ext-diff', '--no-textconv', '--format=', head, '--not', `--remotes=${remote}`], MAX_PUSH_SCAN_BYTES + 1);
+    patch = await git(policy, repo, ['log', '-p', '--no-ext-diff', '--no-textconv', '--format=', head, '--not', `--remotes=${remote}`], MAX_PUSH_SCAN_BYTES + 1);
   } catch {
     throw new IntegrationError('secret_scan_unavailable', 'cannot collect the commits to push for a secret scan');
   }
@@ -224,6 +234,6 @@ export async function gitPush(args: Record<string, unknown>, policy: JcFsPolicy)
   if (!scan.clean) {
     throw new IntegrationError('secret_detected', `secret scan found ${scan.findingCount} finding(s) (${Object.keys(scan.byCategory).join(', ')}); push refused`);
   }
-  const text = await git(repo, ['push', '--no-recurse-submodules', '--', remote, `${head}:refs/heads/${branch}`]);
+  const text = await git(policy, repo, ['push', '--no-recurse-submodules', '--', remote, `${head}:refs/heads/${branch}`], 1024 * 1024, 'host');
   return { repo, remote, branch, pushed: head, secretScan: { clean: true, scannedBytes: Buffer.byteLength(patch) }, text: text.slice(0, 20_000) };
 }

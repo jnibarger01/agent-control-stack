@@ -140,6 +140,14 @@ const JC_CHILD_ENV_KEYS = [
   "JC_STATE_DIR",
   "JC_PUBLIC_MCP_URL",
   "JC_SHELLS",
+  // Workload isolation (apps/jace-commander/src/sandbox.ts). JC_ALLOW_UNISOLATED_WORKLOADS
+  // is deliberately NOT forwarded: a bridged child always isolates its workloads.
+  "JC_WORKLOAD_ISOLATION",
+  "JC_WORKLOAD_NETWORK",
+  "JC_SANDBOX_HIDE",
+  "JC_SANDBOX_WRITABLE",
+  "JC_BWRAP_PATH",
+  "XDG_RUNTIME_DIR",
   "JC_ACS_URL",
   "JC_ACS_TOKEN",
   "JC_SWARM_URL",
@@ -203,6 +211,10 @@ const CHILD_ENV = {
   ...(JC ? { JC_GATEWAY_META_TRUSTED: "1" } : {}),
   ...(JC
     ? Object.fromEntries(JC_CHILD_ENV_KEYS.filter((key) => process.env[key]).map((key) => [key, process.env[key]]))
+    : {}),
+  // The bridge's own code is control plane: workloads see it read-only.
+  ...(JC
+    ? { JC_SANDBOX_READONLY: [path.dirname(fileURLToPath(import.meta.url)), ...(process.env.JC_SANDBOX_READONLY || "").split(":").filter(Boolean)].join(":") }
     : {}),
   ...(!JC && MANAGED && ACS_DC_PUBLIC_KEY && ACS_DC_KEY_ID
     ? {

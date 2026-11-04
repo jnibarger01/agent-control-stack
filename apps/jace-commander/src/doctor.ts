@@ -39,6 +39,8 @@ export interface DoctorRuntime {
   /** Some provider's ACS mode is `required` (local preset): an unreachable ACS then fails the report. */
   acsRequired?: boolean;
   privilegedHelper: () => Promise<boolean>;
+  /** Result of the workload sandbox self-test (sandbox.ts). */
+  workloadIsolation?: { ok: boolean; isolation: string; network: string; detail: string };
 }
 
 const CODE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -191,6 +193,9 @@ export async function jcDoctor(config: JcConfig, runtime: DoctorRuntime): Promis
       : 'JC_FS_ROOTS empty; filesystem, process and git tools fail closed',
   });
   checks.push(runtimePathCheck());
+  if (runtime.workloadIsolation) {
+    checks.push({ name: 'workload isolation', ok: runtime.workloadIsolation.ok, required: true, detail: `${runtime.workloadIsolation.isolation}/${runtime.workloadIsolation.network}: ${runtime.workloadIsolation.detail}` });
+  }
   checks.push({ ...(await probe(config.acsUrl ? acsReadyUrl(config) : undefined, runtime.fetchImpl)), required: runtime.acsRequired === true });
   try {
     const version = (await exec('git', ['--version'], { timeout: 2000 })).stdout.trim();

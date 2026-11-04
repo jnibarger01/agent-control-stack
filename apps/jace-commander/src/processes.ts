@@ -1,7 +1,9 @@
 /**
  * JC-owned bounded process engine. Shell execution is a distinct, approval-gated
  * tool; legacy start_process retains its argv-only shell refusal.
- * A cwd restriction is not a sandbox: approved commands run as the JC account.
+ * Every workload runs inside the bubblewrap sandbox (sandbox.ts): no host PIDs,
+ * read-only filesystem outside the roots, masked credential stores and
+ * control-plane state. A policy without a proven sandbox launches nothing.
  */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -10,11 +12,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { jcChildEnv } from './child-env.js';
 import { containJcPath, type JcFsPolicy } from './filesystem.js';
+import { assertSandboxReady, sandboxArgv } from './sandbox.js';
 import { IntegrationError } from './integrations.js';
 
 const MAX_OUTPUT = 256 * 1024;
 const MAX_SESSIONS = 32;
 const KILL_GRACE_MS = 1000;
+const QUIET_MS = 150;
 const DENIED_BASE = new Set(['sh','bash','dash','zsh','ksh','mksh','ash','fish','csh','tcsh','rbash','sudo','su','doas','pkexec','env','busybox']);
 const EXTRA_ENV = new Set(['LANG','LC_ALL','LC_CTYPE','TZ','TERM','COLORTERM','NO_COLOR','FORCE_COLOR']);
 interface Stream { data: Buffer; start: number; end: number }
@@ -91,16 +95,21 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
     timer.unref();
     s.child.once('close',()=>clearTimeout(timer));
   }
-  function launch(argv: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number, owner = 'stdio'): Session {
+  function launch(argv: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number, owner: string | undefined, policy: JcFsPolicy): Session {
+    if (!policy.workload) throw new IntegrationError('JC_SANDBOX_UNAVAILABLE', 'no workload sandbox is configured; nothing ran');
+    assertSandboxReady(policy.workload.policy, policy.workload.homeDir, policy.workload.stateDir);
+    const sandboxed = sandboxArgv(policy.workload.policy, argv, cwd);
+    // The sandbox has a private /tmp; never point a workload at a host temp dir.
+    const workloadEnv = policy.workload.policy.isolation === 'bwrap' ? { ...env, TMPDIR: '/tmp' } : env;
     if (sessions.size >= MAX_SESSIONS) {
       const finished = [...sessions.values()].find((s) => s.done);
       if (!finished) throw new IntegrationError('too_many_processes','at most 32 managed processes may run at once');
       sessions.delete(finished.sessionId);
     }
-    const child = spawn(argv[0]!,argv.slice(1),{cwd,env,shell:false,stdio:'pipe',detached:true});
+    const child = spawn(sandboxed[0]!,sandboxed.slice(1),{cwd,env:workloadEnv,shell:false,stdio:'pipe',detached:true});
     if (!child.pid) { child.on('error',()=>{}); throw new IntegrationError('start_failed','process did not start'); }
     const stream = (): Stream => ({data:Buffer.alloc(0),start:0,end:0});
-    const s: Session = {sessionId:'proc_'+randomBytes(16).toString('hex'),pid:child.pid,argv,cwd,owner,
+    const s: Session = {sessionId:'proc_'+randomBytes(16).toString('hex'),pid:child.pid,argv,cwd,owner:owner ?? 'stdio',
       stdout:stream(),stderr:stream(),exitCode:null,signal:null,done:false,child,
       timer:setTimeout(()=>terminate(s),timeoutMs)};
     child.stdout.on('data',(chunk: Buffer)=>append(s.stdout,chunk));
@@ -144,7 +153,7 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
     // PTY allocation belongs to JC; Python's standard library needs no DC modules.
     const actual=interactive || args.pty === true
       ? ['/usr/bin/python3',fileURLToPath(new URL('./pty-helper.py',import.meta.url)),...argv] : argv;
-    const s=launch(actual,cwd,environment(args.env),timeout,owner);
+    const s=launch(actual,cwd,environment(args.env),timeout,owner,policy);
     const wait=integer(args.waitMs,interactive?0:10_000,60_000,0);
     // run_command waits for completion, rather than returning on the first chunk.
     const until=Date.now()+wait;
@@ -160,7 +169,7 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
       });
       const cwd=containJcPath(args.cwd,policy);
       const timeoutMs=integer(args.timeoutMs,30_000,600_000);
-      const s=launch([executable(argv[0]!),...argv.slice(1)],cwd,jcChildEnv(),timeoutMs,owner);
+      const s=launch([executable(argv[0]!),...argv.slice(1)],cwd,jcChildEnv(),timeoutMs,owner,policy);
       return {sessionId:s.sessionId,pid:s.pid,cwd,argv,timeoutMs};
     },
     run:(args,policy,owner)=>shell(args,policy,owner,false),
@@ -171,7 +180,19 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
       if (s.done || s.child.stdin.destroyed) throw new IntegrationError('process_exited','process has exited');
       const stdoutOffset=s.stdout.end,stderrOffset=s.stderr.end;
       await new Promise<void>((resolve,reject)=>s.child.stdin.write(args.input as string,(error)=>error?reject(new IntegrationError('process_exited','stdin closed')):resolve()));
-      return read({sessionId:s.sessionId,stdoutOffset,stderrOffset,waitMs:args.waitMs ?? 100},owner);
+      // A terminal echoes input immediately; keep collecting until the output
+      // has been quiet for QUIET_MS (or waitMs elapses / the process exits), so
+      // the command's own output is returned, not just the echo.
+      const wait=integer(args.waitMs,1000,60_000,0);
+      const until=Date.now()+wait;
+      let lastSize=-1, quietSince=Date.now();
+      while (!s.done && Date.now()<until) {
+        const size=s.stdout.end+s.stderr.end;
+        if (size!==lastSize) { lastSize=size; quietSince=Date.now(); }
+        else if (size>stdoutOffset+stderrOffset && Date.now()-quietSince>=QUIET_MS) break;
+        await new Promise((resolve)=>setTimeout(resolve,10));
+      }
+      return output({sessionId:s.sessionId,stdoutOffset,stderrOffset},owner);
     },
     read,output,
     list(owner='stdio') { return {processes:[...sessions.values()].filter((s)=>s.owner===owner).map((s)=>({
