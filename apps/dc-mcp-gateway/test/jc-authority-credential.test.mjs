@@ -44,7 +44,12 @@ async function authority(t, overrides) {
   for (let i = 0; i < 100; i += 1) {
     try {
       const response = await fetch(`http://127.0.0.1:${port}/authority`);
-      if (response.ok) return response.json();
+      if (response.ok) {
+        const report = await response.json();
+        const ready = await fetch(`http://127.0.0.1:${port}/ready`);
+        Object.defineProperty(report, 'readyProbe', { value: { status: ready.status, body: await ready.json() } });
+        return report;
+      }
     } catch {
       // not listening yet
     }
@@ -62,8 +67,11 @@ test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
 const configured = (report) => report.enforcement.currentAuthorityCredentialConfigured;
 
-test('the dedicated token file is configured', async (t) => {
-  assert.equal(configured(await authority(t, { JC_ACS_AUTHORITY_TOKEN_FILE: tokenFile })), true);
+test('the dedicated token file is configured and the bridge /ready is 200', async (t) => {
+  const report = await authority(t, { JC_ACS_AUTHORITY_TOKEN_FILE: tokenFile });
+  assert.equal(configured(report), true);
+  assert.equal(report.readyProbe.status, 200, JSON.stringify(report.readyProbe.body));
+  assert.equal(report.readyProbe.body.ready, true);
 });
 
 test('the dedicated token variable is configured', async (t) => {
@@ -81,6 +89,10 @@ for (const [name, overrides] of [
   test(`not configured and not ready: ${name}`, async (t) => {
     const report = await authority(t, overrides);
     assert.equal(configured(report), false);
+    // The bridge's own /ready must not claim readiness either (it used to check only the child).
+    assert.equal(report.readyProbe.status, 503);
+    assert.equal(report.readyProbe.body.ready, false);
+    assert.ok(report.readyProbe.body.notReady.some((reason) => /JC_ACS_AUTHORITY_TOKEN_FILE/.test(reason)), JSON.stringify(report.readyProbe.body));
     // The edge's /jc/ready predicate refuses the lane even when everything else holds.
     const otherwiseReady = { ...report, authoritative: true, bridge: { ...report.bridge, hasUpstreamPair: true, upstreamStarted: true, initialized: true } };
     assert.equal(jcBridgeReady(otherwiseReady), false);
