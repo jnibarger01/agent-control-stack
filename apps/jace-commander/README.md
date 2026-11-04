@@ -26,13 +26,14 @@ From the repository root:
 | Command | What it proves |
 | --- | --- |
 | `npm test -w apps/jace-commander` | 30 suites: contract, tools, terminal/PTY, sandbox isolation, live authority, documents, approval, privileged helper |
-| `ACS_DC_E2E=1 npx vitest run tests/e2e/acs-jc-mcp` | Real chain: OAuth edge, bridge, native JC and authenticated ACS (27 tests, incl. revocation, lease expiry, replay, principal isolation, audited outcome) |
+| `ACS_DC_E2E=1 npx vitest run tests/e2e/acs-jc-mcp` | Real chain: OAuth edge, bridge, native JC and authenticated ACS with JC holding an `acs:read`-only token (30 tests, incl. revocation, lease expiry, replay, principal isolation, audited outcome, least privilege, missing-token refusal) |
 | `npm run jc:verify-release` | Clean install outside every repository, runtime deps only, with `$HOME/projects` masked; dependency graph, shipped-graph audit, full suite, real MCP client session, module-resolution trace. Evidence: `verification/jc-release-standalone-evidence.json` |
 | `npm run jc:verify-independence` | Copy-out build and test with no workspace or vendor tree |
 | `npm run jc-contracts:check` | Embedded manifest matches the canonical ACS contract |
 
 Set `JC_E2E_RUNTIME_DIR=<release>/current` to run the chain e2e against an
-installed release instead of the source tree. Linux, Node >= 24.16,
+installed release (pinned with `JC_REQUIRE_INSTALLED_RELEASE=1`) instead of the
+source tree. Linux, Node >= 24.16,
 `/usr/bin/python3` (PTY allocation) and bubblewrap (`/usr/bin/bwrap`) are required.
 
 ## Authorization
@@ -41,8 +42,10 @@ installed release instead of the source tree. Linux, Node >= 24.16,
   exact tool, arguments, runtime, scopes, expiry and a single-use nonce. JC only
   verifies; it holds no signing key.
 - Every managed non-read call then reads the work item and attempt lease from
-  ACS with a dedicated read-scoped credential (`JC_ACS_AUTHORITY_TOKEN_FILE`,
-  or `JC_ACS_AUTHORITY_TOKEN`) and requires that ACS still confirms that exact
+  ACS with a dedicated `acs:read`-only credential (`JC_ACS_AUTHORITY_TOKEN_FILE`,
+  or `JC_ACS_AUTHORITY_TOKEN`; there is no fallback to the model-facing
+  `JC_ACS_TOKEN` or the worker token, and an empty or unreadable file counts as
+  unset) and requires that ACS still confirms that exact
   authority: work item `running`, requester = authenticated principal, matching
   action and invocation hash, lease `active` and unexpired, same fencing epoch,
   plan and approval. Refusals name the failed binding (`lease_not_active`,
@@ -119,12 +122,18 @@ The unit pins the non-secret managed settings (`JC_PRESET=managed`,
 values, which systemd's `EnvironmentFile` would mangle). It uses `/usr/bin/node`
 (no version-manager shims) and binds loopback only.
 
-Production layout: install a read-only release outside `JC_FS_ROOTS` with
-`apps/jace-commander/deploy/install-user-release.sh` (default
+Production runtime (pinned): install a read-only release outside `JC_FS_ROOTS`
+with `apps/jace-commander/deploy/install-user-release.sh` (default
 `~/.local/lib/jace-commander/releases/<version>-<commit>` plus an atomically
-switched `current` symlink) and set `JC_RUNTIME_DIR=%h/.local/lib/jace-commander/current`.
+switched `current` symlink). The unit sets
+`JC_RUNTIME_DIR=%h/.local/lib/jace-commander/current` and
+`JC_REQUIRE_INSTALLED_RELEASE=1`: the bridge then refuses to start unless that
+path is an installed release (`RELEASE.json`, package identity, code and
+directories not writable, outside the bridge's checkout, no `DC_ARGS` override).
+There is no fallback to the development checkout. `/authority` reports
+`runtime.{dir, releaseRequired, installedRelease:{realDir, version, commit, readOnly}}`.
 
-Readiness: the bridge's `/authority` reports the native runtime path and
+Readiness: the bridge's `/authority` reports the pinned runtime and
 `enforcement.{executionTokenConfigured, capabilityVerificationConfigured,
 currentAuthorityCredentialConfigured}`; the edge's `/jc/ready` is ready only when
 all hold and ACS issuance is reachable.
@@ -138,7 +147,8 @@ rollout approval.
 2. Apply ACS migration 076 (`jace_commander_native_tools`) through the normal
    procedure. 075 is claimed by two unmerged branches; neither touches what 076
    rebuilds and the runner applies any missing version, so either order works.
-3. Provision a read-scoped (`acs:read`) ACS credential for JC into
+3. Provision a dedicated ACS credential for JC with role `service` and scope
+   `acs:read` only (not the worker token) into
    `~/.config/acs/jc-authority.token` (0600). Without it every mutation fails closed
    and `/jc/ready` stays not ready.
 4. Install the release (`install-user-release.sh`) and update the env file: the

@@ -87,6 +87,56 @@ const DC_ARGS = process.env.DC_ARGS
         );
         process.exit(1);
       })();
+// Installed-release identity of the JC runtime (apps/jace-commander/deploy/
+// install-user-release.sh writes RELEASE.json and makes the release read-only).
+function jcInstalledRelease(dir) {
+  try {
+    const real = fs.realpathSync(dir);
+    const release = JSON.parse(fs.readFileSync(path.join(real, "RELEASE.json"), "utf8"));
+    const pkg = JSON.parse(fs.readFileSync(path.join(real, "package.json"), "utf8"));
+    const writable = (target) => {
+      try {
+        fs.accessSync(target, fs.constants.W_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const readOnly = ![real, path.join(real, "dist"), path.join(real, "dist", "cli.js"), path.join(real, "package.json")].some(writable);
+    return {
+      realDir: real,
+      packageName: typeof pkg.name === "string" ? pkg.name : null,
+      version: typeof release.version === "string" ? release.version : null,
+      commit: typeof release.commit === "string" ? release.commit : null,
+      readOnly
+    };
+  } catch {
+    return null;
+  }
+}
+const JC_RELEASE = JC ? jcInstalledRelease(JC_DIR) : null;
+// Production pin: JC_REQUIRE_INSTALLED_RELEASE=1 refuses to start unless the
+// runtime is an installed, read-only release outside this development checkout,
+// selected explicitly through JC_RUNTIME_DIR. No fallback to the checkout.
+const JC_REQUIRE_RELEASE = JC && process.env.JC_REQUIRE_INSTALLED_RELEASE === "1";
+if (JC_REQUIRE_RELEASE) {
+  const checkout = fs.realpathSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../.."));
+  const reasons = [];
+  if (process.env.DC_ARGS) reasons.push("DC_ARGS overrides the runtime entrypoint");
+  if (!process.env.JC_RUNTIME_DIR) reasons.push("JC_RUNTIME_DIR is not set");
+  if (!JC_RELEASE) reasons.push(`${JC_DIR} is not an installed release (no RELEASE.json)`);
+  else {
+    if (JC_RELEASE.packageName !== "@agent-control-stack/jace-commander") reasons.push(`unexpected package ${JC_RELEASE.packageName}`);
+    if (!JC_RELEASE.readOnly) reasons.push(`${JC_RELEASE.realDir} is writable`);
+    if (JC_RELEASE.realDir === checkout || JC_RELEASE.realDir.startsWith(checkout + path.sep)) {
+      reasons.push(`${JC_RELEASE.realDir} is inside the development checkout ${checkout}`);
+    }
+  }
+  if (reasons.length) {
+    console.error(`bridge: JC_REQUIRE_INSTALLED_RELEASE=1 but the runtime is not a pinned release (${reasons.join("; ")}); refusing to start`);
+    process.exit(1);
+  }
+}
 // A managed JC bridge must not advertise ACS authority over a child that
 // selects a different authorizer through its environment or command line.
 if (JC && MANAGED && (
@@ -1107,17 +1157,18 @@ function breakGlassStatus(file) {
     detail: `break-glass marker held by pid ${status.pid}`
   };
 }
+// Mirrors apps/jace-commander/src/current-authority.ts authorityToken(): the
+// dedicated credential only. JC_ACS_TOKEN (model-facing acs_read) and
+// ACS_WORKER_TOKEN (result submission) never count.
 function jcAuthorityCredentialConfigured() {
-  if (process.env.JC_ACS_AUTHORITY_TOKEN) return true;
+  if (process.env.JC_ACS_AUTHORITY_TOKEN?.trim()) return true;
   const file = process.env.JC_ACS_AUTHORITY_TOKEN_FILE;
-  if (file) {
-    try {
-      return fs.readFileSync(file, "utf8").trim().length > 0;
-    } catch {
-      return false;
-    }
+  if (!file) return false;
+  try {
+    return fs.readFileSync(file, "utf8").trim().length > 0;
+  } catch {
+    return false;
   }
-  return !!process.env.JC_ACS_TOKEN;
 }
 function computeJcAuthority() {
   const initialized = !!(pair && pair.initializedOnce);
@@ -1135,7 +1186,13 @@ function computeJcAuthority() {
     },
     // Which build the child runs (paths only, no secrets): lets `jace-commander
     // doctor` and operators spot a bridge left on a legacy checkout.
-    runtime: { dir: JC_DIR, entrypoint: DC_ARGS[0], monorepoDefault: JC_DIR === MONOREPO_JC_DIR },
+    runtime: {
+      dir: JC_DIR,
+      entrypoint: DC_ARGS[0],
+      monorepoDefault: JC_DIR === MONOREPO_JC_DIR,
+      releaseRequired: JC_REQUIRE_RELEASE,
+      installedRelease: JC_RELEASE
+    },
     enforcement: {
       executionTokenConfigured: !!EXECUTION_TOKEN,
       capabilityVerificationConfigured: !!(process.env.JC_ACS_PUBLIC_KEY && process.env.JC_ACS_KEY_ID),

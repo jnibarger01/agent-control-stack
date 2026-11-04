@@ -1,12 +1,13 @@
 # ~/.config/systemd/user/jace-commander-mcp.service  (CachyOS, systemd user service)
 #
 # Native Jace Commander behind the managed bridge: bridge.js (BRIDGE_PROFILE=
-# jace-commander, 127.0.0.1:8003) runs the native runtime (apps/jace-commander,
-# no Desktop Commander) over stdio. The OAuth edge (server.js, 127.0.0.1:8010)
+# jace-commander, 127.0.0.1:8003) runs the INSTALLED native JC release (no
+# Desktop Commander, not the development checkout) over stdio. The OAuth edge (server.js, 127.0.0.1:8010)
 # routes /jc/mcp here after authentication and per-call ACS acs.jc.v1 issuance.
 #
 # Install only after independent review and explicit rollout approval:
 #   cp jace-commander-mcp.service ~/.config/systemd/user/
+#   apps/jace-commander/deploy/install-user-release.sh      # -> ~/.local/lib/jace-commander/current
 #   install -d -m 0700 ~/.config/acs
 #   install -m 0600 ../jace-commander-bridge.env.example ~/.config/acs/jc-bridge.env   # fill in
 #   install -m 0600 /dev/null ~/.config/acs/jc-authority.token                          # acs:read token
@@ -32,8 +33,14 @@ Environment=JC_WORKLOAD_NETWORK=none
 # Read-scoped ACS credential for the live authority check, from a 0600 file
 # (never placed in the environment). ~/.config/acs is masked from workloads.
 Environment=JC_ACS_AUTHORITY_TOKEN_FILE=%h/.config/acs/jc-authority.token
-# Production: a release outside JC_FS_ROOTS (apps/jace-commander/deploy/install-user-release.sh).
-#Environment=JC_RUNTIME_DIR=%h/.local/lib/jace-commander/current
+# Production runtime: the installed, read-only release outside JC_FS_ROOTS
+# (apps/jace-commander/deploy/install-user-release.sh), never the development
+# checkout. With JC_REQUIRE_INSTALLED_RELEASE=1 the bridge refuses to start
+# unless JC_RUNTIME_DIR resolves to such a release (RELEASE.json present, code
+# not writable, outside this checkout); /authority reports it under
+# runtime.installedRelease. Rollback: re-point `current`, then restart.
+Environment=JC_RUNTIME_DIR=%h/.local/lib/jace-commander/current
+Environment=JC_REQUIRE_INSTALLED_RELEASE=1
 # Secrets and site values (keys, tokens, roots). Plain KEY=VALUE lines only.
 EnvironmentFile=%h/.config/acs/jc-bridge.env
 # /usr/bin/node is the distribution Node (>= 24.16); no version-manager shims.

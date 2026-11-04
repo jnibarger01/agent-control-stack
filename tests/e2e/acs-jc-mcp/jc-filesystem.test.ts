@@ -73,6 +73,12 @@ describe.skipIf(!E2E_ENABLED)("E2E JC-1: read-only filesystem via /jc/mcp (MCP +
     };
     const installed = process.env.JC_E2E_RUNTIME_DIR;
     expect(authority.runtime.monorepoDefault).toBe(!installed);
+    if (installed) {
+      const release = (authority.runtime as unknown as { releaseRequired: boolean; installedRelease: { readOnly: boolean; realDir: string } });
+      expect(release.releaseRequired).toBe(true);
+      expect(release.installedRelease.readOnly).toBe(true);
+      expect(release.installedRelease.realDir).toBe(realpathSync(installed));
+    }
     expect(realpathSync(authority.runtime.dir)).toBe(realpathSync(installed ?? JC_ROOT));
     expect(authority.runtime.dir).not.toMatch(/desktop-commander/);
   });
