@@ -93,6 +93,7 @@ import {
   workItemToolNames,
   ACS_ADMIN_APPROVER,
   ACS_ADMIN_APPROVAL_REASON,
+  ARES_ACTION_KINDS,
   adminExecutionGate,
   observeLiveManagedAuthority,
   policyContextAuditReceipt,
@@ -1368,6 +1369,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   registerDeviceAuthRoutes(app, {
     store: deviceAuthStore,
+    // Public device-flow client ids (RFC 8628 public clients, no secret). Default: the acs CLI only.
+    // ARES Studio links each human's ACS identity with its own id (e.g. ACS_DEVICE_CLIENT_IDS=acs-cli,ares-studio).
+    ...(deviceClientIdsFromEnv(process.env.ACS_DEVICE_CLIENT_IDS) ? { allowedClientIds: deviceClientIdsFromEnv(process.env.ACS_DEVICE_CLIENT_IDS) } : {}),
     auth,
     authLockout,
     rateLimiter,
@@ -4320,11 +4324,39 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       const workerId = requireWorkerIdentity(request, reply, auth);
       if (!workerId) return;
       const body = z
-        .object({ leaseMs: z.number().int().positive().max(3_600_000).optional() })
+        .object({
+          leaseMs: z.number().int().positive().max(3_600_000).optional(),
+          // Exact-item claim for external workers that execute their own approved actions (ARES).
+          workItemId: z.string().min(1).max(128).optional()
+        })
         .strict()
         .parse(requestObject(request.body));
       let claimed;
-      if (nimbleRouting.enabled) {
+      if (body.workItemId !== undefined) {
+        // Only ARES actions may be claimed by id here. Desktop/Jace Commander items keep their
+        // admission-permit lanes; this route never becomes a way around them.
+        const target = tools.get_work_item({ id: body.workItemId });
+        if (!target) return reply.code(404).send({ error: "work item not found" });
+        const kinds = target.requestedActions.map((action) => action.kind);
+        if (kinds.length !== 1 || !ARES_ACTION_KINDS.has(kinds[0] ?? "")) {
+          return reply
+            .code(403)
+            .send({ error: "exact-item claim is limited to ARES actions", code: "worker_claim_kind_forbidden" });
+        }
+        // ARES items name their executor in target.services. Unlike the registry-agent check in the
+        // claim gate (which only binds registered agents), this is unconditional: an unnamed worker can
+        // never lease an ARES item, registered or not.
+        if (!(target.target.services ?? []).includes(workerId)) {
+          return reply
+            .code(403)
+            .send({ error: "work item targets a different worker", code: "worker_target_mismatch" });
+        }
+        claimed = tools.claim_approved_work_item_by_id({
+          id: body.workItemId,
+          workerId,
+          ...(body.leaseMs !== undefined ? { leaseMs: body.leaseMs } : {})
+        });
+      } else if (nimbleRouting.enabled) {
         const routed = await claimNextAuthoritativeWorkItem({
           store: workItems,
           policy,
@@ -4368,6 +4400,21 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         }
         if (body.outcome === "blocked" || body.outcome === "lease_expired") {
           return reply.code(403).send({ error: "ACS-derived outcomes are not worker-submittable", code: "forbidden" });
+        }
+        {
+          // The "ares" execution mode is valid only for ARES work items, and ARES work items may only be
+          // reported as real ARES executions — never as a DC/JC result or a simulated dry run.
+          const resultItem = tools.get_work_item({ id: body.workItemId });
+          const aresItem = Boolean(
+            resultItem &&
+            resultItem.requestedActions.length === 1 &&
+            ARES_ACTION_KINDS.has(resultItem.requestedActions[0]?.kind ?? "")
+          );
+          if (aresItem !== (body.simulationMetadata.executionMode === "ares")) {
+            return reply
+              .code(403)
+              .send({ error: "execution mode does not match the work item's action kind", code: "result_mode_mismatch" });
+          }
         }
         const admissionBinding = body.attemptId ? admissionPermits.get(body.attemptId) : undefined;
         const releasesAdmission = Boolean(
@@ -5149,6 +5196,16 @@ function projectRegistryFreshness(
     heartbeatAgeMs,
     isStale
   };
+}
+
+/** Comma-separated device-flow client ids; undefined keeps the default (acs-cli). Malformed ids fail closed. */
+export function deviceClientIdsFromEnv(raw: string | undefined): string[] | undefined {
+  if (raw === undefined || !raw.trim()) return undefined;
+  const ids = [...new Set(raw.split(",").map((id) => id.trim()).filter(Boolean))];
+  for (const id of ids) {
+    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(id)) throw new Error(`ACS_DEVICE_CLIENT_IDS contains an invalid client id: ${id}`);
+  }
+  return ids;
 }
 
 function resolveAuth(options: GatewayOptions): GatewayAuthOptions | undefined {

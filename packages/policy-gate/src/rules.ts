@@ -56,6 +56,12 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
     }
     return risk("requires_approval", "privileged execution requires an approval record", ["approval:privileged-exec"]);
   }
+  if (ARES_ACTION_KINDS.has(context.action.kind)) {
+    if (context.operation === "approve" && isRequestingActor(context)) {
+      return risk("forbidden", "ARES privileged actions cannot be self-approved", ["deny:self-approval"]);
+    }
+    return risk("requires_approval", "ARES privileged action requires human approval", ["approval:ares"]);
+  }
   if (JC_APPROVAL_KINDS.has(context.action.kind)) {
     if (context.operation === "approve" && isRequestingActor(context)) {
       return risk("forbidden", "Jace Commander mutations cannot be self-approved", ["deny:self-approval"]);
@@ -201,6 +207,21 @@ function isSudo(command: string[]): boolean {
   return command[0] === "sudo" || command.includes("sudo");
 }
 
+/**
+ * ARES Studio privileged actions (identify in Room A, Ghidra/REA adapter runs, SPEC seal, oracle run,
+ * task decision). ARES executes them as the registered "ares" worker only after a human approval of the
+ * exact action hash; the requesting human can never approve their own request.
+ */
+const ARES_ACTION_KIND_LIST = [
+  "ares.analyze.local",
+  "ares.adapter.ghidra",
+  "ares.adapter.rea",
+  "ares.spec.seal",
+  "ares.oracle.run",
+  "ares.task.decide"
+] as const;
+export const ARES_ACTION_KINDS: ReadonlySet<string> = new Set(ARES_ACTION_KIND_LIST);
+
 /** Action kinds policy evaluates. Anything else is denied as unknown (fail closed). */
 export const SUPPORTED_ACTION_KINDS: readonly string[] = Object.freeze([
   "system.status",
@@ -226,7 +247,8 @@ export const SUPPORTED_ACTION_KINDS: readonly string[] = Object.freeze([
   "jc.git.read",
   "jc.git.write",
   "jc.git.network",
-  "privileged.exec"
+  "privileged.exec",
+  ...ARES_ACTION_KIND_LIST
 ]);
 
 const PRIVILEGED_EXEC_KIND = "privileged.exec";

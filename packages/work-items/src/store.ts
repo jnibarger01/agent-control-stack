@@ -133,6 +133,7 @@ import {
   rejectRequestSchema,
   submitWorkResultSchema,
   executionActionHash,
+  aresItemTargetsWorker,
   workItemCreatedEvent,
   workItemSchema,
   workItemStatusEvent,
@@ -2860,6 +2861,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     if (this.getChangeSet(workItem.id)) return false;
     const targetedAgents = (workItem.target.services ?? []).filter((id) => this.getRegistryAgent(id));
     if (targetedAgents.length > 0 && !targetedAgents.includes(workerId)) return false;
+    if (!aresItemTargetsWorker(workItem, workerId)) return false;
     if (
       rejectJaceCommanderContract &&
       workItem.requestedActions.some(

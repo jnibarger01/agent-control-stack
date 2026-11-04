@@ -158,6 +158,22 @@ const simulationMetadataSchema = z.discriminatedUnion("executionMode", [
       workerVersion: identifierSchema.optional(),
       reason: z.string().max(512).optional()
     })
+    .strict(),
+  // ARES Studio executes its own approved ares.* actions in its sandbox and reports through the
+  // worker lease; the gateway restricts this mode to ares.* work items.
+  z
+    .object({
+      executionMode: z.literal("ares"),
+      simulated: z.literal(false),
+      backend: z.literal("ares-studio"),
+      backendVersion: z.string().max(128).optional(),
+      toolName: z.string().min(1).max(128),
+      invocationFingerprint: hashSchema,
+      requestId: identifierSchema,
+      approvalId: identifierSchema.optional(),
+      workerVersion: identifierSchema.optional(),
+      reason: z.string().max(512).optional()
+    })
     .strict()
 ]);
 
@@ -392,6 +408,16 @@ export function createWorkItem(input: unknown, now = new Date().toISOString()): 
     createdAt: now,
     updatedAt: now
   });
+}
+
+/**
+ * ARES Studio items name their executor in target.services. Unlike the registry-agent target rule
+ * (which only binds registered agents), this binds unconditionally: a worker that is not named can
+ * never claim an `ares.*` item, by id or by claim-next. Non-ARES items are unaffected.
+ */
+export function aresItemTargetsWorker(workItem: Pick<WorkItem, "target" | "requestedActions">, workerId: string): boolean {
+  const ares = workItem.requestedActions.some((action) => action.kind.startsWith("ares."));
+  return !ares || (workItem.target.services ?? []).includes(workerId);
 }
 
 export function executionActionHash(

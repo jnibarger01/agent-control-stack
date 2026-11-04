@@ -7,6 +7,7 @@ import {
   DEFAULT_WORK_ITEM_LIST_LIMIT,
   defaultExecutionPlanForWorkItem,
   executionActionHash,
+  aresItemTargetsWorker,
   listWorkItemsSchema,
   resolveExecutionBackend,
   rejectRequestSchema,
@@ -512,6 +513,9 @@ function gateWorkerClaimByIdInTransaction(
   const targetedAgents = (candidate.target.services ?? []).filter((agentId) => store.getRegistryAgent(agentId));
   if (targetedAgents.length > 0 && !targetedAgents.includes(parsed.workerId)) {
     throw new ControlStackError("worker_target_mismatch", "work item targets a different registered agent");
+  }
+  if (!aresItemTargetsWorker(candidate, parsed.workerId)) {
+    throw new ControlStackError("worker_target_mismatch", "ARES work item targets a different worker");
   }
   if (!authoritativeRouteAllows(store, candidate.id, parsed.workerId)) {
     return undefined;
