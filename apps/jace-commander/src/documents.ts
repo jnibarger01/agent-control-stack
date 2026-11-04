@@ -6,7 +6,8 @@
  *
  *   pdf   unpdf (pdf.js text layer), one entry per page
  *   docx  pizzip + word/document.xml text runs (paragraphs, tabs, breaks)
- *   xlsx  exceljs, one tab-separated section per worksheet
+ *   xlsx  pizzip + xl/workbook.xml, sharedStrings and sheet XML (read-only;
+ *         raw cell values), one tab-separated section per worksheet
  *
  * Output is plain text windowed by lines (offset/length), like text files.
  */
@@ -75,23 +76,75 @@ async function readDocx(bytes: Buffer): Promise<DocumentText> {
   };
 }
 
-async function readExcel(bytes: Buffer): Promise<DocumentText> {
-  const { default: ExcelJS } = await import('exceljs');
-  const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.load(bytes as unknown as ArrayBuffer);
+const MAX_SHEET_CELLS = 200_000;
+
+/** Concatenated text of every <t> run inside one shared-string / inline-string element. */
+function runText(xml: string): string {
+  return [...xml.matchAll(/<(?:\w+:)?t(?:\s[^>]*)?>([\s\S]*?)<\/(?:\w+:)?t>/g)].map((match) => decodeXml(match[1] ?? '')).join('');
+}
+
+/** "AB12" -> 27 (zero-based column index). */
+function columnIndex(reference: string): number {
+  const letters = /^([A-Z]+)/.exec(reference)?.[1] ?? 'A';
+  let index = 0;
+  for (const letter of letters) index = index * 26 + (letter.charCodeAt(0) - 64);
+  return index - 1;
+}
+
+function attribute(tag: string, name: string): string | undefined {
+  return new RegExp(`\\s${name}="([^"]*)"`).exec(tag)?.[1];
+}
+
+/** Text of an .xlsx workbook: one tab-separated section per sheet (raw cell values; no number formats). */
+export function xlsxEntriesToText(entries: { workbook: string; rels: string; sharedStrings?: string; sheet(target: string): string | undefined }): string {
+  const shared = entries.sharedStrings
+    ? [...entries.sharedStrings.matchAll(/<si(?:\s[^>]*)?>([\s\S]*?)<\/si>/g)].map((match) => runText(match[1] ?? ''))
+    : [];
+  const targets = new Map<string, string>();
+  for (const match of entries.rels.matchAll(/<Relationship\s[^>]*>/g)) {
+    const id = attribute(match[0], 'Id');
+    const target = attribute(match[0], 'Target');
+    if (id && target) targets.set(id, target.replace(/^\/?xl\//, ''));
+  }
   const sections: string[] = [];
-  workbook.eachSheet((sheet) => {
-    const rows: string[] = [`## Sheet: ${sheet.name}`];
-    sheet.eachRow({ includeEmpty: false }, (row) => {
+  let cellCount = 0;
+  for (const match of entries.workbook.matchAll(/<sheet\s[^>]*\/?>/g)) {
+    const name = decodeXml(attribute(match[0], 'name') ?? 'Sheet');
+    const relId = attribute(match[0], 'r:id');
+    const xml = relId && targets.has(relId) ? entries.sheet(targets.get(relId)!) : undefined;
+    const rows: string[] = [`## Sheet: ${name}`];
+    for (const row of (xml ?? '').matchAll(/<row(?:\s[^>]*)?>([\s\S]*?)<\/row>/g)) {
       const cells: string[] = [];
-      row.eachCell({ includeEmpty: true }, (cell, column) => {
-        cells[column - 1] = String(cell.text ?? '').replace(/[\t\n]/g, ' ');
-      });
-      rows.push(Array.from(cells, (cell) => cell ?? '').join('\t'));
-    });
+      for (const cell of (row[1] ?? '').matchAll(/<c(\s[^>]*?)?(?:\/>|>([\s\S]*?)<\/c>)/g)) {
+        if (++cellCount > MAX_SHEET_CELLS) throw new Error(`spreadsheet has more than ${MAX_SHEET_CELLS} cells`);
+        const tag = cell[1] ?? '';
+        const body = cell[2] ?? '';
+        const type = attribute(tag, 't');
+        const raw = decodeXml(/<v>([\s\S]*?)<\/v>/.exec(body)?.[1] ?? '');
+        const value = type === 's' ? shared[Number(raw)] ?? ''
+          : type === 'inlineStr' ? runText(body)
+            : type === 'b' ? (raw === '1' ? 'TRUE' : 'FALSE')
+              : raw;
+        cells[columnIndex(attribute(tag, 'r') ?? `A${cells.length + 1}`)] = value.replace(/[\t\n]/g, ' ');
+      }
+      if (cells.length > 0) rows.push(Array.from(cells, (cell) => cell ?? '').join('\t'));
+    }
     sections.push(rows.join('\n'));
-  });
-  return { mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', text: sections.join('\n\n') };
+  }
+  return sections.join('\n\n');
+}
+
+async function readExcel(bytes: Buffer): Promise<DocumentText> {
+  const { default: PizZip } = await import('pizzip');
+  const zip = new PizZip(bytes);
+  const text = (name: string) => zip.file(name)?.asText();
+  const workbook = text('xl/workbook.xml');
+  const rels = text('xl/_rels/workbook.xml.rels');
+  if (!workbook || !rels) throw new Error('not an Excel workbook (xl/workbook.xml missing)');
+  return {
+    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    text: xlsxEntriesToText({ workbook, rels, sharedStrings: text('xl/sharedStrings.xml'), sheet: (target) => text(`xl/${target}`) }),
+  };
 }
 
 export async function readDocumentBytes(kind: DocumentKind, bytes: Buffer): Promise<DocumentText> {

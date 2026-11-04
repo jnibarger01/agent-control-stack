@@ -56,7 +56,7 @@ export interface SandboxRun {
 }
 
 const CODE_DIR = path.dirname(fileURLToPath(import.meta.url));
-const RUNTIME_DEPENDENCIES = ['@modelcontextprotocol/sdk', '@simplewebauthn/server', 'exceljs', 'isbinaryfile', 'pizzip', 'unpdf'];
+const RUNTIME_DEPENDENCIES = ['@modelcontextprotocol/sdk', '@simplewebauthn/server', 'isbinaryfile', 'pizzip', 'unpdf'];
 
 /** Credential and control-plane locations relative to $HOME that workloads never see. */
 const HOME_HIDDEN = [
