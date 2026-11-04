@@ -409,7 +409,7 @@ test('/authority reads the jc bridge from JC_UPSTREAM, not the DC upstream', asy
 });
 
 for (const [label, relative] of [['absolute path with spaces', false], ['relative path', true]]) {
-  test(`jace-commander bridge runs <JC_DC_DIR>/dist/jace-commander/cli.js serve (${label})`, async () => {
+  test(`jace-commander bridge runs <JC_RUNTIME_DIR>/dist/cli.js serve (${label})`, async () => {
     const fs = await import('node:fs');
     const os = await import('node:os');
     const path = await import('node:path');
@@ -418,15 +418,15 @@ for (const [label, relative] of [['absolute path with spaces', false], ['relativ
     // path (cwd + relative script path) cannot resolve by accident.
     const root = fs.mkdtempSync(path.join(relative ? repo : os.tmpdir(), relative ? '.jc-dcdir-test-' : 'jc dcdir '));
     const state = path.join(root, 'state');
-    fs.mkdirSync(path.join(root, 'dist/jace-commander'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'dist'), { recursive: true });
     fs.writeFileSync(path.join(root, 'package.json'), '{"type":"module"}\n');
-    fs.copyFileSync(new URL('./stub-jc.mjs', import.meta.url), path.join(root, 'dist/jace-commander/cli.js'));
+    fs.copyFileSync(new URL('./stub-jc.mjs', import.meta.url), path.join(root, 'dist/cli.js'));
     const port = nextPort++;
     const bridge = spawn(process.execPath, ['bridge.js'], {
       cwd: repo,
       env: {
         PATH: process.env.PATH, HOME: process.env.HOME, BRIDGE_PROFILE: 'jace-commander', BRIDGE_PORT: String(port),
-        ACS_MANAGED_MODE: '1', DC_GATEWAY_EXECUTION_TOKEN: 'jc-test-execution-token', DC_CMD: process.execPath, JC_DC_DIR: relative ? path.relative(repo, root) : root,
+        ACS_MANAGED_MODE: '1', DC_GATEWAY_EXECUTION_TOKEN: 'jc-test-execution-token', DC_CMD: process.execPath, JC_RUNTIME_DIR: relative ? path.relative(repo, root) : root,
         JC_ACS_PUBLIC_KEY: 'k', JC_ACS_KEY_ID: 'i', JC_RUNTIME_ID: 'jc-test', JC_STATE_DIR: state,
       },
       stdio: ['ignore', 'ignore', 'pipe'],

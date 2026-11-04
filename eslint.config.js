@@ -303,7 +303,14 @@ export default tseslint.config(
   {
     // Imported Desktop Commander gateway and relay (plain Node ESM): declare
     // the additional Node/web globals they use rather than relaxing no-undef.
-    files: ["apps/dc-mcp-gateway/**/*.js", "apps/dc-mcp-gateway/**/*.mjs", "apps/dc-relay/**/*.js", "tests/**/*.mjs"],
+    files: [
+      "apps/jace-commander/**/*.js",
+      "apps/jace-commander/**/*.mjs",
+      "apps/dc-mcp-gateway/**/*.js",
+      "apps/dc-mcp-gateway/**/*.mjs",
+      "apps/dc-relay/**/*.js",
+      "tests/**/*.mjs"
+    ],
     languageOptions: {
       globals: {
         setInterval: "readonly",
@@ -311,7 +318,10 @@ export default tseslint.config(
         clearInterval: "readonly",
         structuredClone: "readonly",
         URLSearchParams: "readonly",
-        AbortSignal: "readonly"
+        AbortSignal: "readonly",
+        Response: "readonly",
+        ReadableStream: "readonly",
+        DOMException: "readonly"
       }
     }
   },

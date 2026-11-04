@@ -1,0 +1,34 @@
+{
+  "name": "@agent-control-stack/jace-commander",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Jace Commander: independent ACS-governed MCP computer-control runtime (terminal, filesystem, processes, git).",
+  "engines": {
+    "node": ">=24.16.0"
+  },
+  "bin": {
+    "jace-commander": "./dist/cli.js",
+    "jc": "./dist/cli.js",
+    "jc-privileged-helper": "./dist/privileged-helper.js"
+  },
+  "main": "./dist/server.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && cp src/pty-helper.py dist/pty-helper.py && chmod +x dist/cli.js dist/privileged-helper.js",
+    "test": "npm run build && node test/run-all.mjs",
+    "test:only": "node test/run-all.mjs",
+    "start": "node dist/cli.js serve-http"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@simplewebauthn/server": "14.0.3",
+    "exceljs": "^4.4.0",
+    "isbinaryfile": "^5.0.4",
+    "pizzip": "^3.2.0",
+    "unpdf": "^1.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^5.8.3"
+  }
+}

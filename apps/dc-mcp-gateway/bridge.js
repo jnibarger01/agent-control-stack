@@ -70,8 +70,8 @@ if (JC && process.env.JC_PRESET === "local" && process.env.JC_ALLOW_SAME_UID_CHI
 // Default: this monorepo's own Desktop Commander build (vendor/desktop-commander,
 // next to apps/dc-mcp-gateway), never a legacy sibling checkout. A bridge left
 // on a stale checkout advertised a stale (or empty) Jace Commander tool list.
-const MONOREPO_DC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../vendor/desktop-commander");
-const JC_DIR = path.resolve(process.env.JC_DC_DIR || MONOREPO_DC_DIR);
+const MONOREPO_JC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../jace-commander");
+const JC_DIR = path.resolve(process.env.JC_RUNTIME_DIR || process.env.JC_DC_DIR || MONOREPO_JC_DIR);
 // Managed mode must launch the runtime that ACS actually attested. There is no
 // default Desktop Commander entrypoint: the previous fallback pointed at a
 // hardcoded developer checkout under /home/jacen, so a packaged deployment that
@@ -80,7 +80,7 @@ const JC_DIR = path.resolve(process.env.JC_DC_DIR || MONOREPO_DC_DIR);
 const DC_ARGS = process.env.DC_ARGS
   ? process.env.DC_ARGS.split(" ")
   : JC
-    ? [path.join(JC_DIR, "dist/jace-commander/cli.js"), "serve"]
+    ? [path.join(JC_DIR, "dist/cli.js"), "serve"]
     : (() => {
         console.error(
           "bridge: DC_ARGS is required when JC_DC_DIR is not in use; refusing to guess a Desktop Commander entrypoint"
@@ -139,6 +139,7 @@ const JC_CHILD_ENV_KEYS = [
   "JC_RUNTIME_ID",
   "JC_STATE_DIR",
   "JC_PUBLIC_MCP_URL",
+  "JC_SHELLS",
   "JC_ACS_URL",
   "JC_ACS_TOKEN",
   "JC_SWARM_URL",
@@ -199,7 +200,7 @@ const CHILD_ENV = {
     ? { DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: process.env.DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR }
     : {}),
   // Only the bridge, which force-overwrites _meta.gateway, may vouch for it (local preset requires attestation).
-  ...(JC && process.env.JC_PRESET === "local" ? { JC_GATEWAY_META_TRUSTED: "1" } : {}),
+  ...(JC ? { JC_GATEWAY_META_TRUSTED: "1" } : {}),
   ...(JC
     ? Object.fromEntries(JC_CHILD_ENV_KEYS.filter((key) => process.env[key]).map((key) => [key, process.env[key]]))
     : {}),
@@ -1107,7 +1108,7 @@ function computeJcAuthority() {
     },
     // Which build the child runs (paths only, no secrets): lets `jace-commander
     // doctor` and operators spot a bridge left on a legacy checkout.
-    runtime: { dir: JC_DIR, entrypoint: DC_ARGS[0], monorepoDefault: JC_DIR === MONOREPO_DC_DIR },
+    runtime: { dir: JC_DIR, entrypoint: DC_ARGS[0], monorepoDefault: JC_DIR === MONOREPO_JC_DIR },
     enforcement: {
       executionTokenConfigured: !!EXECUTION_TOKEN,
       capabilityVerificationConfigured: !!(process.env.JC_ACS_PUBLIC_KEY && process.env.JC_ACS_KEY_ID)

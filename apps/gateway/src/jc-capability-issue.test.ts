@@ -209,7 +209,7 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
 
   it("denies unknown tools and invalid arguments deterministically", () =>
     withGateway(async (ctx) => {
-      const unknown = await issue(ctx, "run_command", { command: "id" });
+      const unknown = await issue(ctx, "unknown_native_tool", { command: "id" });
       expect(unknown.statusCode).toBe(403);
       expect(unknown.json().reason).toBe("unknown_tool");
       for (const argv of [["apt-get", "update"], ["/usr/bin/../bin/id"], []]) {
@@ -374,6 +374,16 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         args: { argv: ["/usr/bin/node", "--version"], cwd: ws, timeoutMs: 5000 },
         fields: { argv: ["/usr/bin/node", "--version"], cwd: ws, timeoutMs: 5000 }
       },
+      run_command: {
+        args: { command: "printf hello", cwd: ws, timeoutMs: 5000 },
+        fields: { cwd: ws, timeoutMs: 5000 }
+      },
+      start_terminal_session: { args: { cwd: ws }, fields: { cwd: ws } },
+      interact_with_process: {
+        args: { sessionId: "proc_1", input: "hello" },
+        fields: { sessionId: "proc_1", inputBytes: 5 }
+      },
+      delete_file: { args: { path: join(ws, "new.txt") }, fields: { path: join(ws, "new.txt"), recursive: false } },
       kill_process: { args: { sessionId: "proc_1" }, fields: { sessionId: "proc_1" } },
       git_add: { args: { repo: ws, paths: ["src/index.ts"] }, fields: { repo: ws, paths: ["src/index.ts"] } },
       git_commit: {
@@ -394,8 +404,8 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
     return [dir];
   };
 
-  it("the gated list is the manifest's (11 tools) and every one has fixtures", () => {
-    expect(GATED).toHaveLength(11);
+  it("the gated list is the manifest's (15 tools) and every one has fixtures", () => {
+    expect(GATED).toHaveLength(15);
     const fixtures = argsFor("/tmp/x");
     for (const tool of GATED) expect(fixtures[tool], tool).toBeDefined();
   });

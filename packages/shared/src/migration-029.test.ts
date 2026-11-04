@@ -63,7 +63,7 @@ describe("migration 029: jace_commander tool allowlist", () => {
         tool_name: string;
       }>
     ).map((entry) => entry.tool_name);
-    expect(tools).toHaveLength(36);
+    expect(tools).toHaveLength(40);
     expect(tools).toContain("privileged_exec");
     expect(tools).toContain("read_multiple_files");
     expect(tools).toContain("start_search");
@@ -85,7 +85,7 @@ describe("migration 029: jace_commander tool allowlist", () => {
     }>;
     // Only the lease/attempt FK is unsatisfied for this synthetic row; the tool FK is.
     expect(violations.some((violation) => violation.parent === "jace_commander_tools")).toBe(false);
-    expect(() => insert(db, row({ tool_name: "run_command", nonce_hash: hash("2") }))).toThrow(/FOREIGN KEY/);
+    expect(() => insert(db, row({ tool_name: "unknown_native_tool", nonce_hash: hash("2") }))).toThrow(/FOREIGN KEY/);
     db.close();
   });
 

@@ -54,13 +54,19 @@ describe("jc-tool-manifest", () => {
       "git_add",
       "git_commit",
       "git_fetch",
-      "git_push"
+      "git_push",
+      // Native JC terminal/filesystem engine: every one is execution or a
+      // destructive mutation, so every one needs an approval.
+      "run_command",
+      "start_terminal_session",
+      "interact_with_process",
+      "delete_file"
     ]);
     for (const entry of jcToolContracts()) {
       expect(entry.requiresApproval, entry.name).toBe(approval.has(entry.name));
     }
     expect(jcToolContracts().filter((entry) => entry.requiresApproval && entry.name !== "privileged_exec").length).toBe(
-      10
+      14
     );
     expect(jcToolContract("privileged_exec")?.description).toContain("admin mode ACS may auto-authorize");
     expect(jcToolContracts().length).toBeGreaterThanOrEqual(30);

@@ -27,6 +27,10 @@ describe("Jace Commander approval-gated tools (manifest-derived)", () => {
   it("the gated set is exactly the manifest's requiresApproval tools, and every one has fixtures", () => {
     expect(GATED).toEqual(
       [
+        "run_command",
+        "start_terminal_session",
+        "interact_with_process",
+        "delete_file",
         "create_directory",
         "edit_block",
         "git_add",
@@ -87,6 +91,17 @@ describe("B3: approvers see a bounded, redacted summary of the validated argumen
     expect(process.argv).toEqual(["/usr/bin/node", "script.js", "--token=[redacted]"]);
     const edit = jaceCommanderApprovalSummary(invocationFor("edit_block"));
     expect(edit.newPreview).toBe('const token = "[redacted]";');
+  });
+
+  it("binary writes show decoded size and digest without logging encoded bytes", () => {
+    const content = Buffer.from("secret binary payload").toString("base64");
+    const summary = jaceCommanderApprovalSummary(validateJaceCommanderInvocation("write_file", {
+      path: "/srv/work/binary.bin", content, encoding: "base64"
+    }));
+    expect(summary.bytes).toBe(21);
+    expect(summary.encoding).toBe("base64");
+    expect(JSON.stringify(summary)).not.toContain(content);
+    expect(JSON.stringify(summary)).not.toContain("secret binary payload");
   });
 
   it("non-gated tools keep the minimal summary", () => {
