@@ -10,7 +10,7 @@ import {makeIssuer,authorityBody} from './fixtures/jc-mint.js';
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'jc-managed-'));
 const root=path.join(tmp,'work'); fs.mkdirSync(root);
 const issuer=makeIssuer(); let mode='active'; let helperCalls=0;
-const config=loadJcConfig({HOME:tmp,JC_STATE_DIR:path.join(tmp,'state'),JC_FS_ROOTS:root,
+const config=loadJcConfig({JC_ACS_AUTHORITY_TOKEN:'test-authority-read-token',HOME:tmp,JC_STATE_DIR:path.join(tmp,'state'),JC_FS_ROOTS:root,
  JC_ACS_URL:'http://127.0.0.1:9',JC_RUNTIME_ID:'jc-test-runtime',JC_ACS_PUBLIC_KEY:issuer.publicKeyB64,
  JC_ACS_KEY_ID:issuer.keyId,JC_GATEWAY_META_TRUSTED:'1'});
 const server=createJcServer(config,'managed',{

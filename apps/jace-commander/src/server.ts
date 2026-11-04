@@ -359,13 +359,18 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     // success and no local fallback for managed mutations or privileged execution.
     if (mode === 'managed' && authorization && route.riskClass !== 'read') {
       try {
-        const response = await acsGet(config.acsUrl + '/work-items/' + encodeURIComponent(authorization.workItemId));
-        if (response.status !== 200) throw new IntegrationError('ACS_UNAVAILABLE', 'ACS authority could not be read');
+        const token = config.acsAuthorityToken;
+        if (!token) throw new IntegrationError('ACS_UNAVAILABLE', 'no ACS authority credential is configured (JC_ACS_AUTHORITY_TOKEN)');
+        const response = await requestJson(config.acsUrl + '/work-items/' + encodeURIComponent(authorization.workItemId), {
+          timeoutMs: Math.min(config.requestTimeoutMs, 5000), token, fetchImpl,
+        });
+        if (response.status !== 200) throw new IntegrationError('ACS_UNAVAILABLE', `ACS did not confirm authority (HTTP ${response.status})`);
         assertCurrentAuthority(response.body, authorization, principal);
       } catch (error) {
         const code = error instanceof IntegrationError ? error.code : 'ACS_UNAVAILABLE';
-        recordTrace(trace, name, args, {ok: false, code, ...routeTrace(route)});
-        return fail(code, 'current ACS authority unavailable or revoked; nothing ran');
+        const detail = error instanceof IntegrationError ? error.message : 'ACS unreachable';
+        recordTrace(trace, name, args, { ok: false, code, principal: principal ?? 'stdio', workItemId: authorization.workItemId, attemptId: authorization.attemptId, ...routeTrace(route) });
+        return fail(code, `current ACS authority unavailable or revoked (${detail}); nothing ran`, { acsAuthorization: { version: 'acs.jc.v1', decision: 'denied-current-authority', code } });
       }
     }
 

@@ -15,8 +15,9 @@ import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { jcToolNames } from "@agent-control-stack/jc-tool-manifest";
-import { DC_ROOT, E2E_ENABLED, McpHttpClient, sandbox, type Sandbox, type ServiceProcess } from "../support/chain-harness.js";
+import { E2E_ENABLED, McpHttpClient, sandbox, type Sandbox, type ServiceProcess } from "../support/chain-harness.js";
 import {
+  JC_ROOT,
   jcAccessToken,
   requireJaceCommanderBuild,
   runJc,
@@ -66,12 +67,13 @@ describe.skipIf(!E2E_ENABLED)("E2E JC-1: read-only filesystem via /jc/mcp (MCP +
     box?.cleanup();
   });
 
-  it("the jc bridge runs the monorepo's own Desktop Commander build by default (no legacy checkout)", async () => {
+  it("the jc bridge runs the native Jace Commander runtime by default (never Desktop Commander)", async () => {
     const authority = (await (await fetch(`http://127.0.0.1:${bridge.port}/authority`)).json()) as {
       runtime: { dir: string; monorepoDefault: boolean };
     };
     expect(authority.runtime.monorepoDefault).toBe(true);
-    expect(realpathSync(authority.runtime.dir)).toBe(realpathSync(DC_ROOT));
+    expect(realpathSync(authority.runtime.dir)).toBe(realpathSync(JC_ROOT));
+    expect(authority.runtime.dir).not.toMatch(/desktop-commander/);
   });
 
   it("tools/list over /jc/mcp is exactly the canonical manifest", async () => {
