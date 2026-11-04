@@ -237,7 +237,7 @@ import {
   gatewayCredentialCanMutate,
   gatewayCredentialForRequest,
   gatewayCredentialForToken,
-  gatewayCredentialSchema,
+  gatewayCredentialsSchema,
   hasReadAccess,
   mutationActorForCredential,
   requesterForCredential,
@@ -5163,13 +5163,7 @@ function resolveAuth(options: GatewayOptions): GatewayAuthOptions | undefined {
   let credentials: GatewayCredential[] | undefined;
 
   if (credentialsJson) {
-    credentials = gatewayCredentialSchema.array().parse(JSON.parse(credentialsJson));
-    const ids = new Set<string>();
-    for (const credential of credentials) {
-      if (ids.has(credential.id)) throw new Error(`duplicate gateway credential id: ${credential.id}`);
-      ids.add(credential.id);
-    }
-    if (credentials.length === 0) throw new Error("ACS_GATEWAY_CREDENTIALS_JSON must contain at least one credential");
+    credentials = gatewayCredentialsSchema.parse(JSON.parse(credentialsJson));
   }
 
   if (!token && !credentials) {

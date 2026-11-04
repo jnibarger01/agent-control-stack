@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProductionConfigError, validateProductionConfig } from "./production-config.js";
 
 /**
@@ -9,6 +9,8 @@ import { ProductionConfigError, validateProductionConfig } from "./production-co
  * (gatewayCredentialSchema) enforces. Otherwise a config the preflight accepts crashes at boot with an
  * unstructured error. All tokens here are synthetic.
  */
+import { buildGateway } from "./server.js";
+
 const TOKEN = "SYNTHETIC-token-0123456789abcdef0123456789";
 const OAUTH = {
   ACS_OAUTH_ISSUER: "https://issuer.example",
@@ -84,5 +86,55 @@ describe("recovery variables are not a credential source", () => {
       ACS_RECOVERY_CREDENTIALS_JSON: JSON.stringify([good])
     });
     expect(issues.join("|")).toMatch(/required/);
+  });
+});
+
+describe("preflight/runtime credential parity", () => {
+  afterEach(() => vi.unstubAllEnvs());
+  const cases: [string, unknown, boolean][] = [
+    ["valid", [good], true],
+    ["valid optional fields", [{ ...good, expiresAt: "2030-01-01T00:00:00+00:00", status: "revoked" }], true],
+    ["empty collection", [], false],
+    ["not an array", good, false],
+    ["null entry", [null], false],
+    ["array entry", [[]], false],
+    ["missing roles", [{ ...good, roles: undefined }], false],
+    ["empty roles", [{ ...good, roles: [] }], false],
+    ["invalid role", [{ ...good, roles: ["admin"] }], false],
+    ["missing scopes", [{ ...good, scopes: undefined }], false],
+    ["empty scopes", [{ ...good, scopes: [] }], false],
+    ["empty scope", [{ ...good, scopes: [""] }], false],
+    ["duplicate ids", [good, { ...good, token: TOKEN + "2" }], false],
+    ["null expiry", [{ ...good, expiresAt: null }], false],
+    ["invalid expiry", [{ ...good, expiresAt: "tomorrow" }], false],
+    ["invalid status", [{ ...good, status: "paused" }], false],
+    ["null status", [{ ...good, status: null }], false],
+    ["short token", [{ ...good, token: "short" }], false],
+    ["missing actor id", [{ ...good, actorId: undefined }], false]
+  ];
+  it.each(cases)("agrees for %s", async (_name, credentials, accepted) => {
+    expect(issuesFor(credentials).length === 0).toBe(accepted);
+    expect(issuesFor(credentials, { NODE_ENV: "development", ACS_STRICT_CONFIG: "1" }).length === 0).toBe(accepted);
+    const directory = mkdtempSync(join(tmpdir(), "acs-credential-runtime-"));
+    vi.stubEnv("ACS_GATEWAY_CREDENTIALS_JSON", JSON.stringify(credentials));
+    vi.stubEnv("ACS_GATEWAY_TOKEN", "");
+    try {
+      if (!accepted) {
+        expect(() => buildGateway({ dbPath: join(directory, "control.db"), logger: false })).toThrow();
+      } else {
+        const app = buildGateway({ dbPath: join(directory, "control.db"), logger: false });
+        try {
+          await app.ready();
+        } finally {
+          await app.close();
+        }
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+  it("does not echo credential secrets in structured preflight errors", () => {
+    const issues = issuesFor([{ ...good, scopes: [] }]).join("|");
+    expect(issues).not.toContain(TOKEN);
   });
 });

@@ -1,6 +1,6 @@
 import { accessSync, constants, existsSync } from "node:fs";
 import { dirname } from "node:path";
-import { gatewayCredentialSchema } from "./credentials.js";
+import { gatewayCredentialsSchema } from "./credentials.js";
 
 export interface ProductionConfigIssue {
   key: string;
@@ -80,73 +80,14 @@ function validateCredentials(env: NodeJS.ProcessEnv, issues: ProductionConfigIss
     return;
   }
 
-  if (!Array.isArray(parsed) || parsed.length === 0) {
-    issues.push({
-      key: "ACS_GATEWAY_CREDENTIALS_JSON",
-      message: "must be a non-empty JSON array of credentials"
-    });
-    return;
-  }
-
-  for (const [index, entry] of parsed.entries()) {
-    if (!entry || typeof entry !== "object") {
+  const result = gatewayCredentialsSchema.safeParse(parsed);
+  if (!result.success) {
+    for (const issue of result.error.issues) {
       issues.push({
         key: "ACS_GATEWAY_CREDENTIALS_JSON",
-        message: `entry ${index} must be an object`
-      });
-      continue;
-    }
-    const credential = entry as Record<string, unknown>;
-    if (typeof credential.id !== "string" || credential.id.length === 0) {
-      issues.push({
-        key: "ACS_GATEWAY_CREDENTIALS_JSON",
-        message: `entry ${index} requires a non-empty id`
+        message: `${issue.path.length ? `entry ${issue.path.join(".")}` : "credentials"} is invalid: ${issue.message}`
       });
     }
-    if (typeof credential.token !== "string" || credential.token.length < 32) {
-      issues.push({
-        key: "ACS_GATEWAY_CREDENTIALS_JSON",
-        message: `entry ${index} requires a token of at least 32 characters`
-      });
-    }
-    if (typeof credential.actor !== "string" || credential.actor.length === 0) {
-      issues.push({
-        key: "ACS_GATEWAY_CREDENTIALS_JSON",
-        message: `entry ${index} requires a non-empty actor`
-      });
-    }
-    if (typeof credential.actorId !== "string" || credential.actorId.length === 0) {
-      issues.push({
-        key: "ACS_GATEWAY_CREDENTIALS_JSON",
-        message: `entry ${index} requires a non-empty actorId`
-      });
-    }
-    // The runtime parser (gatewayCredentialSchema) is the contract. Enforce its remaining fields here so a
-    // config this preflight accepts cannot still crash at boot with an unstructured error.
-    const shape = gatewayCredentialSchema.safeParse(credential);
-    if (!shape.success) {
-      for (const issue of shape.error.issues) {
-        const field = String(issue.path[0] ?? "");
-        if (["id", "token", "actor", "actorId"].includes(field)) continue; // reported above
-        issues.push({
-          key: "ACS_GATEWAY_CREDENTIALS_JSON",
-          message: `entry ${index} ${field || "value"} is invalid: ${issue.message}`
-        });
-      }
-    }
-  }
-
-  const seen = new Set<string>();
-  for (const [index, entry] of parsed.entries()) {
-    const id = (entry as Record<string, unknown> | null)?.id;
-    if (typeof id !== "string" || id.length === 0) continue;
-    if (seen.has(id)) {
-      issues.push({
-        key: "ACS_GATEWAY_CREDENTIALS_JSON",
-        message: `entry ${index} duplicates credential id "${id}"`
-      });
-    }
-    seen.add(id);
   }
 }
 
