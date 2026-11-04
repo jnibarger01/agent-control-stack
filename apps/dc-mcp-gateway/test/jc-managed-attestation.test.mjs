@@ -95,15 +95,25 @@ test('attested initialization and discovery work; every subsequent method requir
 test('real managed JC child refuses execution without an ACS capability', async (t) => {
   const { publicKey } = generateKeyPairSync('ed25519');
   const f = await fixture(t, {
-    DC_ARGS: `${path.resolve(root, '../../vendor/desktop-commander/dist/jace-commander/cli.js')} serve`,
-    JC_ACS_PUBLIC_KEY: publicKey.export({ format: 'pem', type: 'spki' }),
+    DC_ARGS: `${path.resolve(root, '../jace-commander/dist/cli.js')} serve`,
+    JC_ACS_PUBLIC_KEY: publicKey.export({ format: 'der', type: 'spki' }).toString('base64url'),
   });
   const response = await f.post(init);
-  assert.equal(response.status, 200);
-  await response.text();
+  assert.equal(
+response.status,
+200,
+`initialize failed: HTTP ${response.status}
+${await response.clone().text()}`
+);
+await response.text();
   const headers = { 'mcp-session-id': response.headers.get('mcp-session-id') };
   const result = await f.post({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'write_file', arguments: { path: path.join(f.state, 'must-not-exist'), content: 'unauthorized' } } }, headers);
-  assert.equal(result.status, 200);
+  assert.equal(
+    result.status,
+    200,
+    `tools/call failed: HTTP ${result.status}
+${await result.clone().text()}`
+  );
   const text = await result.text();
   assert.match(text, /JC_CAPABILITY_MISSING/);
   assert.match(text, /"isError":true/);

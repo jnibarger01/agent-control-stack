@@ -1,3 +1,5 @@
+> Native runtime update: the current implementation and managed deployment are documented in apps/jace-commander/README.md. Legacy vendor paths and offline-only verification descriptions below are historical and superseded.
+
 # Jace Commander lane (`/jc/mcp`)
 
 A second, ACS-managed MCP lane on the same Tailscale Funnel host, carrying

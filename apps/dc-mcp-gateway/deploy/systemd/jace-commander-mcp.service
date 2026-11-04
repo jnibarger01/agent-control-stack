@@ -1,31 +1,16 @@
-# Jace Commander MCP bridge: a second bridge.js instance (BRIDGE_PROFILE=jace-commander)
-# whose stdio child is `node <dc>/dist/jace-commander/cli.js serve` (managed;
-# the bridge has no way to pass --standalone). <dc> defaults to the monorepo's
-# vendor/desktop-commander (bridge.js resolves it; JC_DC_DIR overrides), so the
-# unit must run the monorepo bridge, not the legacy desktop-commander-mcp-gateway
-# checkout. `jace-commander doctor` reports the served path. Loopback only; the auth gateway
-# routes https://<host>/jc/mcp here after OAuth + ACS acs.jc.v1 issuance.
-#
-# Install:  cp jace-commander-mcp.service ~/.config/systemd/user/
-#           install -m 0600 ../jace-commander-bridge.env.example \
-#             ~/.config/desktop-commander-mcp-gateway/jc-bridge.env   # then fill in
-#           systemctl --user daemon-reload && systemctl --user enable --now jace-commander-mcp
-# Then set JC_ENABLED=1, JC_UPSTREAM and ACS_JC_GATEWAY_TOKEN in gateway.env
-# (without JC_ENABLED=1 the lane stays off and /jc/mcp returns 404) and restart
-# desktop-commander-auth-proxy.service.
+# Native JC bridge. Install only after independent review and explicit rollout approval.
+# The bridge defaults to apps/jace-commander/dist/cli.js; no vendor dependency.
 [Unit]
 Description=Jace Commander MCP bridge (stdio -> Streamable HTTP, loopback only)
 After=network.target
 
 [Service]
-WorkingDirectory=/opt/agent-control-stack/apps/dc-mcp-gateway
+WorkingDirectory=%h/projects/agent-control-stack/apps/dc-mcp-gateway
 Environment=BRIDGE_PROFILE=jace-commander
 Environment=BRIDGE_PORT=8003
 Environment=NODE_ENV=production
-EnvironmentFile=/home/jacen/.config/desktop-commander-mcp-gateway/jc-bridge.env
-# bridge.js must run from the monorepo: its default Jace Commander runtime is
-# ../../vendor/desktop-commander relative to itself.
-ExecStart=/usr/bin/env node /opt/agent-control-stack/apps/dc-mcp-gateway/bridge.js
+EnvironmentFile=%h/.config/acs/jc-bridge.env
+ExecStart=/usr/bin/node %h/projects/agent-control-stack/apps/dc-mcp-gateway/bridge.js
 Restart=on-failure
 RestartSec=5
 # privileged_exec reaches its root helper via `sudo -n` (setuid), which
