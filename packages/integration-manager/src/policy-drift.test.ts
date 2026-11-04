@@ -80,8 +80,18 @@ describe("the default gate policy matches the classifier it mirrors", () => {
       expect(workflow, ctx).toContain(`for ctx in check test; do`);
       expect(workflow, ctx).toContain("integration_id != null");
     }
-    expect(workflow).toContain("require_last_push_approval==true and .dismiss_stale_reviews_on_push==true");
-    expect(workflow).toContain('index(".github/**")');
+    // Pull request rule: one approval, latest-push approval, stale dismissal, code owner review.
+    expect(workflow).toContain("required_approving_review_count");
+    expect(workflow).toContain(".require_last_push_approval==true");
+    expect(workflow).toContain(".dismiss_stale_reviews_on_push==true");
+    expect(workflow).toContain(".require_code_owner_review==true");
+    // CODEOWNERS on main must cover .github/, and the bypass is the admin role in pull request mode only.
+    expect(workflow).toContain("contents/.github/CODEOWNERS?ref=main");
+    expect(workflow).toContain('.bypass_mode=="pull_request"');
+    expect(workflow).toContain('.actor_type=="RepositoryRole"');
+    expect(workflow).toContain("ACS_ATTESTED_BYPASS_PR_ONLY");
+    // Team reviewers are not available on a user-owned repository; the classifier must not depend on them.
+    expect(workflow).not.toContain("required_reviewers");
     expect(workflow).toContain("ACS_ATTESTED_ACTIONS_CANNOT_APPROVE_PRS");
   });
 });

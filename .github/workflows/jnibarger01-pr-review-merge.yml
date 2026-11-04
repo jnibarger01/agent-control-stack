@@ -4,11 +4,26 @@ name: PR merge classifier
 # branch, so a pull request cannot edit the code that decides its eligibility.
 # It never checks out or executes pull request code, has no App or other
 # secrets, and never calls the merge API. It only:
-#   - blocks when repository protections cannot be verified,
+#   - blocks when the repository protections listed below cannot be verified,
 #   - disables auto-merge for security-sensitive or unclassifiable changes,
 #   - enables GitHub's native auto-merge for ordinary changes, bound to the
 #     exact head SHA it classified.
-# GitHub's rulesets, not this job, enforce approvals and required checks.
+#
+# What the ruleset on main enforces, and this job only verifies (it blocks if any
+# of it is missing):
+#   - required checks `check` and `test`, bound to the GitHub Actions app;
+#   - a pull request with one approving review, approval of the most recent
+#     push, stale approvals dismissed on push, and review from code owners;
+#   - .github/CODEOWNERS on main naming an owner for /.github/;
+#   - bypass limited to the repository admin role in "pull request" mode (merge
+#     through a pull request without waiting for approval; never a direct push).
+#     This job reads the ruleset with its own token; if that is not readable the
+#     owner must attest it (repo variable ACS_ATTESTED_BYPASS_PR_ONLY).
+# Not verifiable by this job, so the owner attests it instead:
+#   - GitHub Actions cannot approve pull requests
+#     (repo variable ACS_ATTESTED_ACTIONS_CANNOT_APPROVE_PRS).
+# This job approves nothing and does not use the bypass. Native auto-merge
+# completes only when GitHub's own requirements are met.
 
 on:
   pull_request_target:
@@ -37,6 +52,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
           ATTESTED_ACTIONS_CANNOT_APPROVE: ${{ vars.ACS_ATTESTED_ACTIONS_CANNOT_APPROVE_PRS }}
+          ATTESTED_BYPASS_PR_ONLY: ${{ vars.ACS_ATTESTED_BYPASS_PR_ONLY }}
         shell: bash
         run: |
           set -euo pipefail
@@ -76,14 +92,37 @@ jobs:
               | .parameters.required_status_checks[]? | select(.context==$c and .integration_id != null)] | length > 0' \
               <<<"$rules" >/dev/null || block "required check '$ctx' is not bound to an app (integration_id) on main"
           done
-          # Review protection: last-push approval and stale dismissal, and a path-scoped
-          # required reviewer covering .github/.
+          # Pull request rule: one approving review, approval of the most recent push, stale
+          # approvals dismissed on push, and review from code owners.
           jq -e '[.[] | select(.type=="pull_request") | .parameters
-            | select(.require_last_push_approval==true and .dismiss_stale_reviews_on_push==true)] | length > 0' \
-            <<<"$rules" >/dev/null || block "review protection (last-push approval, stale dismissal) not verified on main"
-          jq -e '[.[] | select(.type=="pull_request") | .parameters.required_reviewers[]?
-            | select(.file_patterns | index(".github/**"))] | length > 0' \
-            <<<"$rules" >/dev/null || block "no required reviewer for .github/** verified on main"
+            | select((.required_approving_review_count // 0) >= 1
+                     and .require_last_push_approval==true
+                     and .dismiss_stale_reviews_on_push==true
+                     and .require_code_owner_review==true)] | length > 0' \
+            <<<"$rules" >/dev/null \
+            || block "pull request rule not verified on main (1 approval, latest-push approval, stale dismissal, code owner review)"
+          # Code owner review only protects .github/ if CODEOWNERS on main names an owner for it.
+          codeowners="$(gh api "repos/$REPO/contents/.github/CODEOWNERS?ref=main" --jq '.content' | base64 -d)" \
+            || block "could not read .github/CODEOWNERS on main"
+          grep -Eq '^/?\.github/(\*\*)?[[:space:]]+@[A-Za-z0-9_-]' <<<"$codeowners" \
+            || block "CODEOWNERS on main names no owner for /.github/"
+          # Bypass: only the repository admin role (GitHub role id 5), and only in "pull request" mode.
+          # Read from each ruleset that carries the pull request rule; if that is not readable, the owner attests.
+          ADMIN_ROLE_ID=5
+          ruleset_ids="$(jq -r '[.[] | select(.type=="pull_request") | .ruleset_id // empty] | unique | .[]' <<<"$rules")"
+          [[ -n "$ruleset_ids" ]] || block "pull request rule carries no ruleset id; bypass actors cannot be checked"
+          for rid in $ruleset_ids; do
+            bypass="$(gh api "repos/$REPO/rulesets/$rid" --jq '.bypass_actors' 2>/dev/null || true)"
+            if jq -e 'type=="array"' <<<"${bypass:-null}" >/dev/null 2>&1; then
+              jq -e --argjson admin "$ADMIN_ROLE_ID" \
+                'all(.[]; .bypass_mode=="pull_request" and .actor_type=="RepositoryRole" and .actor_id==$admin)' \
+                <<<"$bypass" >/dev/null \
+                || block "ruleset $rid allows a bypass other than the repository admin role in pull request mode"
+            else
+              [[ "$ATTESTED_BYPASS_PR_ONLY" == "true" ]] \
+                || block "bypass actors of ruleset $rid are not readable; attest them (repo variable ACS_ATTESTED_BYPASS_PR_ONLY)"
+            fi
+          done
           # GitHub Actions cannot be read by this token. The owner must attest it.
           [[ "$ATTESTED_ACTIONS_CANNOT_APPROVE" == "true" ]] || block "Actions can-approve setting not attested (repo variable ACS_ATTESTED_ACTIONS_CANNOT_APPROVE_PRS)"
 

@@ -26,10 +26,27 @@ HEAD = "a" * 40
 OTHER = "b" * 40
 GITHUB_TOKEN = "github-token-value-not-real"
 
+ADMIN_BYPASS = [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}]
+GOOD_CODEOWNERS = "# owners\n/packages/sandbox/ @jnibarger01\n/.github/ @jnibarger01\n"
+RULESET_ID = 99
+
+
+def review_rule(**overrides):
+    params = {"required_approving_review_count": 1, "require_code_owner_review": True,
+              "require_last_push_approval": True, "dismiss_stale_reviews_on_push": True}
+    params.update(overrides)
+    return {"type": "pull_request", "ruleset_id": RULESET_ID, "parameters": params}
+
+
 GOOD_RULES = [
-    {"type": "required_status_checks", "parameters": {"required_status_checks": [
+    {"type": "required_status_checks", "ruleset_id": RULESET_ID, "parameters": {"required_status_checks": [
         {"context": "check", "integration_id": 15368}, {"context": "test", "integration_id": 15368}]}},
-    {"type": "pull_request", "parameters": {
+    review_rule(),
+]
+# The design the runbook used to describe: path-scoped team reviewers. Not what this repository enforces.
+LEGACY_RULES = [
+    GOOD_RULES[0],
+    {"type": "pull_request", "ruleset_id": RULESET_ID, "parameters": {
         "require_last_push_approval": True, "dismiss_stale_reviews_on_push": True,
         "required_reviewers": [{"file_patterns": [".github/**"], "minimum_approvals": 1, "reviewer": {}}]}},
 ]
@@ -49,6 +66,8 @@ emit() { if [[ -n "$jq_filter" ]]; then jq -r "$jq_filter"; else cat; fi; }
 case "$args" in
   "pr merge"*|"pr comment"*) echo ok ;;
   *"/files"*) emit < "$STUB_FIX/files.json" ;;
+  *"/contents/.github/CODEOWNERS"*) [[ -f "$STUB_FIX/codeowners.json" ]] && emit < "$STUB_FIX/codeowners.json" || exit 1 ;;
+  *"/rulesets/"*) [[ -f "$STUB_FIX/ruleset.json" ]] && emit < "$STUB_FIX/ruleset.json" || exit 1 ;;
   *"/rules/branches/"*) cat "$STUB_FIX/rules.json" ;;
   *"/pulls/"*) cat "$STUB_FIX/pr.json" ;;
   *) echo '{}' ;;
@@ -90,18 +109,27 @@ class Harness(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def fixtures(self, pr_obj=None, files_list=None, rules=None):
+    def fixtures(self, pr_obj=None, files_list=None, rules=None, codeowners=GOOD_CODEOWNERS, bypass=ADMIN_BYPASS):
+        """codeowners: text, or None for a missing file. bypass: list of bypass actors, or None for 'ruleset unreadable'."""
+        import base64
+        for name in ("codeowners.json", "ruleset.json"):
+            (self.fix / name).unlink(missing_ok=True)
+        if codeowners is not None:
+            (self.fix / "codeowners.json").write_text(json.dumps({"content": base64.b64encode(codeowners.encode()).decode()}))
+        if bypass is not None:
+            (self.fix / "ruleset.json").write_text(json.dumps({"id": RULESET_ID, "bypass_actors": bypass}))
         (self.fix / "pr.json").write_text(json.dumps(pr_obj or pr()))
         (self.fix / "files.json").write_text(json.dumps(files_list if files_list is not None else files(("packages/x/index.ts", "", "modified"))))
         (self.fix / "rules.json").write_text(json.dumps(rules if rules is not None else GOOD_RULES))
 
-    def run_step(self, path, step_name, extra_env=None, attested=True):
+    def run_step(self, path, step_name, extra_env=None, attested=True, bypass_attested=False):
         script, _ = load_run(path, step_name)
         env = dict(os.environ)
         env.update({
             "PATH": f"{self.bin}:{env['PATH']}", "STUB_LOG": str(self.log), "STUB_FIX": str(self.fix),
             "GH_TOKEN": GITHUB_TOKEN, "REPO": REPO, "PR": "7", "EXPECTED_HEAD": HEAD,
             "ATTESTED_ACTIONS_CANNOT_APPROVE": "true" if attested else "",
+            "ATTESTED_BYPASS_PR_ONLY": "true" if bypass_attested else "",
             "GITHUB_STEP_SUMMARY": str(self.summary),
         })
         env.update(extra_env or {})
@@ -279,6 +307,76 @@ class ClassifierTests(Harness):
         self.fixtures()
         self.gate()
         self.assertNotIn(GITHUB_TOKEN, self.log.read_text())
+
+
+class RulesetConfigurationTests(Harness):
+    """The classifier must verify the configuration this repository actually uses: one approving review, approval of
+    the latest push, stale approvals dismissed, code owner review with CODEOWNERS covering .github/, and a bypass
+    limited to the repository admin role in pull-request mode. It must not depend on team required_reviewers."""
+
+    def test_the_documented_configuration_passes(self):
+        self.fixtures()
+        res = self.gate()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+    def test_each_review_setting_is_required(self):
+        for override in ({"required_approving_review_count": 0}, {"require_code_owner_review": False},
+                         {"require_last_push_approval": False}, {"dismiss_stale_reviews_on_push": False}):
+            with self.subTest(override=override):
+                self.setUp()
+                self.fixtures(rules=[GOOD_RULES[0], review_rule(**override)])
+                self.assert_blocked(self.gate())
+
+    def test_the_old_team_reviewer_design_no_longer_satisfies_the_check(self):
+        self.fixtures(rules=LEGACY_RULES)
+        self.assert_blocked(self.gate())
+
+    def test_codeowners_must_cover_dot_github_with_an_owner(self):
+        for text in (None, "# nothing\n", "/packages/sandbox/ @jnibarger01\n", "/.github/\n", "docs/.github-notes @jnibarger01\n"):
+            with self.subTest(codeowners=text):
+                self.setUp()
+                self.fixtures(codeowners=text)
+                self.assert_blocked(self.gate())
+        for text in ("/.github/ @jnibarger01\n", ".github/** @jnibarger01\n", "/.github/** @jnibarger01 @someone-else\n"):
+            with self.subTest(codeowners=text):
+                self.setUp()
+                self.fixtures(codeowners=text)
+                self.assertEqual(self.gate().returncode, 0)
+
+    def test_bypass_must_be_the_admin_role_in_pull_request_mode(self):
+        for bad in ([{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
+                    [{"actor_id": 2, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}],
+                    [{"actor_id": 123, "actor_type": "Integration", "bypass_mode": "pull_request"}],
+                    ADMIN_BYPASS + [{"actor_id": 123, "actor_type": "Integration", "bypass_mode": "always"}]):
+            with self.subTest(bypass=bad):
+                self.setUp()
+                self.fixtures(bypass=bad)
+                self.assert_blocked(self.gate())
+        for ok in (ADMIN_BYPASS, []):
+            with self.subTest(bypass=ok):
+                self.setUp()
+                self.fixtures(bypass=ok)
+                self.assertEqual(self.gate().returncode, 0)
+
+    def test_unreadable_bypass_settings_need_the_owner_attestation(self):
+        self.fixtures(bypass=None)
+        self.assert_blocked(self.gate())
+        self.setUp()
+        self.fixtures(bypass=None)
+        self.assertEqual(self.gate(bypass_attested=True).returncode, 0)
+
+    def test_a_review_rule_without_a_ruleset_id_cannot_be_checked_for_bypass(self):
+        rule = review_rule(); del rule["ruleset_id"]
+        self.fixtures(rules=[GOOD_RULES[0], rule])
+        self.assert_blocked(self.gate())
+
+    def test_header_states_what_is_enforced_and_no_longer_claims_rulesets_do_everything(self):
+        text = GATE.read_text(encoding="utf-8")
+        header = text.split("on:\n", 1)[0]
+        for phrase in ("code owner", "CODEOWNERS", "bypass", "pull request", "verifies", "attest"):
+            self.assertIn(phrase, header, f"header does not state: {phrase}")
+        self.assertNotIn("rulesets, not this job, enforce approvals", header)
+        self.assertNotIn("required_reviewers", text, "the classifier must not depend on team required_reviewers")
 
 
 class DependabotTests(Harness):

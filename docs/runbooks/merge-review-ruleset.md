@@ -10,18 +10,29 @@ repository owner in GitHub. This document does not change them.
 Ruleset `CI required for merge` (id 22526882) currently requires only `check` and `test`. Add a `pull_request` rule to
 the same ruleset, or to a new ruleset that targets `refs/heads/main`:
 
-| Setting                                                          | Value                                               | Why the classifier needs it                            |
-| ---------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------ |
-| Require a pull request before merging                            | on                                                  | No direct pushes to `main`.                            |
-| Required approving reviews                                       | at least 1                                          | An independent human must approve.                     |
-| Require approval of the most recent reviewable push              | on                                                  | An approval cannot carry over to a newer head.         |
-| Dismiss stale pull request approvals when new commits are pushed | on                                                  | Matches the classifier's stale-dismissal check.        |
-| Require review from Code Owners                                  | on, with a `CODEOWNERS` entry covering `.github/**` | Matches the path-scoped reviewer check.                |
-| Required status checks                                           | `check`, `test`                                     | Already present. Keep bound to the GitHub Actions app. |
-| Bypass list                                                      | empty                                               | No actor can skip the rules.                           |
+| Setting                                                          | Value                                                                 | Why the classifier needs it                                                     |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Require a pull request before merging                            | on                                                                    | No direct pushes to `main`.                                                     |
+| Required approving reviews                                       | at least 1                                                            | An independent human must approve.                                              |
+| Require approval of the most recent reviewable push              | on                                                                    | An approval cannot carry over to a newer head.                                  |
+| Dismiss stale pull request approvals when new commits are pushed | on                                                                    | Matches the classifier's stale-dismissal check.                                 |
+| Require review from Code Owners                                  | on; `.github/CODEOWNERS` on `main` must name an owner for `/.github/` | The classifier reads CODEOWNERS and blocks without it.                          |
+| Required status checks                                           | `check`, `test`                                                       | Already present. Keep bound to the GitHub Actions app.                          |
+| Bypass list                                                      | the repository admin role only, bypass mode "Pull request"            | Merge through a pull request without waiting for approval; never a direct push. |
 
-The classifier reads these through `repos/{repo}/rules/branches/main` and fails closed if `require_last_push_approval`,
-`dismiss_stale_reviews_on_push`, a `.github/**` required reviewer, or an app-bound `check`/`test` is missing.
+The classifier reads these through `repos/{repo}/rules/branches/main` and the ruleset it names, and fails closed if any of
+these is missing: app-bound `check` and `test`; `required_approving_review_count` of at least 1; `require_last_push_approval`;
+`dismiss_stale_reviews_on_push`; `require_code_owner_review`; a CODEOWNERS entry for `/.github/` on `main`; a bypass list that
+contains only the repository admin role (role id 5) in `pull_request` mode. It does not use team `required_reviewers`: that
+field needs reviewer teams, which a user-owned repository does not have.
+
+If the token cannot read the ruleset's bypass actors, the classifier blocks until the owner attests them: set the repository
+variable `ACS_ATTESTED_BYPASS_PR_ONLY` to `true` only after confirming the bypass list in the GitHub UI. After applying the
+ruleset, check the role id with `gh api repos/jnibarger01/agent-control-stack/rulesets/<id> --jq .bypass_actors`.
+
+With one human owner the owner cannot approve their own pull request. They merge through the admin bypass (pull request
+mode). The classifier does not use that bypass, so native auto-merge for a documentation-only pull request completes only
+when GitHub's own requirements are met, including an approval from another account.
 
 ## Actions cannot approve
 
