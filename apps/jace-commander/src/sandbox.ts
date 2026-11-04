@@ -53,6 +53,8 @@ export interface SandboxRun {
   readonly roBindBack?: readonly string[];
   /** Overrides the policy network for this run (git fetch/push need the network). */
   readonly network?: WorkloadNetwork;
+  /** bubblewrap writes {"child-pid": N} (the sandbox PID-namespace init) to this fd. */
+  readonly infoFd?: number;
 }
 
 const CODE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -167,6 +169,7 @@ export function sandboxArgv(policy: SandboxPolicy, argv: readonly string[], cwd:
   if (policy.isolation === 'none') return [...argv];
   const network = run.network ?? policy.network;
   const args = [
+    ...(run.infoFd !== undefined ? ['--info-fd', String(run.infoFd)] : []),
     '--unshare-user', '--disable-userns', '--die-with-parent', '--new-session',
     '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try',
     ...(network === 'none' ? ['--unshare-net'] : []),
@@ -268,6 +271,32 @@ export function sandboxSelfTest(policy: SandboxPolicy, homeDir: string, stateDir
 export function assertSandboxReady(policy: SandboxPolicy, homeDir: string, stateDir: string): void {
   const test = sandboxSelfTest(policy, homeDir, stateDir);
   if (!test.ok) throw new IntegrationError('JC_SANDBOX_UNAVAILABLE', `workload isolation is unavailable (${test.detail}); nothing ran`);
+}
+
+/** Linux process start time (clock ticks since boot): identity that survives PID reuse checks. */
+export function processStartTicks(pid: number): string | undefined {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * SIGKILL a sandbox's PID-namespace init. The kernel then kills EVERY process
+ * in that namespace, so nothing a workload started can outlive its session
+ * (closes the die-with-parent startup race). The PID is signalled only while
+ * it is still the same process (start time unchanged), never a reused PID.
+ */
+export function killSandboxNamespace(pid: number | undefined, startTicks: string | undefined): boolean {
+  if (!pid || !startTicks || processStartTicks(pid) !== startTicks) return false;
+  try {
+    process.kill(pid, 'SIGKILL');
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function defaultHome(): string {
