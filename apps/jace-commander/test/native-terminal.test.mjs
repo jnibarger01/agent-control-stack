@@ -3,8 +3,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createProcessRegistry } from '../dist/processes.js';
+import { sandboxPolicyFromEnv } from '../dist/sandbox.js';
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jc-native-'));
-const policy = { roots: [root], deniedRoots: [] };
+const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jc-native-state-'));
+// Workloads always run sandboxed; the registry refuses a policy without one.
+const policy = { roots: [root], deniedRoots: [], workload: {
+  policy: sandboxPolicyFromEnv({ homeDir: os.homedir(), stateDir, fsRoots: [root], fsDeniedRoots: [], managed: true }, {}),
+  homeDir: os.homedir(), stateDir } };
 const registry = createProcessRegistry();
 try {
   process.env.JC_SECRET_CANARY = 'must-not-leak';
@@ -30,4 +35,4 @@ try {
   const next = await registry.read({sessionId:stream.sessionId,stdoutOffset:stream.nextStdoutOffset,stderrOffset:0,waitMs:1000},'alice');
   assert.equal(stream.stdout + next.stdout, 'onetwo');
   console.log('native terminal: shell, stderr, exit, boundaries, environment, PTY, ownership, timeout, streaming PASS');
-} finally { registry.close(); fs.rmSync(root,{recursive:true,force:true}); }
+} finally { registry.close(); fs.rmSync(root,{recursive:true,force:true}); fs.rmSync(stateDir,{recursive:true,force:true}); }

@@ -23,7 +23,8 @@ const sh = (args, cwd = root) => execFileSync('git', args, { cwd, env: gitEnv, e
 sh(['init', '-b', 'main']);
 sh(['config', 'user.email', 'jc@example.com']);
 sh(['config', 'user.name', 'JC Test']);
-const bare = path.join(tmp, 'bare.git');
+// The remote lives inside a filesystem root: sandboxed git can only write inside roots.
+const bare = path.join(home, 'bare.git');
 sh(['init', '--bare', bare], tmp);
 sh(['remote', 'add', 'origin', bare]);
 

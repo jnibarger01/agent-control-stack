@@ -57,6 +57,7 @@ import { defaultDeniedRoots, getFileInfo, listDirectory, readFile, readMultipleF
 import { gitAdd, gitBranch, gitCommit, gitDiff, gitFetch, gitLog, gitPush, gitShow, gitStatus } from './git-ops.js';
 import { createDirectory, deleteFile, editBlock, moveFile, writeFile } from './mutations.js';
 import { createProcessRegistry } from './processes.js';
+import { sandboxPolicyFromEnv, sandboxSelfTest } from './sandbox.js';
 import { createSearchRegistry } from './search.js';
 import { invokePrivilegedHelper, privilegedHelperAvailable } from './privileged-client.js';
 import { JC_PROVIDER_IDS, assertProviderCoverage, collectProviderHealth, type JcAcsMode, type JcProviderId, type JcProviderProbe } from './providers.js';
@@ -442,7 +443,17 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
   }
 
   type Handler = (args: Record<string, unknown>, capability: unknown, owner?: string) => Promise<ToolResult>;
+  // Throws (refusing to construct the server) when the configuration asks for
+  // unisolated workloads in managed mode: there is no unsandboxed fallback.
+  const sandboxPolicy = sandboxPolicyFromEnv({
+    homeDir: config.homeDir,
+    stateDir: config.stateDir,
+    fsRoots: policy?.effective.fsRoots ?? config.fsRoots,
+    fsDeniedRoots: [...config.fsDeniedRoots, ...(policy?.effective.fsDeniedRoots ?? []), ...(mode === 'local' ? [config.policyPath, config.policyUserPath] : [])],
+    managed: mode === 'managed',
+  }, config.sandboxEnv as NodeJS.ProcessEnv);
   const fsPolicy: JcFsPolicy = {
+    workload: { policy: sandboxPolicy, homeDir: config.homeDir, stateDir: config.stateDir },
     roots: policy?.effective.fsRoots ?? config.fsRoots,
     deniedRoots: [
       ...defaultDeniedRoots(config.stateDir, config.homeDir),
@@ -553,6 +564,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       approver: mode === 'local' ? approverHealth : undefined,
       acsRequired: mode === 'managed' || requiredByAcsMode().acs === true || Object.keys(requiredByAcsMode()).length > 0,
       privilegedHelper: () => helperAvailable(helperOptions),
+      workloadIsolation: sandboxSelfTest(sandboxPolicy, config.homeDir, config.stateDir),
     })),
     ping: async () => ok(await jcPing(config)),
     get_config: async () => ok(jcConfigView(config)),
@@ -646,6 +658,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       swarm: { url: config.swarmUrl, ...swarm },
       visualizer: { url: config.visualizerUrl ?? null, ...visualizer },
       missionRouter: { dir: config.missionRouterDir },
+      workloadIsolation: sandboxSelfTest(sandboxPolicy, config.homeDir, config.stateDir),
       privilegedHelper: { path: config.privilegedHelperPath, sudoNonInteractive: helper },
       providers: await collectProviderHealth(probes, { requiredOverrides: requiredByAcsMode() }),
       ...(mode === 'local' ? { approver: await approverHealth(), acsModes, mirror: mirror ? mirror.status() : { enabled: false } } : {}),

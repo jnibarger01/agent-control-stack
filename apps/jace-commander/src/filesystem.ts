@@ -33,6 +33,7 @@ import path from 'node:path';
 import { isBinaryFile } from 'isbinaryfile';
 import { documentKind, readDocumentBytes, windowLines } from './documents.js';
 import { isCredentialPath } from './credential-paths.js';
+import type { SandboxPolicy } from './sandbox.js';
 import { IntegrationError } from './integrations.js';
 
 /** Runtime output caps (argument limits live in the manifest schemas). */
@@ -54,6 +55,14 @@ export const JC_FS_RUNTIME_LIMITS = Object.freeze({
 export interface JcFsPolicy {
   readonly roots: readonly string[];
   readonly deniedRoots: readonly string[];
+  /** Workload sandbox for every process/git child; absent means workloads are refused. */
+  readonly workload?: JcWorkloadSandbox;
+}
+
+export interface JcWorkloadSandbox {
+  readonly policy: SandboxPolicy;
+  readonly homeDir: string;
+  readonly stateDir: string;
 }
 
 /** Denied regardless of roots: JC's own state and common secret/config stores. */

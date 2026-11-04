@@ -27,6 +27,7 @@ import { runLocalCeremony } from './passkey-ceremony.js';
 import readline from 'node:readline/promises';
 import { JC_TOOLS } from './tool-descriptors.js';
 import { VERSION } from './version.js';
+import { sandboxPolicyFromEnv, sandboxSelfTest } from './sandbox.js';
 
 type Out = { json: boolean; stdout: (text: string) => void; stderr: (text: string) => void };
 
@@ -254,6 +255,20 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
         // Fail closed at startup rather than rejecting every call later.
         out.stderr('jace-commander: managed mode requires JC_ACS_PUBLIC_KEY and JC_ACS_KEY_ID (or pass --standalone for read-only local development, or --preset local)');
         return JC_EXIT.authorityUnavailable;
+      }
+      if (mode !== 'standalone') {
+        // Fail closed at startup: workloads never run without OS isolation.
+        let isolation;
+        try {
+          const sandbox = sandboxPolicyFromEnv({ homeDir: config.homeDir, stateDir: config.stateDir, fsRoots: config.fsRoots, fsDeniedRoots: config.fsDeniedRoots, managed: mode === 'managed' }, config.sandboxEnv as NodeJS.ProcessEnv);
+          isolation = sandboxSelfTest(sandbox, config.homeDir, config.stateDir);
+        } catch (error) {
+          isolation = { ok: false, detail: error instanceof Error ? error.message : 'invalid sandbox configuration' };
+        }
+        if (!isolation.ok) {
+          out.stderr(`jace-commander: workload isolation unavailable (${isolation.detail}); refusing to serve`);
+          return JC_EXIT.authorityUnavailable;
+        }
       }
       const server = createJcServer(config, mode);
       await server.connect(new StdioServerTransport());

@@ -56,6 +56,8 @@ export interface JcConfig {
   mirrorMaxPending: number;
   /** JC_GATEWAY_META_TRUSTED=1 (set only by the OAuth bridge): `_meta.gateway` is bridge-stamped, not client-written. */
   gatewayMetaTrusted: boolean;
+  /** Raw workload-sandbox settings (sandbox.ts builds the policy with the preset). */
+  sandboxEnv: Readonly<Record<string, string | undefined>>;
 }
 
 function httpUrl(raw: string, name: string): string {
@@ -125,6 +127,10 @@ export function loadJcConfig(env: NodeJS.ProcessEnv = process.env): JcConfig {
     mirrorUrl: env.JC_ACS_MIRROR_URL ? httpUrl(env.JC_ACS_MIRROR_URL, 'JC_ACS_MIRROR_URL') : undefined,
     mirrorIntervalMs: boundedInt(env.JC_ACS_MIRROR_INTERVAL_MS, 5000, 100, 3_600_000, 'JC_ACS_MIRROR_INTERVAL_MS'),
     gatewayMetaTrusted: env.JC_GATEWAY_META_TRUSTED === '1',
+    sandboxEnv: Object.freeze(Object.fromEntries([
+      'JC_WORKLOAD_ISOLATION', 'JC_WORKLOAD_NETWORK', 'JC_SANDBOX_HIDE', 'JC_SANDBOX_READONLY',
+      'JC_SANDBOX_WRITABLE', 'JC_BWRAP_PATH', 'JC_ALLOW_UNISOLATED_WORKLOADS', 'XDG_RUNTIME_DIR',
+    ].map((name) => [name, env[name] ?? (name === 'XDG_RUNTIME_DIR' ? process.env.XDG_RUNTIME_DIR : undefined)]))),
     mirrorMaxPending: boundedInt(env.JC_ACS_MIRROR_MAX_PENDING, 5000, 10, 1_000_000, 'JC_ACS_MIRROR_MAX_PENDING'),
   };
 }
