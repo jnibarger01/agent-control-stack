@@ -367,8 +367,10 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
         if (response.status !== 200) throw new IntegrationError('ACS_UNAVAILABLE', `ACS did not confirm authority (HTTP ${response.status})`);
         assertCurrentAuthority(response.body, authorization, principal);
       } catch (error) {
-        const code = error instanceof IntegrationError ? error.code : 'ACS_UNAVAILABLE';
-        const detail = error instanceof IntegrationError ? error.message : 'ACS unreachable';
+        // A binding ACS no longer confirms is a revocation; any failure to obtain an
+        // answer (unreachable, timeout, non-200, oversized) is ACS_UNAVAILABLE.
+        const code = error instanceof IntegrationError && error.code === 'JC_AUTHORITY_REVOKED' ? 'JC_AUTHORITY_REVOKED' : 'ACS_UNAVAILABLE';
+        const detail = error instanceof IntegrationError ? `${error.code}: ${error.message}` : 'ACS unreachable';
         recordTrace(trace, name, args, { ok: false, code, principal: principal ?? 'stdio', workItemId: authorization.workItemId, attemptId: authorization.attemptId, ...routeTrace(route) });
         return fail(code, `current ACS authority unavailable or revoked (${detail}); nothing ran`, { acsAuthorization: { version: 'acs.jc.v1', decision: 'denied-current-authority', code } });
       }

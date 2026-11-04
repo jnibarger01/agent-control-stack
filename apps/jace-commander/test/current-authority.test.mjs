@@ -144,3 +144,75 @@ await (async () => {
   }
 })();
 console.log(`jace-commander current authority (server): ${passed} total passed`);
+
+// ---- every authorization failure denies BEFORE any side effect ---------------
+await (async () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'jc-no-side-effect-')));
+  const work = path.join(tmp, 'work');
+  fs.mkdirSync(work);
+  const issuer = makeIssuer();
+  const otherIssuer = makeIssuer();
+  let acsMode = 'ok';
+  const config = loadJcConfig({
+    HOME: tmp, JC_STATE_DIR: path.join(tmp, 'state'), JC_FS_ROOTS: work, JC_RUNTIME_ID: 'jc-test-runtime',
+    JC_ACS_PUBLIC_KEY: issuer.publicKeyB64, JC_ACS_KEY_ID: issuer.keyId, JC_ACS_URL: 'http://127.0.0.1:9',
+    JC_ACS_AUTHORITY_TOKEN: 'read-only-authority-token',
+  });
+  const server = createJcServer(config, 'managed', {
+    helperAvailable: async () => false,
+    fetchImpl: async (url) => {
+      if (acsMode === 'down') throw new TypeError('fetch failed: ECONNREFUSED');
+      if (acsMode === 'error') return new Response('{}', { status: 500, headers: { 'content-type': 'application/json' } });
+      const body = (await authorityFetch(issuer)(url)).json ? await (await authorityFetch(issuer)(url)).json() : {};
+      if (acsMode === 'revoked') body.attemptLeases[0].status = 'revoked';
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  const client = new Client({ name: 'side-effect-test', version: '1' });
+  await client.connect(clientTransport);
+  let n = 0;
+  const cases = [
+    ['no capability', () => undefined, 'JC_CAPABILITY_MISSING'],
+    ['a capability from another signer', (name, args) => otherIssuer.mint(name, args, {}, { keyId: issuer.keyId }), 'JC_CAPABILITY_SIGNATURE_INVALID'],
+    ['an expired capability', (name, args) => issuer.mint(name, args, {}, { now: Date.now() - 120_000 }), 'JC_CAPABILITY_TIME_INVALID'],
+    ['a capability for other arguments', (name, args) => issuer.mint(name, { ...args, cwd: args.cwd ?? work, path: `${work}/elsewhere` }), 'JC_CAPABILITY_ARGUMENTS_MISMATCH'],
+    ['a lease ACS revoked', (name, args) => { acsMode = 'revoked'; return issuer.mint(name, args); }, 'JC_AUTHORITY_REVOKED'],
+    ['ACS unreachable', (name, args) => { acsMode = 'down'; return issuer.mint(name, args); }, 'ACS_UNAVAILABLE'],
+    ['ACS answering 500', (name, args) => { acsMode = 'error'; return issuer.mint(name, args); }, 'ACS_UNAVAILABLE'],
+  ];
+  try {
+    for (const tool of ['run_command', 'write_file']) {
+      for (const [label, capabilityFor, expected] of cases) {
+        acsMode = 'ok';
+        const marker = path.join(work, `marker-${n += 1}`);
+        const args = tool === 'run_command' ? { command: `touch ${marker}`, cwd: work, waitMs: 2000 } : { path: marker, content: 'x' };
+        const capability = capabilityFor(tool, args);
+        const result = await client.callTool({ name: tool, arguments: args, ...(capability ? { _meta: { acsCapability: capability } } : {}) });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        test(`${tool} with ${label}: refused (${expected}) and nothing happened`, () => {
+          assert.equal(result.isError, true, JSON.stringify(result.structuredContent));
+          assert.equal(result.structuredContent.error.code, expected);
+          assert.equal(fs.existsSync(marker), false);
+        });
+      }
+      // Replay: the first use executes, the identical envelope is refused and runs nothing more.
+      acsMode = 'ok';
+      const marker = path.join(work, `replay-${tool}`);
+      const args = tool === 'run_command' ? { command: `echo x >> ${marker}`, cwd: work, waitMs: 5000 } : { path: marker, content: 'x', overwrite: true };
+      const capability = issuer.mint(tool, args);
+      const first = await client.callTool({ name: tool, arguments: args, _meta: { acsCapability: capability } });
+      const replay = await client.callTool({ name: tool, arguments: args, _meta: { acsCapability: capability } });
+      test(`${tool}: a replayed capability is refused and executes nothing more (no duplicate execution)`, () => {
+        assert.equal(first.isError, undefined, JSON.stringify(first.structuredContent));
+        assert.equal(replay.structuredContent.error.code, 'JC_CAPABILITY_NONCE_REPLAY');
+        assert.equal(fs.readFileSync(marker, 'utf8'), tool === 'run_command' ? 'x\n' : 'x');
+      });
+    }
+  } finally {
+    await client.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+})();
+console.log(`jace-commander authorization side effects: ${passed} total passed`);
