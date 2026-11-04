@@ -30,6 +30,12 @@ fs.writeFileSync(path.join(root, 'app', '.env'), 'SECRET=1\n');
 fs.writeFileSync(path.join(root, 'app', 'relay.env'), 'KEY=1\n');
 fs.writeFileSync(path.join(outside, 'secret.txt'), 'outside\n');
 fs.writeFileSync(path.join(stateDir, 'credentials.json'), '{}\n');
+// An ACS checkout inside the root: its database and config are never served.
+const acsCheckout = path.join(root, 'agent-control-stack');
+fs.mkdirSync(path.join(acsCheckout, 'storage'), { recursive: true });
+fs.writeFileSync(path.join(acsCheckout, 'package.json'), '{"name":"agent-control-stack"}\n');
+fs.writeFileSync(path.join(acsCheckout, 'storage', 'local.db'), 'acs-db\n');
+fs.writeFileSync(path.join(acsCheckout, 'README.md'), 'readable\n');
 fs.symlinkSync(outside, path.join(root, 'escape'));
 fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(root, 'escape-file.txt'));
 fs.mkdirSync(path.join(root, 'app', '.git'));
@@ -139,6 +145,14 @@ await test('path outside every root is refused (path_not_allowed)', async () => 
 await test('a symlink inside a root that points outside it is refused', async () => {
   assert.equal(errorCode(await call(managed, 'read_file', { path: path.join(root, 'escape-file.txt') })), 'path_not_allowed');
   assert.equal(errorCode(await call(managed, 'list_directory', { path: path.join(root, 'escape') })), 'path_not_allowed');
+});
+
+await test('an ACS checkout inside a root: its database is path_denied and not listed; its code is readable', async () => {
+  assert.equal(errorCode(await call(managed, 'read_file', { path: path.join(acsCheckout, 'storage', 'local.db') })), 'path_denied');
+  assert.equal(errorCode(await call(managed, 'list_directory', { path: path.join(acsCheckout, 'storage') })), 'path_denied');
+  const listing = (await call(managed, 'list_directory', { path: acsCheckout })).structuredContent;
+  assert.ok(!listing.entries.some((entry) => entry.name === 'storage'), JSON.stringify(listing.entries));
+  assert.match((await call(managed, 'read_file', { path: path.join(acsCheckout, 'README.md') })).structuredContent.content, /readable/);
 });
 
 await test('credential files and JC state are refused even inside a root (path_denied)', async () => {

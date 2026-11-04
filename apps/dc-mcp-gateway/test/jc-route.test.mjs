@@ -527,7 +527,7 @@ test('/ready is not delayed by an unresponsive jc bridge', async () => {
 });
 
 test('/jc/ready is independent of DC and fails closed on untrusted JC authority or unavailable ACS', async () => {
-  const good = { variant: 'jc', configuredExecutionMode: 'managed', childMode: 'managed', authoritative: true, bridge: { hasUpstreamPair: true, upstreamStarted: true, initialized: true }, enforcement: { executionTokenConfigured: true, capabilityVerificationConfigured: true } };
+  const good = { variant: 'jc', configuredExecutionMode: 'managed', childMode: 'managed', authoritative: true, bridge: { hasUpstreamPair: true, upstreamStarted: true, initialized: true }, enforcement: { executionTokenConfigured: true, capabilityVerificationConfigured: true, currentAuthorityCredentialConfigured: true } };
   let current = good;
   let acsStatus = 200;
   const acs = recorder(() => ({ status: acsStatus, body: { ok: true } }));
@@ -540,7 +540,7 @@ test('/jc/ready is independent of DC and fails closed on untrusted JC authority 
     assert.equal(ok.status, 200);
     assert.deepEqual(await ok.json(), { ready: true, configured: true, bridgeReady: true, issuanceReady: true });
     assert.ok(acs.requests.every((r) => r.path === '/readyz'));
-    for (const bad of [null, {}, [], { ...good, variant: 'dc' }, { ...good, configuredExecutionMode: 'unmanaged_gateway' }, { ...good, childMode: 'local' }, { ...good, authoritative: false }, { ...good, bridge: undefined }, ...['hasUpstreamPair', 'upstreamStarted', 'initialized'].map((key) => ({ ...good, bridge: { ...good.bridge, [key]: 'true' } })), { ...good, enforcement: {} }, ...['executionTokenConfigured', 'capabilityVerificationConfigured'].map((key) => ({ ...good, enforcement: { ...good.enforcement, [key]: 'true' } }))]) {
+    for (const bad of [null, {}, [], { ...good, variant: 'dc' }, { ...good, configuredExecutionMode: 'unmanaged_gateway' }, { ...good, childMode: 'local' }, { ...good, authoritative: false }, { ...good, bridge: undefined }, ...['hasUpstreamPair', 'upstreamStarted', 'initialized'].map((key) => ({ ...good, bridge: { ...good.bridge, [key]: 'true' } })), { ...good, enforcement: {} }, ...['executionTokenConfigured', 'capabilityVerificationConfigured', 'currentAuthorityCredentialConfigured'].map((key) => ({ ...good, enforcement: { ...good.enforcement, [key]: 'true' } }))]) {
       current = bad;
       const response = await probe();
       assert.equal(response.status, 503, JSON.stringify(bad));

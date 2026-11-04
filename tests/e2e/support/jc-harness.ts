@@ -134,6 +134,9 @@ export async function startJcBridge(
       ACS_MANAGED_MODE: "1",
       DC_CMD: process.execPath,
       ...(options.jcDir ? { JC_DC_DIR: options.jcDir } : {}),
+      // Run the chain against an installed release instead of the source tree
+      // (apps/jace-commander/deploy/install-user-release.sh -> $PREFIX/current).
+      ...(!options.jcDir && process.env.JC_E2E_RUNTIME_DIR ? { JC_RUNTIME_DIR: process.env.JC_E2E_RUNTIME_DIR } : {}),
       JC_ACS_PUBLIC_KEY: acs.publicKey,
       JC_ACS_KEY_ID: JC_KEY_ID,
       JC_RUNTIME_ID,

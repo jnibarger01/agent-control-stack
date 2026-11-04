@@ -57,7 +57,7 @@ import { defaultDeniedRoots, getFileInfo, listDirectory, readFile, readMultipleF
 import { gitAdd, gitBranch, gitCommit, gitDiff, gitFetch, gitLog, gitPush, gitShow, gitStatus } from './git-ops.js';
 import { createDirectory, deleteFile, editBlock, moveFile, writeFile } from './mutations.js';
 import { createProcessRegistry } from './processes.js';
-import { sandboxPolicyFromEnv, sandboxSelfTest } from './sandbox.js';
+import { acsCheckoutsUnder, sandboxPolicyFromEnv, sandboxSelfTest } from './sandbox.js';
 import { createSearchRegistry } from './search.js';
 import { invokePrivilegedHelper, privilegedHelperAvailable } from './privileged-client.js';
 import { JC_PROVIDER_IDS, assertProviderCoverage, collectProviderHealth, type JcAcsMode, type JcProviderId, type JcProviderProbe } from './providers.js';
@@ -466,6 +466,9 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       // The model must not be able to read the policy it is governed by, or edit it.
       ...(mode === 'local' ? [config.policyPath, config.policyUserPath] : []),
       ...(policy?.effective.fsDeniedRoots ?? []),
+      // ACS's database and config in any reachable ACS checkout: never readable or writable by tools.
+      ...acsCheckoutsUnder(policy?.effective.fsRoots ?? config.fsRoots)
+        .flatMap((checkout) => [path.join(checkout, 'storage'), path.join(checkout, '.env'), path.join(checkout, 'acs.config.yaml')]),
     ],
   };
 

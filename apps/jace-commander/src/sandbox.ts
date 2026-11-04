@@ -65,6 +65,7 @@ const HOME_HIDDEN = [
   '.ssh', '.gnupg', '.aws', '.azure', '.kube', '.docker', '.config/gcloud', '.config/gh',
   '.config/jace-commander', '.jace-commander', '.config/desktop-commander-mcp-gateway', '.config/dc-relay',
   '.desktop-commander', '.config/agent-control-stack', '.local/share/agent-control-stack',
+  '.config/acs', '.local/share/acs', '.local/state/acs', '.local/state/jace-commander', '.local/share/jace-commander',
   '.local/share/keyrings', '.local/share/kwalletd', '.password-store', '.netrc', '.git-credentials',
   '.npmrc', '.pypirc', '.config/hub', '.codex', '.claude', '.claude.json', '.config/Codex',
   '.mozilla', '.config/google-chrome', '.config/chromium', '.config/BraveSoftware',
@@ -107,6 +108,45 @@ export function runtimeModuleDirs(codeDir = CODE_DIR): string[] {
   return [...dirs];
 }
 
+function isAcsCheckout(dir: string): boolean {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')) as { name?: string };
+    return pkg.name === 'agent-control-stack';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * ACS checkouts reachable from the filesystem roots: a root itself, or up to
+ * two directory levels below it (covers JC_FS_ROOTS=$HOME with checkouts in
+ * ~/projects). Their database and config must be masked: a workload that could
+ * write ACS's SQLite file could approve its own work items. Bounded scan; for
+ * anything else use JC_SANDBOX_HIDE.
+ */
+export function acsCheckoutsUnder(roots: readonly string[], maxDepth = 2): string[] {
+  const found = new Set<string>();
+  const visit = (dir: string, depth: number): void => {
+    if (isAcsCheckout(dir)) {
+      found.add(dir);
+      return;
+    }
+    if (depth >= maxDepth) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries.slice(0, 500)) {
+      // Real directories only; hidden dirs and node_modules cannot hold the served ACS.
+      if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules') visit(path.join(dir, entry.name), depth + 1);
+    }
+  };
+  for (const root of roots) visit(root, 0);
+  return [...found];
+}
+
 /** The ACS monorepo root when JC is served from a checkout (apps/jace-commander/dist). */
 function monorepoRoot(codeDir = CODE_DIR): string | null {
   const candidate = path.resolve(codeDir, '..', '..', '..');
@@ -143,8 +183,10 @@ export function sandboxPolicyFromEnv(input: SandboxConfigInput, env: NodeJS.Proc
     ...SYSTEM_HIDDEN,
     ...(runtimeDir ? [runtimeDir] : []),
     ...input.fsDeniedRoots,
-    // ACS's own database and evidence when ACS runs from this checkout.
-    ...(repo ? [path.join(repo, 'storage'), path.join(repo, '.env'), path.join(repo, 'acs.config.yaml')] : []),
+    // ACS's database and config: the checkout JC is served from, and every ACS
+    // checkout reachable from the filesystem roots.
+    ...[...new Set([...(repo ? [repo] : []), ...acsCheckoutsUnder(input.fsRoots)])]
+      .flatMap((checkout) => [path.join(checkout, 'storage'), path.join(checkout, '.env'), path.join(checkout, 'acs.config.yaml')]),
     ...splitList(env.JC_SANDBOX_HIDE),
   ];
   const readOnly = [

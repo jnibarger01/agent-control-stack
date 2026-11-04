@@ -1,22 +1,54 @@
-# Native JC bridge. Install only after independent review and explicit rollout approval.
-# The bridge defaults to apps/jace-commander/dist/cli.js; no vendor dependency.
+# ~/.config/systemd/user/jace-commander-mcp.service  (CachyOS, systemd user service)
+#
+# Native Jace Commander behind the managed bridge: bridge.js (BRIDGE_PROFILE=
+# jace-commander, 127.0.0.1:8003) runs the native runtime (apps/jace-commander,
+# no Desktop Commander) over stdio. The OAuth edge (server.js, 127.0.0.1:8010)
+# routes /jc/mcp here after authentication and per-call ACS acs.jc.v1 issuance.
+#
+# Install only after independent review and explicit rollout approval:
+#   cp jace-commander-mcp.service ~/.config/systemd/user/
+#   install -d -m 0700 ~/.config/acs
+#   install -m 0600 ../jace-commander-bridge.env.example ~/.config/acs/jc-bridge.env   # fill in
+#   install -m 0600 /dev/null ~/.config/acs/jc-authority.token                          # acs:read token
+#   systemctl --user daemon-reload && systemctl --user enable --now jace-commander-mcp
+# Health:  curl -s 127.0.0.1:8003/healthz ; curl -s 127.0.0.1:8003/authority
+# Refuses to start (fail closed) without ACS verification keys, the gateway
+# execution token, or a passing workload-isolation self-test (bubblewrap).
 [Unit]
-Description=Jace Commander MCP bridge (stdio -> Streamable HTTP, loopback only)
+Description=Jace Commander MCP bridge (native runtime, loopback 127.0.0.1:8003)
 After=network.target
 
 [Service]
+Type=simple
 WorkingDirectory=%h/projects/agent-control-stack/apps/dc-mcp-gateway
+Environment=NODE_ENV=production
 Environment=BRIDGE_PROFILE=jace-commander
 Environment=BRIDGE_PORT=8003
-Environment=NODE_ENV=production
+Environment=ACS_MANAGED_MODE=1
+Environment=JC_PRESET=managed
+# Workload isolation is mandatory on the managed lane; network namespace by default.
+Environment=JC_WORKLOAD_ISOLATION=bwrap
+Environment=JC_WORKLOAD_NETWORK=none
+# Read-scoped ACS credential for the live authority check, from a 0600 file
+# (never placed in the environment). ~/.config/acs is masked from workloads.
+Environment=JC_ACS_AUTHORITY_TOKEN_FILE=%h/.config/acs/jc-authority.token
+# Production: a release outside JC_FS_ROOTS (apps/jace-commander/deploy/install-user-release.sh).
+#Environment=JC_RUNTIME_DIR=%h/.local/lib/jace-commander/current
+# Secrets and site values (keys, tokens, roots). Plain KEY=VALUE lines only.
 EnvironmentFile=%h/.config/acs/jc-bridge.env
+# /usr/bin/node is the distribution Node (>= 24.16); no version-manager shims.
 ExecStart=/usr/bin/node %h/projects/agent-control-stack/apps/dc-mcp-gateway/bridge.js
 Restart=on-failure
 RestartSec=5
+# SIGTERM: the bridge closes sessions and its stdio child; JC terminates every
+# sandboxed workload (each sandbox's PID namespace is killed).
+KillMode=mixed
+TimeoutStopSec=15
 # privileged_exec reaches its root helper via `sudo -n` (setuid), which
 # NoNewPrivileges=true would block. The helper, not this unit, is the gate.
 NoNewPrivileges=false
 PrivateTmp=true
+UMask=0077
 
 [Install]
 WantedBy=default.target

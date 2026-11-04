@@ -33,6 +33,14 @@ fs.writeFileSync(path.join(stateDir, 'device-login.json'), JSON.stringify({ toke
 fs.writeFileSync(path.join(home, '.ssh', 'id_ed25519'), CANARY, { mode: 0o600 });
 fs.writeFileSync(path.join(runtimeDir, 'bus'), CANARY);
 fs.writeFileSync(path.join(home, '.bashrc'), '# original\n');
+// The bridge env file location used by the systemd template.
+fs.mkdirSync(path.join(home, '.config', 'acs'), { recursive: true });
+fs.writeFileSync(path.join(home, '.config', 'acs', 'jc-bridge.env'), `ACS_WORKER_TOKEN=${CANARY}\n`, { mode: 0o600 });
+// An ACS checkout inside a filesystem root: its database must be masked.
+const acsCheckout = path.join(work, 'agent-control-stack');
+fs.mkdirSync(path.join(acsCheckout, 'storage'), { recursive: true });
+fs.writeFileSync(path.join(acsCheckout, 'package.json'), JSON.stringify({ name: 'agent-control-stack' }));
+fs.writeFileSync(path.join(acsCheckout, 'storage', 'local.db'), CANARY);
 
 // The control plane's own environment carries the canary (as the bridge/JC env does).
 process.env.DC_GATEWAY_EXECUTION_TOKEN = CANARY;
@@ -76,9 +84,17 @@ try {
   await test('credential stores, JC env/state and the runtime bus are masked', async () => {
     const out = await run([
       `cat ${home}/.config/jace-commander/jc.env`, `cat ${stateDir}/device-login.json`, `cat ${home}/.ssh/id_ed25519`,
-      `cat ${runtimeDir}/bus`, `grep -rs ${CANARY} ${home} | head -1`, 'true',
+      `cat ${runtimeDir}/bus`, `cat ${home}/.config/acs/jc-bridge.env`, `cat ${acsCheckout}/storage/local.db`,
+      `grep -rs ${CANARY} ${home} | head -1`, 'true',
     ].map((c) => `${c} 2>/dev/null`).join('; '));
     assert.doesNotMatch(out.stdout + out.stderr, new RegExp(CANARY));
+  });
+
+  await test('an ACS database inside a writable root can be neither read nor written', async () => {
+    const out = await run(`echo forged >> ${acsCheckout}/storage/local.db 2>/dev/null && echo WROTE; ls -A ${acsCheckout}/storage | wc -l`);
+    assert.doesNotMatch(out.stdout, /WROTE/);
+    assert.equal(out.stdout.trim(), '0');
+    assert.equal(fs.readFileSync(path.join(acsCheckout, 'storage', 'local.db'), 'utf8'), CANARY);
   });
 
   await test('nothing outside the roots is writable: no dotfile / unit / runtime persistence', async () => {
