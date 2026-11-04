@@ -134,6 +134,7 @@ import {
   submitWorkResultSchema,
   executionActionHash,
   aresItemTargetsWorker,
+  isAresWorkItem,
   assertAresResultBinding,
   workItemCreatedEvent,
   workItemSchema,
@@ -3521,6 +3522,43 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return row ? rowToExecutionAttempt(row) : undefined;
   }
 
+  /** An ARES attempt's approved runtime budget starts at its first lease, never at a renewal or re-lease. */
+  private aresAttemptExecutionDeadline(
+    workItemId: string,
+    attemptId: string,
+    workerId: string,
+    firstIssueFallback: string
+  ): number {
+    const workItem = this.getRequired(workItemId);
+    if (!isAresWorkItem(workItem)) return Infinity;
+    if (!aresItemTargetsWorker(workItem, workerId)) {
+      throw new ControlStackError("worker_target_mismatch", "ARES attempt targets a different worker");
+    }
+    const plan = this.getCurrentExecutionPlan(workItemId);
+    const attempt = this.getAttempt(attemptId);
+    if (
+      !plan ||
+      !attempt ||
+      attempt.workItemId !== workItemId ||
+      attempt.planHash !== plan.planHash ||
+      plan.definition.constraints.executionMode !== "ares" ||
+      plan.subjectInputHash !== executionPlanSubjectInputHash(workItem)
+    ) {
+      throw new ControlStackError(
+        "ares_plan_input_mismatch",
+        "ARES lease requires its current approved principal and plan"
+      );
+    }
+    const first = this.db
+      .prepare("SELECT min(issued_at) AS issued_at FROM attempt_leases WHERE work_item_id = ? AND attempt_id = ?")
+      .get(workItemId, attemptId) as { issued_at: string | null };
+    const startedAt = Date.parse(first.issued_at ?? firstIssueFallback);
+    if (!Number.isFinite(startedAt)) {
+      throw new ControlStackError("lease_state_inconsistent", "ARES execution budget start is invalid");
+    }
+    return startedAt + plan.definition.constraints.maxRuntimeMs;
+  }
+
   leaseAttempt(input: IssueLeaseInput, options: PrivilegedTransitionOptions): AttemptLease {
     requirePrivilegedTransition(options, "lease_attempt");
     const parsed = issueLeaseInputSchema.parse(input);
@@ -3545,7 +3583,16 @@ export class SqliteWorkItemStore implements WorkItemStore {
         new Date(now)
       );
       const authorityRemainingMs = operationPermit ? Date.parse(operationPermit.expiresAt) - Date.parse(now) : Infinity;
-      const maxTtlMs = Math.min(parsed.maxTtlMs ?? Math.max(parsed.ttlMs, 60 * 60 * 1_000), authorityRemainingMs);
+      const executionRemainingMs =
+        this.aresAttemptExecutionDeadline(parsed.workItemId, parsed.attemptId, parsed.workerId, now) - Date.parse(now);
+      if (executionRemainingMs <= 0) {
+        throw new ControlStackError("worker_lease_expired", "ARES approved execution runtime is exhausted");
+      }
+      const maxTtlMs = Math.min(
+        parsed.maxTtlMs ?? Math.max(parsed.ttlMs, 60 * 60 * 1_000),
+        authorityRemainingMs,
+        executionRemainingMs
+      );
       const maxExpiresAt = new Date(Date.parse(now) + maxTtlMs).toISOString();
       const expiresAt = new Date(Date.parse(now) + Math.min(parsed.ttlMs, maxTtlMs)).toISOString();
       const events: StoredAuditEvent[] = [];
@@ -3728,7 +3775,16 @@ export class SqliteWorkItemStore implements WorkItemStore {
         throw new ControlStackError("lease_state_inconsistent", "lease max expiry is invalid");
       }
       const requestedExpiresMs = nowMs + parsed.ttlMs;
-      const nextExpiresMs = Math.min(requestedExpiresMs, maxExpiresMs);
+      const executionDeadline = this.aresAttemptExecutionDeadline(
+        parsed.workItemId,
+        parsed.attemptId,
+        parsed.workerId,
+        row.issued_at
+      );
+      if (executionDeadline <= nowMs) {
+        throw new ControlStackError("worker_lease_expired", "ARES approved execution runtime is exhausted");
+      }
+      const nextExpiresMs = Math.min(requestedExpiresMs, maxExpiresMs, executionDeadline);
       if (nextExpiresMs <= Date.parse(row.expires_at)) {
         throw new ControlStackError("lease_renewal_exhausted", "lease cannot be renewed beyond its maximum duration");
       }
@@ -8699,7 +8755,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
     ) {
       throw new ControlStackError("attempt_fence_mismatch", "result lease epoch is stale or mismatched");
     }
-    if (Date.parse(lease.expires_at) <= Date.parse(now)) {
+    if (
+      Date.parse(lease.expires_at) <= Date.parse(now) ||
+      this.aresAttemptExecutionDeadline(input.workItemId, input.attemptId, input.workerId, lease.issued_at) <=
+        Date.parse(now)
+    ) {
       throw new ControlStackError("worker_lease_expired", "worker lease has expired");
     }
     if (input.outcome === "blocked" || input.outcome === "lease_expired") {

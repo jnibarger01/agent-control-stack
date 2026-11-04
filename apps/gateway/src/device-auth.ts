@@ -11,6 +11,7 @@ import {
   DeviceAuthStore,
   type DeviceAuthorizationSummary
 } from "./device-auth-store.js";
+import { gatewayCredentialIsHumanOperator } from "./credentials.js";
 import type { AuthFailureLockout } from "@agent-control-stack/shared";
 import type { SlidingWindowRateLimiter } from "./rate-limit.js";
 import {
@@ -137,6 +138,9 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
     if (!credential) {
       return reply.code(401).type("text/html").send(renderLoginPage(request.url));
     }
+    if (!gatewayCredentialIsHumanOperator(credential)) {
+      return reply.code(403).type("text/html").send("Human operator authority is required");
+    }
     const userCode = stringField((request.query as Record<string, unknown> | undefined)?.user_code);
     const summary = userCode ? options.store.findByUserCode(userCode) : undefined;
     return reply.type("text/html").send(renderDeviceVerifyPage({ userCode, summary }));
@@ -151,7 +155,7 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
       if (!credential) {
         return reply.code(401).send({ error: "unauthorized" });
       }
-      if (!gatewayCredentialCanMutate(credential)) {
+      if (!gatewayCredentialIsHumanOperator(credential) || !gatewayCredentialCanMutate(credential)) {
         return reply.code(403).send({ error: "forbidden" });
       }
       if (!credential.actorId) {
@@ -219,11 +223,10 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
   );
 
   // Remote device revocation, independent of any CLI-side logout. Operator-only:
-  // this is the same mutation privilege gate used elsewhere (POST /connectors, etc.),
-  // not a new authorization concept.
+  // delegated work-creation tokens are not device-management authority.
   app.post<{ Params: { id: string } }>("/devices/:id/revoke", async (request, reply) => {
     const credential = gatewayCredentialForRequest(request, options.auth);
-    if (!credential || !gatewayCredentialCanMutate(credential)) {
+    if (!credential || !gatewayCredentialIsHumanOperator(credential) || !gatewayCredentialCanMutate(credential)) {
       return reply.code(credential ? 403 : 401).send({ error: credential ? "forbidden" : "unauthorized" });
     }
     const revoked = options.store.revokeDevice(request.params.id);

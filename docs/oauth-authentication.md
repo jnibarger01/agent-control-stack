@@ -242,3 +242,12 @@ sent, and adds `error="invalid_token"` when a token was presented but is expired
 shows **Reauthentication required** for a client whose refresh token was rejected, reused, expired or revoked. See
 [ADR 0027](adr/0027-oauth-reauthentication-detection.md) and the "Reauthentication required" section of
 [the client visibility runbook](runbooks/mcp-client-visibility.md). Reporting to ACS is off unless the edge sets `ACS_MCP_AUTH_EVENTS=1`.
+
+### Human authority for device management
+
+Device consent pages and consent decisions require a configured human operator identity
+(`actor: user`, operator role, no service/worker role). Decisions and remote revocation
+also require `acs:write`. The approving human must hold every requested scope. Delegated
+device tokens (including ARES work-create/read tokens) cannot approve or deny another
+device request, view its pending details, or revoke devices. Work-creation scope is not
+device-management authority.

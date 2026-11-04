@@ -66,6 +66,16 @@ export function findIncompatibleHumanApprovalCredentials(
   );
 }
 
+/** Configured human authority; delegated device/service/worker credentials never inherit it. */
+export function gatewayCredentialIsHumanOperator(credential: GatewayCredential): boolean {
+  return (
+    credential.actor === "user" &&
+    credential.roles.includes("operator") &&
+    !credential.roles.includes("service") &&
+    !credential.roles.includes("worker")
+  );
+}
+
 export function requireHumanApprovalActor(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -75,13 +85,7 @@ export function requireHumanApprovalActor(
   if (!actor || !auth) return undefined;
   const credential = gatewayCredentialForRequest(request, auth);
   // Authority comes from configured identity, never caller-supplied actor fields.
-  if (
-    !credential ||
-    credential.actor !== "user" ||
-    !credential.roles.includes("operator") ||
-    credential.roles.includes("service") ||
-    credential.roles.includes("worker")
-  ) {
+  if (!credential || !gatewayCredentialIsHumanOperator(credential)) {
     reply.code(403).send({ error: "human operator authority is required", code: "human_authority_required" });
     return undefined;
   }

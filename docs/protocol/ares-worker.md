@@ -37,6 +37,14 @@ fields are rejected. Exact-ID and claim-next both require that `target.services`
 that worker, with existing assignment/routing constraints intact. Concurrent claims can
 produce only one active lease. No approval or no eligible item yields `claimed: false`.
 
+ACS caps the initial lease, renewal and result-acceptance window at the approved plan's
+`maxRuntimeMs`, starting with the attempt's first lease. Re-leasing an interrupted attempt,
+even with fresh independent approval, does not reset that deadline. Expiry returns
+`worker_lease_expired`; no further result or renewal authority is granted. The default
+ARES plan budget is five minutes; longer experiments need a correspondingly bounded plan
+and independent approval. ACS fences authority and results; ARES must stop its own process
+within the approved deadline. This integration does not attest external process termination.
+
 Results use the existing strict worker envelope and attempt-derived idempotency key.
 Work item, worker, attempt, lease, action/plan/input hashes, fencing epoch and expiry are
 checked in the acceptance transaction. ARES results require mode `ares`, `simulated: false`,
@@ -63,7 +71,12 @@ Unset defaults to `acs-cli`; adding `ares-studio` requires deployment configurat
 this slice. A client ID is a public label, not an authenticated application identity.
 The authenticated verification page displays the stored client ID, escaped device name,
 public-key fingerprint and requested scopes. It excludes device codes, tokens and keys;
-anonymous visitors receive no pending-device details.
+anonymous visitors receive no pending-device details. Consent viewing/decisions and remote
+device revocation require configured human operator authority. Device/service/worker tokens,
+including ARES's work-creation token, cannot enroll another device or revoke devices.
+The disposable loopback HTTP test exercises real device-flow keys/tokens, principal binding,
+independent approval, concurrent claim, runtime cap, result binding, replay and revocation
+with synthetic data; it does not launch an adapter or an ARES Studio process.
 
 Migration 075 rebuilds the two leaf result tables to add the ARES metadata mode. Existing
 column order, rows, indexes, triggers and binding constraints are tested against v74.
