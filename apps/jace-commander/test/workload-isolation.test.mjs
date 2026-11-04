@@ -110,7 +110,7 @@ try {
     const out = await registry.interact({ sessionId: session.sessionId, input: 'test -t 0 && tty && echo PTY_$((40+2))\n', waitMs: 5000 }, 'alice');
     assert.match(out.stdout, /PTY_42/);
     assert.match(out.stdout, /\/dev\/pts\/\d+/);
-    registry.kill({ sessionId: session.sessionId }, 'alice');
+    assert.equal((await registry.kill({ sessionId: session.sessionId }, 'alice')).exited, true);
   });
 
   await test('network none (default) cannot reach host loopback services; host mode is explicit opt-in', async () => {
