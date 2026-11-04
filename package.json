@@ -63,7 +63,8 @@
     "acs": "node apps/runtime/dist/cli.js",
     "ops:pending-approval-digest": "node packages/policy-gate/dist/pending-approval-digest-cli.js",
     "test:jc-native": "npm test -w apps/jace-commander",
-    "jc:verify-independence": "node scripts/verify-jc-independence.mjs"
+    "jc:verify-independence": "node scripts/verify-jc-independence.mjs",
+    "jc:verify-release": "node scripts/verify-jc-release.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

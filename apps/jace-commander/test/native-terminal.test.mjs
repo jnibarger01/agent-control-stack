@@ -25,10 +25,11 @@ try {
   const out = await registry.interact({sessionId:interactive.sessionId,input:'test -t 0 && printf PTY_OK\n',waitMs:300},'alice');
   assert.match(out.stdout, /PTY_OK/);
   assert.throws(() => registry.output({sessionId:interactive.sessionId},'bob'), /session/i);
-  assert.throws(() => registry.kill({sessionId:interactive.sessionId},'bob'), /process|session/i);
+  await assert.rejects(registry.kill({sessionId:interactive.sessionId},'bob'), /process|session/i);
   assert.equal(registry.list('bob').processes.length, 0);
   await assert.rejects(registry.interact({sessionId:interactive.sessionId,input:'echo hijack\n'},'bob'),/session/i);
-  registry.kill({sessionId:interactive.sessionId},'alice');
+  const killed = await registry.kill({sessionId:interactive.sessionId},'alice');
+  assert.equal(killed.exited, true);
   const timed = await registry.run({command:'sleep 5',cwd:root,timeoutMs:60,waitMs:1500},policy,'alice');
   assert.equal(timed.running, false);
   const stream = await registry.run({command:'printf one; sleep .1; printf two',cwd:root,waitMs:30},policy,'alice');

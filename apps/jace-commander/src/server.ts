@@ -550,7 +550,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     interact_with_process: async (args, _cap, owner) => ok(await processes.interact(args, owner)),
     read_process_output: async (args, _cap, owner) => ok(await processes.read(args, owner)),
     list_processes: async (_args, _cap, owner) => ok(processes.list(owner)),
-    kill_process: async (args, _cap, owner) => ok(processes.kill(args, owner)),
+    kill_process: async (args, _cap, owner) => ok(await processes.kill(args, owner)),
     git_status: async (args) => ok(await gitStatus(args, fsPolicy)),
     git_diff: async (args) => ok(await gitDiff(args, fsPolicy)),
     git_log: async (args) => ok(await gitLog(args, fsPolicy)),

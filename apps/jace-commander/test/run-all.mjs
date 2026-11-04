@@ -10,10 +10,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const filters = process.argv.slice(2);
+// node test/run-all.mjs [filter ...] [--exclude name ...]
+const argv = process.argv.slice(2);
+const excludeAt = argv.indexOf('--exclude');
+const filters = excludeAt >= 0 ? argv.slice(0, excludeAt) : argv;
+const excluded = excludeAt >= 0 ? argv.slice(excludeAt + 1) : [];
 const files = fs.readdirSync(here)
   .filter((name) => name.endsWith('.test.mjs'))
   .filter((name) => filters.length === 0 || filters.some((filter) => name.includes(filter)))
+  .filter((name) => !excluded.some((filter) => name.includes(filter)))
   .sort();
 const failed = [];
 for (const file of files) {

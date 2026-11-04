@@ -35,7 +35,7 @@ export interface ProcessRegistry {
   read(args: Record<string, unknown>, owner?: string): Promise<Record<string, unknown>>;
   output(args: Record<string, unknown>, owner?: string): Record<string, unknown>;
   list(owner?: string): { processes: Record<string, unknown>[] };
-  kill(args: Record<string, unknown>, owner?: string): Record<string, unknown>;
+  kill(args: Record<string, unknown>, owner?: string): Promise<Record<string, unknown>>;
   close(): void;
 }
 function invalid(message: string): never { throw new IntegrationError('invalid_argument', message); }
@@ -197,12 +197,16 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
     read,output,
     list(owner='stdio') { return {processes:[...sessions.values()].filter((s)=>s.owner===owner).map((s)=>({
       sessionId:s.sessionId,pid:s.pid,cwd:s.cwd,argv:s.argv,exitCode:s.exitCode,signal:s.signal,running:!s.done}))}; },
-    kill(args,owner='stdio') {
+    async kill(args,owner='stdio') {
       const s=[...sessions.values()].find((s)=>s.owner===owner && (s.sessionId===args.sessionId || (typeof args.pid==='number' && s.pid===args.pid)));
       if (!s) throw new IntegrationError('not_found','managed process not found');
       if (s.done) return {sessionId:s.sessionId,pid:s.pid,alreadyExited:true};
       terminate(s);
-      return {sessionId:s.sessionId,pid:s.pid,signal:'SIGTERM',escalatesAfterMs:KILL_GRACE_MS};
+      // Return once the whole sandbox/process group is gone (SIGTERM, SIGKILL at
+      // the grace deadline), so a caller never observes a "killed" process running.
+      const until=Date.now()+KILL_GRACE_MS+2000;
+      while (!s.done && Date.now()<until) await new Promise((resolve)=>setTimeout(resolve,10));
+      return {sessionId:s.sessionId,pid:s.pid,signal:'SIGTERM',escalatesAfterMs:KILL_GRACE_MS,exited:s.done,exitSignal:s.signal};
     },
     close() { for (const s of sessions.values()) terminate(s); }
   };
