@@ -24,7 +24,7 @@ import {
   injectRuntimeBootstrap,
   issueRuntimeBootstrap
 } from "./managed.js";
-import { dcBridgeReady } from "./readiness.js";
+import { dcBridgeReady, jcServiceNotReadyReasons } from "./readiness.js";
 
 const ACS_CAPABILITY_META_KEY = "capability";
 const ACS_GUARD_META_KEY = "acsCapability";
@@ -1260,14 +1260,18 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
   if (path === "/ready" && JC) {
-    const ready = !!pair?.upstreamStarted;
+    // Ready only when governed calls can actually execute: a started child is
+    // not enough (without the authority credential every mutation is refused).
+    const notReady = jcServiceNotReadyReasons(computeJcAuthority());
+    const ready = notReady.length === 0;
     res.writeHead(ready ? 200 : 503, { "Content-Type": "application/json" });
     res.end(
       JSON.stringify({
         ready,
         variant: "jc",
         hasUpstreamPair: !!pair,
-        upstreamStarted: !!pair?.upstreamStarted
+        upstreamStarted: !!pair?.upstreamStarted,
+        ...(ready ? {} : { notReady })
       })
     );
     return;
