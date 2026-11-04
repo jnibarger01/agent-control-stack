@@ -3,6 +3,8 @@
 #
 #   apps/jace-commander/deploy/install-user-release.sh            # build + install
 #   PREFIX=/some/dir apps/jace-commander/deploy/install-user-release.sh
+#   apps/jace-commander/deploy/install-user-release.sh --status    # current / previous
+#   apps/jace-commander/deploy/install-user-release.sh --rollback  # current <-> previous
 #
 # Layout: $PREFIX/releases/<version>-<commit>/ (read-only) and $PREFIX/current
 # (atomically switched symlink). Point the bridge at it with
@@ -10,10 +12,34 @@
 # Keep $PREFIX outside JC_FS_ROOTS: workloads must never be able to alter the
 # code that verifies capabilities and holds ACS credentials. Runtime
 # dependencies only, freshly resolved from the registry (no Desktop Commander,
-# no workspace packages). Rollback: re-point `current` at the previous release.
+# no workspace packages). Every switch keeps the replaced release as
+# `previous` (last known good); --rollback swaps them atomically. Restart the
+# service afterwards: systemctl --user restart jace-commander-mcp
 set -euo pipefail
 
 PREFIX="${PREFIX:-$HOME/.local/lib/jace-commander}"
+
+# Atomically point $PREFIX/<name> at <target>.
+point() { ln -sfn "$2" "$PREFIX/.$1.tmp" && mv -T "$PREFIX/.$1.tmp" "$PREFIX/$1"; }
+show() {
+  for link in current previous; do
+    if [ -L "$PREFIX/$link" ]; then echo "$link -> $(readlink "$PREFIX/$link")"; else echo "$link: none"; fi
+  done
+}
+case "${1:-}" in
+  --status) show; exit 0 ;;
+  --rollback)
+    [ -L "$PREFIX/previous" ] || { echo "no previous release to roll back to" >&2; exit 1; }
+    from="$(readlink "$PREFIX/current")"; to="$(readlink "$PREFIX/previous")"
+    [ -f "$to/RELEASE.json" ] || { echo "previous release $to is not an installed release" >&2; exit 1; }
+    point current "$to"
+    point previous "$from"
+    echo "rolled back: current -> $to (previous -> $from)"
+    echo "restart:     systemctl --user restart jace-commander-mcp"
+    exit 0 ;;
+  "") ;;
+  *) echo "usage: $0 [--status|--rollback]" >&2; exit 2 ;;
+esac
 APP="$(cd "$(dirname "$0")/.." && pwd)"
 REPO="$(cd "$APP/../.." && pwd)"
 NODE="${NODE:-/usr/bin/node}"
@@ -24,7 +50,7 @@ command -v bwrap >/dev/null || { echo "bubblewrap (bwrap) is required for worklo
 (cd "$REPO" && npm run build -w apps/jace-commander >/dev/null)
 version="$("$NODE" -p "require('$APP/package.json').version")"
 commit="$(git -C "$REPO" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
-release="$PREFIX/releases/$version-$commit"
+release="$PREFIX/releases/${JC_RELEASE_ID:-$version-$commit}"
 
 case "$release/" in
   "$REPO"/*) echo "refusing to install inside the repository ($REPO)" >&2; exit 1 ;;
@@ -49,8 +75,11 @@ else
   chmod -R a-w "$release"
 fi
 
-ln -sfn "$release" "$PREFIX/.current.tmp"
-mv -T "$PREFIX/.current.tmp" "$PREFIX/current"
+# Keep the release being replaced as the last known good.
+if [ -L "$PREFIX/current" ] && [ "$(readlink "$PREFIX/current")" != "$release" ]; then
+  point previous "$(readlink "$PREFIX/current")"
+fi
+point current "$release"
 echo "installed: $release"
-echo "current -> $(readlink "$PREFIX/current")"
+show
 echo "bridge:   Environment=JC_RUNTIME_DIR=$PREFIX/current"
