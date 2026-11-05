@@ -151,14 +151,14 @@ rollout approval.
    `acs:read` only (not the worker token) into
    `~/.config/acs/jc-authority.token` (0600). Without it every mutation fails closed
    and `/jc/ready` stays not ready.
-4. Install the release (`install-user-release.sh`) and update the env file: the
-   template in the repository could not be edited by the automation that
-   produced this change (a local guardrail protects `*.env*` paths), so add by
-   hand, or rely on the unit's `Environment=` lines:
-   `JC_ACS_AUTHORITY_TOKEN_FILE`, `JC_RUNTIME_DIR`, optionally
-   `JC_WORKLOAD_NETWORK=host`, `JC_SANDBOX_HIDE` (ACS data dirs outside any
-   checkout, e.g. a live instance's `storage`), `JC_SANDBOX_WRITABLE` (caches such
-   as `~/.npm`). Keep `ACS_GATEWAY_URL`/`ACS_WORKER_TOKEN` (result submission) set.
+4. Install the release (`install-user-release.sh`). Copy
+   `apps/dc-mcp-gateway/deploy/jace-commander-bridge.env.example` to
+   `~/.config/acs/jc-bridge.env` (0600) and fill the placeholders. The unit, not
+   that file, sets `JC_ACS_AUTHORITY_TOKEN_FILE`, `JC_RUNTIME_DIR`, and
+   `JC_REQUIRE_INSTALLED_RELEASE`. Optional workload overrides
+   (`JC_WORKLOAD_NETWORK=host`, `JC_SANDBOX_HIDE`, `JC_SANDBOX_WRITABLE`) belong
+   in the env file. `JC_ACS_TOKEN` is the model-facing tool credential only and
+   never satisfies the authority check.
 5. Replace the old unit with the template, `systemctl --user daemon-reload`, restart
    `jace-commander-mcp`, and check `127.0.0.1:8003/authority` (`runtime.dir` must be
    the native release, never `vendor/desktop-commander`) and the edge `/jc/ready`.
