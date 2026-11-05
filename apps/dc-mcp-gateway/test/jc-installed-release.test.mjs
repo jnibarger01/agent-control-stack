@@ -174,4 +174,21 @@ test('the CachyOS unit pins the installed release the installer creates', () => 
   // JC itself is never launched from the checkout: no DC_ARGS / JC_DC_DIR in the unit.
   assert.doesNotMatch(unit, /^Environment=(DC_ARGS|JC_DC_DIR)=/m);
   assert.match(unit, /^ExecStart=\/usr\/bin\/node /m);
+  assert.equal(environment.JC_ACS_AUTHORITY_TOKEN_FILE, '%h/.config/acs/jc-authority.token');
+});
+
+test('the bridge env example does not present JC_ACS_TOKEN as the authority credential', () => {
+  const example = fs.readFileSync(path.join(gateway, 'deploy', 'jace-commander-bridge.env.example'), 'utf8');
+  assert.match(example, /~\/\.config\/acs\/jc-bridge\.env/);
+  assert.match(example, /JC_ACS_AUTHORITY_TOKEN_FILE=%h\/\.config\/acs\/jc-authority\.token/);
+  assert.match(example, /role service and scope acs:read ONLY/);
+  assert.match(example, /JC_ACS_TOKEN and ACS_WORKER_TOKEN are\n# never used for it/);
+  // The old template told operators this commented variable was the required credential.
+  assert.doesNotMatch(example, /Required read-scoped credential/);
+  assert.doesNotMatch(example, /^JC_ACS_TOKEN=/m);
+  assert.doesNotMatch(example, /^JC_RUNTIME_DIR=/m);
+  assert.doesNotMatch(example, /^DC_ARGS=/m);
+  assert.match(example, /^ACS_GATEWAY_URL=/m);
+  assert.match(example, /^ACS_WORKER_TOKEN=/m);
+  assert.match(example, /^ACS_WORKER_ID=acs-jc-bridge$/m);
 });
