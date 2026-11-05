@@ -1,7 +1,7 @@
 import { createHmac, generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -71,8 +71,115 @@ function opencodeE2eEnvironment(home: string, config: string): NodeJS.ProcessEnv
     OPENCODE_DISABLE_AUTOUPDATE: "1",
     // The fixture model is fully declared locally. Native CLI model-catalog
     // fetching is unrelated to the authenticated MCP interoperability contract.
-    OPENCODE_DISABLE_MODELS_FETCH: "1"
+    OPENCODE_DISABLE_MODELS_FETCH: "1",
+    // Private `opencode serve` password for this fixture only. v2 generates one
+    // when it is unset and will not accept the follow-up `run --server` without it.
+    OPENCODE_SERVER_PASSWORD: opencodeFixtureServerPassword
   };
+}
+
+const opencodeFixtureServerPassword = "opencode-fixture-password";
+
+async function reserveLoopbackPort(): Promise<number> {
+  const probe = createServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const address = probe.address();
+  if (!address || typeof address === "string") throw new Error("could not reserve a loopback port");
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  return address.port;
+}
+
+function startOpenCodeServer(
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  port: number
+): {
+  child: ReturnType<typeof spawn>;
+  output: () => string;
+} {
+  let output = "";
+  const child = spawn(
+    opencodeExecutable!,
+    ["serve", "--hostname", "127.0.0.1", "--port", String(port), "--print-logs"],
+    { cwd, env, stdio: ["ignore", "pipe", "pipe"] }
+  );
+  child.stdout?.on("data", (chunk: Buffer) => (output += chunk.toString("utf8")));
+  child.stderr?.on("data", (chunk: Buffer) => (output += chunk.toString("utf8")));
+  return { child, output: () => output };
+}
+
+async function readOpenCodeMcpStatus(
+  port: number,
+  directory: string
+): Promise<{ status: "connected" | "failed" | "pending" | "disabled" | "needs_auth" | "absent"; detail: string }> {
+  const authorization = `Basic ${Buffer.from(`opencode:${opencodeFixtureServerPassword}`).toString("base64")}`;
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/mcp`, {
+      headers: {
+        accept: "application/json",
+        authorization,
+        // `opencode run` sends this header from its cwd. Poll that directory, not the
+        // server process cwd, or a second MCP connection can still be pending at prompt time.
+        "x-opencode-directory": encodeURIComponent(directory)
+      },
+      signal: AbortSignal.timeout(2_000)
+    });
+    if (!response.ok) return { status: "absent", detail: `HTTP ${response.status}` };
+    const body = (await response.json()) as {
+      location?: { directory?: string };
+      data?: Array<{ name?: string; status?: { status?: string; error?: string } }>;
+    };
+    if (body.location?.directory !== directory) {
+      return { status: "absent", detail: `directory ${body.location?.directory ?? "missing"}` };
+    }
+    const server = body.data?.find((entry) => entry.name === "acs-gateway");
+    const status = server?.status?.status;
+    const detail = server?.status?.error ?? status ?? "missing";
+    if (
+      status === "connected" ||
+      status === "failed" ||
+      status === "pending" ||
+      status === "disabled" ||
+      status === "needs_auth"
+    ) {
+      return { status, detail };
+    }
+    return { status: "absent", detail };
+  } catch (error) {
+    return { status: "absent", detail: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+async function waitForOpenCodeMcp(
+  port: number,
+  directory: string,
+  expected: "connected" | "settled",
+  diagnostics: () => string
+): Promise<void> {
+  const deadline = Date.now() + 20_000;
+  let last = "absent";
+  while (Date.now() < deadline) {
+    const current = await readOpenCodeMcpStatus(port, directory);
+    last = `${current.status}: ${current.detail}`;
+    if (expected === "connected" && current.status === "connected") return;
+    if (
+      expected === "settled" &&
+      (current.status === "connected" ||
+        current.status === "failed" ||
+        current.status === "disabled" ||
+        current.status === "needs_auth")
+    ) {
+      return;
+    }
+    if (
+      expected === "connected" &&
+      (current.status === "failed" || current.status === "disabled" || current.status === "needs_auth")
+    ) {
+      throw new Error(`OpenCode MCP acs-gateway ${last}\n${diagnostics()}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`OpenCode MCP acs-gateway did not become ${expected}. Last status: ${last}\n${diagnostics()}`);
 }
 
 async function stopFixtureProcess(child: ReturnType<typeof spawn> | undefined): Promise<void> {
@@ -1686,13 +1793,16 @@ describe("gateway MCP transport", () => {
     "proves real OpenCode CLI interoperability through a temporary local model and gateway",
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "acs-gateway-opencode-e2e-"));
-      const allowed = join(dir, "allowed");
+      const allowedLink = join(dir, "allowed");
+      mkdirSync(allowedLink);
+      // OpenCode keys MCP by directory. Resolve symlinks such as /tmp -> /var/tmp
+      // so the server cwd, the run cwd, and the status poll are one location.
+      const allowed = realpathSync(allowedLink);
       const configPath = join(dir, "machine-controller.json");
       const dbPath = join(dir, "control.db");
       const opencodeConfigPath = join(dir, "opencode.json");
       const isolatedConfigHome = join(dir, "config");
       const isolatedDataHome = join(dir, "data");
-      mkdirSync(allowed);
       mkdirSync(isolatedConfigHome);
       mkdirSync(isolatedDataHome);
       writeFileSync(
@@ -1702,7 +1812,9 @@ describe("gateway MCP transport", () => {
           security: { max_output_bytes: 256, command_timeout_ms: 5_000 },
           agents: [
             {
-              id: "fixture-agent",
+              // Published MCP schema only accepts directAgentNames. OpenCode v2
+              // rejects any other id locally, before the gateway sees the call.
+              id: "opencode",
               command: "node",
               args: ["-e", "process.stdout.write('fixture-response:' + process.argv.at(-1))"],
               permission_mode: "read-only"
@@ -1713,6 +1825,11 @@ describe("gateway MCP transport", () => {
       );
 
       const modelRequests: Array<Record<string, unknown>> = [];
+      // OpenCode can snapshot the first agent request before MCP tools join the
+      // registry, even after /api/mcp says connected. A later request observes
+      // registrations that landed in between. The extra step is capped; a run
+      // that never advertises the ACS tool still stops with the refusal string.
+      let builtinOnlySteps = 0;
       const modelServer = createServer((request, response) => {
         if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
           response.writeHead(404).end();
@@ -1724,96 +1841,171 @@ describe("gateway MCP transport", () => {
           const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
           modelRequests.push(body);
           const messages = Array.isArray(body.messages) ? body.messages : [];
-          const hasToolResult = messages.some(
-            (message) => message && typeof message === "object" && (message as Record<string, unknown>).role === "tool"
-          );
-          response.writeHead(200, { "content-type": "text/event-stream" });
-          if (hasToolResult) {
-            const toolText = JSON.stringify(messages);
-            const content =
-              toolText.includes("fixture-response:") || toolText.includes("completed through the gateway")
-                ? "OpenCode fixture invocation completed"
-                : "OpenCode fixture tool failed";
+          const systemText = messages
+            .filter(
+              (message) =>
+                message && typeof message === "object" && (message as Record<string, unknown>).role === "system"
+            )
+            .map((message) => {
+              const content = (message as Record<string, unknown>).content;
+              return typeof content === "string" ? content : JSON.stringify(content);
+            })
+            .join("\n");
+          // OpenCode asks the fixture model to title the session before the user turn.
+          // That request carries no tools. Answer it, and leave the tool assertion on the agent turn.
+          if (systemText.includes("You name conversations")) {
             response.end(
               `data: ${JSON.stringify({
-                id: "fixture-completion-2",
+                id: "fixture-title",
                 object: "chat.completion.chunk",
                 choices: [
                   {
                     index: 0,
-                    delta: { role: "assistant", content },
+                    delta: { role: "assistant", content: "OpenCode fixture session" },
                     finish_reason: null
                   }
                 ]
               })}\n\ndata: ${JSON.stringify({
-                id: "fixture-completion-2",
+                id: "fixture-title",
                 object: "chat.completion.chunk",
                 choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
               })}\n\ndata: [DONE]\n\n`
             );
             return;
           }
-          const tools = Array.isArray(body.tools) ? body.tools : [];
-          const tool = tools.find(
-            (candidate) =>
-              candidate &&
-              typeof candidate === "object" &&
-              typeof (candidate as Record<string, unknown>).function === "object" &&
-              String(((candidate as Record<string, unknown>).function as Record<string, unknown>).name).includes(
-                "test_agent_run"
-              )
-          ) as Record<string, unknown> | undefined;
-          if (!tool) {
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          const finish = (id: string, content: string) => {
             response.end(
               `data: ${JSON.stringify({
-                id: "fixture-completion-no-tool",
+                id,
                 object: "chat.completion.chunk",
                 choices: [
                   {
                     index: 0,
-                    delta: { role: "assistant", content: "No ACS direct-agent tool was advertised" },
+                    delta: { role: "assistant", content },
                     finish_reason: "stop"
                   }
                 ]
               })}\n\ndata: [DONE]\n\n`
             );
+          };
+          const callTool = (sseId: string, callId: string, functionName: string, argumentsValue: string) => {
+            response.end(
+              `data: ${JSON.stringify({
+                id: sseId,
+                object: "chat.completion.chunk",
+                choices: [
+                  {
+                    index: 0,
+                    delta: {
+                      role: "assistant",
+                      tool_calls: [
+                        {
+                          index: 0,
+                          id: callId,
+                          type: "function",
+                          function: { name: functionName, arguments: argumentsValue }
+                        }
+                      ]
+                    },
+                    finish_reason: null
+                  }
+                ]
+              })}\n\ndata: ${JSON.stringify({
+                id: sseId,
+                object: "chat.completion.chunk",
+                choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }]
+              })}\n\ndata: [DONE]\n\n`
+            );
+          };
+          const namedTools = (Array.isArray(body.tools) ? body.tools : []).flatMap((candidate) => {
+            if (!candidate || typeof candidate !== "object") return [];
+            const fn = (candidate as Record<string, unknown>).function;
+            if (!fn || typeof fn !== "object") return [];
+            const name = (fn as Record<string, unknown>).name;
+            if (typeof name !== "string") return [];
+            const parameters = (fn as Record<string, unknown>).parameters;
+            return [
+              {
+                name,
+                parameters:
+                  parameters && typeof parameters === "object" ? (parameters as Record<string, unknown>) : undefined
+              }
+            ];
+          });
+          const toolText = JSON.stringify(
+            messages.filter(
+              (message) =>
+                message && typeof message === "object" && (message as Record<string, unknown>).role === "tool"
+            )
+          );
+          // A directory listing from the registry-refresh step is not the ACS result.
+          const acsToolResult =
+            toolText.includes("fixture-call-1") ||
+            toolText.includes("fixture-response:") ||
+            toolText.includes("completed through the gateway") ||
+            toolText.includes("test_agent_run");
+          if (acsToolResult) {
+            finish(
+              "fixture-completion-2",
+              toolText.includes("fixture-response:") || toolText.includes("completed through the gateway")
+                ? "OpenCode fixture invocation completed"
+                : "OpenCode fixture tool failed"
+            );
             return;
           }
-          const functionName = String((tool.function as Record<string, unknown>).name);
-          const argumentsValue = JSON.stringify({
-            agent: "fixture-agent",
-            prompt: "OpenCode real CLI check",
-            cwd: allowed,
-            timeoutSeconds: 5,
-            permissionMode: "read-only"
-          });
-          response.end(
-            `data: ${JSON.stringify({
-              id: "fixture-completion-1",
-              object: "chat.completion.chunk",
-              choices: [
-                {
-                  index: 0,
-                  delta: {
-                    role: "assistant",
-                    tool_calls: [
-                      {
-                        index: 0,
-                        id: "fixture-call-1",
-                        type: "function",
-                        function: { name: functionName, arguments: argumentsValue }
-                      }
-                    ]
-                  },
-                  finish_reason: null
-                }
-              ]
-            })}\n\ndata: ${JSON.stringify({
-              id: "fixture-completion-1",
-              object: "chat.completion.chunk",
-              choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }]
-            })}\n\ndata: [DONE]\n\n`
-          );
+          const acsTool = namedTools.find((tool) => tool.name.includes("test_agent_run"));
+          if (acsTool) {
+            callTool(
+              "fixture-completion-1",
+              "fixture-call-1",
+              acsTool.name,
+              JSON.stringify({
+                agent: "opencode",
+                prompt: "OpenCode real CLI check",
+                cwd: allowed,
+                timeoutSeconds: 5,
+                permissionMode: "read-only"
+              })
+            );
+            return;
+          }
+          const advertisedProbe =
+            namedTools.find((tool) => tool.name === "glob") ?? namedTools.find((tool) => tool.name === "read");
+          // An empty tool list is the same race with the registry not yet visible.
+          // Calling glob still yields a later request, which is the snapshot that can see MCP tools.
+          const probe =
+            advertisedProbe ?? (namedTools.length === 0 ? { name: "glob", parameters: undefined } : undefined);
+          if (probe && builtinOnlySteps < 2) {
+            builtinOnlySteps += 1;
+            const properties =
+              probe.parameters && typeof probe.parameters.properties === "object" && probe.parameters.properties
+                ? (probe.parameters.properties as Record<string, unknown>)
+                : {};
+            const required = Array.isArray(probe.parameters?.required)
+              ? probe.parameters.required.filter((key): key is string => typeof key === "string")
+              : [];
+            const keys = required.length > 0 ? required : Object.keys(properties);
+            const probeArgs: Record<string, string> = {};
+            for (const key of keys) {
+              if (/pattern/i.test(key)) probeArgs[key] = "*";
+              else if (/path|file|dir/i.test(key))
+                probeArgs[key] = probe.name === "read" ? join(allowed, "fixture-probe.txt") : ".";
+              else probeArgs[key] = "fixture-probe";
+            }
+            if (Object.keys(probeArgs).length === 0) {
+              probeArgs[probe.name === "read" ? "filePath" : "pattern"] =
+                probe.name === "read" ? join(allowed, "fixture-probe.txt") : "*";
+            }
+            callTool(
+              `fixture-probe-${builtinOnlySteps}`,
+              `fixture-probe-${builtinOnlySteps}`,
+              probe.name,
+              JSON.stringify(probeArgs)
+            );
+            return;
+          }
+          finish("fixture-completion-no-tool", "No ACS direct-agent tool was advertised");
         });
       });
       await new Promise<void>((resolve) => modelServer.listen(0, "127.0.0.1", resolve));
@@ -1837,7 +2029,10 @@ describe("gateway MCP transport", () => {
             "acs-gateway": {
               type: "remote",
               url: "PLACEHOLDER",
-              headers: { Authorization: "Bearer deterministic-opencode-token" }
+              headers: { Authorization: "Bearer deterministic-opencode-token" },
+              // v2 hides MCP tools behind the execute/code-mode tool unless this is false.
+              // The fixture still requires the ACS tool to be advertised by name and invoked.
+              codemode: false
             }
           }
         })
@@ -1853,6 +2048,9 @@ describe("gateway MCP transport", () => {
       seedActor(dbPath, "local-dev", "local_bearer:local-dev");
       let opencodeProcess: ReturnType<typeof spawn> | undefined;
       let invalidRun: ReturnType<typeof spawn> | undefined;
+      let opencodeServer: ReturnType<typeof startOpenCodeServer> | undefined;
+      let invalidServer: ReturnType<typeof startOpenCodeServer> | undefined;
+      const opencodeEnv = opencodeE2eEnvironment(dir, opencodeConfigPath);
       try {
         await app.listen({ host: "127.0.0.1", port: 0 });
         const gatewayAddress = app.server.address();
@@ -1861,12 +2059,27 @@ describe("gateway MCP transport", () => {
         (config.mcp as Record<string, Record<string, unknown>>)["acs-gateway"].url =
           `http://127.0.0.1:${gatewayAddress.port}/mcp`;
         writeFileSync(opencodeConfigPath, JSON.stringify(config));
+        // v2 `run --standalone` sends the prompt as soon as the private server listens,
+        // before remote MCP tools/list finishes. Serve on a loopback port, wait until
+        // acs-gateway is connected, then attach the run to that server.
+        const opencodePort = await reserveLoopbackPort();
+        opencodeServer = startOpenCodeServer(allowed, opencodeEnv, opencodePort);
+        await waitForOpenCodeMcp(opencodePort, allowed, "connected", () => opencodeServer?.output() ?? "");
+        writeFileSync(join(allowed, "fixture-probe.txt"), "probe\n");
         opencodeProcess = spawn(
           opencodeExecutable!,
-          ["run", "--pure", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
+          [
+            "run",
+            "--server",
+            `http://127.0.0.1:${opencodePort}`,
+            "--auto",
+            "--format",
+            "json",
+            "Use the ACS direct agent tool and report the result."
+          ],
           {
             cwd: allowed,
-            env: opencodeE2eEnvironment(dir, opencodeConfigPath),
+            env: opencodeEnv,
             stdio: ["ignore", "pipe", "pipe"]
           }
         );
@@ -1879,7 +2092,17 @@ describe("gateway MCP transport", () => {
           opencodeProcess?.once("close", resolve);
         });
         expect(exitCode, stderr).toBe(0);
-        expect(stdout).toContain("OpenCode fixture invocation completed");
+        const advertisedTools = modelRequests.flatMap((request) =>
+          Array.isArray(request.tools)
+            ? request.tools.flatMap((tool) => {
+                if (!tool || typeof tool !== "object") return [];
+                const fn = (tool as Record<string, unknown>).function;
+                const name = fn && typeof fn === "object" ? (fn as Record<string, unknown>).name : undefined;
+                return typeof name === "string" ? [name] : [];
+              })
+            : []
+        );
+        expect(stdout, advertisedTools.join(",")).toContain("OpenCode fixture invocation completed");
         expect(modelRequests.some((request) => Array.isArray(request.tools))).toBe(true);
         const invalidConfig = JSON.parse(readFileSync(opencodeConfigPath, "utf8")) as Record<string, unknown>;
         (
@@ -1889,12 +2112,28 @@ describe("gateway MCP transport", () => {
           >
         )["Authorization"] = "Bearer invalid-opencode-token";
         writeFileSync(opencodeConfigPath, JSON.stringify(invalidConfig));
+        await stopFixtureProcess(opencodeServer?.child);
+        // A second private server reads the rejected token. Wait until its MCP
+        // status leaves `pending` so an in-flight connect cannot be mistaken for refusal.
+        const invalidPort = await reserveLoopbackPort();
+        invalidServer = startOpenCodeServer(allowed, opencodeEnv, invalidPort);
+        await waitForOpenCodeMcp(invalidPort, allowed, "settled", () => invalidServer?.output() ?? "");
+        const requestsBeforeInvalidRun = modelRequests.length;
+        builtinOnlySteps = 0;
         invalidRun = spawn(
           opencodeExecutable!,
-          ["run", "--pure", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
+          [
+            "run",
+            "--server",
+            `http://127.0.0.1:${invalidPort}`,
+            "--auto",
+            "--format",
+            "json",
+            "Use the ACS direct agent tool and report the result."
+          ],
           {
             cwd: allowed,
-            env: opencodeE2eEnvironment(dir, opencodeConfigPath),
+            env: opencodeEnv,
             stdio: ["ignore", "pipe", "pipe"]
           }
         );
@@ -1907,21 +2146,20 @@ describe("gateway MCP transport", () => {
         });
         expect(invalidExitCode).toBe(0);
         expect(invalidOutput).toContain("No ACS direct-agent tool was advertised");
-        expect(
-          modelRequests.some(
-            (request) =>
-              Array.isArray(request.tools) &&
-              !request.tools.some(
-                (tool) =>
-                  tool &&
-                  typeof tool === "object" &&
-                  typeof (tool as Record<string, unknown>).function === "object" &&
-                  String(((tool as Record<string, unknown>).function as Record<string, unknown>).name).includes(
-                    "test_agent_run"
-                  )
+        const invalidRequests = modelRequests.slice(requestsBeforeInvalidRun);
+        const requestAdvertisesAcsTool = (request: Record<string, unknown>) =>
+          Array.isArray(request.tools) &&
+          request.tools.some(
+            (tool) =>
+              tool &&
+              typeof tool === "object" &&
+              typeof (tool as Record<string, unknown>).function === "object" &&
+              String(((tool as Record<string, unknown>).function as Record<string, unknown>).name).includes(
+                "test_agent_run"
               )
-          )
-        ).toBe(true);
+          );
+        expect(invalidRequests.some((request) => Array.isArray(request.tools))).toBe(true);
+        expect(invalidRequests.some(requestAdvertisesAcsTool)).toBe(false);
         const events = new SqliteWorkItemStore(dbPath);
         try {
           expect(
@@ -1940,14 +2178,20 @@ describe("gateway MCP transport", () => {
         }
         expect(readFileSync(join(dir, "machine-audit.jsonl"), "utf8")).toContain('"tool":"test.agent.run"');
       } finally {
-        await Promise.all([stopFixtureProcess(opencodeProcess), stopFixtureProcess(invalidRun)]);
+        await Promise.all([
+          stopFixtureProcess(opencodeProcess),
+          stopFixtureProcess(invalidRun),
+          stopFixtureProcess(opencodeServer?.child),
+          stopFixtureProcess(invalidServer?.child)
+        ]);
         await app.close();
         await new Promise<void>((resolve) => modelServer.close(() => resolve()));
         rmSync(dir, { recursive: true, force: true });
       }
     },
-    // Two real OpenCode processes. Idle is about 3s; the 5s default trips when vitest saturates the machine.
-    30_000
+    // Two private OpenCode servers, each waited through MCP startup, then a run attached to it.
+    // A builtin-only first agent turn may take one extra local tool step before the ACS tool is visible.
+    60_000
   );
 
   it.skipIf(!hermesExecutable)(
@@ -2215,7 +2459,8 @@ describe("gateway MCP transport", () => {
           hermesFixture.launcher,
           [
             "--ignore-rules",
-            "--no-restore-cwd",
+            "--in",
+            allowed,
             "-z",
             "Run the explicitly registered ACS fixture agent and report its result."
           ],

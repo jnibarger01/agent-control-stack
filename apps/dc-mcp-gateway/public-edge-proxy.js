@@ -1,17 +1,25 @@
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { allowedPublicRoute } from './public-edge-policy.js';
-import { INGRESS_CLIENT_HEADER, normalizeIp } from './consent-guard.js';
+import {
+  INGRESS_CLIENT_HEADER,
+  INGRESS_PROOF_HEADER,
+  SPOOFED_FORWARDED_HEADERS,
+  normalizeIp,
+  stampIngressIdentity,
+  assertIngressIdentityKey,
+} from './consent-guard.js';
 
 const HOP_HEADERS = new Set([
   'connection', 'proxy-connection', 'proxy-authorization', 'keep-alive',
   'upgrade', 'transfer-encoding', 'te', 'trailer', 'host'
 ]);
+const STRIPPED = new Set([INGRESS_CLIENT_HEADER, INGRESS_PROOF_HEADER, ...SPOOFED_FORWARDED_HEADERS]);
 const filtered = (headers) => Object.fromEntries(
   Object.entries(headers).filter(([k]) => {
     const name = k.toLowerCase();
-    // Drop a client-supplied ingress stamp so only the socket peer below is forwarded.
-    return !HOP_HEADERS.has(name) && !name.startsWith('x-forwarded-') && name !== INGRESS_CLIENT_HEADER;
+    // Drop client-supplied identity. The stamp below is the only one forwarded.
+    return !HOP_HEADERS.has(name) && !name.startsWith('x-forwarded-') && !STRIPPED.has(name);
   })
 );
 const failure = (res, status) => {
@@ -35,10 +43,11 @@ const consume = (req, maxBytes) => new Promise((resolve, reject) => {
   req.on('error', reject);
   req.on('aborted', () => reject(new Error('request aborted')));
 });
-export function createPublicIngress({ upstreamPort = 8010, jcResource }) {
+export function createPublicIngress({ upstreamPort = 8010, jcResource, identityKey }) {
   if (!/^https:\/\/[^\s]+\/jc\/mcp$/.test(jcResource || '')) throw new Error('JC_RESOURCE required');
   if (!Number.isInteger(upstreamPort) || upstreamPort < 1 || upstreamPort > 65535)
     throw new Error('invalid upstream port');
+  assertIngressIdentityKey(identityKey);
   return http.createServer(async (req, res) => {
     const consent = req.url?.split('?')[0] === '/authorize/consent' && req.method === 'POST';
     let body = null;
@@ -54,10 +63,11 @@ export function createPublicIngress({ upstreamPort = 8010, jcResource }) {
     }
     const headers = filtered(req.headers);
     if (consent) headers['content-length'] = String(body.length);
-    // The gateway honors this only when its TCP peer is loopback. This file's
-    // listener stays off unless the file itself is the entrypoint.
+    // Proof is bound to the socket this process accepted. A client-supplied
+    // stamp was stripped above. The listener stays off unless this file is the entrypoint.
     const stamped = normalizeIp(req.socket && req.socket.remoteAddress);
-    if (stamped) headers[INGRESS_CLIENT_HEADER] = stamped;
+    if (consent && !stamped) { failure(res, 400); return; }
+    if (stamped) Object.assign(headers, stampIngressIdentity(stamped, identityKey));
     const upstream = http.request({
       hostname: '127.0.0.1', port: upstreamPort, path: req.url,
       method: req.method, headers
@@ -75,6 +85,16 @@ export function createPublicIngress({ upstreamPort = 8010, jcResource }) {
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const port = Number(process.env.PUBLIC_INGRESS_PORT || 8011);
   const upstreamPort = Number(process.env.GATEWAY_PORT || 8010);
-  const server = createPublicIngress({ upstreamPort, jcResource: process.env.JC_RESOURCE });
+  let server;
+  try {
+    server = createPublicIngress({
+      upstreamPort,
+      jcResource: process.env.JC_RESOURCE,
+      identityKey: process.env.JC_INGRESS_IDENTITY_KEY || '',
+    });
+  } catch (error) {
+    console.error(`public ingress: ${error.message}; refusing to start`);
+    process.exit(1);
+  }
   server.listen(port, '127.0.0.1', () => console.log('public JC ingress listening on loopback:' + port));
 }

@@ -27,7 +27,7 @@ ChatGPT ──HTTPS──► https://jacen-ubuntu.tailaa6d41.ts.net/mcp
     `x-dc-client`, `x-dc-attestation` — short-lived HMAC over the identity,
     keyed by `GATEWAY_EXECUTION_TOKEN`). The bearer token is never forwarded;
     client-supplied `x-dc-*` headers are always stripped.
-  - Consent page gated by `CONSENT_PASSPHRASE` (typed by the owner in a browser). The passphrase must be at least 16 characters and mix two character classes, or the gateway refuses to start. Five failed attempts for one client identity, five for one OAuth client, or twenty overall lock consent for 15 minutes.
+  - Consent page gated by `CONSENT_PASSPHRASE` (typed by the owner in a browser). The passphrase must be at least 16 characters and mix two character classes, or the gateway refuses to start. Five failed attempts for one authenticated client identity, five for one OAuth client, or twenty overall lock consent for 15 minutes. The counters are shared across gateway processes in `DATA_DIR/consent-lockout.json`. The public ingress proves the client address with `JC_INGRESS_IDENTITY_KEY`; a spoofed identity header is rejected.
 - `bridge.js` — MCP SDK stdio→Streamable HTTP multiplexer, bound to 127.0.0.1
   only (replaces Supergateway, which cannot bind loopback). It owns one
   long-lived `StdioClientTransport` and therefore one canonical Desktop

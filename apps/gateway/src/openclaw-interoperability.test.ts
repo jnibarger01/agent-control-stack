@@ -297,7 +297,11 @@ describe("installed OpenClaw interoperability", () => {
                 model: { primary: "fixture/fixture-model" },
                 skipBootstrap: true
               },
-              list: [{ id: "main", default: true, workspace: allowed, model: "fixture/fixture-model" }]
+              // OpenClaw 2026.11 keys agents by id. A boolean `default` marker is rejected;
+              // a sole entry is the agent used by this fixture.
+              entries: {
+                main: { workspace: allowed, model: "fixture/fixture-model" }
+              }
             },
             models: {
               mode: "merge",

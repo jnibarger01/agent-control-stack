@@ -167,8 +167,13 @@ describe.skipIf(major < 24)("nodeWouldProxy agrees with Node's real env-proxy di
       { NO_PROXY: `127.0.0.1:${v4Port + 1}` },
       { NO_PROXY: ".localhost" }
     ]) {
-      add(v4, extra);
-      add(local, extra);
+      // Node 26 treats a bare `*` entry as match-all even beside other hosts, so a
+      // live fetch of `*,example.com` is DIRECT. The guard still refuses that value
+      // (`*` is a bypass only as the whole string). safetyOnly accepts DIRECT while
+      // requiring the guard's own verdict to stay PROXIED.
+      const starredList = extra.NO_PROXY === "*,example.com";
+      add(v4, extra, starredList);
+      add(local, extra, starredList);
     }
     if (v6Port) {
       const v6 = `http://[::1]:${v6Port}/`;

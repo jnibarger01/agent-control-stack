@@ -7,8 +7,8 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 ROOT="$(mktemp -d /tmp/acs-cert-XXXXXX)"
-mkdir -p "$ROOT/workspace" "$ROOT/dc-state" "$ROOT/router" "$ROOT/logs"
-chmod 700 "$ROOT" "$ROOT/dc-state" "$ROOT/router"
+mkdir -p "$ROOT/workspace" "$ROOT/dc-state" "$ROOT/router" "$ROOT/logs" "$ROOT/gateway-data"
+chmod 700 "$ROOT" "$ROOT/dc-state" "$ROOT/router" "$ROOT/gateway-data"
 LOG="$ROOT/logs"
 export MISSION_ROUTER_HOME="$ROOT/router"
 export DESKTOP_COMMANDER_STATE_DIR="$ROOT/dc-state"
@@ -17,6 +17,32 @@ FAILURES=0
 ACS_PORT=8971; BRIDGE_PORT=8972; GW_PORT=8973
 WORKSPACE="$ROOT/workspace"
 note() { echo "[cert] $*"; }
+# set -u makes `kill $GW_PID` abort before any signal is sent when an earlier
+# stage fails and that pid was never assigned. Only signal pids that exist.
+stop_cert() {
+  local pid
+  for pid in ${ACS_PID:-} ${BRIDGE_PID:-} ${GW_PID:-}; do
+    if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; fi
+  done
+}
+trap stop_cert EXIT
+REPO_ROOT="$(cd "$PWD/../.." && pwd)"
+EXTERNAL_DC="/home/jacen/projects/desktop-commander/dist/index.js"
+VENDORED_DC="$REPO_ROOT/vendor/desktop-commander/dist/index.js"
+if [[ -f "$EXTERNAL_DC" ]]; then
+  DC_ENTRYPOINT="$EXTERNAL_DC"
+elif [[ -f "$VENDORED_DC" ]]; then
+  DC_ENTRYPOINT="$VENDORED_DC"
+else
+  DC_ENTRYPOINT=""
+fi
+MR_CLI="/home/jacen/projects/mission-router/src/cli.mjs"
+if [[ -z "$DC_ENTRYPOINT" || ! -f "$MR_CLI" ]]; then
+  note "BLOCKED: certification needs a Desktop Commander dist ($EXTERNAL_DC or $VENDORED_DC) and $MR_CLI; refusing to start services"
+  [[ -n "$DC_ENTRYPOINT" ]] && note "desktop commander dist: $DC_ENTRYPOINT" || note "desktop commander dist: absent"
+  [[ -f "$MR_CLI" ]] && note "mission-router: $MR_CLI" || note "mission-router: absent"
+  exit 1
+fi
 
 # 1. Capability signing keys (throwaway, fresh per run).
 node -e "
@@ -28,7 +54,6 @@ fs.writeFileSync('$WORKSPACE/acs.cap.public', publicKey.export({format:'der',typ
 "
 ACS_PRIVATE_KEY=$(cat "$WORKSPACE/acs.cap.private")
 ACS_PUBLIC_KEY_B64=$(cat "$WORKSPACE/acs.cap.public")
-DC_ENTRYPOINT="/home/jacen/projects/desktop-commander/dist/index.js"
 DC_ENTRY_FINGERPRINT=$(sha256sum "$DC_ENTRYPOINT" | cut -d' ' -f1)
 MR_TOKEN="mr-service-token-0123456789abcdef"
 SVC_TOKEN="svc-gateway-token-0123456789abcdef"
@@ -58,7 +83,7 @@ env "${ACS_ENV[@]}" node e2e/acs-server.mjs >"$LOG/acs.log" 2>&1 &
 ACS_PID=$!
 sleep 2
 if ! curl -sf "http://127.0.0.1:${ACS_PORT}/livez" >/dev/null; then
-  note "ACS gateway FAILED"; cat "$LOG/acs.log"; kill $ACS_PID $BRIDGE_PID $GW_PID 2>/dev/null; exit 1
+  note "ACS gateway FAILED"; cat "$LOG/acs.log"; exit 1
 fi
 note "ACS gateway up (pid $ACS_PID)"
 
@@ -70,12 +95,12 @@ ACS_DC_RUNTIME_SCOPES="fs.read,fs.write,process.exec,process.spawn" \
 DESKTOP_COMMANDER_STATE_DIR="$ROOT/dc-state" \
 BRIDGE_PORT="$BRIDGE_PORT" DC_GATEWAY_EXECUTION_TOKEN="$EXEC_TOKEN" \
 DC_CMD="$(which node)" \
-DC_ARGS="/home/jacen/projects/desktop-commander/dist/index.js" \
+DC_ARGS="$DC_ENTRYPOINT" \
 node bridge.js >"$LOG/bridge.log" 2>&1 &
 BRIDGE_PID=$!
 sleep 2
 if ! curl -sf "http://127.0.0.1:${BRIDGE_PORT}/healthz" >/dev/null; then
-  note "bridge FAILED"; cat "$LOG/bridge.log"; kill $ACS_PID $BRIDGE_PID $GW_PID 2>/dev/null; exit 1
+  note "bridge FAILED"; cat "$LOG/bridge.log"; exit 1
 fi
 note "bridge (managed) up (pid $BRIDGE_PID)"
 
@@ -87,18 +112,19 @@ DESKTOP_COMMANDER_STATE_DIR="$ROOT/dc-state" \
 GATEWAY_PORT="$GW_PORT" PUBLIC_ORIGIN="http://127.0.0.1:${GW_PORT}" \
 CONSENT_PASSPHRASE="cert-e2e-passphrase" SIGNING_KEY="$(printf 'a%.0s' $(seq 1 64))" \
 GATEWAY_EXECUTION_TOKEN="$EXEC_TOKEN" \
+DATA_DIR="$ROOT/gateway-data" \
 UPSTREAM="http://127.0.0.1:${BRIDGE_PORT}" \
 node server.js >"$LOG/gateway.log" 2>&1 &
 GW_PID=$!
 sleep 2
 if ! curl -sf "http://127.0.0.1:${GW_PORT}/healthz" >/dev/null; then
-  note "mcp-gateway FAILED"; cat "$LOG/gateway.log"; kill $ACS_PID $BRIDGE_PID $GW_PID 2>/dev/null; exit 1
+  note "mcp-gateway FAILED"; cat "$LOG/gateway.log"; exit 1
 fi
 note "mcp-gateway (managed) up (pid $GW_PID)"
 
 # 5. Mission Router -> ACS webhook (the real compatibility path).
 MR_SUBMIT=$(ACS_GATEWAY_URL="http://127.0.0.1:${ACS_PORT}" ACS_GATEWAY_TOKEN="$MR_TOKEN" \
-  node /home/jacen/projects/mission-router/src/cli.mjs submit --goal "read the certification notes file" --origin cli --workspace "$WORKSPACE" 2>&1)
+  node "$MR_CLI" submit --goal "read the certification notes file" --origin cli --workspace "$WORKSPACE" 2>&1)
 echo "$MR_SUBMIT" | tail -25
 MISSION_ID=$(echo "$MR_SUBMIT" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const i=d.indexOf('{');try{const j=JSON.parse(d.slice(i));console.log(j.mission?.id||j.id||'')}catch{console.log('')}})")
 note "mission id: ${MISSION_ID:-<parse-failed>}"

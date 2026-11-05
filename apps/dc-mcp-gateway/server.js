@@ -21,6 +21,8 @@ import { ClientInfoCache, createClientObserver, extractClientInfo } from './clie
 import { tokenSubject } from './client-identity.js';
 import {
   CONSENT_PASSPHRASE_MAX_LENGTH,
+  ConsentStoreUnavailable,
+  assertIngressIdentityKey,
   consentClientKey,
   consentSource,
   consentSourceKey,
@@ -84,6 +86,13 @@ if (passphraseError) {
   process.exit(1);
 }
 const CONSENT_PASSPHRASE_DIGEST = crypto.createHash('sha256').update(CONSENT_PASSPHRASE).digest();
+// Optional. When unset, an ingress stamp cannot be proven and is rejected.
+// A present but weak key refuses startup so it cannot be ignored.
+const INGRESS_IDENTITY_KEY = process.env.JC_INGRESS_IDENTITY_KEY || '';
+if (INGRESS_IDENTITY_KEY) {
+  try { assertIngressIdentityKey(INGRESS_IDENTITY_KEY); }
+  catch (error) { console.error(`gateway: ${error.message}; refusing to start`); process.exit(1); }
+}
 const NATIVE_RUNTIME_BOOTSTRAP = process.env.ACS_NATIVE_RUNTIME_BOOTSTRAP === '1';
 let MANAGED = { enabled: false };
 try {
@@ -487,11 +496,21 @@ function consentLocked(res, gate) {
   });
 }
 
+function consentStoreDown(res) {
+  console.log('auth: consent refused reason=store_unavailable client=- source=- locked=1 retry_after=60');
+  return send(res, 503, denyPage('Consent temporarily unavailable.'), {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Retry-After': '60',
+    'Cache-Control': 'no-store',
+  });
+}
+
 async function handleConsent(req, res, body) {
   const params = Object.fromEntries(new URLSearchParams(body.toString('utf8')).entries());
-  // The TCP peer is the identity. A loopback peer may carry the ingress stamp.
-  // X-Forwarded-For, Forwarded, and X-Real-IP are not consulted.
-  const source = consentSource(req.socket && req.socket.remoteAddress, req.headers);
+  // The authenticated ingress may name the external client. Any other identity
+  // header is a spoof and is charged to the TCP peer, never to the claimed address.
+  const decision = consentSource(req.socket && req.socket.remoteAddress, req.headers, { identityKey: INGRESS_IDENTITY_KEY });
+  const source = decision.ok ? decision.source : { kind: 'peer', id: decision.peer };
   const sourceKey = consentSourceKey(source);
   const txnId = typeof params.consent_txn === 'string' ? params.consent_txn : '';
   const stored = txnId ? consentTxns.get(txnId) : undefined;
@@ -500,30 +519,47 @@ async function handleConsent(req, res, body) {
   // An unknown transaction has no trusted client. The posted client_id must not
   // spend or reset another client's attempt budget.
   const clientKey = live ? consentClientKey(stored.client_id) : null;
-  const gate = consentLimiter.snapshot({ sourceKey, clientKey });
-  if (gate.locked) {
-    auditConsent('locked', source, live ? stored.client_id : null, gate);
-    return consentLocked(res, gate);
-  }
-  if (!txnId || !live) {
-    const recorded = consentLimiter.recordFailure({ sourceKey, clientKey: null });
-    auditConsent(txnId ? 'unknown_txn' : 'missing_txn', source, null, recorded);
-    const message = txnId ? 'Unknown or expired consent transaction.' : 'Consent transaction required.';
-    return send(res, 400, denyPage(message), { 'Content-Type': 'text/html; charset=utf-8' });
-  }
-  const txn = stored;
-  // A conflicting form field must not burn the transaction: the owner can still
-  // submit the page that was actually rendered. It is rejected before the
-  // passphrase is checked and does not spend an authentication attempt.
-  if (consentBindingMismatch(params, txn)) {
-    return send(res, 400, denyPage('Consent transaction does not match the submitted request.'), { 'Content-Type': 'text/html; charset=utf-8' });
-  }
-  // Compare and count before any await so concurrent posts cannot pass the budget.
-  const passOk = passphraseMatches(typeof params.passphrase === 'string' ? params.passphrase : '');
-  if (!passOk) {
-    const recorded = consentLimiter.recordFailure({ sourceKey, clientKey });
-    auditConsent('passphrase_invalid', source, txn.client_id, recorded);
-    return send(res, 401, denyPage('Invalid consent passphrase.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  let txn;
+  try {
+    if (!decision.ok) {
+      const recorded = consentLimiter.recordFailure({ sourceKey, clientKey: null });
+      auditConsent('spoofed_identity', source, null, recorded);
+      if (recorded.locked) return consentLocked(res, recorded);
+      return send(res, 400, denyPage('Untrusted client identity.'), { 'Content-Type': 'text/html; charset=utf-8' });
+    }
+    const gate = consentLimiter.snapshot({ sourceKey, clientKey });
+    if (gate.locked) {
+      // A full table still records the attempt on the overflow bucket so the
+      // denial survives after a tracked slot expires.
+      const recorded = gate.saturated
+        ? consentLimiter.recordFailure({ sourceKey, clientKey })
+        : gate;
+      auditConsent('locked', source, live ? stored.client_id : null, recorded);
+      return consentLocked(res, recorded);
+    }
+    if (!txnId || !live) {
+      const recorded = consentLimiter.recordFailure({ sourceKey, clientKey: null });
+      auditConsent(txnId ? 'unknown_txn' : 'missing_txn', source, null, recorded);
+      const message = txnId ? 'Unknown or expired consent transaction.' : 'Consent transaction required.';
+      return send(res, 400, denyPage(message), { 'Content-Type': 'text/html; charset=utf-8' });
+    }
+    txn = stored;
+    // A conflicting form field must not burn the transaction: the owner can still
+    // submit the page that was actually rendered. It is rejected before the
+    // passphrase is checked and does not spend an authentication attempt.
+    if (consentBindingMismatch(params, txn)) {
+      return send(res, 400, denyPage('Consent transaction does not match the submitted request.'), { 'Content-Type': 'text/html; charset=utf-8' });
+    }
+    // Compare and count before any await so concurrent posts cannot pass the budget.
+    const passOk = passphraseMatches(typeof params.passphrase === 'string' ? params.passphrase : '');
+    if (!passOk) {
+      const recorded = consentLimiter.recordFailure({ sourceKey, clientKey });
+      auditConsent('passphrase_invalid', source, txn.client_id, recorded);
+      return send(res, 401, denyPage('Invalid consent passphrase.'), { 'Content-Type': 'text/html; charset=utf-8' });
+    }
+  } catch (error) {
+    if (error instanceof ConsentStoreUnavailable) return consentStoreDown(res);
+    throw error;
   }
   // Delete before any await so a second delivery in this process cannot mint another code.
   consentTxns.delete(txnId);
@@ -555,7 +591,10 @@ const codes = new Map();
 const CONSENT_TXN_TTL_S = 600;
 const CONSENT_TXN_CAP = 1000;
 const consentTxns = new Map();
-const consentLimiter = createConsentLimiter({ lockoutMs: consentLockoutMs });
+const consentLimiter = createConsentLimiter({
+  lockoutMs: consentLockoutMs,
+  filePath: path.join(DATA_DIR, 'consent-lockout.json'),
+});
 
 function sweepExpired(map) {
   const t = now();

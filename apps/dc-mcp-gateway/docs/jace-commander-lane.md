@@ -47,16 +47,24 @@ ChatGPT/Claude ─► https://jacen-ubuntu.tailaa6d41.ts.net/jc/mcp
   minutes. Further attempts do not extend the lock, and a correct
   passphrase does not clear it early. Unknown transactions count against
   the peer and the global ceiling only; a posted `client_id` cannot aim
-  that count at another client. When the peer is loopback, one IP in
-  `x-jc-ingress-client` identifies the external client. The public ingress
-  sets that header from its own socket after discarding a client-supplied
-  value. `X-Forwarded-For`, `Forwarded`, and `X-Real-IP` are not a client
-  identity. `EDGE_TEST_MODE=1` may shorten the lock with
-  `EDGE_TEST_CONSENT_LOCKOUT_MS` (values below 50 ms are ignored and the
-  production duration is kept) and announces it. Failures are logged with
-  a reason, a truncated client id, and a hashed source. Passphrases,
-  tokens, transaction ids, and request bodies are not logged. Lock state
-  is in memory and clears when the process exits.
+  that count at another client. The external client is the socket the
+  public ingress accepted. That process stamps `x-jc-ingress-client` and
+  `x-jc-ingress-proof`, an HMAC-SHA256 over `jc-ingress-v1:` plus the
+  normalized IP, keyed by `JC_INGRESS_IDENTITY_KEY`. The gateway accepts
+  the pair only from a loopback peer. `X-Forwarded-For`, `Forwarded`,
+  `X-Real-IP`, a stamp without a valid proof, and a proof from any other
+  address are rejected and charged to the TCP peer, not to the claimed
+  address. A missing or unreadable lockout file fails closed. Counters
+  live in `DATA_DIR/consent-lockout.json` and are updated under an
+  exclusive lock, so they survive a restart and are shared by every
+  gateway process using that directory. The file holds at most 1024
+  source keys and 1024 client keys. A further identity increments an
+  overflow bucket instead of taking a new slot. `EDGE_TEST_MODE=1` may
+  shorten the lock with `EDGE_TEST_CONSENT_LOCKOUT_MS` (values below
+  50 ms are ignored and the production duration is kept) and announces
+  it. Failures are logged with a reason, a truncated client id, and a
+  hashed source. Passphrases, tokens, transaction ids, request bodies,
+  and the ingress key are not logged.
 * **Capability transport.**
   * Every `tools/call` is authorized by ACS `POST /jc/capability/issue`
     before it is forwarded.

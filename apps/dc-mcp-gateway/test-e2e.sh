@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
-# End-to-end local OAuth 2.1 + MCP test through the gateway (127.0.0.1:8010).
+# End-to-end local OAuth 2.1 + MCP test through an already running gateway.
+# This script does not send X-Forwarded-For, Forwarded, X-Real-IP, or
+# x-jc-ingress-*. Those headers are rejected. Identity is the TCP peer.
+# Do not point GW at a public ingress.
 set -euo pipefail
 cd "$(dirname "$0")"
+if [[ ! -f CONSENT_PASSPHRASE.txt ]]; then
+  echo "CONSENT_PASSPHRASE.txt is absent; refusing to read or invent a secret" >&2
+  exit 1
+fi
 PASSPHRASE=$(cut -d= -f2- CONSENT_PASSPHRASE.txt)
 GW=${GW:-http://127.0.0.1:8010}
 

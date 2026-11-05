@@ -25,14 +25,19 @@ import {
   CONSENT_GLOBAL_MAX_FAILURES,
   CONSENT_LOCKOUT_MS,
   CONSENT_SOURCE_MAX_FAILURES,
+  ConsentStoreUnavailable,
   INGRESS_CLIENT_HEADER,
+  INGRESS_PROOF_HEADER,
   consentSource,
+  consentSourceKey,
   createConsentLimiter,
   passphraseStrengthError,
   resolveConsentLockoutMs,
+  stampIngressIdentity,
 } from '../consent-guard.js';
 
 const KEY = 'k'.repeat(32);
+const IDENTITY_KEY = 'i'.repeat(32);
 const ORIGIN = 'https://gw.test';
 const JC_RESOURCE = `${ORIGIN}/jc/mcp`;
 const PASS = 'consent-test-pass-1';
@@ -66,21 +71,29 @@ test('passphrase strength fails closed and the lock duration cannot be turned of
   assert.throws(() => createConsentLimiter({ sourceMax: 0 }), /positive/);
 });
 
-test('forwarded headers are not a client identity', () => {
+test('spoofed identity headers are rejected and a proven ingress stamp is accepted', () => {
+  const stamped = stampIngressIdentity('203.0.113.10', IDENTITY_KEY);
   const forwarded = {
     'x-forwarded-for': '203.0.113.9',
     'x-real-ip': '198.51.100.9',
     forwarded: 'for=192.0.2.9',
-    [INGRESS_CLIENT_HEADER]: '203.0.113.10',
+    ...stamped,
   };
-  assert.deepEqual(consentSource('127.0.0.1', forwarded), { kind: 'ingress', id: '203.0.113.10' });
-  assert.deepEqual(consentSource('::ffff:127.0.0.1', forwarded), { kind: 'ingress', id: '203.0.113.10' });
-  assert.deepEqual(consentSource('::1', { [INGRESS_CLIENT_HEADER]: '[::1]' }), { kind: 'ingress', id: '::1' });
-  assert.deepEqual(consentSource('203.0.113.8', forwarded), { kind: 'peer', id: '203.0.113.8' });
-  assert.deepEqual(consentSource('127.0.0.1', { [INGRESS_CLIENT_HEADER]: ['203.0.113.10', '198.51.100.10'] }), { kind: 'peer', id: '127.0.0.1' });
-  assert.deepEqual(consentSource('127.0.0.1', { [INGRESS_CLIENT_HEADER]: '203.0.113.10, 198.51.100.10' }), { kind: 'peer', id: '127.0.0.1' });
-  assert.deepEqual(consentSource('127.0.0.1', { [INGRESS_CLIENT_HEADER]: 'not-an-ip' }), { kind: 'peer', id: '127.0.0.1' });
-  assert.deepEqual(consentSource('127.0.0.1', {}), { kind: 'peer', id: '127.0.0.1' });
+  assert.deepEqual(consentSource('127.0.0.1', stamped, { identityKey: IDENTITY_KEY }), { ok: true, source: { kind: 'ingress', id: '203.0.113.10' } });
+  assert.deepEqual(consentSource('::ffff:127.0.0.1', stampIngressIdentity('[::1]', IDENTITY_KEY), { identityKey: IDENTITY_KEY }), { ok: true, source: { kind: 'ingress', id: '::1' } });
+  assert.equal(consentSource('127.0.0.1', forwarded, { identityKey: IDENTITY_KEY }).ok, false);
+  assert.equal(consentSource('127.0.0.1', { [INGRESS_CLIENT_HEADER]: '203.0.113.10' }, { identityKey: IDENTITY_KEY }).ok, false);
+  assert.equal(consentSource('203.0.113.8', stamped, { identityKey: IDENTITY_KEY }).ok, false);
+  assert.equal(consentSource('127.0.0.1', { [INGRESS_CLIENT_HEADER]: ['203.0.113.10', '198.51.100.10'] }, { identityKey: IDENTITY_KEY }).ok, false);
+  assert.equal(consentSource('127.0.0.1', { [INGRESS_CLIENT_HEADER]: '203.0.113.10, 198.51.100.10' }, { identityKey: IDENTITY_KEY }).ok, false);
+  assert.equal(consentSource('127.0.0.1', { 'x-real-ip': '198.51.100.9' }, { identityKey: IDENTITY_KEY }).ok, false);
+  assert.equal(consentSource('127.0.0.1', { forwarded: 'for=192.0.2.9' }, { identityKey: IDENTITY_KEY }).ok, false);
+  assert.deepEqual(consentSource('127.0.0.1', {}, { identityKey: IDENTITY_KEY }), { ok: true, source: { kind: 'peer', id: '127.0.0.1' } });
+  const wrong = stampIngressIdentity('203.0.113.10', `${IDENTITY_KEY}other-key-material`);
+  assert.equal(consentSource('127.0.0.1', wrong, { identityKey: IDENTITY_KEY }).ok, false);
+  const missingKey = consentSource('127.0.0.1', stamped, { identityKey: '' });
+  assert.equal(missingKey.ok, false);
+  assert.equal(JSON.stringify(missingKey).includes(IDENTITY_KEY), false);
 });
 
 test('lockout expires, does not slide, and keeps source, client, and global buckets apart', () => {
@@ -149,13 +162,14 @@ function clientRecord(name) {
 }
 
 let nextPort = 24140;
-async function boot(extraEnv = {}, clients = null) {
+async function boot(extraEnv = {}, clients = null, options = {}) {
   const acs = http.createServer((_req, res) => { res.writeHead(202); res.end('{}'); });
   const upstream = http.createServer((_req, res) => { res.writeHead(200); res.end('{}'); });
   const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
   const [acsPort, upPort] = [await listen(acs), await listen(upstream)];
   const port = nextPort++;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `consent-lockout-${port}-`));
+  const dir = options.dir ?? fs.mkdtempSync(path.join(os.tmpdir(), `consent-lockout-${port}-`));
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(dir, 'clients.json'), JSON.stringify(clients ?? {
     'jc-one': clientRecord('Trusted App'),
     'jc-two': clientRecord('Other App'),
@@ -169,6 +183,7 @@ async function boot(extraEnv = {}, clients = null) {
       PUBLIC_ORIGIN: ORIGIN,
       CONSENT_PASSPHRASE: PASS,
       SIGNING_KEY: KEY,
+      JC_INGRESS_IDENTITY_KEY: IDENTITY_KEY,
       DATA_DIR: dir,
       UPSTREAM: `http://127.0.0.1:${upPort}`,
       JC_ENABLED: '1',
@@ -186,7 +201,7 @@ async function boot(extraEnv = {}, clients = null) {
     child.kill('SIGKILL');
     acs.close();
     upstream.close();
-    fs.rmSync(dir, { recursive: true, force: true });
+    if (!options.keep) fs.rmSync(dir, { recursive: true, force: true });
     await new Promise((resolve) => {
       if (child.exitCode !== null || child.signalCode !== null) resolve();
       else child.once('exit', resolve);
@@ -202,11 +217,11 @@ async function boot(extraEnv = {}, clients = null) {
     await close();
     assert.fail(`gateway failed to start: ${logged}`);
   }
-  return { base: `http://127.0.0.1:${port}`, output: () => output, close };
+  return { base: `http://127.0.0.1:${port}`, dir, output: () => output, close };
 }
 
 async function withGateway(fn, options = {}) {
-  const gw = await boot(options.env, options.clients);
+  const gw = await boot(options.env, options.clients, options);
   try { await fn(gw); } finally { await gw.close(); }
 }
 
@@ -399,11 +414,11 @@ test('unknown transactions posted against another client do not lock that client
         client_id: 'jc-one',
         resource: JC_RESOURCE,
         passphrase: WRONG_PASS,
-      }, { [INGRESS_CLIENT_HEADER]: `192.0.2.${i + 1}` });
+      }, stampIngressIdentity(`192.0.2.${i + 1}`, IDENTITY_KEY));
       assert.equal(response.status, 400);
     }
     const fields = await authorize(gw, 'jc-one');
-    const ok = await consent(gw, { ...fields, passphrase: PASS }, { [INGRESS_CLIENT_HEADER]: '192.0.2.20' });
+    const ok = await consent(gw, { ...fields, passphrase: PASS }, stampIngressIdentity('192.0.2.20', IDENTITY_KEY));
     assert.equal(ok.status, 302);
     assert.match(gw.output(), /reason=unknown_txn client=- /);
     assert.doesNotMatch(gw.output(), /reason=unknown_txn client=jc-one/);
@@ -428,7 +443,7 @@ test('a new client registration and forwarded headers do not reset a source lock
     assert.equal(blocked.status, 429);
     const freshId = await register(gw, 'registered-fresh-source');
     const freshFields = await authorize(gw, freshId);
-    const fresh = await consent(gw, { ...freshFields, passphrase: PASS }, { [INGRESS_CLIENT_HEADER]: '203.0.113.40' });
+    const fresh = await consent(gw, { ...freshFields, passphrase: PASS }, stampIngressIdentity('203.0.113.40', IDENTITY_KEY));
     assert.equal(fresh.status, 302);
     assertNoSecrets(gw, [blockedFields.consent_txn, freshFields.consent_txn, '203.0.113.77']);
   }));
@@ -438,13 +453,13 @@ test('distinct ingress peers still share the per-client budget', () =>
     let fields = null;
     for (let i = 0; i < CONSENT_CLIENT_MAX_FAILURES; i += 1) {
       fields = await authorize(gw, 'jc-one');
-      const denied = await consent(gw, { ...fields, passphrase: WRONG_PASS }, { [INGRESS_CLIENT_HEADER]: `198.51.100.${i + 1}` });
+      const denied = await consent(gw, { ...fields, passphrase: WRONG_PASS }, stampIngressIdentity(`198.51.100.${i + 1}`, IDENTITY_KEY));
       assert.equal(denied.status, 401);
     }
-    const locked = await consent(gw, { ...fields, passphrase: PASS }, { [INGRESS_CLIENT_HEADER]: '198.51.100.20' });
+    const locked = await consent(gw, { ...fields, passphrase: PASS }, stampIngressIdentity('198.51.100.20', IDENTITY_KEY));
     assert.equal(locked.status, 429);
     const otherFields = await authorize(gw, 'jc-two');
-    const other = await consent(gw, { ...otherFields, passphrase: PASS }, { [INGRESS_CLIENT_HEADER]: '198.51.100.21' });
+    const other = await consent(gw, { ...otherFields, passphrase: PASS }, stampIngressIdentity('198.51.100.21', IDENTITY_KEY));
     assert.equal(other.status, 302);
     assertNoSecrets(gw, [fields.consent_txn, otherFields.consent_txn, '198.51.100.1']);
   }));
@@ -455,12 +470,213 @@ test('rotating the ingress identity does not defeat the global ceiling', () => {
   return withGateway(async (gw) => {
     for (let i = 0; i < CONSENT_GLOBAL_MAX_FAILURES; i += 1) {
       const fields = await authorize(gw, `jc-${i}`);
-      const denied = await consent(gw, { ...fields, passphrase: WRONG_PASS }, { [INGRESS_CLIENT_HEADER]: `203.0.113.${i + 1}` });
+      const denied = await consent(gw, { ...fields, passphrase: WRONG_PASS }, stampIngressIdentity(`203.0.113.${i + 1}`, IDENTITY_KEY));
       assert.equal(denied.status, 401, `global attempt ${i}`);
     }
     const fields = await authorize(gw, `jc-${CONSENT_GLOBAL_MAX_FAILURES}`);
-    const locked = await consent(gw, { ...fields, passphrase: PASS }, { [INGRESS_CLIENT_HEADER]: '203.0.113.250' });
+    const locked = await consent(gw, { ...fields, passphrase: PASS }, stampIngressIdentity('203.0.113.250', IDENTITY_KEY));
     assert.equal(locked.status, 429);
     assertNoSecrets(gw, [fields.consent_txn, '203.0.113.1']);
   }, { clients });
+});
+
+test('a spoofed ingress header is rejected and does not spend the claimed address', () =>
+  withGateway(async (gw) => {
+    const fields = await authorize(gw, 'jc-one');
+    const spoof = await consent(gw, { ...fields, passphrase: WRONG_PASS }, {
+      [INGRESS_CLIENT_HEADER]: '203.0.113.77',
+      'x-forwarded-for': '198.51.100.77',
+      'x-real-ip': '192.0.2.77',
+      forwarded: 'for=192.0.2.78',
+    });
+    assert.equal(spoof.status, 400);
+    assert.match(gw.output(), /reason=spoofed_identity /);
+    assert.equal(gw.output().includes('203.0.113.77'), false);
+    const claimed = await consent(gw, { ...fields, passphrase: PASS }, stampIngressIdentity('203.0.113.77', IDENTITY_KEY));
+    assert.equal(claimed.status, 302);
+    assertNoSecrets(gw, [fields.consent_txn, IDENTITY_KEY]);
+  }));
+
+test('lockout state survives a gateway restart, including a correct passphrase', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'consent-restart-'));
+  const env = { EDGE_TEST_MODE: '1', EDGE_TEST_CONSENT_LOCKOUT_MS: '4000' };
+  const first = await boot(env, null, { dir, keep: true });
+  try {
+    const fields = await authorize(first, 'jc-one');
+    for (let i = 0; i < CONSENT_SOURCE_MAX_FAILURES; i += 1) {
+      assert.equal((await consent(first, { ...fields, passphrase: WRONG_PASS })).status, 401);
+    }
+    assert.equal((await consent(first, { ...fields, passphrase: PASS })).status, 429);
+  } finally {
+    await first.close();
+  }
+  const second = await boot(env, null, { dir, keep: true });
+  try {
+    const fields = await authorize(second, 'jc-one');
+    const locked = await consent(second, { ...fields, passphrase: PASS });
+    assert.equal(locked.status, 429);
+    let opened = locked;
+    const started = Date.now();
+    while (opened.status !== 302 && Date.now() - started < 8_000) {
+      await delay(100);
+      opened = await consent(second, { ...fields, passphrase: PASS });
+    }
+    assert.equal(opened.status, 302);
+    assertNoSecrets(second, [fields.consent_txn]);
+  } finally {
+    await second.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('two gateway processes share one global failure ceiling', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'consent-shared-'));
+  const clients = {};
+  for (let i = 0; i < CONSENT_GLOBAL_MAX_FAILURES + 1; i += 1) clients[`jc-${i}`] = clientRecord(`Client ${i}`);
+  const left = await boot({}, clients, { dir, keep: true });
+  const right = await boot({}, clients, { dir, keep: true });
+  try {
+    for (let i = 0; i < CONSENT_GLOBAL_MAX_FAILURES; i += 1) {
+      const gw = i % 2 === 0 ? left : right;
+      const fields = await authorize(gw, `jc-${i}`);
+      const denied = await consent(gw, { ...fields, passphrase: WRONG_PASS }, stampIngressIdentity(`203.0.113.${i + 1}`, IDENTITY_KEY));
+      assert.equal(denied.status, 401, `shared attempt ${i}`);
+    }
+    const fields = await authorize(right, `jc-${CONSENT_GLOBAL_MAX_FAILURES}`);
+    const locked = await consent(left, { ...fields, passphrase: PASS }, stampIngressIdentity('203.0.113.250', IDENTITY_KEY));
+    assert.equal(locked.status, 429);
+  } finally {
+    await left.close();
+    await right.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a corrupt lockout file fails closed and is left in place', () =>
+  withGateway(async (gw) => {
+    const file = path.join(gw.dir, 'consent-lockout.json');
+    const fields = await authorize(gw, 'jc-one');
+    assert.equal((await consent(gw, { ...fields, passphrase: WRONG_PASS })).status, 401);
+    fs.writeFileSync(file, '{');
+    const down = await consent(gw, { ...fields, passphrase: PASS });
+    assert.equal(down.status, 503);
+    assert.equal(down.headers.get('retry-after'), '60');
+    assert.equal(fs.readFileSync(file, 'utf8'), '{');
+    assert.match(gw.output(), /reason=store_unavailable /);
+    assert.equal(gw.output().includes(PASS), false);
+  }));
+
+test('new identities cannot grow the table or escape a full one after tracked entries expire', () => {
+  let clock = 0;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'consent-cap-'));
+  const filePath = path.join(dir, 'consent-lockout.json');
+  const key = (ip) => consentSourceKey({ kind: 'ingress', id: ip });
+  const open = () => createConsentLimiter({
+    filePath, now: () => clock, cap: 2, sourceMax: 5, clientMax: 5, globalMax: 500, lockoutMs: 10_000,
+  });
+  open().recordFailure({ sourceKey: key('203.0.113.1') });
+  open().recordFailure({ sourceKey: key('203.0.113.2') });
+  clock = 9_000;
+  const fresh = key('203.0.113.3');
+  for (let i = 0; i < 5; i += 1) open().recordFailure({ sourceKey: fresh });
+  assert.equal(open().snapshot({ sourceKey: fresh }).overflowLocked, true);
+  clock = 10_000;
+  const expired = open().snapshot({ sourceKey: fresh });
+  assert.equal(expired.locked, true);
+  assert.equal(expired.overflowLocked, true);
+  const newer = key('203.0.113.4');
+  open().recordFailure({ sourceKey: newer });
+  const stored = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  assert.equal(stored.sources[fresh], undefined);
+  assert.equal(stored.sources[newer], undefined);
+  assert.ok(Object.keys(stored.sources).length <= 2);
+  const lockedUntil = stored.sourceOverflow.lockedUntilMs;
+  clock = 11_000;
+  open().recordFailure({ sourceKey: newer });
+  const held = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  assert.equal(held.sourceOverflow.lockedUntilMs, lockedUntil);
+  assert.equal(held.sources[newer], undefined);
+  assert.equal(fs.statSync(filePath).mode & 0o777, 0o600);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('concurrent processes do not lose failure increments', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'consent-race-'));
+  const filePath = path.join(dir, 'consent-lockout.json');
+  const sourceKey = consentSourceKey({ kind: 'peer', id: '198.51.100.8' });
+  const guard = path.join(gatewayDir, 'consent-guard.js');
+  const run = () => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', `
+      import { createConsentLimiter } from ${JSON.stringify(guard)};
+      const limiter = createConsentLimiter({
+        filePath: process.argv[1],
+        sourceMax: 50,
+        clientMax: 50,
+        globalMax: 50,
+        lockoutMs: 60000,
+        cap: 8,
+        lockTimeoutMs: 5000,
+      });
+      for (let i = 0; i < 8; i += 1) limiter.recordFailure({ sourceKey: process.argv[2] });
+    `, filePath, sourceKey], { stdio: ['ignore', 'inherit', 'inherit'] });
+    child.once('exit', (code) => (code === 0 ? resolve() : reject(new Error(`child ${code}`))));
+  });
+  await Promise.all([run(), run()]);
+  const stored = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  assert.equal(stored.sources[sourceKey].failures, 16);
+  assert.equal(stored.global.failures, 16);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('a forged proof, a rebound proof, and a non-loopback replay are rejected; the socket peer stays the fallback', () => {
+  const stamped = stampIngressIdentity('203.0.113.10', IDENTITY_KEY);
+  const forged = { ...stamped, [INGRESS_PROOF_HEADER]: 'ab'.repeat(32) };
+  const forgedDecision = consentSource('127.0.0.1', forged, { identityKey: IDENTITY_KEY });
+  assert.equal(forgedDecision.ok, false);
+  assert.equal(forgedDecision.reason, 'spoofed_identity');
+  assert.equal(forgedDecision.peer, '127.0.0.1');
+  const rebound = {
+    [INGRESS_CLIENT_HEADER]: '203.0.113.11',
+    [INGRESS_PROOF_HEADER]: stamped[INGRESS_PROOF_HEADER],
+  };
+  assert.equal(consentSource('127.0.0.1', rebound, { identityKey: IDENTITY_KEY }).ok, false);
+  assert.equal(consentSource('203.0.113.10', stamped, { identityKey: IDENTITY_KEY }).ok, false);
+  assert.deepEqual(consentSource('192.0.2.10', {}, { identityKey: IDENTITY_KEY }), {
+    ok: true,
+    source: { kind: 'peer', id: '192.0.2.10' },
+  });
+  assert.equal(consentSource('192.0.2.10', { 'x-forwarded-for': '203.0.113.77' }, { identityKey: IDENTITY_KEY }).ok, false);
+});
+
+test('the lockout file is private, and restoring it after a corrupt copy keeps the lock', () =>
+  withGateway(async (gw) => {
+    const file = path.join(gw.dir, 'consent-lockout.json');
+    const fields = await authorize(gw, 'jc-one');
+    assert.equal((await consent(gw, { ...fields, passphrase: WRONG_PASS })).status, 401);
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    assert.equal(fs.lstatSync(file).isSymbolicLink(), false);
+    for (let i = 1; i < CONSENT_SOURCE_MAX_FAILURES; i += 1) {
+      assert.equal((await consent(gw, { ...fields, passphrase: WRONG_PASS })).status, 401);
+    }
+    const lockedBytes = fs.readFileSync(file);
+    assert.equal((await consent(gw, { ...fields, passphrase: PASS })).status, 429);
+    fs.writeFileSync(file, '{');
+    const down = await consent(gw, { ...fields, passphrase: PASS });
+    assert.equal(down.status, 503);
+    assert.equal(fs.readFileSync(file, 'utf8'), '{');
+    fs.writeFileSync(file, lockedBytes, { mode: 0o600 });
+    assert.equal((await consent(gw, { ...fields, passphrase: PASS })).status, 429);
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  }));
+
+test('an unreadable lockout file is an unavailable store', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'consent-link-'));
+  const filePath = path.join(dir, 'consent-lockout.json');
+  const real = path.join(dir, 'real.json');
+  fs.writeFileSync(real, '{}');
+  fs.symlinkSync(real, filePath);
+  const limiter = createConsentLimiter({ filePath, lockoutMs: 1000 });
+  assert.throws(() => limiter.snapshot({ sourceKey: consentSourceKey({ kind: 'peer', id: '127.0.0.1' }) }), ConsentStoreUnavailable);
+  assert.equal(fs.readFileSync(real, 'utf8'), '{}');
+  fs.rmSync(dir, { recursive: true, force: true });
 });
