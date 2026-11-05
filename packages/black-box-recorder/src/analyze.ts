@@ -1,22 +1,12 @@
 import { canonicalJson, sha256Hex } from "./canonical.js";
 import type {
-  AuthState,
   Completeness,
   Finding,
   RecorderEvent,
   RunAnnotation,
   RunSummary,
-  VerifyState,
 } from "./types.js";
-import type { RecorderStore } from "./store.js";
-
-const AUTH_TYPES = new Set([
-  "policy.evaluated",
-  "authorization.allowed",
-  "authorization.denied",
-  "approval.granted",
-  "approval.rejected",
-]);
+import { isPublicRecorderId, recorderRunId, type RecorderStore } from "./store.js";
 
 const EXEC_TYPES = new Set([
   "execution.started",
@@ -25,6 +15,8 @@ const EXEC_TYPES = new Set([
   "tool.started",
   "tool.completed",
   "tool.failed",
+  "execution.tool_succeeded",
+  "execution.tool_failed",
 ]);
 
 const START_TYPES = new Set(["execution.started", "tool.started"]);
@@ -33,26 +25,30 @@ const END_TYPES = new Set([
   "execution.timed_out",
   "tool.completed",
   "tool.failed",
+  "execution.tool_succeeded",
+  "execution.tool_failed",
   "mission.completed",
   "mission.failed",
   "agent.stopped",
   "agent.failed",
 ]);
 
-const SUCCESS_TYPES = new Set(["execution.completed", "mission.completed", "tool.completed", "agent.stopped"]);
+const EXEC_SUCCESS_TYPES = new Set(["execution.completed", "tool.completed", "execution.tool_succeeded"]);
+const SUCCESS_TYPES = new Set([...EXEC_SUCCESS_TYPES, "mission.completed", "agent.stopped"]);
 
-export function recomputeFindings(store: RecorderStore, observationWindowMs = 120_000): Finding[] {
+export function recomputeFindings(store: RecorderStore, observationWindowMs = 120_000, observedAt = Date.now()): Finding[] {
   store.findings.length = 0;
   const byRun = group(store);
   for (const [runId, events] of byRun) {
-    const annotation = store.annotations.get(runId) ?? {};
-    store.findings.push(...rulesForRun(runId, events, annotation, store, observationWindowMs));
+    const annotation = store.annotationFor(runId) ?? {};
+    store.findings.push(...rulesForRun(runId, events, annotation, store, observationWindowMs, observedAt));
   }
-  for (const conflict of store.conflicts) {
-    const existing = store.events.get(conflict.existingEventId);
-    const runId = existing?.runId ?? "unscoped";
+  const records = store.events;
+  for (const [eventId, detectedAt] of store.conflictedAt) {
+    const existing = records.get(eventId);
+    const runId = recorderRunId(existing?.runId ?? null, eventId);
     store.findings.push({
-      findingId: `find_abbr.conflict_${conflict.existingEventId}`,
+      findingId: `find_abbr.conflict_${eventId}`,
       ruleId: "abbr.conflict",
       ruleVersion: 1,
       severity: "high",
@@ -60,8 +56,8 @@ export function recomputeFindings(store: RecorderStore, observationWindowMs = 12
       runId,
       summary:
         "A second payload arrived with the same producer event identity and different content. The original record was kept.",
-      relatedEventIds: [conflict.existingEventId],
-      detectedAt: conflict.ingestedAt,
+      relatedEventIds: [eventId],
+      detectedAt,
     });
   }
   return boundFindings(store);
@@ -94,9 +90,10 @@ function rulesForRun(
   annotation: RunAnnotation,
   store: RecorderStore,
   observationWindowMs: number,
+  observedAt: number,
 ): Finding[] {
   const findings: Finding[] = [];
-  const coverage = annotation.coverage ?? String(events[0]?.metadata.coverage ?? "unknown");
+  const coverage = runCoverage(annotation, events);
   const detectedAt = latestIngest(events);
   const ids = events.map((event) => event.eventId);
 
@@ -115,9 +112,8 @@ function rulesForRun(
     );
   }
 
-  const hasExec = events.some((event) => EXEC_TYPES.has(event.eventType));
-  const hasAuth = events.some((event) => AUTH_TYPES.has(event.eventType));
-  if (hasExec && !hasAuth && coverage !== "list-projection") {
+  const executed = events.filter(isExecutionEvent);
+  if (executed.length > 0 && authorizationEvidence(events, coverage, store).state !== "allowed" && coverage !== "list-projection") {
     findings.push(
       finding(
         "abbr.missing-authorization",
@@ -125,17 +121,15 @@ function rulesForRun(
         "high",
         "evidence",
         runId,
-        "Execution evidence is present without a loaded authorization or approval record. That is uncorroborated. It is not proof the action was unauthorized.",
-        ids.filter((id) => EXEC_TYPES.has(store.events.get(id)?.eventType ?? "")),
+        "Execution evidence is present without a matching trusted authorization or approval record.",
+        executed.map((event) => event.eventId),
         detectedAt,
       ),
     );
   }
 
-  const verifyFail = events.find((event) => event.eventType === "verification.failed");
-  const verifyPass = events.find((event) => event.eventType === "verification.passed");
-  const success = events.some((event) => isSuccessClaim(event));
-  if (verifyFail) {
+  const verification = verificationEvidence(events, coverage, store);
+  if (verification.state === "failed" && verification.evidenceEventId) {
     findings.push(
       finding(
         "abbr.validator-failed",
@@ -144,11 +138,11 @@ function rulesForRun(
         "evidence",
         runId,
         "An independent verification failure is present. A producer success claim does not override it.",
-        [verifyFail.eventId],
+        [verification.evidenceEventId],
         detectedAt,
       ),
     );
-  } else if (success && !verifyPass) {
+  } else if (verification.state === "unverified") {
     findings.push(
       finding(
         "abbr.unverified-success",
@@ -158,33 +152,26 @@ function rulesForRun(
         runId,
         coverage === "list-projection"
           ? "The list row reports success. No validator record was loaded, so success stays unverified."
-          : "A success or result-acceptance record is present and no verification.passed event is in the loaded chain. Exit success is not verification.",
+          : "One or more success claims lack trusted verification bound to the corresponding execution.",
         events.filter((event) => isSuccessClaim(event)).map((event) => event.eventId),
         detectedAt,
       ),
     );
   }
 
-  const started = events.filter((event) => START_TYPES.has(event.eventType));
-  const ended = events.some((event) => END_TYPES.has(event.eventType));
-  if (started.length > 0 && !ended) {
-    const newest = maxTime(started.map((event) => event.sourceTimestamp));
-    const ingest = Date.parse(detectedAt);
-    const age = newest ? ingest - Date.parse(newest) : observationWindowMs + 1;
-    if (age > observationWindowMs) {
-      findings.push(
-        finding(
-          "abbr.missing-terminal",
-          1,
-          "medium",
-          "evidence",
-          runId,
-          "A start event has no terminal event inside the observation window. The run is incomplete, not failed.",
-          started.map((event) => event.eventId),
-          detectedAt,
-        ),
-      );
-    }
+  const expired = unmatchedStarts(executed).filter((event) =>
+    observedAt - epoch(event.sourceTimestamp ?? event.ingestedAt) > observationWindowMs);
+  if (expired.length > 0) {
+    findings.push(finding(
+      "abbr.missing-terminal",
+      1,
+      "medium",
+      "evidence",
+      runId,
+      "A recorded start has no matching terminal event after the observation window.",
+      expired.map((event) => event.eventId),
+      new Date(observedAt).toISOString(),
+    ));
   }
 
   const releases = unique(
@@ -299,7 +286,7 @@ function rulesForRun(
         "high",
         "evidence",
         runId,
-        `ACS accepted the start. A later read (${annotation.correlatedWorkItem ?? "unknown work item"}) observed process exit ${annotation.correlatedExitCode} for session ${annotation.correlatedSession ?? "unknown"}. That exit is not a ResultValidator verdict, and spawn success is not process success.`,
+        `The recorded start was followed by a reported exit ${annotation.correlatedExitCode} for session ${annotation.correlatedSession ?? "unknown"} in ${annotation.correlatedWorkItem ?? "an unidentified work item"}. Independent verification is tracked separately.`,
         events.filter((event) => event.eventType === "execution.completed").map((event) => event.eventId),
         detectedAt,
       ),
@@ -348,30 +335,33 @@ export function summarize(store: RecorderStore): RunSummary[] {
   recomputeFindings(store);
   const summaries: RunSummary[] = [];
   for (const [runId, events] of group(store)) {
-    summaries.push(summarizeRun(runId, events, store));
+    summaries.push(summarizeRecordedRun(runId, events, store));
   }
-  summaries.sort((a, b) => (b.latestAt ?? "").localeCompare(a.latestAt ?? ""));
+  summaries.sort((a, b) => epoch(b.latestAt) - epoch(a.latestAt));
   return summaries;
 }
 
-export function summarizeRun(runId: string, events: RecorderEvent[], store: RecorderStore): RunSummary {
-  const annotation = store.annotations.get(runId) ?? {};
+/** Select the complete evidence set from the store, including for legacy callers supplying an array. */
+export function summarizeRun(runId: string, _events: RecorderEvent[], store: RecorderStore): RunSummary {
+  recomputeFindings(store);
+  return summarizeRecordedRun(runId, store.eventsFor(runId), store);
+}
+
+function summarizeRecordedRun(runId: string, events: RecorderEvent[], store: RecorderStore): RunSummary {
+  const annotation = store.annotationFor(runId) ?? {};
+  const coverage = runCoverage(annotation, events);
+  const recordedTool = events.map((event) => event.metadata.tool).find((tool): tool is string => typeof tool === "string");
   const findings = store.findings.filter((item) => item.runId === runId);
   const releases = unique(
     events.map((event) => event.source.releaseId).filter((id): id is string => Boolean(id)),
   );
   const startedAt = minTime(events.map((event) => event.sourceTimestamp));
   const latestAt = maxTime(events.map((event) => event.sourceTimestamp ?? event.ingestedAt));
-  const terminal = events.find((event) => END_TYPES.has(event.eventType));
-  const authEvent =
-    events.find((event) => event.eventType === "authorization.denied" || event.eventType === "approval.rejected") ??
-    events.find((event) => event.eventType === "approval.granted" || event.eventType === "authorization.allowed");
-  const verifyEvent =
-    events.find((event) => event.eventType === "verification.failed") ??
-    events.find((event) => event.eventType === "verification.passed");
+  const hasOpenAttempt = unmatchedStarts(events.filter(isExecutionEvent)).length > 0;
+  const terminal = orderEvents(events.filter((event) => END_TYPES.has(event.eventType)), "source").at(-1);
   const gapCount = findings.filter((item) => item.severity !== "info").length;
   const errorCount = findings.filter((item) => item.severity === "high").length;
-  const completeness: Completeness = findings.some(
+  const completeness: Completeness = events.length === 0 || events.some((event) => store.hasConflict(event.eventId)) || findings.some(
     (item) => item.ruleId === "abbr.conflict" || item.ruleId === "abbr.audit-chain-break",
   )
     ? "unverifiable"
@@ -384,14 +374,11 @@ export function summarizeRun(runId: string, events: RecorderEvent[], store: Reco
     missionId: events.find((event) => event.missionId)?.missionId ?? null,
     correlationId: events.find((event) => event.correlationId)?.correlationId ?? null,
     agent: annotation.agent ?? "unknown",
-    tool: annotation.tool ?? String(events.find((event) => event.metadata.tool)?.metadata.tool ?? "unknown"),
+    tool: annotation.tool ?? recordedTool ?? "unknown",
     instruction: annotation.instruction ?? null,
-    observedState: annotation.observedStatus ?? observedState(events),
-    authorization: { state: authState(events, annotation.coverage), evidenceEventId: authEvent?.eventId ?? null },
-    verification: {
-      state: verifyState(events, annotation.coverage),
-      evidenceEventId: verifyEvent?.eventId ?? null,
-    },
+    observedState: annotation.observedStatus ?? observedState(hasOpenAttempt, terminal),
+    authorization: authorizationEvidence(events, coverage, store),
+    verification: verificationEvidence(events, coverage, store),
     evidence: {
       completeness,
       eventCount: events.length,
@@ -400,10 +387,10 @@ export function summarizeRun(runId: string, events: RecorderEvent[], store: Reco
       errorCount,
     },
     sourceReleases: releases,
-    coverage: annotation.coverage ?? "unknown",
+    coverage,
     startedAt,
     latestAt,
-    terminalAt: terminal?.sourceTimestamp ?? null,
+    terminalAt: hasOpenAttempt ? null : terminal?.sourceTimestamp ?? null,
   };
 }
 
@@ -455,13 +442,13 @@ export function orderEvents(events: RecorderEvent[], mode: "source" | "ingestion
   const copy = [...events];
   copy.sort((a, b) => {
     if (mode === "ingestion") {
-      const byIngest = a.ingestedAt.localeCompare(b.ingestedAt);
-      if (byIngest !== 0) return byIngest;
+      const byIngest = epoch(a.ingestedAt) - epoch(b.ingestedAt);
+      if (byIngest) return byIngest;
     }
     const at = a.sourceTimestamp ?? a.ingestedAt;
     const bt = b.sourceTimestamp ?? b.ingestedAt;
-    const byTime = at.localeCompare(bt);
-    if (byTime !== 0) return byTime;
+    const byTime = epoch(at) - epoch(bt);
+    if (byTime) return byTime;
     return sequenceOf(a) - sequenceOf(b);
   });
   return copy;
@@ -473,17 +460,17 @@ export function timestampUncertain(events: RecorderEvent[]): boolean {
     const current = ordered[i];
     const previous = ordered[i - 1];
     if (!current?.sourceTimestamp || !previous?.sourceTimestamp) continue;
-    if (current.sourceTimestamp === previous.sourceTimestamp) return true;
-    if (current.sourceTimestamp < previous.sourceTimestamp) return true;
+    if (epoch(current.sourceTimestamp) <= epoch(previous.sourceTimestamp)) return true;
   }
   return false;
 }
 
 export async function exportRun(store: RecorderStore, runId: string) {
-  recomputeFindings(store);
   const events = orderEvents(store.eventsFor(runId), "source");
+  if (events.length === 0) throw new Error("Recorder run was not found");
+  recomputeFindings(store);
   const findings = store.findings.filter((item) => item.runId === runId);
-  const summary = summarizeRun(runId, events, store);
+  const summary = summarizeRecordedRun(runId, events, store);
   const body = {
     schemaVersion: 1,
     exportedAt: new Date().toISOString(),
@@ -498,106 +485,149 @@ export async function exportRun(store: RecorderStore, runId: string) {
 }
 
 function isSuccessClaim(event: RecorderEvent): boolean {
-  if (event.eventType === "verification.passed" || event.eventType === "verification.failed") return false;
-  if (event.metadata.outcome === "succeeded") return true;
-  if (SUCCESS_TYPES.has(event.eventType) && event.metadata.outcome !== "failed") {
-    return event.eventType === "execution.completed" || event.eventType === "mission.completed";
-  }
-  return false;
+  if (event.eventType.startsWith("verification.") || event.metadata.outcome === "failed") return false;
+  return event.metadata.outcome === "succeeded" || SUCCESS_TYPES.has(event.eventType);
 }
 
-/** Only signed ACS records, or records a caller explicitly granted, can establish authority. */
-const TRUSTED_AUTHORITY: ReadonlySet<string> = new Set(["acs_authoritative", "independently_verified"]);
-const GRANT_TYPES: ReadonlySet<string> = new Set(["approval.granted", "authorization.allowed", "capability.issued"]);
+function runCoverage(annotation: RunAnnotation, events: RecorderEvent[]): string {
+  const recorded = events[0]?.metadata.coverage;
+  return annotation.coverage ?? (typeof recorded === "string" ? recorded : "unknown");
+}
 
-function authState(events: RecorderEvent[], coverage?: string): AuthState {
-  if (events.some((event) => event.eventType === "authorization.denied" || event.eventType === "approval.rejected")) {
-    return "denied";
-  }
-  const grants = events.filter(
-    (event) =>
-      TRUSTED_AUTHORITY.has(event.trustLevel) &&
-      GRANT_TYPES.has(event.eventType) &&
-      typeof event.metadata.decisionId === "string" &&
-      typeof event.metadata.actor === "string" &&
-      typeof event.metadata.capabilityId === "string",
-  );
-  if (grants.length > 0) {
-    // Every execution in the run must be bound to a decision that was actually granted. A grant for another decision
-    // does not authorize this run, and an execution with no decision is not explained by any grant.
-    // A grant only covers executions at or after its own timestamp. A grant recorded later is stale for earlier work.
-    // The capability is bound too: a grant for one tool invocation does not cover another invocation of the same decision.
-    const grantedAt = new Map<unknown, number>();
-    const grantedCapabilities = new Map<unknown, Set<unknown>>();
-    for (const grant of grants) {
-      const at = Date.parse(grant.sourceTimestamp ?? "");
-      if (!Number.isFinite(at)) continue;
-      const prior = grantedAt.get(grant.metadata.decisionId);
-      grantedAt.set(grant.metadata.decisionId, prior === undefined ? at : Math.min(prior, at));
-      const caps = grantedCapabilities.get(grant.metadata.decisionId) ?? new Set<unknown>();
-      caps.add(grant.metadata.capabilityId);
-      grantedCapabilities.set(grant.metadata.decisionId, caps);
+const TRUSTED_AUTHORITY = new Set(["acs_authoritative", "independently_verified"]);
+const GRANT_TYPES = new Set(["approval.granted", "authorization.allowed", "capability.issued"]);
+const DENIAL_TYPES = new Set(["authorization.denied", "approval.rejected"]);
+
+function isExecutionEvent(event: RecorderEvent): boolean {
+  return EXEC_TYPES.has(event.eventType);
+}
+
+function isAuthenticatedExecution(event: RecorderEvent): boolean {
+  return isExecutionEvent(event) &&
+    (TRUSTED_AUTHORITY.has(event.trustLevel) || event.trustLevel === "authenticated_producer");
+}
+
+function attemptKey(event: RecorderEvent): string | undefined {
+  const attempt = event.metadata.attemptId;
+  if (attempt !== undefined) return isPublicRecorderId(attempt) ? JSON.stringify(["attempt", attempt]) : undefined;
+  const binding = authorizationBinding(event);
+  if (binding) return JSON.stringify(["grant", binding]);
+  const context = event.correlationId ?? event.source.component;
+  if (isPublicRecorderId(context)) return JSON.stringify(["source", context, event.metadata.tool ?? null]);
+}
+
+function unmatchedStarts(events: RecorderEvent[]): RecorderEvent[] {
+  const open: RecorderEvent[] = [];
+  for (const event of orderEvents(events, "source")) {
+    if (START_TYPES.has(event.eventType)) {
+      open.push(event);
+      continue;
     }
-    // Only trusted execution evidence constrains a grant. Unsigned rows are not evidence and cannot poison a valid chain.
-    const executed = events.filter(
-      (event) =>
-        TRUSTED_AUTHORITY.has(event.trustLevel) &&
-        (event.eventType.startsWith("execution") || SUCCESS_TYPES.has(event.eventType)),
-    );
-    const unbound = executed.some((event) => {
-      const decision = event.metadata.decisionId;
-      const grantTime = grantedAt.get(decision);
-      const executedAt = Date.parse(event.sourceTimestamp ?? "");
-      const capabilityGranted = grantedCapabilities.get(decision)?.has(event.metadata.capabilityId) === true;
-      return (
-        typeof decision !== "string" ||
-        grantTime === undefined ||
-        !Number.isFinite(executedAt) ||
-        executedAt < grantTime ||
-        !capabilityGranted
-      );
+    if (!END_TYPES.has(event.eventType)) continue;
+    const key = attemptKey(event);
+    const index = open.findIndex((start) => {
+      if (isAuthenticatedExecution(start) && !isAuthenticatedExecution(event)) return false;
+      const sameContext = ["decisionId", "capabilityId", "actor", "actionHash"].every((field) => {
+        const before = start.metadata[field];
+        const after = event.metadata[field];
+        return before === undefined || after === undefined || (isPublicRecorderId(before) && before === after);
+      });
+      if (!sameContext) return false;
+      if (event.parentEventId) {
+        if (!isPublicRecorderId(event.parentEventId)) return false;
+        if (event.parentEventId === start.eventId) return true;
+        return event.parentEventId === start.source.producerEventId &&
+          event.source.component === start.source.component && event.source.instanceId === start.source.instanceId &&
+          event.trustLevel === start.trustLevel;
+      }
+      return key !== undefined && attemptKey(start) === key;
     });
-    return unbound ? "unknown" : "allowed";
+    if (index >= 0) open.splice(index, 1);
   }
-  if (
-    events.some(
-      (event) => event.metadata.policyDecision === "require_approval" || event.eventType === "approval.requested",
-    )
-  ) {
-    return "held";
-  }
-  if (coverage === "list-projection") return "not_loaded";
-  return "unknown";
+  return open;
 }
 
-function verifyState(events: RecorderEvent[], coverage?: string): VerifyState {
-  if (events.some((event) => event.eventType === "verification.failed")) return "failed";
-  // A pass counts only from trusted authority and only when it names an execution in this same run.
-  const bound = events.some(
-    (event) =>
-      TRUSTED_AUTHORITY.has(event.trustLevel) &&
-      event.eventType === "verification.passed" &&
-      typeof event.metadata.executionEventId === "string" &&
-      events.some(
-        (other) =>
-          other.eventId === event.metadata.executionEventId &&
-          TRUSTED_AUTHORITY.has(other.trustLevel) &&
-          other.eventType.startsWith("execution") &&
-          other.metadata.outcome === "succeeded",
-      ),
-  );
-  if (bound) return "verified";
-  if (events.some((event) => isSuccessClaim(event))) return "unverified";
-  if (coverage === "list-projection") return "not_loaded";
-  return "unknown";
+function authorizationBinding(event: RecorderEvent): string | undefined {
+  const { decisionId, capabilityId, actor, actionHash } = event.metadata;
+  const fields = [decisionId, capabilityId, actor, actionHash];
+  if (fields.every(isPublicRecorderId)) {
+    return JSON.stringify(fields);
+  }
 }
 
-function observedState(events: RecorderEvent[]): string {
-  if (events.some((event) => event.eventType === "mission.failed" || event.eventType === "agent.failed")) return "failed";
-  if (events.some((event) => event.eventType === "mission.completed")) return "completed";
-  if (events.some((event) => event.eventType === "execution.completed")) return "completed";
-  if (events.some((event) => START_TYPES.has(event.eventType))) return "running";
-  return "observed";
+function authorizationEvidence(events: RecorderEvent[], coverage: string, store: RecorderStore): RunSummary["authorization"] {
+  const executed = events.filter(isAuthenticatedExecution);
+  const bindings = new Set(executed.map(authorizationBinding));
+  const grants = new Map<string, { event: RecorderEvent; at: number }>();
+  for (const event of events) {
+    if (!TRUSTED_AUTHORITY.has(event.trustLevel) || store.hasConflict(event.eventId)) continue;
+    const binding = authorizationBinding(event);
+    if (DENIAL_TYPES.has(event.eventType) && (executed.length === 0 || (binding && bindings.has(binding)))) {
+      return { state: "denied", evidenceEventId: event.eventId };
+    }
+    if (!binding || !GRANT_TYPES.has(event.eventType)) continue;
+    const at = Date.parse(event.sourceTimestamp ?? "");
+    if (!Number.isFinite(at)) continue;
+    const prior = grants.get(binding);
+    if (!prior || at < prior.at) grants.set(binding, { event, at });
+  }
+  if (grants.size > 0) {
+    let supportingGrant: RecorderEvent | undefined;
+    for (const event of executed) {
+      const binding = authorizationBinding(event);
+      const grant = binding ? grants.get(binding) : undefined;
+      const at = Date.parse(event.sourceTimestamp ?? "");
+      if (store.hasConflict(event.eventId) || !grant || !Number.isFinite(at) || at < grant.at) {
+        return { state: "unknown", evidenceEventId: null };
+      }
+      supportingGrant ??= grant.event;
+    }
+    supportingGrant ??= grants.values().next().value?.event;
+    if (supportingGrant) return { state: "allowed", evidenceEventId: supportingGrant.eventId };
+  }
+  const held = events.find((event) => event.metadata.policyDecision === "require_approval" || event.eventType === "approval.requested");
+  if (held) return { state: "held", evidenceEventId: held.eventId };
+  return { state: coverage === "list-projection" ? "not_loaded" : "unknown", evidenceEventId: null };
+}
+
+function verificationEvidence(events: RecorderEvent[], coverage: string, store: RecorderStore): RunSummary["verification"] {
+  const executed = new Map(events.filter(isAuthenticatedExecution).map((event) => [event.eventId, event]));
+  const successes = [...executed.values()].filter(isSuccessClaim);
+  const passes = new Map<string, RecorderEvent>();
+  for (const event of events) {
+    if (!TRUSTED_AUTHORITY.has(event.trustLevel) || store.hasConflict(event.eventId)) continue;
+    const id = event.metadata.executionEventId;
+    if (typeof id !== "string") continue;
+    const target = executed.get(id);
+    if (!target || !END_TYPES.has(target.eventType) || store.hasConflict(target.eventId)) continue;
+    const executedAt = epoch(target.sourceTimestamp);
+    const verifiedAt = epoch(event.sourceTimestamp);
+    if (!Number.isFinite(executedAt) || !Number.isFinite(verifiedAt) || verifiedAt < executedAt) continue;
+    const bindings = [
+      [event.metadata.decisionId, target.metadata.decisionId],
+      [event.metadata.capabilityId, target.metadata.capabilityId],
+      [event.metadata.actionHash, target.metadata.actionHash],
+      [event.metadata.executionActor, target.metadata.actor],
+    ];
+    if (!bindings.every(([claim, value]) => claim === undefined || (isPublicRecorderId(claim) && claim === value))) continue;
+    if (event.eventType === "verification.failed") return { state: "failed", evidenceEventId: event.eventId };
+    if (event.eventType === "verification.passed" && EXEC_SUCCESS_TYPES.has(target.eventType) && isSuccessClaim(target)) {
+      passes.set(id, event);
+    }
+  }
+  const conflictedExecution = [...executed.keys()].some((id) => store.hasConflict(id));
+  if (!conflictedExecution && successes.length > 0 && successes.every((event) => passes.has(event.eventId))) {
+    return { state: "verified", evidenceEventId: passes.values().next().value?.eventId ?? null };
+  }
+  if (events.some(isSuccessClaim)) return { state: "unverified", evidenceEventId: null };
+  return { state: coverage === "list-projection" ? "not_loaded" : "unknown", evidenceEventId: null };
+}
+
+function observedState(hasOpenAttempt: boolean, terminal: RecorderEvent | undefined): string {
+  if (hasOpenAttempt) return "running";
+  if (!terminal) return "observed";
+  if (terminal.metadata.outcome === "failed" || /(?:[._]failed|\.timed_out)$/.test(terminal.eventType)) return "failed";
+  return "completed";
 }
 
 function finding(
@@ -626,7 +656,7 @@ function finding(
 function group(store: RecorderStore): Map<string, RecorderEvent[]> {
   const byRun = new Map<string, RecorderEvent[]>();
   for (const event of store.events.values()) {
-    const runId = event.runId ?? "unscoped";
+    const runId = recorderRunId(event.runId, event.eventId);
     const list = byRun.get(runId) ?? [];
     list.push(event);
     byRun.set(runId, list);
@@ -643,16 +673,21 @@ function bySequence(a: RecorderEvent, b: RecorderEvent): number {
 }
 
 function latestIngest(events: RecorderEvent[]): string {
-  return events.map((event) => event.ingestedAt).sort().at(-1) ?? new Date(0).toISOString();
+  return maxTime(events.map((event) => event.ingestedAt)) ?? new Date(0).toISOString();
+}
+
+function epoch(value: string | null): number {
+  const parsed = Date.parse(value ?? "");
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
 }
 
 function minTime(values: Array<string | null>): string | null {
-  const finite = values.filter((value): value is string => Boolean(value)).sort();
+  const finite = values.filter((value): value is string => Number.isFinite(epoch(value))).sort((a, b) => epoch(a) - epoch(b));
   return finite[0] ?? null;
 }
 
 function maxTime(values: Array<string | null>): string | null {
-  const finite = values.filter((value): value is string => Boolean(value)).sort();
+  const finite = values.filter((value): value is string => Number.isFinite(epoch(value))).sort((a, b) => epoch(a) - epoch(b));
   return finite.at(-1) ?? null;
 }
 

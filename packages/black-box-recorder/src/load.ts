@@ -1,5 +1,6 @@
-import snapshot from "./snapshot.json" with { type: "json" };
+import snapshotHeader from "./snapshot-header.json" with { type: "json" };
 import { FIXTURE_RUNS } from "./fixture.js";
+import { recorderFeatureEnabled } from "./flag.js";
 import { RecorderStore } from "./store.js";
 import type { IngestDraft, RunAnnotation } from "./types.js";
 
@@ -25,22 +26,14 @@ type Snapshot = {
   }>;
 };
 
-const data = snapshot as Snapshot;
+export const capture = Object.freeze(snapshotHeader);
 
-export const capture = {
-  capturedAt: data.capturedAt,
-  repoHead: data.source.repoHead,
-  via: data.source.via,
-  runtimeId: data.source.runtimeId,
-  gatewayReachable: data.source.gatewayReachable,
-  note: data.source.note,
-  liveRuns: data.runs.length
-};
-
-export async function loadLane(lane: "live" | "fixture"): Promise<RecorderStore> {
+export async function loadLane(lane: "live" | "fixture", options: { enabled?: boolean } = {}): Promise<RecorderStore> {
+  const enabled = options.enabled ?? recorderFeatureEnabled();
+  const store = new RecorderStore({ enabled });
+  if (!enabled) return store;
   // Bundled snapshot and fixture data is unsigned repository content. It can be shown, but it is never authoritative:
   // no trust is granted here, so its authority claims stay untrusted and cannot produce allowed or verified states.
-  const store = new RecorderStore({ enabled: true });
   if (lane === "fixture") {
     for (const run of FIXTURE_RUNS) {
       store.annotate(run.annotation.runId, run.annotation);
@@ -48,6 +41,8 @@ export async function loadLane(lane: "live" | "fixture"): Promise<RecorderStore>
     }
     return store;
   }
+  const { default: snapshot } = await import("./snapshot.json", { with: { type: "json" } });
+  const data = snapshot as Snapshot;
   for (const run of data.runs) {
     store.annotate(run.runId, {
       ...run.annotations,

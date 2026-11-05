@@ -13,6 +13,14 @@ describe("black box recorder", () => {
     expect(recorderFeatureEnabled({ ABBR_ENABLED: "1" })).toBe(true);
   });
 
+  test("loading a disabled lane does not retain snapshot or fixture events", async () => {
+    for (const lane of ["live", "fixture"] as const) {
+      const store = await loadLane(lane, { enabled: false });
+      expect(store.events.size).toBe(0);
+      expect(store.annotations.size).toBe(0);
+    }
+  });
+
   test("package source does not import execution or approval authority", () => {
     const banned = [
       "policy-gate",
@@ -101,7 +109,7 @@ describe("black box recorder", () => {
   });
 
   test("execution without authorization is uncorroborated, not declared unauthorized", async () => {
-    const store = await loadLane("fixture");
+    const store = await loadLane("fixture", { enabled: true });
     const row = summarize(store).find((item) => item.runId === "fixture-uncorroborated");
     expect(row).toBeTruthy();
     expect(row?.authorization.state).toBe("unknown");
@@ -111,26 +119,26 @@ describe("black box recorder", () => {
     ).toBe(true);
   });
 
-  test("validator failure stays authoritative over producer success", async () => {
-    const store = await loadLane("fixture");
+  test("an unsigned fixture failure stays a claim and leaves success unverified", async () => {
+    const store = await loadLane("fixture", { enabled: true });
     const row = summarize(store).find((item) => item.runId === "fixture-validator-wins");
     expect(row).toBeTruthy();
-    expect(row?.verification.state).toBe("failed");
-    expect(store.findings.some((item) => item.ruleId === "abbr.validator-failed")).toBe(true);
+    expect(row?.verification.state).toBe("unverified");
+    expect(store.findings.some((item) => item.ruleId === "abbr.validator-failed")).toBe(false);
     expect(store.findings.some((item) => item.ruleId === "abbr.unverified-success" && item.runId === row?.runId)).toBe(
-      false
+      true
     );
     expect(row?.sourceReleases.length).toBe(2);
   });
 
   test("bundled fixtures are never authoritative: they cannot show verified or allowed, and release is not invented on the live focus run", async () => {
     // Bundled data is unsigned. Its claims of authority or verification must not become production-authoritative states.
-    const fixture = await loadLane("fixture");
+    const fixture = await loadLane("fixture", { enabled: true });
     const verified = summarize(fixture).find((item) => item.runId === "fixture-verified");
     expect(verified?.verification.state).not.toBe("verified");
     expect(verified?.authorization.state).not.toBe("allowed");
 
-    const live = await loadLane("live");
+    const live = await loadLane("live", { enabled: true });
     const focus = summarize(live).find((item) => item.runId === LIVE_FOCUS_RUN);
     expect(focus?.authorization.state).not.toBe("allowed");
     expect(focus?.verification.state).toBe("unverified");
@@ -148,7 +156,7 @@ describe("black box recorder", () => {
     for (const needle of ["/home/jacen", "stdout", "stderr", "Bearer ", "BEGIN PRIVATE", "tokenHash"]) {
       expect(raw.includes(needle), needle).toBe(false);
     }
-    const live = await loadLane("live");
+    const live = await loadLane("live", { enabled: true });
     const { exportRun } = await import("./analyze.js");
     const bundle = await exportRun(live, LIVE_FOCUS_RUN);
     const text = JSON.stringify(bundle);
@@ -159,7 +167,7 @@ describe("black box recorder", () => {
   });
 
   test("queries are paginated and do not return the whole history", async () => {
-    const live = await loadLane("live");
+    const live = await loadLane("live", { enabled: true });
     const page = queryRuns(live, { limit: 8 });
     expect(page.runs.length).toBe(8);
     expect(page.total).toBe(100);

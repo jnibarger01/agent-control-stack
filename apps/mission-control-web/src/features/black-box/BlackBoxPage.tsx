@@ -26,7 +26,7 @@ export function BlackBoxPage() {
     let cancelled = false;
     setStore(null);
     setFailed(false);
-    loadLane(lane)
+    loadLane(lane, { enabled: true })
       .then((next) => {
         if (cancelled) return;
         setStore(next);
@@ -240,8 +240,12 @@ function storeRun(store: RecorderStore, runId: string): RunSummary | null {
 
 function lead(summary: RunSummary, findings: Finding[]): string {
   if (summary.verification.state === "failed") return "Verification failed. That conclusion is the validator record. A producer success claim does not replace it.";
-  if (findings.some((item) => item.ruleId === "abbr.spawn-accepted-process-exit")) return "ACS authorized this start and accepted the tool result. A later read observed a non-zero process exit. No ResultValidator event is in the loaded chain, so the exit is not a verified outcome.";
-  if (summary.verification.state === "verified") return "A validator pass is linked to this fixture run. Authorization and verification stay separate from how complete the recording is.";
+  if (summary.verification.state === "verified") return "Trusted validator records cover the successful executions in this run.";
+  if (findings.some((item) => item.ruleId === "abbr.spawn-accepted-process-exit")) {
+    return summary.authorization.state === "allowed"
+      ? "A trusted authorization record is present for this run. A later record reports a non-zero process exit. The outcome awaits independent verification."
+      : "The loaded records report a start and a later non-zero process exit. Authorization and the outcome remain unverified.";
+  }
   if (summary.coverage !== "audit-chain") return "Only the work-item list row was loaded. Missing audit events in this view are a snapshot limit, not proof they never happened.";
   if (findings.some((item) => item.ruleId === "abbr.missing-authorization")) return "Execution evidence is present without authorization evidence in the loaded set. That is uncorroborated. It is not an automatic denial.";
   if (summary.verification.state === "unverified") return "Something in the loaded chain reports success. Nothing here is an independent verification.";
@@ -249,7 +253,7 @@ function lead(summary: RunSummary, findings: Finding[]): string {
 }
 
 function TimelineRow({ event, prior, open, onToggle, onCopy, copied }: { event: RecorderEvent; prior?: RecorderEvent; open: boolean; onToggle: () => void; onCopy: (value: string) => void; copied: string | null }) {
-  const name = String(event.metadata.acsEventName ?? event.eventType);
+  const name = typeof event.metadata.acsEventName === "string" ? event.metadata.acsEventName : event.eventType;
   const tied = Boolean(prior?.sourceTimestamp && prior.sourceTimestamp === event.sourceTimestamp);
   return (
     <li className="border-l border-line py-2 pl-3">

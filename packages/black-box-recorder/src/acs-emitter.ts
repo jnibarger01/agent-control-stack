@@ -1,4 +1,4 @@
-import { recorderEventIdFor } from "./store.js";
+import { isPublicRecorderId, recorderEventIdFor } from "./store.js";
 import type { IngestDraft } from "./types.js";
 
 /**
@@ -33,9 +33,8 @@ const TYPE_BY_NAME: Readonly<Record<string, string>> = {
   "execution.authorization_granted": "authorization.allowed",
   "execution.authorization_denied": "authorization.denied",
   "execution.completed": "execution.completed",
-  "desktop_commander.tool_succeeded": "execution.tool_succeeded",
-  "desktop_commander.tool_failed": "execution.tool_failed",
-  "verification.finished": "verification.passed"
+  "desktop_commander.tool_succeeded": "tool.completed",
+  "desktop_commander.tool_failed": "tool.failed"
 };
 
 /**
@@ -46,7 +45,12 @@ const TYPE_BY_NAME: Readonly<Record<string, string>> = {
  * The draft is unsigned. Only a signature from an ACS key, added by the signer, can make it authoritative.
  */
 export async function toRecorderDraft(row: AcsExecutionRow): Promise<IngestDraft> {
-  const type = row.verification === "failed" ? "verification.failed" : (TYPE_BY_NAME[row.name] ?? row.name);
+  let type = TYPE_BY_NAME[row.name] ?? row.name;
+  if (row.name === "verification.finished") {
+    type = row.verification === "passed" || row.verification === "failed"
+      ? `verification.${row.verification}`
+      : "verification.unknown";
+  }
   const metadata: Record<string, unknown> = {
     acsEventName: row.name,
     decisionId: row.requestId,
@@ -56,7 +60,7 @@ export async function toRecorderDraft(row: AcsExecutionRow): Promise<IngestDraft
     tool: row.toolName
   };
   if (row.outcome) metadata.outcome = row.outcome;
-  if (row.verifiesProducerEventId) {
+  if (row.name === "verification.finished" && isPublicRecorderId(row.verifiesProducerEventId)) {
     metadata.executionEventId = await recorderEventIdFor(COMPONENT, row.verifiesProducerEventId);
   }
   return {

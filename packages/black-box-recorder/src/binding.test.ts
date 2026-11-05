@@ -24,7 +24,7 @@ function draft(partial: Partial<IngestDraft> & Pick<IngestDraft, "producerEventI
     missionId: "run-b",
     correlationId: "c-b",
     parentEventId: null,
-    sourceTimestamp: at(1),
+    sourceTimestamp: partial.eventType.startsWith("verification.") ? at(4) : at(1),
     ingestedAt: at(2),
     trustLevel: "acs_authoritative",
     metadata: {},
@@ -44,7 +44,7 @@ const execution = (id: string, decisionId: string) =>
     producerEventId: id,
     eventType: "execution.completed",
     sourceTimestamp: at(3),
-    metadata: { outcome: "succeeded", decisionId, capabilityId: "cap-1" }
+    metadata: { outcome: "succeeded", decisionId, capabilityId: "cap-1", actor: "jace", actionHash: "action-1" }
   });
 
 describe("authorization and verification are bound to their context", () => {
@@ -54,7 +54,7 @@ describe("authorization and verification are bound to their context", () => {
         draft({
           producerEventId: "a1",
           eventType: "authorization.allowed",
-          metadata: { decisionId: "d1", actor: "jace", capabilityId: "cap-1" }
+          metadata: { decisionId: "d1", actor: "jace", capabilityId: "cap-1", actionHash: "action-1" }
         })
       ),
       signed(execution("e1", "d1"))
@@ -69,7 +69,7 @@ describe("authorization and verification are bound to their context", () => {
           producerEventId: "a9",
           eventType: "authorization.allowed",
           sourceTimestamp: at(5),
-          metadata: { decisionId: "d1", actor: "jace", capabilityId: "cap-1" }
+          metadata: { decisionId: "d1", actor: "jace", capabilityId: "cap-1", actionHash: "action-1" }
         })
       ),
       signed(execution("e9", "d1"))
@@ -90,7 +90,7 @@ describe("authorization and verification are bound to their context", () => {
         producerEventId: "a3",
         eventType: "authorization.allowed",
         trustLevel: "acs_authoritative",
-        metadata: { decisionId: "d1", actor: "jace", capabilityId: "cap-1" }
+        metadata: { decisionId: "d1", actor: "jace", capabilityId: "cap-1", actionHash: "action-1" }
       })
     ]);
     expect(row?.authorization.state).not.toBe("allowed");
@@ -102,7 +102,7 @@ describe("authorization and verification are bound to their context", () => {
         draft({
           producerEventId: "a4",
           eventType: "authorization.allowed",
-          metadata: { decisionId: "d-other", actor: "jace", capabilityId: "cap-1" }
+          metadata: { decisionId: "d-other", actor: "jace", capabilityId: "cap-1", actionHash: "action-1" }
         })
       ),
       signed(execution("e4", "d1"))

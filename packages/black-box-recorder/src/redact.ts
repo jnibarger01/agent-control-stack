@@ -20,10 +20,11 @@ export function redact(value: unknown, depth = 0): unknown {
     return value.slice(0, MAX_KEYS).map((item) => redact(item, depth + 1));
   }
   if (typeof value === "object") {
-    const out: Record<string, unknown> = {};
+    const out: Record<string, unknown> = Object.create(null);
     for (const key of Object.keys(value as Record<string, unknown>).slice(0, MAX_KEYS)) {
       const raw = (value as Record<string, unknown>)[key];
-      out[key] = SENSITIVE_KEY.test(key) ? "[redacted]" : redact(raw, depth + 1);
+      const safeKey = redactString(key);
+      out[safeKey] = safeKey !== key || SENSITIVE_KEY.test(key) ? "[redacted]" : redact(raw, depth + 1);
     }
     return out;
   }

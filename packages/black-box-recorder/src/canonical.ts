@@ -5,7 +5,7 @@ export function canonicalJson(value: unknown): string {
 
 function stringify(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
-  if (Array.isArray(value)) return `[${value.map((item) => stringify(item)).join(",")}]`;
+  if (Array.isArray(value)) return `[${Array.from(value, (item) => stringify(item)).join(",")}]`;
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record)
     .filter((key) => record[key] !== undefined)
@@ -34,5 +34,22 @@ export function envelopeForDigest(event: {
   metadata: unknown;
   evidence: { sourceRecordRef: string | null; integrityStatus: string };
 }): string {
-  return canonicalJson(event);
+  return canonicalJson({
+    eventId: event.eventId,
+    schemaVersion: event.schemaVersion,
+    runId: event.runId,
+    missionId: event.missionId,
+    correlationId: event.correlationId,
+    parentEventId: event.parentEventId,
+    eventType: event.eventType,
+    source: event.source,
+    sourceTimestamp: event.sourceTimestamp,
+    ingestedAt: event.ingestedAt,
+    trustLevel: event.trustLevel,
+    metadata: event.metadata,
+    evidence: {
+      sourceRecordRef: event.evidence.sourceRecordRef,
+      integrityStatus: event.evidence.integrityStatus
+    }
+  });
 }

@@ -1,22 +1,31 @@
 import { canonicalJson, envelopeForDigest, sha256Hex } from "./canonical.js";
 import { recorderFeatureEnabled } from "./flag.js";
-import { importTrustedKey, verifyProvenance } from "./provenance.js";
+import { importTrustedKey, signedPayload, verifyProvenance } from "./provenance.js";
 import { redact, redactField } from "./redact.js";
 import type { Finding, IngestDraft, IngestResult, RecorderEvent, RunAnnotation, TrustLevel } from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
 
-/** The event id the store assigns to a producer event. Shared so a verification can name its execution event. */
 /**
- * Authoritative and untrusted records live in separate slots. An unsigned claim can therefore never occupy the id of a
- * signed record, and cannot make a signed verification point at unsigned evidence.
+ * Derives an event id within its trust namespace so an unsigned claim cannot
+ * occupy the id an authenticated record or a validator reference uses.
  */
 export async function recorderEventIdFor(
   component: string,
   producerEventId: string,
-  authority: "authoritative" | "untrusted" = "authoritative"
+  authority: "authoritative" | "authenticated" | "untrusted" = "authoritative"
 ): Promise<string> {
-  const producerKey = `${redactField(component) ?? ""}\0${redactField(producerEventId) ?? ""}\0${authority}`;
+  if (!isPublicRecorderId(component) || !isPublicRecorderId(producerEventId)) {
+    throw new Error("Recorder reference requires an unambiguous public identity");
+  }
+  const producerKey = `${component}\0${producerEventId}\0${authority}`;
   return `rec_${(await sha256Hex(producerKey)).slice(0, 24)}`;
+}
+
+export function isPublicRecorderId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 &&
+    !value.includes("\0") && !value.includes("[redacted]") && !value.includes("…[truncated]") &&
+    !/[\uD800-\uDFFF]/u.test(value) &&
+    redactField(value) === value;
 }
 
 export type RecorderStoreOptions = {
@@ -47,6 +56,12 @@ const UNGRANTED: ReadonlySet<TrustLevel> = new Set([
   "authenticated_producer"
 ]);
 
+/** Give each unscoped record its own run key, reserving that namespace. */
+export function recorderRunId(runId: string | null, eventId: string): string {
+  if (runId === null) return `unscoped:${eventId}`;
+  return runId.startsWith("unscoped:") ? `unscoped:run:${runId}` : runId;
+}
+
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object") {
     for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
@@ -56,46 +71,93 @@ function deepFreeze<T>(value: T): T {
 }
 
 export class RecorderStore {
-  readonly events = new Map<string, RecorderEvent>();
-  private readonly enabled: boolean;
-  private readonly maxEvents: number;
-  private readonly grantTrust: NonNullable<RecorderStoreOptions["grantTrust"]>;
-  private readonly maxRuns: number;
-  private readonly keys: Promise<Map<string, CryptoKey>>;
+  readonly #events = new Map<string, RecorderEvent>();
+  readonly #byProducer = new Map<string, string>();
+  readonly #annotations = new Map<string, RunAnnotation>();
+  readonly #fingerprints = new Map<string, string>();
+  readonly #conflictedAt = new Map<string, string>();
+  #fingerprintKey?: Promise<CryptoKey>;
+  readonly #enabled: boolean;
+  readonly #maxEvents: number;
+  readonly #grantTrust: NonNullable<RecorderStoreOptions["grantTrust"]>;
+  readonly #maxRuns: number;
+  readonly #keys: Promise<Map<string, CryptoKey>>;
 
   constructor(options: RecorderStoreOptions = {}) {
-    this.enabled = options.enabled ?? recorderFeatureEnabled();
-    this.maxEvents = options.maxEvents ?? DEFAULT_MAX_EVENTS;
-    this.maxRuns = options.maxRuns ?? DEFAULT_MAX_RUNS;
-    this.grantTrust = options.grantTrust ?? (() => false);
-    this.keys = loadKeys(options.trustedKeys ?? {});
+    this.#enabled = options.enabled ?? recorderFeatureEnabled();
+    this.#maxEvents = options.maxEvents ?? DEFAULT_MAX_EVENTS;
+    this.#maxRuns = options.maxRuns ?? DEFAULT_MAX_RUNS;
+    this.#grantTrust = options.grantTrust ?? (() => false);
+    this.#keys = loadKeys(options.trustedKeys ?? {});
   }
-  readonly byProducer = new Map<string, string>();
-  readonly conflicts: Array<{
+  readonly #conflicts: Array<Readonly<{
     producerKey: string;
     existingEventId: string;
     rejectedSha256: string;
     ingestedAt: string;
-  }> = [];
-  readonly annotations = new Map<string, RunAnnotation>();
+  }>> = [];
   readonly findings: Finding[] = [];
+
+  get events(): ReadonlyMap<string, RecorderEvent> { return new Map(this.#events); }
+  get annotations(): ReadonlyMap<string, RunAnnotation> { return new Map(this.#annotations); }
+  get conflicts() { return this.#conflicts.slice(); }
+  get conflictedAt(): ReadonlyMap<string, string> { return new Map(this.#conflictedAt); }
+
+  annotationFor(runId: string): RunAnnotation | undefined { return this.#annotations.get(runId); }
+  hasConflict(eventId: string): boolean { return this.#conflictedAt.has(eventId); }
 
   /** Returns false, and stores nothing, when a new run would exceed the annotation cap. */
   annotate(runId: string, annotation: RunAnnotation): boolean {
-    if (!this.annotations.has(runId) && this.annotations.size >= this.maxRuns) return false;
-    const prev = this.annotations.get(runId) ?? {};
-    this.annotations.set(runId, { ...prev, ...annotation });
+    if (!this.#enabled || !isPublicRecorderId(runId) || !annotation || typeof annotation !== "object") return false;
+    const key = recorderRunId(runId, "");
+    if (!this.#annotations.has(key) && this.#annotations.size >= this.#maxRuns) return false;
+    const prev = this.#annotations.get(key) ?? {};
+    const redacted = redact(annotation) as RunAnnotation;
+    const safe: RunAnnotation = {};
+    for (const field of ["agent", "tool", "observedStatus", "coverage", "instruction", "correlatedSession", "correlatedWorkItem", "sessionId"] as const) {
+      const value = redacted[field];
+      if (typeof value === "string") safe[field] = value;
+    }
+    for (const field of ["correlatedExitCode", "observedProcessExitCode"] as const) {
+      const value = redacted[field];
+      if (typeof value === "number") safe[field] = value;
+    }
+    this.#annotations.set(key, deepFreeze({ ...prev, ...safe }));
     return true;
   }
 
-  async ingest(draft: IngestDraft): Promise<IngestResult> {
-    if (!this.enabled) return { status: "disabled", reason: "ABBR_ENABLED is not set to 1" };
+  async ingest(input: IngestDraft): Promise<IngestResult> {
+    if (!this.#enabled) return { status: "disabled", reason: "ABBR_ENABLED is not set to 1" };
+    let draft: IngestDraft;
+    let producerPayload: string;
+    try {
+      // Capture the payload before the first await. The signature, redaction
+      // and fingerprint must all describe the same immutable input.
+      draft = deepFreeze(structuredClone(input));
+      if (![draft.component, draft.producerEventId, draft.eventType, draft.ingestedAt]
+        .every((field) => typeof field === "string" && field.length > 0)) {
+        return { status: "rejected", reason: "record is missing a required identity, type or time" };
+      }
+      const optionalFields = [draft.instanceId, draft.releaseId, draft.identityRef, draft.runId,
+        draft.missionId, draft.correlationId, draft.parentEventId, draft.sourceTimestamp, draft.sourceRecordRef];
+      if (!optionalFields.every((field) => field == null || typeof field === "string")) {
+        return { status: "rejected", reason: "record contains an invalid identity, reference or timestamp" };
+      }
+      if (!UNGRANTED.has(draft.trustLevel) && draft.trustLevel !== "unknown" && draft.trustLevel !== "untrusted_claim") {
+        return { status: "rejected", reason: "record contains an unknown trust level" };
+      }
+      const fields = signedPayload(draft);
+      delete fields.ingestedAt;
+      producerPayload = canonicalJson(fields);
+    } catch {
+      return { status: "rejected", reason: "record payload cannot be encoded as canonical JSON" };
+    }
     // Every stored string passes through the same redaction, including identity and reference fields.
     const metadata = redact(draft.metadata ?? {}) as Record<string, unknown>;
     // Authority is kept only when an ACS key signed exactly these fields, or the caller explicitly grants it.
-    const signed = await verifyProvenance(draft, canonicalJson, await this.keys);
+    const signed = await verifyProvenance(draft, canonicalJson, await this.#keys);
     const trustLevel: TrustLevel =
-      UNGRANTED.has(draft.trustLevel) && !signed && !this.grantTrust(draft, draft.trustLevel)
+      UNGRANTED.has(draft.trustLevel) && !signed && !this.#grantTrust(draft, draft.trustLevel)
         ? "untrusted_claim"
         : draft.trustLevel;
     const source = {
@@ -105,13 +167,17 @@ export class RecorderStore {
       producerEventId: redactField(draft.producerEventId) ?? "",
       identityRef: redactField(draft.identityRef)
     };
-    const authority = TRUSTED_AUTHORITY_LEVELS.has(trustLevel) ? "authoritative" : "untrusted";
-    const producerKey = `${source.component}\0${source.producerEventId}\0${authority}`;
+    const authority = TRUSTED_AUTHORITY_LEVELS.has(trustLevel) ? "authoritative"
+      : trustLevel === "authenticated_producer" ? "authenticated" : "untrusted";
+    const producerIdentity = [draft.component, draft.producerEventId, authority];
+    const producerKey = isPublicRecorderId(draft.component) && isPublicRecorderId(draft.producerEventId)
+      ? producerIdentity.join("\0")
+      : `private\0${await this.#fingerprint("identity", canonicalJson(producerIdentity))}`;
     const eventId = `rec_${(await sha256Hex(producerKey)).slice(0, 24)}`;
     const partial = {
       eventId,
       schemaVersion: SCHEMA_VERSION,
-      runId: redactField(draft.runId),
+      runId: isPublicRecorderId(draft.runId) ? draft.runId : null,
       missionId: redactField(draft.missionId),
       correlationId: redactField(draft.correlationId),
       parentEventId: redactField(draft.parentEventId),
@@ -133,34 +199,46 @@ export class RecorderStore {
       evidence: { ...partial.evidence, payloadSha256 }
     }) as RecorderEvent;
 
-    const existingId = this.byProducer.get(producerKey);
+    // Retry comparison keeps the original payload private and ignores the recorder's observation time.
+    const fingerprint = await this.#fingerprint("payload", producerPayload);
+    const existingId = this.#byProducer.get(producerKey);
     if (existingId) {
-      const existing = this.events.get(existingId);
+      const existing = this.#events.get(existingId);
       if (!existing) throw new Error("producer index pointed at a missing event");
-      if (existing.evidence.payloadSha256 === payloadSha256) {
+      if (this.#fingerprints.get(existingId) === fingerprint) {
         return { status: "duplicate", event: existing };
       }
-      if (this.conflicts.length < this.maxEvents) {
-        this.conflicts.push({
+      this.#conflictedAt.set(existingId, event.ingestedAt);
+      if (this.#conflicts.length < this.#maxEvents) {
+        this.#conflicts.push(Object.freeze({
           producerKey,
           existingEventId: existing.eventId,
           rejectedSha256: payloadSha256,
-          ingestedAt: draft.ingestedAt
-        });
+          ingestedAt: event.ingestedAt
+        }));
       }
       return { status: "conflict", event: existing, rejectedSha256: payloadSha256 };
     }
 
-    if (this.events.size >= this.maxEvents) {
-      return { status: "rejected", reason: `store is at its ${this.maxEvents}-record limit` };
+    if (this.#events.size >= this.#maxEvents) {
+      return { status: "rejected", reason: `store is at its ${this.#maxEvents}-record limit` };
     }
-    this.events.set(event.eventId, event);
-    this.byProducer.set(producerKey, event.eventId);
+    if (this.#events.has(event.eventId)) return { status: "rejected", reason: "recorder event identity collision" };
+    this.#events.set(event.eventId, event);
+    this.#byProducer.set(producerKey, event.eventId);
+    this.#fingerprints.set(event.eventId, fingerprint);
     return { status: "created", event };
   }
 
   eventsFor(runId: string): RecorderEvent[] {
-    return [...this.events.values()].filter((event) => event.runId === runId);
+    return [...this.#events.values()].filter((event) => recorderRunId(event.runId, event.eventId) === runId);
+  }
+
+  async #fingerprint(domain: "identity" | "payload", content: string): Promise<string> {
+    this.#fingerprintKey ??= crypto.subtle.generateKey({ name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const data = new TextEncoder().encode(`${domain}\0${content}`);
+    const digest = await crypto.subtle.sign("HMAC", await this.#fingerprintKey, data);
+    return btoa(String.fromCharCode(...new Uint8Array(digest)));
   }
 }
 
@@ -178,6 +256,5 @@ async function loadKeys(pems: Record<string, string>): Promise<Map<string, Crypt
 }
 
 function trustIntegrity(trust: IngestDraft["trustLevel"]): RecorderEvent["evidence"]["integrityStatus"] {
-  if (trust === "unknown" || trust === "untrusted_claim") return "unverifiable";
-  return "valid";
+  return UNGRANTED.has(trust) ? "valid" : "unverifiable";
 }
