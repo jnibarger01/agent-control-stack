@@ -158,6 +158,43 @@ await test('constraint checks: command allow/deny by name or absolute path, git 
   assert.equal(checkPolicyConstraints(effective, 'git_fetch', {}), undefined, 'default remote origin is allowed');
 });
 
+await test('constraint checks: every process-execution entry point shares the command guardrail', () => {
+  const denyCurl = { ...load({ systemPathExplicit: false }).effective, denyCommands: ['curl'], allowCommands: undefined };
+  // start_process argv[0]
+  assert.match(checkPolicyConstraints(denyCurl, 'start_process', { argv: ['/usr/bin/curl'] }), /denied/);
+  // run_command command words, including separators, env, wrappers and sh -c
+  for (const command of [
+    'curl https://example.test',
+    'echo hi && /usr/bin/curl https://example.test',
+    'FOO=1 curl https://example.test',
+    'sudo -u root curl https://example.test',
+    "sh -c 'curl https://example.test'",
+    'bash -lc "echo hi; curl https://example.test"',
+    'echo $(curl https://example.test)',
+  ]) {
+    assert.match(checkPolicyConstraints(denyCurl, 'run_command', { command }), /denied/, command);
+  }
+  // start_terminal_session starts a shell; its later input is checked by interact.
+  assert.equal(checkPolicyConstraints(denyCurl, 'start_terminal_session', { shell: '/bin/bash' }), undefined);
+  assert.match(checkPolicyConstraints({ ...denyCurl, denyCommands: ['bash'] }, 'start_terminal_session', { shell: '/bin/bash' }), /denied/);
+  // interact_with_process input tokens
+  assert.match(checkPolicyConstraints(denyCurl, 'interact_with_process', { input: 'curl https://example.test\n' }), /denied/);
+  assert.match(checkPolicyConstraints(denyCurl, 'interact_with_process', { input: 'echo hi; curl https://example.test\n' }), /denied/);
+
+  // A command used as an argument or redirection target is not a command word.
+  assert.equal(checkPolicyConstraints(denyCurl, 'run_command', { command: 'echo curl' }), undefined);
+  assert.equal(checkPolicyConstraints(denyCurl, 'run_command', { command: 'echo hi > curl' }), undefined);
+
+  // An allowlist applies to the same candidates (absolute entries match bare
+  // shell words, because PATH resolution happens after this check).
+  const allowGit = { ...denyCurl, denyCommands: [], allowCommands: ['/usr/bin/git'] };
+  assert.equal(checkPolicyConstraints(allowGit, 'run_command', { command: 'git status' }), undefined);
+  assert.match(checkPolicyConstraints(allowGit, 'run_command', { command: 'curl x' }), /allowlist/);
+  assert.match(checkPolicyConstraints(allowGit, 'start_terminal_session', { shell: '/bin/bash' }), /allowlist/);
+  assert.equal(checkPolicyConstraints(allowGit, 'interact_with_process', { input: 'git status\n' }), undefined);
+  assert.match(checkPolicyConstraints(allowGit, 'interact_with_process', { input: 'curl x\n' }), /allowlist/);
+});
+
 // ---- server level ----
 fs.writeFileSync(path.join(work, 'a.txt'), 'hello\n');
 function configFor(stateName, env = {}) {

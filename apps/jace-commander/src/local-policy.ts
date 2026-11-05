@@ -428,15 +428,166 @@ export function loadJcPolicy(options: JcPolicyOptions): JcPolicyLoad {
   };
 }
 
-/** Constraint check for one call. Returns a refusal reason, or undefined when permitted. */
-export function checkPolicyConstraints(effective: JcEffectivePolicy, tool: string, args: Record<string, unknown>): string | undefined {
+/**
+ * Words a shell treats as "run the next word as the command". They are skipped
+ * only when looking for the command word; they are not commands themselves.
+ * (The process layer separately refuses privilege tools; this is advisory.)
+ */
+const COMMAND_PREFIXES = new Set(['command', 'builtin', 'exec', 'env', 'nohup', 'sudo', 'doas', 'time']);
+const SHELL_BASENAMES = new Set(['sh', 'bash', 'dash', 'zsh', 'ksh', 'mksh', 'ash', 'fish', 'csh', 'tcsh']);
+
+/**
+ * Advisory shell word split: quote-aware, splits on command separators, and
+ * understands `NAME=value`, wrapper words and `sh -c '<command>'` recursion.
+ * It is deliberately conservative but is NOT a parser and NOT a security
+ * boundary: the sandbox is. Its purpose is to make `denyCommands` and
+ * `allowCommands` mean the same thing for every command-execution tool.
+ */
+function shellCommandWords(text: string, depth = 0): string[] {
+  if (depth > 3 || text.length > 16 * 1024) return [];
+  const commands: string[] = [];
+  let words: string[] = [];
+  let word = '';
+  let quote: 'single' | 'double' | undefined;
+  const flushWord = () => {
+    if (word) words.push(word);
+    word = '';
+  };
+  const flushCommand = () => {
+    flushWord();
+    if (words.length === 0) return;
+    let index = 0;
+    while (index < words.length) {
+      const candidate = words[index]!;
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(candidate)) { index += 1; continue; }
+      if (COMMAND_PREFIXES.has(path.basename(candidate))) {
+        index += 1;
+        // Wrapper options are not the command: `sudo -u root curl`,
+        // `env -i curl`, `time -p curl`. Options that take a value are
+        // followed by one; skipping it keeps the wrapper from hiding curl.
+        const takesValue = new Set(['-u', '-g', '-p', '-h', '-C', '-r', '-t', '-U', '--user', '--group']);
+        while (index < words.length && words[index]!.startsWith('-')) {
+          const option = words[index]!;
+          index += 1;
+          if (takesValue.has(option) && index < words.length) index += 1;
+        }
+        continue;
+      }
+      break;
+    }
+    const executable = words[index];
+    if (executable) {
+      commands.push(executable);
+      const base = path.basename(executable);
+      if (SHELL_BASENAMES.has(base)) {
+        // `sh -c '...'`, `bash -lc '...'`, `bash -l -c '...'`
+        for (let j = index + 1; j < words.length; j += 1) {
+          const option = words[j]!;
+          if (option === '--' && j + 1 < words.length) {
+            commands.push(...shellCommandWords(words[j + 1]!, depth + 1));
+            break;
+          }
+          if (/^-[A-Za-z]*c[A-Za-z]*$/.test(option) && j + 1 < words.length) {
+            commands.push(...shellCommandWords(words[j + 1]!, depth + 1));
+            break;
+          }
+        }
+      }
+    }
+    words = [];
+  };
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i]!;
+    if (quote === 'single') {
+      if (char === "'") quote = undefined;
+      else word += char;
+      continue;
+    }
+    if (quote === 'double') {
+      if (char === '\\' && i + 1 < text.length) { word += text[(i += 1)]!; continue; }
+      if (char === '"') quote = undefined;
+      else word += char;
+      continue;
+    }
+    if (char === '\\' && i + 1 < text.length) { word += text[(i += 1)]!; continue; }
+    if (char === "'") { quote = 'single'; continue; }
+    if (char === '"') { quote = 'double'; continue; }
+    if (/\s/.test(char)) {
+      flushWord();
+      continue;
+    }
+    if ([';', '|', '&', '(', ')', '`', '{', '}'].includes(char)) {
+      flushCommand();
+      continue;
+    }
+    if (char === '>' || char === '<') {
+      // A redirection target is a path, not a command word.
+      flushWord();
+      let j = i + 1;
+      while (j < text.length && /[<>]/.test(text[j]!)) j += 1;
+      if (text[j] === '&') {
+        j += 1;
+        while (j < text.length && /\d/.test(text[j]!)) j += 1;
+      } else {
+        while (j < text.length && /\s/.test(text[j]!)) j += 1;
+        while (j < text.length && !/[\s;|&()`]/.test(text[j]!)) j += 1;
+      }
+      i = j - 1;
+      continue;
+    }
+    word += char;
+  }
+  flushCommand();
+  return commands;
+}
+
+/** Every command an invocation can identify, for one policy evaluation. */
+function commandCandidates(tool: string, args: Record<string, unknown>): string[] {
+  const candidates: string[] = [];
   if (tool === 'start_process') {
     const argv = Array.isArray(args.argv) ? args.argv : [];
-    const executable = typeof argv[0] === 'string' ? argv[0] : '';
-    const base = path.basename(executable);
-    const matches = (entry: string) => (entry.includes('/') ? entry === executable : entry === base);
-    if (effective.denyCommands.some(matches)) return `command ${base || executable} is denied by policy`;
-    if (effective.allowCommands && !effective.allowCommands.some(matches)) return `command ${base || executable} is not in the policy allowlist`;
+    if (typeof argv[0] === 'string' && argv[0]) candidates.push(argv[0]);
+  } else if (tool === 'run_command') {
+    if (typeof args.command === 'string') candidates.push(...shellCommandWords(args.command));
+  } else if (tool === 'start_terminal_session') {
+    // The configured shell is the command this call starts; input sent later is
+    // evaluated by interact_with_process.
+    if (typeof args.shell === 'string' && args.shell) candidates.push(args.shell);
+    else candidates.push('/bin/bash');
+  } else if (tool === 'interact_with_process') {
+    if (typeof args.input === 'string') candidates.push(...shellCommandWords(args.input));
+  }
+  return [...new Set(candidates)];
+}
+
+function commandMatches(entry: string, candidate: string): boolean {
+  const base = path.basename(candidate);
+  if (entry.includes('/')) {
+    // An absolute policy entry matches that exact path; for a bare shell word
+    // (which PATH would resolve) compare the basename as well.
+    return entry === candidate || (!candidate.includes('/') && path.basename(entry) === candidate);
+  }
+  return entry === base;
+}
+
+/**
+ * Constraint check for one call. Returns a refusal reason, or undefined when
+ * permitted. This runs before any approval is requested or consumed and is
+ * shared by every process-execution entry point.
+ *
+ * These are advisory guardrails, not a sandbox: an allowed interpreter can run
+ * arbitrary code, which is why the bubblewrap workload sandbox (and the OS
+ * account/unit hardening) remains the actual containment boundary.
+ */
+export function checkPolicyConstraints(effective: JcEffectivePolicy, tool: string, args: Record<string, unknown>): string | undefined {
+  for (const candidate of commandCandidates(tool, args)) {
+    const base = path.basename(candidate);
+    if (effective.denyCommands.some((entry) => commandMatches(entry, candidate))) {
+      return `command ${base || candidate} is denied by policy`;
+    }
+    if (effective.allowCommands && !effective.allowCommands.some((entry) => commandMatches(entry, candidate))) {
+      return `command ${base || candidate} is not in the policy allowlist`;
+    }
   }
   if (tool === 'git_fetch' || tool === 'git_push') {
     const remote = typeof args.remote === 'string' ? args.remote : 'origin';
