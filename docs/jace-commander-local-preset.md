@@ -112,6 +112,65 @@ hardening profile is deliberately bubblewrap-compatible (namespace allow-list,
 `ProtectHostname` or `RestrictSUIDSGID`), and the root install steps create the
 workspace root and the state directory that `ReadWritePaths=` requires.
 
+The same command allow/deny list is evaluated for every process-execution entry
+point: `start_process` (`argv[0]`), `run_command` (the command words after shell
+parsing, including `&&`/`|` segments, `NAME=value`, wrapper words and `sh -c`),
+`start_terminal_session` (the configured shell), and `interact_with_process`
+(input words sent to an existing session). This is advisory policy applied
+before approval is requested or consumed; it is not the containment boundary.
+Because a shell can construct command names dynamically, an `allowCommands`
+list is not a proof that only those programs run. The sandbox and OS account are.
+
+## Readiness
+
+`GET /ready` on the bridge and `GET /jc/ready` on the edge are mode-aware. A
+local lane is ready only when all of these hold:
+
+- the executor is pinned to a read-only installed release
+  (`JC_REQUIRE_INSTALLED_RELEASE=1`), and the entrypoint is that release;
+- `DC_CMD` is `setpriv`/`runuser`, so the executor runs as a different uid;
+- the pinned release's own `local-readiness --json` probe succeeds through the
+  same wrapper, uid and child environment. The probe loads the effective policy
+  and runs the bubblewrap self-test;
+- the bridge child is started (the edge additionally requires a completed
+  initialize), and the gateway execution token is configured.
+
+Managed ACS fields are not required for the local preset. ACS is required only
+when the local policy routes a tool through `acs-capability` issuance. A
+listening HTTP port, a spawned child, or a policy with an invalid/missing
+configured file is never reported as ready.
+
+Run the probe by hand under the same account to see the reason:
+
+```bash
+/opt/jace-commander/current/dist/cli.js local-readiness --json
+```
+
+### Verifying the real systemd boundary
+
+The readiness probe runs as the executor, but it cannot prove that systemd
+started the bridge as `jc-bridge`, that `setpriv` initialized the executor's
+groups, or that a root-owned unit is actually in effect. On a **disposable**
+installation, run the root-only verifier:
+
+```bash
+sudo ACS_VERIFY_DISPOSABLE=1 \
+  /opt/agent-control-stack/apps/dc-mcp-gateway/deploy/verify-local-preset-systemd.sh
+```
+
+It checks the unit fragment ownership/mode, the bridge and executor uids/gids,
+the executor's supplementary groups and `CapEff=0`, the pinned release's own
+readiness result, and a real bubblewrap workload that must be able to write its
+policy root while it cannot write `/` or `/etc`, read JC state or the bridge
+environment file, or escalate through `sudo`/`mount`. It does not change host
+settings. Override the defaults with `JC_UNIT`, `JC_BRIDGE_PORT`,
+`JC_EXPECT_BRIDGE_USER`, `JC_EXPECT_EXEC_USER`, `JC_RELEASE_DIR`,
+`JC_STATE_DIR`, `JC_POLICY_PATH`, `JC_BRIDGE_ENV` and `JC_WORKSPACE`.
+
+A user-namespace approximation (for example a transient `systemd --user`
+service) is useful for finding configuration mistakes but is **not** evidence
+that the root-owned boundary works. Do not promote a release on it.
+
 ## Audit
 
 Every call is written to the hash-chained local trace with `authorizer`,
