@@ -121,6 +121,15 @@ function issue(ctx: Ctx, tool: string, args: Record<string, unknown>, token = JC
   });
 }
 
+function issueFor(ctx: Ctx, clientId: string, tool: string, args: Record<string, unknown>) {
+  return ctx.app.inject({
+    method: "POST",
+    url: "/jc/capability/issue",
+    headers: { authorization: `Bearer ${JC_BRIDGE_TOKEN}`, "x-jc-actor": ACTOR },
+    payload: { client_id: clientId, tool, argsSummary: JSON.stringify(args) }
+  });
+}
+
 function approve(ctx: Ctx, workItemId: string, actionHash: string, token = OP_TOKEN) {
   return ctx.app.inject({
     method: "POST",
@@ -270,6 +279,52 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
       const again = await issue(ctx, "privileged_exec", PRIV_ARGS);
       expect(again.statusCode).toBe(409);
       expect(again.json().workItemId).not.toBe(pending.workItemId);
+    }));
+
+  it("records the OAuth client on the approval work item", () =>
+    withGateway(async (ctx) => {
+      const pending = await issueFor(ctx, "client-a", "privileged_exec", PRIV_ARGS);
+      expect(pending.statusCode).toBe(409);
+      const detail = await ctx.app.inject({
+        method: "GET",
+        url: `/work-items/${pending.json().workItemId}`,
+        headers: { authorization: `Bearer ${OP_TOKEN}` }
+      });
+      expect(detail.json().workItem.requestedActions[0].params.oauthClientId).toBe("client-a");
+      expect(detail.json().workItem.intent).toContain("client-a");
+    }));
+
+  it("does not let a second OAuth client reuse an approval bound to the same actor", () =>
+    withGateway(async (ctx) => {
+      const first = await issueFor(ctx, "client-a", "privileged_exec", PRIV_ARGS);
+      expect(first.statusCode).toBe(409);
+      const pending = first.json();
+      expect((await approve(ctx, pending.workItemId, pending.actionHash)).statusCode).toBe(200);
+
+      const cross = await issueFor(ctx, "client-b", "privileged_exec", PRIV_ARGS);
+      expect(cross.statusCode).toBe(409);
+      expect(cross.json().capability).toBeUndefined();
+      expect(cross.json().workItemId).not.toBe(pending.workItemId);
+
+      const owner = await issueFor(ctx, "client-a", "privileged_exec", PRIV_ARGS);
+      expect(owner.statusCode).toBe(200);
+      expect(owner.json().workItemId).toBe(pending.workItemId);
+
+      const crossDetail = await ctx.app.inject({
+        method: "GET",
+        url: `/work-items/${cross.json().workItemId}`,
+        headers: { authorization: `Bearer ${OP_TOKEN}` }
+      });
+      const ownerDetail = await ctx.app.inject({
+        method: "GET",
+        url: `/work-items/${pending.workItemId}`,
+        headers: { authorization: `Bearer ${OP_TOKEN}` }
+      });
+      expect(crossDetail.json().workItem.requestedActions[0].params.oauthClientId).toBe("client-b");
+      expect(ownerDetail.json().workItem.requestedActions[0].params.oauthClientId).toBe("client-a");
+      expect(crossDetail.json().workItem.requestedActions[0].params.bindingHash).toBe(
+        ownerDetail.json().workItem.requestedActions[0].params.bindingHash
+      );
     }));
 
   it("an approval for one argv never authorizes a different argv", () =>

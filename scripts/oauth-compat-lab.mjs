@@ -50,7 +50,7 @@ const secret = () => crypto.randomBytes(24).toString('hex');
 const secretsFile = path.join(lab, 'lab.json');
 const secrets = existing
   ? JSON.parse(fs.readFileSync(secretsFile, 'utf8'))
-  : { bridgeToken: `lab-bridge-${secret()}`, operatorToken: `lab-operator-${secret()}`, consentCode: `lab-${crypto.randomBytes(6).toString('hex')}`, signingKey: crypto.randomBytes(32).toString('hex') };
+  : { bridgeToken: `lab-bridge-${secret()}`, operatorToken: `lab-operator-${secret()}`, consentCode: `lab-${crypto.randomBytes(6).toString('hex')}A1`, signingKey: crypto.randomBytes(32).toString('hex') };
 if (!existing) fs.writeFileSync(secretsFile, JSON.stringify(secrets), { mode: 0o600 });
 const { bridgeToken, operatorToken, consentCode, signingKey } = secrets;
 const evidence = fs.createWriteStream(path.join(lab, 'evidence.jsonl'), { flags: 'a', mode: 0o600 });

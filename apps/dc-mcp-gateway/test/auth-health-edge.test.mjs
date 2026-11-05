@@ -69,7 +69,7 @@ async function boot({ authEvents = false, idempotentRetry = false, acsUp = true,
   const child = spawn(process.execPath, ['server.js'], {
     cwd: new URL('..', import.meta.url).pathname,
     env: {
-      PATH: process.env.PATH, GATEWAY_PORT: String(port), PUBLIC_ORIGIN: ORIGIN, CONSENT_PASSPHRASE: 'pass-phrase', SIGNING_KEY: KEY, DATA_DIR: dir,
+      PATH: process.env.PATH, GATEWAY_PORT: String(port), PUBLIC_ORIGIN: ORIGIN, CONSENT_PASSPHRASE: 'consent-test-pass-1', SIGNING_KEY: KEY, DATA_DIR: dir,
       UPSTREAM: `http://127.0.0.1:${dcPort}`, JC_ENABLED: '1', JC_UPSTREAM: `http://127.0.0.1:${jcPort}`,
       ACS_GATEWAY_URL: `http://127.0.0.1:${acsPort}`, ACS_JC_GATEWAY_TOKEN: 'jc-bridge-token',
       ...(authEvents ? { ACS_MCP_AUTH_EVENTS: '1' } : {}), ...(idempotentRetry ? { ACS_REFRESH_IDEMPOTENT_RETRY: '1' } : {}),
@@ -152,7 +152,13 @@ test('flag ON: refresh success and a genuine reuse (lost response) are reported 
     assert.equal(refreshed.clientId, 'public-app');
     assert.equal(refreshed.lane, 'jc');
     assert.ok(Date.parse(refreshed.refreshExpiresAt) > Date.now() + 20 * 86_400_000);
-    assert.deepEqual(strip(events.find((e) => e.kind === 'refresh_failed')), { lane: 'jc', clientId: 'public-app', subject: 'jacen', kind: 'refresh_failed', reason: 'refresh_reused' });
+    assert.deepEqual(strip(events.find((e) => e.kind === 'refresh_failed')), {
+      lane: 'jc',
+      clientId: 'public-app',
+      subject: `jc-client:${crypto.createHash('sha256').update('public-app').digest('hex')}`,
+      kind: 'refresh_failed',
+      reason: 'refresh_reused',
+    });
   } finally { gw.close(); }
 });
 

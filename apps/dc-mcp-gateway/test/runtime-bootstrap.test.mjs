@@ -115,7 +115,7 @@ function startServer(port, upstreamPort, acsPort, stateDir) {
     env: {
       ...process.env,
       GATEWAY_PORT: String(port),
-      PUBLIC_ORIGIN: 'https://gw.test', CONSENT_PASSPHRASE: 'x', SIGNING_KEY: 'a'.repeat(32),
+      PUBLIC_ORIGIN: 'https://gw.test', CONSENT_PASSPHRASE: 'consent-test-pass-1', SIGNING_KEY: 'a'.repeat(32),
       ACS_MANAGED_MODE: '1', ACS_GATEWAY_URL: `http://127.0.0.1:${acsPort}`, ACS_GATEWAY_TOKEN: 'svc-token',
       ACS_NATIVE_RUNTIME_BOOTSTRAP: '1',
       UPSTREAM: `http://127.0.0.1:${upstreamPort}`,

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createPublicIngress } from '../public-edge-proxy.js';
+import { INGRESS_CLIENT_HEADER } from '../consent-guard.js';
 
 const resource = 'https://example.ts.net/jc/mcp';
 const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
@@ -44,5 +45,33 @@ test('proxy forwards only JC OAuth and consent payloads', async () => {
     assert.equal(await ok.text(), good);
     const denied = await fetch(url, { method: 'POST', body: 'resource=https%3A%2F%2Fevil.example' });
     assert.equal(denied.status, 404);
+  } finally { await close(publicServer); await close(upstream); }
+});
+test('proxy stamps the accepted peer and drops a client-supplied ingress identity', async () => {
+  let seen = null;
+  const upstream = http.createServer((req, res) => {
+    seen = req.headers;
+    res.writeHead(204);
+    res.end();
+  });
+  const uport = await listen(upstream);
+  const publicServer = createPublicIngress({ upstreamPort: uport, jcResource: resource });
+  const pport = await listen(publicServer);
+  try {
+    const url = 'http://127.0.0.1:' + pport + '/authorize/consent';
+    const good = 'resource=' + encodeURIComponent(resource) + '&passphrase=placeholder';
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        'x-forwarded-for': '203.0.113.50',
+        [INGRESS_CLIENT_HEADER]: '203.0.113.53',
+      },
+      body: good,
+    });
+    assert.equal(response.status, 204);
+    assert.equal(seen[INGRESS_CLIENT_HEADER], '127.0.0.1');
+    assert.equal(seen['x-forwarded-for'], undefined);
+    assert.notEqual(seen[INGRESS_CLIENT_HEADER], '203.0.113.53');
   } finally { await close(publicServer); await close(upstream); }
 });

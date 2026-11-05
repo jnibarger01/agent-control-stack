@@ -18,6 +18,17 @@ import { fileURLToPath } from 'node:url';
 import { saveJson } from './atomic-json.js';
 import { fetchClientMetadata, isAllowedRedirectUri, matchesRegisteredLoopback } from './cimd-guard.js';
 import { ClientInfoCache, createClientObserver, extractClientInfo } from './client-attribution.js';
+import { tokenSubject } from './client-identity.js';
+import {
+  CONSENT_PASSPHRASE_MAX_LENGTH,
+  consentClientKey,
+  consentSource,
+  consentSourceKey,
+  consentSourceLabel,
+  createConsentLimiter,
+  passphraseStrengthError,
+  resolveConsentLockoutMs,
+} from './consent-guard.js';
 import { localRoutingFromEnv, stripAuthorityMeta } from './jc-routing.js';
 import { managedModeFromEnv, jcModeFromEnv, identityAttribution, capabilityTransport, acsPost, isToolsCall, dcRuntimeIdentityFromState, issueRuntimeBootstrap, completeRuntimeBootstrap, injectRuntimeBootstrap } from './managed.js';
 import { dcBridgeReady, jcBridgeReady } from './readiness.js';
@@ -50,7 +61,9 @@ const testTtl = (name, fallback) => {
 };
 const ACCESS_TTL_S = testTtl('EDGE_TEST_ACCESS_TTL_S', 3600);
 const REFRESH_TTL_S = testTtl('EDGE_TEST_REFRESH_TTL_S', 30 * 24 * 3600);
-if (EDGE_TEST_MODE) console.warn(`gateway: EDGE_TEST_MODE=1 (access ttl ${ACCESS_TTL_S}s, refresh ttl ${REFRESH_TTL_S}s). NOT FOR PRODUCTION.`);
+// Production lock is 15 minutes. Test mode may shorten it, but not to zero, and the override is announced below.
+const consentLockoutMs = resolveConsentLockoutMs({ testMode: EDGE_TEST_MODE, raw: process.env.EDGE_TEST_CONSENT_LOCKOUT_MS });
+if (EDGE_TEST_MODE) console.warn(`gateway: EDGE_TEST_MODE=1 (access ttl ${ACCESS_TTL_S}s, refresh ttl ${REFRESH_TTL_S}s, consent lockout ${consentLockoutMs}ms). NOT FOR PRODUCTION.`);
 const CODE_TTL_S = 300;
 const MAX_BODY = 2 * 1024 * 1024; // 2 MB
 const rawInitializeAcsTimeout = Number.parseInt(process.env.MCP_INITIALIZE_ACS_TIMEOUT_MS || "400", 10);
@@ -65,6 +78,12 @@ const MCP_INITIALIZE_UPSTREAM_TIMEOUT_MS = Number.isFinite(rawInitializeUpstream
 for (const [k, v] of Object.entries({ PUBLIC_ORIGIN, CONSENT_PASSPHRASE, SIGNING_KEY })) {
   if (!v) { console.error(`gateway: missing required env ${k}; refusing to start`); process.exit(1); }
 }
+const passphraseError = passphraseStrengthError(CONSENT_PASSPHRASE);
+if (passphraseError) {
+  console.error(`gateway: ${passphraseError}; refusing to start`);
+  process.exit(1);
+}
+const CONSENT_PASSPHRASE_DIGEST = crypto.createHash('sha256').update(CONSENT_PASSPHRASE).digest();
 const NATIVE_RUNTIME_BOOTSTRAP = process.env.ACS_NATIVE_RUNTIME_BOOTSTRAP === '1';
 let MANAGED = { enabled: false };
 try {
@@ -348,27 +367,36 @@ function validRedirect(client, redirectUri) {
 
 // ---------------------------------------------------------------------------
 // Consent page (single-owner deployment: passphrase-gated approval)
+// The transaction is the only authority for redirect, PKCE, and client.
+// Hidden fields are the transaction id, the resource (ingress allowlist), and
+// the client id, which must match the transaction and cannot select another one.
 // ---------------------------------------------------------------------------
 function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
-function consentPage(q, lane = DC_OAUTH_LANE) {
-  const hidden = Object.entries(q)
-    .filter(([k]) => ['client_id', 'redirect_uri', 'response_type', 'scope', 'state', 'code_challenge', 'code_challenge_method', 'resource'].includes(k))
-    .map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join('\n');
-  const requested = q.resource || lane.resource;
+function clientName(client) {
+  const name = client && typeof client.client_name === 'string' ? client.client_name.trim() : '';
+  return name.slice(0, 100);
+}
+function consentPage(view, lane = DC_OAUTH_LANE) {
+  const hidden = ['consent_txn', 'resource', 'client_id']
+    .filter((key) => view[key])
+    .map((key) => `<input type="hidden" name="${esc(key)}" value="${esc(view[key])}">`).join('\n');
+  const requested = view.resource || lane.resource;
   const warning = requested === JC_RESOURCE
     ? 'Jace Commander access: ACS/codex-swarm/visualizer reads, mission submission, and ROOT commands (each root command still needs a separate human approval in ACS). Only approve clients you trust.'
     : 'Full Desktop Commander access (shell, filesystem). Only approve clients you trust.';
+  const name = view.client_name || 'unnamed client';
   return `<!doctype html><html><head><meta charset="utf-8"><title>Desktop Commander MCP - Authorization</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>body{font-family:system-ui,sans-serif;background:#111;color:#eee;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
 .card{background:#1c1c1c;padding:2rem;border-radius:12px;max-width:420px;width:90%}h1{font-size:1.1rem}
-code{background:#333;padding:2px 6px;border-radius:4px;font-size:.85em}
+code{background:#333;padding:2px 6px;border-radius:4px;font-size:.85em;word-break:break-all}
 input{width:100%;padding:.6rem;margin:.5rem 0 1rem;border-radius:6px;border:1px solid #444;background:#252525;color:#eee;box-sizing:border-box}
 button{width:100%;padding:.7rem;border:0;border-radius:6px;background:#4f8cff;color:#fff;font-size:1rem;cursor:pointer}
 .warn{color:#ffb454;font-size:.85rem}</style></head>
 <body><div class="card"><h1>Authorize MCP client?</h1>
-<p>Client <code>${esc(q.client_id || '?')}</code> requests scope <code>${esc(q.scope || 'mcp')}</code> for
+<p>Client <code>${esc(name)}</code> (<code>${esc(view.client_id || '?')}</code>) requests scope <code>${esc(view.scope || 'mcp')}</code> for
 <code>${esc(requested)}</code>.</p>
+<p>Authorization code destination: <code>${esc(view.redirect_uri || '')}</code></p>
 <p class="warn">${esc(warning)}</p>
 <form method="POST" action="/authorize/consent">
 ${hidden}
@@ -405,35 +433,117 @@ async function handleAuthorize(req, res, q, laneHint = null) {
   if (resource !== lane.resource) return fail('invalid_target', 'resource does not belong to this OAuth lane');
   const reqScope = (scope || 'mcp').split(' ').filter((s) => s === 'mcp' || s === 'openid' || s === 'email' || s === 'profile');
   if (reqScope.length === 0) return fail('invalid_scope', 'no permitted scope requested');
-  return send(res, 200, consentPage({ ...q, resource }, lane), { 'Content-Type': 'text/html; charset=utf-8' });
+  const grantedScope = reqScope.join(' ');
+  const consentTxn = mintConsentTxn({
+    client_id,
+    client_name: clientName(client),
+    redirect_uri,
+    scope: grantedScope,
+    resource,
+    issuer: lane.issuer,
+    code_challenge,
+    code_challenge_method: 'S256',
+    state: typeof state === 'string' ? state : '',
+    lane: lane.name,
+  });
+  return send(res, 200, consentPage({
+    consent_txn: consentTxn,
+    client_id,
+    client_name: clientName(client),
+    redirect_uri,
+    scope: grantedScope,
+    resource,
+  }, lane), { 'Content-Type': 'text/html; charset=utf-8' });
 }
 
-async function handleConsent(req, res, body, laneHint = null) {
+const CONSENT_BINDINGS = ['redirect_uri', 'client_id', 'code_challenge', 'code_challenge_method', 'resource', 'scope', 'state'];
+
+function consentBindingMismatch(params, txn) {
+  // resource and client_id have to be posted. Their absence is a mismatch, so a
+  // probe cannot omit the field the ingress allowlist keys on.
+  if (!params.resource || params.resource !== txn.resource) return true;
+  if (!params.client_id || params.client_id !== txn.client_id) return true;
+  for (const key of CONSENT_BINDINGS) {
+    if (Object.prototype.hasOwnProperty.call(params, key) && params[key] !== txn[key]) return true;
+  }
+  return false;
+}
+
+function passphraseMatches(pass) {
+  if (typeof pass !== 'string' || pass.length === 0 || pass.length > CONSENT_PASSPHRASE_MAX_LENGTH) return false;
+  const digest = crypto.createHash('sha256').update(pass).digest();
+  return crypto.timingSafeEqual(digest, CONSENT_PASSPHRASE_DIGEST);
+}
+
+// Stable fields only. The passphrase, the transaction id, tokens, and the raw body are not logged.
+function auditConsent(reason, source, clientId, gate) {
+  console.log(`auth: consent refused reason=${reason} client=${logSafe(clientId)} source=${consentSourceLabel(source)} locked=${gate.locked ? 1 : 0} retry_after=${gate.retryAfterSec || 0}`);
+}
+
+function consentLocked(res, gate) {
+  return send(res, 429, denyPage('Consent temporarily locked.'), {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Retry-After': String(gate.retryAfterSec),
+  });
+}
+
+async function handleConsent(req, res, body) {
   const params = Object.fromEntries(new URLSearchParams(body.toString('utf8')).entries());
-  const { client_id, redirect_uri, scope, state, code_challenge, code_challenge_method } = params;
-  const pass = params.passphrase || '';
-  const passOk = pass.length > 0 && crypto.timingSafeEqual(
-    Buffer.from(crypto.createHash('sha256').update(pass).digest()),
-    Buffer.from(crypto.createHash('sha256').update(CONSENT_PASSPHRASE).digest()));
-  if (!passOk) return send(res, 401, denyPage('Invalid consent passphrase.'), { 'Content-Type': 'text/html; charset=utf-8' });
-  const client = await resolveClient(client_id);
-  if (!client || !validRedirect(client, redirect_uri)) return send(res, 400, denyPage('Invalid client/redirect.'), { 'Content-Type': 'text/html; charset=utf-8' });
-  const lane = laneHint || laneForClientResource(client, params.resource);
-  if (!lane) return send(res, 400, denyPage('Unknown resource.'), { 'Content-Type': 'text/html; charset=utf-8' });
-  const resource = params.resource || lane.resource;
-  if (resource !== lane.resource) return send(res, 400, denyPage('Resource does not belong to this OAuth lane.'), { 'Content-Type': 'text/html; charset=utf-8' });
-  // The consent POST is a second entry point: it must enforce the same PKCE rule as /authorize, not trust the form.
-  if (code_challenge_method !== 'S256' || !isPkceChallenge(code_challenge)) return send(res, 400, denyPage('PKCE with S256 is required.'), { 'Content-Type': 'text/html; charset=utf-8' });
-  const reqScope = (scope || 'mcp').split(' ').filter((s) => s === 'mcp' || s === 'openid' || s === 'email' || s === 'profile');
+  // The TCP peer is the identity. A loopback peer may carry the ingress stamp.
+  // X-Forwarded-For, Forwarded, and X-Real-IP are not consulted.
+  const source = consentSource(req.socket && req.socket.remoteAddress, req.headers);
+  const sourceKey = consentSourceKey(source);
+  const txnId = typeof params.consent_txn === 'string' ? params.consent_txn : '';
+  const stored = txnId ? consentTxns.get(txnId) : undefined;
+  const live = Boolean(stored && stored.exp >= now());
+  if (stored && !live) consentTxns.delete(txnId);
+  // An unknown transaction has no trusted client. The posted client_id must not
+  // spend or reset another client's attempt budget.
+  const clientKey = live ? consentClientKey(stored.client_id) : null;
+  const gate = consentLimiter.snapshot({ sourceKey, clientKey });
+  if (gate.locked) {
+    auditConsent('locked', source, live ? stored.client_id : null, gate);
+    return consentLocked(res, gate);
+  }
+  if (!txnId || !live) {
+    const recorded = consentLimiter.recordFailure({ sourceKey, clientKey: null });
+    auditConsent(txnId ? 'unknown_txn' : 'missing_txn', source, null, recorded);
+    const message = txnId ? 'Unknown or expired consent transaction.' : 'Consent transaction required.';
+    return send(res, 400, denyPage(message), { 'Content-Type': 'text/html; charset=utf-8' });
+  }
+  const txn = stored;
+  // A conflicting form field must not burn the transaction: the owner can still
+  // submit the page that was actually rendered. It is rejected before the
+  // passphrase is checked and does not spend an authentication attempt.
+  if (consentBindingMismatch(params, txn)) {
+    return send(res, 400, denyPage('Consent transaction does not match the submitted request.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  }
+  // Compare and count before any await so concurrent posts cannot pass the budget.
+  const passOk = passphraseMatches(typeof params.passphrase === 'string' ? params.passphrase : '');
+  if (!passOk) {
+    const recorded = consentLimiter.recordFailure({ sourceKey, clientKey });
+    auditConsent('passphrase_invalid', source, txn.client_id, recorded);
+    return send(res, 401, denyPage('Invalid consent passphrase.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  }
+  // Delete before any await so a second delivery in this process cannot mint another code.
+  consentTxns.delete(txnId);
+  const lane = txn.lane === 'jc' ? JC_OAUTH_LANE : txn.lane === 'dc' ? DC_OAUTH_LANE : null;
+  if (!lane || txn.resource !== lane.resource || txn.issuer !== lane.issuer) {
+    return send(res, 400, denyPage('Unknown resource.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  }
+  const client = await resolveClient(txn.client_id);
+  if (!client || !validRedirect(client, txn.redirect_uri)) return send(res, 400, denyPage('Invalid client/redirect.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  if (txn.code_challenge_method !== 'S256' || !isPkceChallenge(txn.code_challenge)) return send(res, 400, denyPage('PKCE with S256 is required.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  const reqScope = String(txn.scope || '').split(' ').filter((s) => s === 'mcp' || s === 'openid' || s === 'email' || s === 'profile');
   if (reqScope.length === 0) return send(res, 400, denyPage('No permitted scope requested.'), { 'Content-Type': 'text/html; charset=utf-8' });
   const code = randId();
   codes.set(code, {
-    client_id, redirect_uri, scope: reqScope.join(' '), resource, issuer: lane.issuer,
-    code_challenge, code_challenge_method: 'S256', exp: now() + CODE_TTL_S,
+    client_id: txn.client_id, redirect_uri: txn.redirect_uri, scope: reqScope.join(' '), resource: txn.resource, issuer: lane.issuer,
+    code_challenge: txn.code_challenge, code_challenge_method: 'S256', exp: now() + CODE_TTL_S,
   });
-  const u = new URL(redirect_uri);
+  const u = new URL(txn.redirect_uri);
   u.searchParams.set('code', code);
-  if (state) u.searchParams.set('state', state);
+  if (txn.state) u.searchParams.set('state', txn.state);
   u.searchParams.set('iss', lane.issuer);
   return redirect(res, u.toString());
 }
@@ -442,19 +552,51 @@ async function handleConsent(req, res, body, laneHint = null) {
 const isPkceVerifier = (v) => typeof v === 'string' && /^[A-Za-z0-9\-._~]{43,128}$/.test(v);
 const isPkceChallenge = (v) => typeof v === 'string' && /^[A-Za-z0-9\-_]{43}$/.test(v);
 const codes = new Map();
-setInterval(() => { const t = now(); for (const [c, g] of codes) if (g.exp < t) codes.delete(c); }, 60_000);
+const CONSENT_TXN_TTL_S = 600;
+const CONSENT_TXN_CAP = 1000;
+const consentTxns = new Map();
+const consentLimiter = createConsentLimiter({ lockoutMs: consentLockoutMs });
+
+function sweepExpired(map) {
+  const t = now();
+  for (const [id, row] of map) if (row.exp < t) map.delete(id);
+}
+
+function mintConsentTxn(fields) {
+  sweepExpired(consentTxns);
+  while (consentTxns.size >= CONSENT_TXN_CAP) {
+    const oldest = consentTxns.keys().next().value;
+    if (oldest === undefined) break;
+    consentTxns.delete(oldest);
+  }
+  const id = randId();
+  consentTxns.set(id, { ...fields, exp: now() + CONSENT_TXN_TTL_S });
+  return id;
+}
+
+setInterval(() => { sweepExpired(codes); sweepExpired(consentTxns); consentLimiter.sweep(); }, 60_000).unref();
 
 function issueTokens(grant, lane = DC_OAUTH_LANE, family = randId().slice(0, 12)) {
   const t = now();
   const jti = randId();
+  const subject = tokenSubject(lane, grant.client_id);
   const access = signJwt({
-    iss: lane.issuer, sub: 'jacen', aud: lane.resource, client_id: grant.client_id,
+    iss: lane.issuer, sub: subject, aud: lane.resource, client_id: grant.client_id,
     scope: grant.scope, iat: t, exp: t + ACCESS_TTL_S, jti,
   });
   const rjti = randId();
-  refreshTokens[rjti] = { client_id: grant.client_id, scope: grant.scope, resource: lane.resource, issuer: lane.issuer, exp: t + REFRESH_TTL_S, active: true, family };
+  refreshTokens[rjti] = { client_id: grant.client_id, subject, scope: grant.scope, resource: lane.resource, issuer: lane.issuer, exp: t + REFRESH_TTL_S, active: true, family };
   saveJson(tokensFile, refreshTokens);
   return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TTL_S, refresh_token: rjti, scope: grant.scope };
+}
+
+/** Identity for an auth event. Legacy JC refresh rows have no stored subject; derive it so they do not collapse to the owner. */
+function reportedSubject(lane, record) {
+  if (record && typeof record.subject === 'string' && record.subject.length > 0) return record.subject;
+  if (lane && lane.name === 'jc' && record && typeof record.client_id === 'string' && record.client_id.length > 0) {
+    return tokenSubject(lane, record.client_id);
+  }
+  return 'jacen';
 }
 
 // ---- Authentication health (ADR 0027) ----
@@ -505,7 +647,7 @@ async function handleToken(req, res, body, laneHint = null) {
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return jsonError(res, 400, 'invalid_grant', 'PKCE verification failed');
     if (resource && resource !== lane.resource) return jsonError(res, 400, 'invalid_target', 'resource mismatch');
     const issued = issueTokens(g, lane);
-    reportAuth(lane.name, { clientId: g.client_id, subject: 'jacen' }, 'granted', undefined, isoFromSec(refreshTokens[issued.refresh_token].exp), refreshTokens[issued.refresh_token].family);
+    reportAuth(lane.name, { clientId: g.client_id, subject: reportedSubject(lane, refreshTokens[issued.refresh_token]) }, 'granted', undefined, isoFromSec(refreshTokens[issued.refresh_token].exp), refreshTokens[issued.refresh_token].family);
     return send(res, 200, issued, { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' });
   }
   if (grant_type === 'refresh_token') {
@@ -527,7 +669,7 @@ async function handleToken(req, res, body, laneHint = null) {
     if (resolved.ok === false) {
       // Every refusal leaves a trace (reason, lane, client; never a token), whether or not reporting to ACS is on.
       console.log(`auth: refresh refused reason=${resolved.reason} lane=${rejectedLane ? rejectedLane.name : '-'} client=${logSafe(resolved.clientId || client_id)}`);
-      if (rejectedLane && resolved.clientId && REPORTABLE_REFRESH_FAILURES.has(resolved.reason)) reportAuth(rejectedLane.name, { clientId: resolved.clientId, subject: 'jacen' }, 'refresh_failed', resolved.reason, undefined, known && known.family);
+      if (rejectedLane && resolved.clientId && REPORTABLE_REFRESH_FAILURES.has(resolved.reason)) reportAuth(rejectedLane.name, { clientId: resolved.clientId, subject: reportedSubject(rejectedLane, known) }, 'refresh_failed', resolved.reason, undefined, known && known.family);
       if (resolved.reason === 'invalid_client') return jsonError(res, 401, 'invalid_client', 'client auth failed');
       return jsonError(res, 400, 'invalid_grant', 'invalid refresh token');
     }
@@ -541,7 +683,7 @@ async function handleToken(req, res, body, laneHint = null) {
     const t = issueTokens({ client_id: rec.client_id, scope: rec.scope }, lane, rec.family);
     rec.successor = t.refresh_token;
     saveJson(tokensFile, refreshTokens);
-    reportAuth(lane.name, { clientId: rec.client_id, subject: 'jacen' }, 'refreshed', undefined, isoFromSec(refreshTokens[t.refresh_token].exp), rec.family);
+    reportAuth(lane.name, { clientId: rec.client_id, subject: reportedSubject(lane, rec) }, 'refreshed', undefined, isoFromSec(refreshTokens[t.refresh_token].exp), rec.family);
     return send(res, 200, t, { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' });
   }
   return jsonError(res, 400, 'unsupported_grant_type', 'supported: authorization_code, refresh_token');

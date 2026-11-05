@@ -29,8 +29,34 @@ ChatGPT/Claude ─► https://jacen-ubuntu.tailaa6d41.ts.net/jc/mcp
     `/.well-known/oauth-protected-resource/jc/mcp` and the
     `WWW-Authenticate` challenge on `/jc/mcp`.
   * A token for one lane gets 401 on the other.
-  * The consent page names the requested resource and warns that it
-    includes root commands.
+  * The consent page names the client, the requested resource, and the exact
+    redirect destination. Approval is bound to a server-side transaction;
+    the code is minted from that transaction, not from substitutable form
+    fields. The page warns that the lane includes root commands.
+  * A Jace Commander access token's `sub` is `jc-client:` plus the SHA-256
+    of the authenticated `client_id`. The exact `client_id` stays in the
+    token and in the ACS issue body. Desktop Commander tokens keep the
+    owner subject. ACS will not reuse a JC approval across OAuth clients,
+    even when those clients present the same actor.
+* **Consent attempts are bounded.** `CONSENT_PASSPHRASE` must be 16 to 256
+  characters, mix at least two character classes, and contain no whitespace
+  or control characters. The gateway refuses to start otherwise. A failed
+  attempt counts against the TCP peer, the OAuth client on the live
+  server-side transaction, and a process-wide ceiling: 5 failures for a
+  peer, 5 for a client, or 20 overall, then that bucket locks for 15
+  minutes. Further attempts do not extend the lock, and a correct
+  passphrase does not clear it early. Unknown transactions count against
+  the peer and the global ceiling only; a posted `client_id` cannot aim
+  that count at another client. When the peer is loopback, one IP in
+  `x-jc-ingress-client` identifies the external client. The public ingress
+  sets that header from its own socket after discarding a client-supplied
+  value. `X-Forwarded-For`, `Forwarded`, and `X-Real-IP` are not a client
+  identity. `EDGE_TEST_MODE=1` may shorten the lock with
+  `EDGE_TEST_CONSENT_LOCKOUT_MS` (values below 50 ms are ignored and the
+  production duration is kept) and announces it. Failures are logged with
+  a reason, a truncated client id, and a hashed source. Passphrases,
+  tokens, transaction ids, and request bodies are not logged. Lock state
+  is in memory and clears when the process exits.
 * **Capability transport.**
   * Every `tools/call` is authorized by ACS `POST /jc/capability/issue`
     before it is forwarded.

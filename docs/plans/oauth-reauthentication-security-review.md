@@ -36,7 +36,7 @@ Verdict: **no weakening of authentication found after the fixes below. The idemp
 3. No refresh-token **family revocation** on reuse (RFC 9700 allows it). Not added: it would turn a replay by anyone into a forced outage for the real client.
 4. Refresh tokens are plaintext at rest; `loadJson` resets to `{}` if `tokens.json` is corrupt (mass reauthentication). Pre-existing.
 5. No operator revoke endpoint; `revoked` is only reported if a record is marked revoked by other means.
-6. Access tokens are HS256 with one symmetric key; `sub` is the constant `jacen`. Pre-existing single-owner design.
+6. Access tokens are HS256 with one symmetric key. At the time of this review `sub` was the constant `jacen`. Jace Commander tokens now use a per-client subject (`jc-client:` plus the SHA-256 of `client_id`); Desktop Commander tokens still use the owner subject. See `apps/dc-mcp-gateway/docs/jace-commander-lane.md`.
 7. A client that registered as confidential but never sends its secret on refresh already fails at the code exchange (the same check exists there), so
    enforcing it on refresh adds no new failure for working clients. A client that sends the secret at exchange but omits it on refresh (an RFC violation) would break.
 

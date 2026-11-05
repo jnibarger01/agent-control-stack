@@ -18,14 +18,26 @@ AUTH_URL="$GW/authorize?response_type=code&client_id=$CLIENT_ID&redirect_uri=htt
 # consent form present?
 FORM=$(curl -s "$AUTH_URL")
 echo "$FORM" | grep -q 'Consent passphrase' && echo "consent form: OK"
+echo "$FORM" | grep -F -q 'http://127.0.0.1/callback' && echo "consent shows redirect: OK"
+CONSENT_FIELDS=$(python3 -c '
+import html, re, sys
+form = sys.stdin.read()
+fields = {}
+for name, value in re.findall(r"<input type=\"hidden\" name=\"([^\"]+)\" value=\"([^\"]*)\"", form):
+    fields[name] = html.unescape(value)
+for key in ("consent_txn", "resource", "client_id"):
+    if not fields.get(key):
+        raise SystemExit(f"consent form missing {key}")
+    print(f"{key}={fields[key]}")
+' <<<"$FORM")
+CONSENT_TXN=$(printf '%s\n' "$CONSENT_FIELDS" | sed -n 's/^consent_txn=//p')
+CONSENT_RESOURCE=$(printf '%s\n' "$CONSENT_FIELDS" | sed -n 's/^resource=//p')
+CONSENT_CLIENT=$(printf '%s\n' "$CONSENT_FIELDS" | sed -n 's/^client_id=//p')
+test "$CONSENT_CLIENT" = "$CLIENT_ID"
 LOCATION=$(curl -s -o /dev/null -D - -X POST "$GW/authorize/consent" \
-  --data-urlencode "client_id=$CLIENT_ID" \
-  --data-urlencode "redirect_uri=http://127.0.0.1/callback" \
-  --data-urlencode "scope=mcp" \
-  --data-urlencode "state=xyz123" \
-  --data-urlencode "code_challenge=$CHALLENGE" \
-  --data-urlencode "code_challenge_method=S256" \
-  --data-urlencode "resource=https://jacen-ubuntu.tailaa6d41.ts.net/mcp" \
+  --data-urlencode "consent_txn=$CONSENT_TXN" \
+  --data-urlencode "resource=$CONSENT_RESOURCE" \
+  --data-urlencode "client_id=$CONSENT_CLIENT" \
   --data-urlencode "passphrase=$PASSPHRASE" | grep -i '^location:' | tr -d '\r' | cut -d' ' -f2)
 CODE=$(python3 -c "import sys,urllib.parse as u; q=u.parse_qs(u.urlparse(sys.argv[1]).query); print(q['code'][0])" "$LOCATION")
 echo "authorization code obtained (iss=$(python3 -c "import sys,urllib.parse as u; q=u.parse_qs(u.urlparse(sys.argv[1]).query); print(q.get('iss'))" "$LOCATION"), state=$(python3 -c "import sys,urllib.parse as u; q=u.parse_qs(u.urlparse(sys.argv[1]).query); print(q['state'][0])" "$LOCATION"))"

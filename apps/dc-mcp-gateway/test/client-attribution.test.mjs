@@ -154,7 +154,7 @@ async function startGateway(env) {
   const port = nextPort++;
   const child = spawn(process.execPath, ['server.js'], {
     cwd: new URL('..', import.meta.url).pathname,
-    env: { PATH: process.env.PATH, GATEWAY_PORT: String(port), PUBLIC_ORIGIN: ORIGIN, CONSENT_PASSPHRASE: 'pass-phrase', SIGNING_KEY: KEY, DATA_DIR: `/tmp/attr-gw-${port}-${process.pid}`, ...env },
+    env: { PATH: process.env.PATH, GATEWAY_PORT: String(port), PUBLIC_ORIGIN: ORIGIN, CONSENT_PASSPHRASE: 'consent-test-pass-1', SIGNING_KEY: KEY, DATA_DIR: `/tmp/attr-gw-${port}-${process.pid}`, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stderr = '';

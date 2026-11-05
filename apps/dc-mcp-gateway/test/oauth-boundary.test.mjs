@@ -20,12 +20,24 @@ import { spawn } from 'node:child_process';
 const KEY = 'k'.repeat(32);
 const ORIGIN = 'https://gw.test';
 const JC_RESOURCE = `${ORIGIN}/jc/mcp`;
-const PASS = 'pass-phrase';
+const PASS = 'consent-test-pass-1';
 const b64u = (buf) => Buffer.from(buf).toString('base64url');
 const pkce = () => {
   const verifier = crypto.randomBytes(32).toString('base64url');
   return { verifier, challenge: b64u(crypto.createHash('sha256').update(verifier).digest()) };
 };
+function hiddenFields(html) {
+  const fields = {};
+  for (const match of html.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)"/g)) {
+    fields[match[1]] = match[2]
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&amp;/g, '&');
+  }
+  return fields;
+}
 
 function stub() {
   const server = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{}'); });
@@ -166,7 +178,10 @@ test('consent refuses a POST with no PKCE, a non-S256 method, or a malformed cha
 test('consent refuses a wrong passphrase', () =>
   withGateway(async (gw) => {
     const { challenge } = pkce();
-    const r = await gw.consent({ client_id: 'public-app', redirect_uri: 'https://app.test/cb', code_challenge: challenge, code_challenge_method: 'S256', passphrase: 'nope' });
+    const page = await gw.authorize({ client_id: 'public-app', redirect_uri: 'https://app.test/cb', code_challenge: challenge, code_challenge_method: 'S256' });
+    assert.equal(page.status, 200);
+    const fields = hiddenFields(await page.text());
+    const r = await gw.consent({ ...fields, passphrase: 'nope' });
     assert.equal(r.status, 401);
   }));
 
@@ -176,7 +191,11 @@ test('consent refuses a wrong passphrase', () =>
 
 async function issueCode(gw, { redirect = 'https://app.test/cb' } = {}) {
   const { verifier, challenge } = pkce();
-  const consent = await gw.consent({ client_id: 'public-app', redirect_uri: redirect, code_challenge: challenge, code_challenge_method: 'S256' });
+  const page = await gw.authorize({ client_id: 'public-app', redirect_uri: redirect, code_challenge: challenge, code_challenge_method: 'S256' });
+  assert.equal(page.status, 200, 'authorize must render the consent transaction');
+  const fields = hiddenFields(await page.text());
+  assert.equal(typeof fields.consent_txn, 'string');
+  const consent = await gw.consent(fields);
   assert.equal(consent.status, 302, `consent must issue a code: ${consent.status}`);
   const code = location(consent).searchParams.get('code');
   assert.ok(code, 'consent redirect carries a code');

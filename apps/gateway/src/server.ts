@@ -3552,6 +3552,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           requiredScopes: toolPolicy.scopes,
           requesterSubject: jcActor
         });
+        // The OAuth client is the grant fence. It stays out of bindingHash:
+        // change-set permits compare that hash and are not issued per OAuth client.
+        // A work item with no oauthClientId does not match, so a legacy row cannot
+        // be reused by a later client.
+        const oauthClientId = body.client_id;
 
         const existing = body.changeSetPermitId
           ? changeSetPermitWorkItem(
@@ -3569,6 +3574,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                 return (
                   !params?.changeSetBinding &&
                   candidate.requesterSubject === jcActor &&
+                  params?.oauthClientId === oauthClientId &&
                   params?.tool === invocation.toolName &&
                   params?.bindingHash === bindingHash &&
                   ["needs_approval", "approved"].includes(candidate.status)
@@ -3587,7 +3593,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               // Approvers see what they approve: title and intent carry the
               // bounded, redacted argument summary for approval-gated tools.
               title: jaceCommanderWorkItemTitle(invocation),
-              intent: jaceCommanderWorkItemIntent(invocation, jcActor),
+              intent: `${jaceCommanderWorkItemIntent(invocation, jcActor)} oauthClientId=${oauthClientId.replace(/[\r\n]/g, "")}`,
               requester: "agent",
               requesterSubject: jcActor,
               target: {},
@@ -3600,6 +3606,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                     contract: "acs.jc.v1",
                     invocationHash: invocation.invocationHash,
                     bindingHash,
+                    oauthClientId,
                     runtimeId: jcSigningConfig.runtimeId,
                     requiredScopes: [...toolPolicy.scopes],
                     requesterSubject: jcActor,

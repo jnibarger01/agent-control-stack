@@ -109,12 +109,27 @@ CLIENT=$(curl -sf -X POST "http://127.0.0.1:${GW_PORT}/register" -H 'Content-Typ
 CLIENT_ID=$(echo "$CLIENT" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).client_id))")
 VERIFIER=$(head -c 48 /dev/urandom | base64 | tr -d '=+/\n' | head -c 64)
 CHALLENGE=$(printf '%s' "$VERIFIER" | openssl dgst -sha256 -binary | base64 | tr -d '=\n')
+RESOURCE="http://127.0.0.1:${GW_PORT}/mcp"
+AUTH_URL="http://127.0.0.1:${GW_PORT}/authorize?response_type=code&client_id=${CLIENT_ID}&redirect_uri=http%3A%2F%2F127.0.0.1%2Fcallback&scope=mcp&state=cert123&code_challenge=${CHALLENGE}&code_challenge_method=S256&resource=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$RESOURCE")"
+FORM=$(curl -sf "$AUTH_URL")
+CONSENT_FIELDS=$(python3 -c '
+import html, re, sys
+form = sys.stdin.read()
+fields = {}
+for name, value in re.findall(r"<input type=\"hidden\" name=\"([^\"]+)\" value=\"([^\"]*)\"", form):
+    fields[name] = html.unescape(value)
+for key in ("consent_txn", "resource", "client_id"):
+    if not fields.get(key):
+        raise SystemExit(f"consent form missing {key}")
+    print(f"{key}={fields[key]}")
+' <<<"$FORM")
+CONSENT_TXN=$(printf '%s\n' "$CONSENT_FIELDS" | sed -n 's/^consent_txn=//p')
+CONSENT_RESOURCE=$(printf '%s\n' "$CONSENT_FIELDS" | sed -n 's/^resource=//p')
+CONSENT_CLIENT=$(printf '%s\n' "$CONSENT_FIELDS" | sed -n 's/^client_id=//p')
 LOCATION=$(curl -s -o /dev/null -D - -X POST "http://127.0.0.1:${GW_PORT}/authorize/consent" \
-  --data-urlencode "client_id=$CLIENT_ID" \
-  --data-urlencode "redirect_uri=http://127.0.0.1/callback" \
-  --data-urlencode "scope=mcp" --data-urlencode "state=cert123" \
-  --data-urlencode "code_challenge=$CHALLENGE" --data-urlencode "code_challenge_method=S256" \
-  --data-urlencode "resource=http://127.0.0.1:${GW_PORT}/mcp" \
+  --data-urlencode "consent_txn=$CONSENT_TXN" \
+  --data-urlencode "resource=$CONSENT_RESOURCE" \
+  --data-urlencode "client_id=$CONSENT_CLIENT" \
   --data-urlencode "passphrase=cert-e2e-passphrase" | grep -i '^location:' | tr -d '\r' | cut -d' ' -f2)
 CODE=$(node -e "const u=new URL(process.argv[1]);console.log(u.searchParams.get('code'))" "$LOCATION")
 TOKENS=$(curl -sf -X POST "http://127.0.0.1:${GW_PORT}/token" -H 'Content-Type: application/x-www-form-urlencoded' \

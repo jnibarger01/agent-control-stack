@@ -84,7 +84,7 @@ const gateway = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
     GATEWAY_PORT: String(gwPort),
     UPSTREAM: STUB,
     PUBLIC_ORIGIN: `http://127.0.0.1:${gwPort}`,
-    CONSENT_PASSPHRASE: 'test-passphrase',
+    CONSENT_PASSPHRASE: 'consent-test-pass-1',
     SIGNING_KEY: 'b'.repeat(64),
     GATEWAY_EXECUTION_TOKEN: 'test-execution-token',
     DATA_DIR: dataDir,

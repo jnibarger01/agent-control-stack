@@ -128,11 +128,17 @@ These are enforced in three independent places.
 1. The bridge calls `POST /jc/capability/issue`. It sends
    `{client_id, tool, argsSummary, correlationId?}` with `x-jc-actor` (the
    legacy `x-dc-actor` is still accepted; two headers that disagree get 400),
-   authenticated as `acs-jc-bridge`.
+   authenticated as `acs-jc-bridge`. The Jace Commander edge sets `x-jc-actor`
+   from the access token `sub`. For an OAuth client that subject is
+   `jc-client:` plus the SHA-256 of `client_id`, sent as `chatgpt:` plus that
+   subject. Other authenticated bridge callers may still present their own actor.
 2. For `privileged_exec`, ACS creates a `needs_approval` work item (risk
    critical; title `ROOT: <argv>`, plus an `approvalSummary` with argv, cwd,
-   timeout and stdin size). In strict mode it returns the normal 409 approval
-   challenge. In admin mode ACS records the exact `acs:admin` approval itself.
+   timeout and stdin size). The work item records `oauthClientId`. Reuse
+   requires that id to match the caller. A work item without it is not reused.
+   `bindingHash` does not include the client, so a change-set permit stays bound
+   to the approved invocation. In strict mode ACS returns the normal 409
+   approval challenge. In admin mode ACS records the exact `acs:admin` approval itself.
 3. ACS claims the approved item under a fresh lease, consumes the approval,
    records the issuance, appends `jace_commander.capability_issued` to the
    canonical audit chain, and returns the signed envelope.

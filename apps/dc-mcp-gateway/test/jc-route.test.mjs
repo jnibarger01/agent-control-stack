@@ -68,7 +68,7 @@ async function startGateway(env) {
   const port = nextPort++;
   const child = spawn(process.execPath, ['server.js'], {
     cwd: new URL('..', import.meta.url).pathname,
-    env: { PATH: process.env.PATH, GATEWAY_PORT: String(port), PUBLIC_ORIGIN: ORIGIN, CONSENT_PASSPHRASE: 'pass-phrase', SIGNING_KEY: KEY, DATA_DIR: `/tmp/jc-gw-${port}-${process.pid}`, ...env },
+    env: { PATH: process.env.PATH, GATEWAY_PORT: String(port), PUBLIC_ORIGIN: ORIGIN, CONSENT_PASSPHRASE: 'consent-test-pass-1', SIGNING_KEY: KEY, DATA_DIR: `/tmp/jc-gw-${port}-${process.pid}`, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stderr = '';
@@ -205,12 +205,18 @@ test('hosted root OAuth flow preserves the JC lane without resource on token exc
     assert.match(html, /Jace Commander access/);
     assert.match(html, /ROOT commands/);
     assert.match(html, new RegExp(`${ORIGIN.replaceAll('.', '\\.')}/jc/mcp`));
+    const fields = {};
+    for (const match of html.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)"/g)) {
+      fields[match[1]] = match[2].replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+    }
+    assert.equal(typeof fields.consent_txn, 'string');
+    assert.equal(fields.redirect_uri, undefined);
 
     const consent = await fetch(`${base}/authorize/consent`, {
       method: 'POST',
       redirect: 'manual',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ ...params, resource: `${ORIGIN}/jc/mcp`, passphrase: 'pass-phrase' }).toString(),
+      body: new URLSearchParams({ ...fields, passphrase: 'consent-test-pass-1' }).toString(),
     });
     assert.equal(consent.status, 302);
     const location = new URL(consent.headers.get('location'));

@@ -326,7 +326,7 @@ export async function startEdge(
       HOME: box.home,
       GATEWAY_PORT: String(port),
       PUBLIC_ORIGIN: origin,
-      CONSENT_PASSPHRASE: "e2e-consent",
+      CONSENT_PASSPHRASE: "e2e-consent-pass-1",
       SIGNING_KEY: OAUTH_SIGNING_KEY,
       DATA_DIR: box.gatewayData,
       UPSTREAM: `http://127.0.0.1:${bridge.port}`,

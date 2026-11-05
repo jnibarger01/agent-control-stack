@@ -1,14 +1,18 @@
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { allowedPublicRoute } from './public-edge-policy.js';
+import { INGRESS_CLIENT_HEADER, normalizeIp } from './consent-guard.js';
 
 const HOP_HEADERS = new Set([
   'connection', 'proxy-connection', 'proxy-authorization', 'keep-alive',
   'upgrade', 'transfer-encoding', 'te', 'trailer', 'host'
 ]);
 const filtered = (headers) => Object.fromEntries(
-  Object.entries(headers).filter(([k]) => !HOP_HEADERS.has(k.toLowerCase()) &&
-    !k.toLowerCase().startsWith('x-forwarded-'))
+  Object.entries(headers).filter(([k]) => {
+    const name = k.toLowerCase();
+    // Drop a client-supplied ingress stamp so only the socket peer below is forwarded.
+    return !HOP_HEADERS.has(name) && !name.startsWith('x-forwarded-') && name !== INGRESS_CLIENT_HEADER;
+  })
 );
 const failure = (res, status) => {
   if (res.headersSent) return res.destroy();
@@ -50,6 +54,10 @@ export function createPublicIngress({ upstreamPort = 8010, jcResource }) {
     }
     const headers = filtered(req.headers);
     if (consent) headers['content-length'] = String(body.length);
+    // The gateway honors this only when its TCP peer is loopback. This file's
+    // listener stays off unless the file itself is the entrypoint.
+    const stamped = normalizeIp(req.socket && req.socket.remoteAddress);
+    if (stamped) headers[INGRESS_CLIENT_HEADER] = stamped;
     const upstream = http.request({
       hostname: '127.0.0.1', port: upstreamPort, path: req.url,
       method: req.method, headers

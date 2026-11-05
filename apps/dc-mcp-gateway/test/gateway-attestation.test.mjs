@@ -110,7 +110,7 @@ const gateway = startProc(path.join(ROOT, 'server.js'), {
   GATEWAY_PORT: String(gwPort),
   UPSTREAM: BR,
   PUBLIC_ORIGIN: ORIGIN,
-  CONSENT_PASSPHRASE: 'test-passphrase',
+  CONSENT_PASSPHRASE: 'consent-test-pass-1',
   SIGNING_KEY: 'a'.repeat(64),
   GATEWAY_EXECUTION_TOKEN: EXEC_TOKEN,
   DATA_DIR: dataDir,

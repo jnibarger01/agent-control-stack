@@ -137,7 +137,7 @@ async function startEdge(acsUrl: string, tokens: Record<string, unknown>, authEv
       PATH: process.env.PATH,
       GATEWAY_PORT: String(port),
       PUBLIC_ORIGIN: ORIGIN,
-      CONSENT_PASSPHRASE: "pass-phrase",
+      CONSENT_PASSPHRASE: "consent-test-pass-1",
       SIGNING_KEY: KEY,
       DATA_DIR: dir,
       UPSTREAM: `http://127.0.0.1:${upPort}`,
@@ -200,11 +200,22 @@ async function startEdge(acsUrl: string, tokens: Record<string, unknown>, authEv
     };
     const page = await fetch(`${base}/authorize?${new URLSearchParams({ ...params, oauth_lane: "jc" })}`);
     expect(page.status).toBe(200);
+    const html = await page.text();
+    const fields: Record<string, string> = {};
+    for (const match of html.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)"/g)) {
+      fields[match[1]] = match[2]
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&amp;/g, "&");
+    }
+    expect(typeof fields.consent_txn).toBe("string");
     const consent = await fetch(`${base}/authorize/consent`, {
       method: "POST",
       redirect: "manual",
       headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ ...params, passphrase: "pass-phrase" }).toString()
+      body: new URLSearchParams({ ...fields, passphrase: "consent-test-pass-1" }).toString()
     });
     expect(consent.status).toBe(302);
     const code = new URL(consent.headers.get("location")!).searchParams.get("code")!;
