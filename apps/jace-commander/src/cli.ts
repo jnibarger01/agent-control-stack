@@ -22,6 +22,7 @@ import { JC_EXIT, McpHttpClient, type JcCallOutcome } from './mcp-http-client.js
 import { privilegedHelperAvailable } from './privileged-client.js';
 import { JC_PRESETS, isJcPreset, type JcPreset } from './authorizers.js';
 import { createJcServer } from './server.js';
+import { loadJcPolicy } from './local-policy.js';
 import { runApproveCommand } from './approve-cli.js';
 import { runLocalCeremony } from './passkey-ceremony.js';
 import readline from 'node:readline/promises';
@@ -273,6 +274,68 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
       const server = createJcServer(config, mode);
       await server.connect(new StdioServerTransport());
       return -1; // keep running
+    }
+    case 'local-readiness': {
+      // Machine-readable dependency check for the local preset. The bridge runs
+      // this through the SAME wrapper/uid/environment it uses for the executor,
+      // so policy loading and the bubblewrap self-test are proven by the code
+      // that will actually enforce them. Non-secret output only.
+      const policy = loadJcPolicy({
+        systemPath: config.policyPath,
+        systemPathExplicit: config.policyPathExplicit,
+        userPath: config.policyUserPath,
+        unsafeDev: config.policyUnsafeDev,
+        requireImmutable: true,
+        baseFsRoots: config.fsRoots,
+      });
+      let sandbox: { ok: boolean; isolation: string; network: string; detail: string };
+      try {
+        const sandboxPolicy = sandboxPolicyFromEnv({
+          homeDir: config.homeDir,
+          stateDir: config.stateDir,
+          fsRoots: policy.effective.fsRoots ?? config.fsRoots,
+          fsDeniedRoots: [
+            ...config.fsDeniedRoots,
+            ...policy.effective.fsDeniedRoots,
+            config.policyPath,
+            config.policyUserPath,
+          ],
+          managed: false,
+        }, config.sandboxEnv as NodeJS.ProcessEnv);
+        sandbox = sandboxSelfTest(sandboxPolicy, config.homeDir, config.stateDir);
+      } catch (error) {
+        sandbox = {
+          ok: false,
+          isolation: 'unknown',
+          network: 'unknown',
+          detail: error instanceof Error ? error.message : 'invalid sandbox configuration',
+        };
+      }
+      // A configured policy that cannot be trusted refuses every governed call;
+      // a built-in default (no policy file at all) is reported as such.
+      const policyOk = policy.state !== 'invalid' && (policy.state !== 'loaded' || policy.immutable === true);
+      const report = {
+        ok: policyOk && sandbox.ok === true,
+        preset: 'local',
+        runtime: { version: VERSION, manifestHash: JC_MANIFEST.manifestHash },
+        policy: {
+          state: policy.state,
+          hash: policy.hash,
+          immutable: policy.immutable,
+          unsafeDev: policy.unsafeDev,
+          sources: policy.sources,
+          errors: policy.errors,
+          // Paths only; used by the root-owned deployment verifier to exercise
+          // the real workspace root and the state directory it must hide.
+          roots: policy.effective.fsRoots ?? config.fsRoots,
+          ok: policyOk,
+        },
+        sandbox,
+        stateDir: config.stateDir,
+        homeDir: config.homeDir,
+      };
+      out.stdout(JSON.stringify(report, null, 2));
+      return report.ok ? JC_EXIT.ok : JC_EXIT.authorityUnavailable;
     }
     case 'pending':
     case 'approve':

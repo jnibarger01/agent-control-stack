@@ -43,6 +43,16 @@ const writable = stageRelease('writable', { readOnly: false });
 const setpriv = path.join(base, 'fake-bin', 'setpriv');
 fs.mkdirSync(path.dirname(setpriv), { recursive: true });
 fs.writeFileSync(setpriv, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+// A stand-in that behaves like a uid drop for readiness tests: it discards the
+// setpriv options and executes the pinned release. (The real uid transition is
+// only proven by the root-owned systemd verification, not by this test.)
+const execpriv = path.join(base, 'fake-bin-ok', 'setpriv');
+fs.mkdirSync(path.dirname(execpriv), { recursive: true });
+fs.writeFileSync(
+  execpriv,
+  '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do case "$1" in --*) shift ;; *) break ;; esac; done\nexec "$@"\n',
+  { mode: 0o755 },
+);
 const nodeBin = process.execPath;
 const setprivArgs = (entrypoint, extra = []) =>
   ['--reuid=65534', '--regid=65534', '--init-groups', '--inh-caps=-all', '--bounding-set=-all', nodeBin, entrypoint, 'serve', '--preset', 'local', ...extra].join(' ');
@@ -101,13 +111,26 @@ async function authorityFor(t, overrides = {}) {
   });
   for (let i = 0; i < 100; i += 1) {
     try {
-      return await (await fetch(`http://127.0.0.1:${port}/authority`)).json();
+      const report = await (await fetch(`http://127.0.0.1:${port}/authority`)).json();
+      Object.defineProperty(report, 'url', { value: `http://127.0.0.1:${port}` });
+      return report;
     } catch {
       // not listening yet
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(`bridge did not start: ${output}`);
+}
+
+async function waitReady(authority, predicate) {
+  let last;
+  for (let i = 0; i < 120; i += 1) {
+    const response = await fetch(`${authority.url}/ready`);
+    last = await response.json();
+    if (predicate(response.status, last)) return { status: response.status, body: last };
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`bridge /ready never matched: ${JSON.stringify(last)}`);
 }
 
 function attestation(sub) {
@@ -186,6 +209,45 @@ test('the local preset refuses DC_ARGS that launches another runtime', () => {
     { DC_CMD: setpriv, DC_ARGS: setprivArgs(path.join(app, 'dist', 'cli.js')) },
     /DC_ARGS entrypoint .* is not the pinned release/,
   );
+});
+
+test('the local preset becomes /ready only after the pinned release proves policy and sandbox', async (t) => {
+  const authority = await authorityFor(t, {
+    DC_CMD: execpriv,
+    DC_ARGS: setprivArgs(path.join(current, 'dist', 'cli.js')),
+  });
+  assert.equal(authority.childMode, 'local');
+  assert.equal(authority.runtime.entrypoint, path.join(current, 'dist', 'cli.js'), 'the entrypoint is the release, not a setpriv flag');
+  assert.equal(authority.local.uidDrop.configured, true);
+  const ready = await waitReady(authority, (status) => status === 200);
+  assert.equal(ready.body.ready, true, JSON.stringify(ready.body));
+  assert.equal(ready.body.mode, 'local');
+  assert.equal(ready.body.local.readiness.sandbox.ok, true);
+  assert.equal(ready.body.local.readiness.policy.ok, true);
+});
+
+test('the local preset is not /ready when the workload sandbox is disabled', async (t) => {
+  const authority = await authorityFor(t, {
+    DC_CMD: execpriv,
+    DC_ARGS: setprivArgs(path.join(current, 'dist', 'cli.js')),
+    JC_WORKLOAD_ISOLATION: 'none',
+  });
+  const notReady = await waitReady(authority, (status, body) =>
+    status === 503 && (body.notReady || []).some((reason) => /local readiness probe failed|sandbox/.test(reason)));
+  assert.equal(notReady.body.ready, false);
+  assert.match(notReady.body.notReady.join(' '), /sandbox|isolation/i);
+});
+
+test('the local preset is not /ready when its configured policy is missing', async (t) => {
+  const authority = await authorityFor(t, {
+    DC_CMD: execpriv,
+    DC_ARGS: setprivArgs(path.join(current, 'dist', 'cli.js')),
+    JC_POLICY_PATH: path.join(base, 'missing-policy.json'),
+  });
+  const notReady = await waitReady(authority, (status, body) =>
+    status === 503 && (body.notReady || []).some((reason) => /policy/.test(reason)));
+  assert.equal(notReady.body.ready, false);
+  assert.match(notReady.body.notReady.join(' '), /policy/);
 });
 
 test('the local preset refuses a pinned uid drop to root', () => {

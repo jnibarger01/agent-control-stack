@@ -25,6 +25,7 @@ import {
   issueRuntimeBootstrap
 } from "./managed.js";
 import { dcBridgeReady, jcServiceNotReadyReasons } from "./readiness.js";
+import { createLocalReadinessProbe, localReadinessInvocation } from "./local-readiness.js";
 
 const ACS_CAPABILITY_META_KEY = "capability";
 const ACS_GUARD_META_KEY = "acsCapability";
@@ -232,6 +233,11 @@ if (!JC && !process.env.DC_CWD) {
   }
 }
 const DC_CWD = JC ? JC_DIR : process.env.DC_CWD || path.dirname(DC_ARGS[0]);
+// The executor entrypoint, not the first wrapper flag: with the local preset
+// DC_ARGS starts with setpriv options and `runtime.entrypoint` must still name
+// the build that actually runs.
+const DC_ENTRY_INDEX = DC_ARGS.findIndex((arg) => /(?:^|[\\/])dist[\\/]cli\.js$/u.test(arg));
+const DC_ENTRYPOINT = DC_ENTRY_INDEX >= 0 ? DC_ARGS[DC_ENTRY_INDEX] : DC_ARGS[0];
 const EXECUTION_TOKEN = process.env.DC_GATEWAY_EXECUTION_TOKEN || "";
 // ADR 0026: under the local preset nothing but the authenticated gateway may reach the
 // child (no ACS capability stands behind read:allow), so gateway attestation is mandatory.
@@ -380,6 +386,36 @@ const BRIDGE_RUNTIME_MANAGED =
       }
     : null;
 const MAX_BODY = 2 * 1024 * 1024;
+
+// Local preset: prove the pinned release's policy and workload sandbox with the
+// SAME wrapper/uid/environment as the executor. The bridge itself listens as a
+// different account, so only this probe (not a bridge-side guess) can observe
+// what the executor can do.
+const LOCAL_READINESS_INVOCATION = JC_LOCAL ? localReadinessInvocation({ cmd: DC_CMD, args: DC_ARGS }) : null;
+const LOCAL_READINESS = JC_LOCAL
+  ? LOCAL_READINESS_INVOCATION
+    ? createLocalReadinessProbe({
+        command: LOCAL_READINESS_INVOCATION.command,
+        args: LOCAL_READINESS_INVOCATION.args,
+        cwd: DC_CWD,
+        env: CHILD_ENV
+      })
+    : {
+        refresh: async () => ({
+          status: "failed",
+          ok: false,
+          checkedAt: new Date().toISOString(),
+          detail: "DC_ARGS does not name a dist/cli.js entrypoint, so local readiness cannot be probed"
+        }),
+        start() {},
+        stop() {},
+        status: () => ({
+          status: "failed",
+          ok: false,
+          detail: "DC_ARGS does not name a dist/cli.js entrypoint, so local readiness cannot be probed"
+        })
+      }
+  : null;
 
 function managedRuntimeIdentityForChild() {
   if (!BRIDGE_RUNTIME_MANAGED) return null;
@@ -994,6 +1030,7 @@ function createSession(headers) {
 }
 
 spawnPair();
+if (LOCAL_READINESS) LOCAL_READINESS.start();
 console.log(
   `bridge: profile=${PROFILE} executor mode: ${MANAGED ? "managed (ACS-authorized capabilities only)" : JC ? "unmanaged gateway (child still requires acs.jc.v1)" : "standalone"}`
 );
@@ -1259,7 +1296,7 @@ function computeJcAuthority() {
     // doctor` and operators spot a bridge left on a legacy checkout.
     runtime: {
       dir: JC_DIR,
-      entrypoint: DC_ARGS[0],
+      entrypoint: DC_ENTRYPOINT,
       monorepoDefault: JC_DIR === MONOREPO_JC_DIR,
       releaseRequired: JC_REQUIRE_RELEASE,
       installedRelease: JC_RELEASE
@@ -1270,6 +1307,23 @@ function computeJcAuthority() {
       // Without the read-scoped authority credential JC refuses every non-read call.
       currentAuthorityCredentialConfigured: jcAuthorityCredentialConfigured()
     },
+    // Local preset only: the bridge's readiness inputs. The probe result comes
+    // from the pinned release itself (policy load + bubblewrap self-test) run
+    // under the executor's wrapper, uid and environment.
+    ...(JC_LOCAL
+      ? {
+          local: {
+            preset: "local",
+            policyPath: process.env.JC_POLICY_PATH || null,
+            uidDrop: {
+              required: true,
+              configured: ["setpriv", "runuser"].includes(path.basename(DC_CMD)),
+              sameUidAllowed: process.env.JC_ALLOW_SAME_UID_CHILD === "1"
+            },
+            readiness: LOCAL_READINESS ? LOCAL_READINESS.status() : undefined
+          }
+        }
+      : {}),
     authoritative: !!pair && initialized
   };
 }
@@ -1332,16 +1386,20 @@ const httpServer = http.createServer(async (req, res) => {
   }
   if (path === "/ready" && JC) {
     // Ready only when governed calls can actually execute: a started child is
-    // not enough (without the authority credential every mutation is refused).
-    const notReady = jcServiceNotReadyReasons(computeJcAuthority());
+    // not enough (without the authority credential every mutation is refused),
+    // and the local preset additionally needs a verified policy and sandbox.
+    const authority = computeJcAuthority();
+    const notReady = jcServiceNotReadyReasons(authority);
     const ready = notReady.length === 0;
     res.writeHead(ready ? 200 : 503, { "Content-Type": "application/json" });
     res.end(
       JSON.stringify({
         ready,
         variant: "jc",
+        mode: authority.childMode,
         hasUpstreamPair: !!pair,
         upstreamStarted: !!pair?.upstreamStarted,
+        ...(authority.local ? { local: authority.local } : {}),
         ...(ready ? {} : { notReady })
       })
     );
@@ -1479,6 +1537,7 @@ httpServer.listen(PORT, "127.0.0.1", () =>
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
+  LOCAL_READINESS?.stop();
   console.log(`bridge: ${signal} received; shutting down cleanly`);
   const activePair = pair;
   const closeListener = new Promise((resolve) => httpServer.close(() => resolve()));

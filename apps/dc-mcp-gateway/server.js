@@ -806,15 +806,33 @@ const server = http.createServer(async (req, res) => {
     if (pathName === '/health') { log('GET', '/health', 200); return send(res, 200, { ok: true, pid: process.pid, service: 'desktop-commander-mcp-gateway' }); }
 
     if (pathName === '/jc/ready' && req.method === 'GET') {
-      const configured = !!(JC.enabled && !JC.acsOptional && !JC_LOCAL.enabled && JC.acsGatewayUrl && JC.acsGatewayToken && GATEWAY_EXECUTION_TOKEN);
+      // Mode-aware: the local preset is judged by its own dependencies (pinned
+      // release, policy, uid drop, sandbox probe), never by managed-only ACS
+      // rules. ACS is required only when the local policy routes a tool through
+      // ACS capability issuance.
+      const localPreset = JC_LOCAL.enabled === true;
+      const localNeedsAcs = localPreset && JC_LOCAL.usesAcs?.() === true;
+      const localConfigured = !!(
+        JC.enabled && localPreset && !JC_LOCAL.error && GATEWAY_EXECUTION_TOKEN &&
+        (!localNeedsAcs || (JC.acsGatewayUrl && JC.acsGatewayToken))
+      );
+      const managedConfigured = !!(JC.enabled && !JC.acsOptional && !localPreset && JC.acsGatewayUrl && JC.acsGatewayToken && GATEWAY_EXECUTION_TOKEN);
+      const configured = localPreset ? localConfigured : managedConfigured;
       const [acs, bridge] = configured
         ? await Promise.all([checkAcsIssuanceReady(JC), fetchBridgeAuthority(JC_UPSTREAM)])
         : [{ reachable: false }, { ok: false }];
       const bridgeReady = bridge.ok && jcBridgeReady(bridge.data);
-      const issuanceReady = acs.reachable === true;
+      const issuanceReady = localPreset ? (!localNeedsAcs || acs.reachable === true) : acs.reachable === true;
       const ready = configured && bridgeReady && issuanceReady;
       log('GET', '/jc/ready', ready ? 200 : 503);
-      return send(res, ready ? 200 : 503, { ready, configured, bridgeReady, issuanceReady });
+      return send(res, ready ? 200 : 503, {
+        ready,
+        configured,
+        mode: localPreset ? 'local' : 'managed',
+        bridgeReady,
+        issuanceReady,
+        ...(localPreset ? { acsRequired: localNeedsAcs } : {}),
+      });
     }
 
     // /ready and /authority (hardening item #2): non-secret structured state
@@ -841,10 +859,12 @@ const server = http.createServer(async (req, res) => {
       const bridgeReady = bridgeAuthority.ok && dcBridgeReady(bridgeAuthority.data, { managed: MANAGED.enabled });
       const issuanceReady = !MANAGED.enabled || acsIssuance.reachable;
       // /ready gates the primary DC route; the JC bridge is reported, not gating.
-      const jcBridgeReady = jcAuthority ? !!(jcAuthority.ok && jcAuthority.data?.variant === 'jc' && jcAuthority.data?.bridge?.hasUpstreamPair) : undefined;
+      // The report uses the same mode-aware predicate as /jc/ready and /authority:
+      // "has a child" alone is not readiness.
+      const jcLaneReady = jcAuthority ? !!(jcAuthority.ok && jcBridgeReady(jcAuthority.data)) : undefined;
       const ready = !!bridgeReady && !!issuanceReady;
       log('GET', '/ready', ready ? 200 : 503);
-      return send(res, ready ? 200 : 503, { ready, bridgeReady: !!bridgeReady, issuanceReady, ...(jcAuthority ? { jcBridgeReady } : {}) });
+      return send(res, ready ? 200 : 503, { ready, bridgeReady: !!bridgeReady, issuanceReady, ...(jcAuthority ? { jcBridgeReady: jcLaneReady } : {}) });
     }
 
     // ---- discovery (public, no secrets) ----

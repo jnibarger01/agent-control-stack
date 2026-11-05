@@ -538,7 +538,7 @@ test('/jc/ready is independent of DC and fails closed on untrusted JC authority 
   try {
     const ok = await probe();
     assert.equal(ok.status, 200);
-    assert.deepEqual(await ok.json(), { ready: true, configured: true, bridgeReady: true, issuanceReady: true });
+    assert.deepEqual(await ok.json(), { ready: true, configured: true, mode: 'managed', bridgeReady: true, issuanceReady: true });
     assert.ok(acs.requests.every((r) => r.path === '/readyz'));
     for (const bad of [null, {}, [], { ...good, variant: 'dc' }, { ...good, configuredExecutionMode: 'unmanaged_gateway' }, { ...good, childMode: 'local' }, { ...good, authoritative: false }, { ...good, bridge: undefined }, ...['hasUpstreamPair', 'upstreamStarted', 'initialized'].map((key) => ({ ...good, bridge: { ...good.bridge, [key]: 'true' } })), { ...good, enforcement: {} }, ...['executionTokenConfigured', 'capabilityVerificationConfigured', 'currentAuthorityCredentialConfigured'].map((key) => ({ ...good, enforcement: { ...good.enforcement, [key]: 'true' } }))]) {
       current = bad;
@@ -555,6 +555,46 @@ test('/jc/ready is independent of DC and fails closed on untrusted JC authority 
     assert.equal(dcReady.status, 503);
     assert.deepEqual(await dcReady.json(), { ready: false, bridgeReady: false, issuanceReady: true });
   } finally { gw.child.kill('SIGKILL'); acs.server.close(); jc.server.close(); }
+});
+
+test('/jc/ready for the local preset judges its own dependencies, never managed ACS rules', async () => {
+  const local = {
+    variant: 'jc', configuredExecutionMode: 'unmanaged_gateway', childMode: 'local', authoritative: true,
+    bridge: { hasUpstreamPair: true, upstreamStarted: true, initialized: true },
+    runtime: { releaseRequired: true, installedRelease: { realDir: '/opt/jace-commander/1.0.0', readOnly: true } },
+    enforcement: { executionTokenConfigured: true, capabilityVerificationConfigured: false, currentAuthorityCredentialConfigured: false },
+    local: {
+      preset: 'local',
+      uidDrop: { required: true, configured: true, sameUidAllowed: false },
+      readiness: {
+        status: 'ok', ok: true,
+        policy: { state: 'loaded', ok: true, immutable: true },
+        sandbox: { ok: true, isolation: 'bwrap', network: 'none', detail: 'bubblewrap namespaces verified' },
+        detail: 'bubblewrap namespaces verified',
+      },
+    },
+  };
+  const jc = recorder(() => ({ status: 200, body: local }));
+  const [jcPort] = [await jc.listen()];
+  const gw = await startGateway({
+    UPSTREAM: 'http://127.0.0.1:1', JC_ENABLED: '1', JC_PRESET: 'local', JC_ACS_OPTIONAL: '1',
+    JC_UPSTREAM: `http://127.0.0.1:${jcPort}`, ACS_GATEWAY_URL: 'http://127.0.0.1:1',
+    ACS_JC_GATEWAY_TOKEN: 'jc-token', GATEWAY_EXECUTION_TOKEN: 'test-execution-token',
+  });
+  try {
+    assert.equal(gw.exitCode, undefined, `gateway failed to start: ${typeof gw.stderr === 'function' ? gw.stderr() : gw.stderr}`);
+    const ok = await fetch(`http://127.0.0.1:${gw.port}/jc/ready`);
+    assert.equal(ok.status, 200);
+    assert.deepEqual(await ok.json(), {
+      ready: true, configured: true, mode: 'local', bridgeReady: true, issuanceReady: true, acsRequired: false,
+    });
+    // The same lane is not ready when the pinned release's sandbox probe fails,
+    // even though every managed ACS field is absent and ACS is unreachable.
+    local.local.readiness.sandbox = { ok: false, detail: 'bubblewrap not found' };
+    const bad = await fetch(`http://127.0.0.1:${gw.port}/jc/ready`);
+    assert.equal(bad.status, 503);
+    assert.equal((await bad.json()).bridgeReady, false);
+  } finally { gw.child.kill('SIGKILL'); jc.server.close(); }
 });
 
 for (const env of [{}, { JC_ENABLED: '1', JC_ACS_OPTIONAL: '1', JC_PRESET: 'local' }, { JC_ENABLED: '1', ACS_GATEWAY_URL: 'http://127.0.0.1:1', ACS_JC_GATEWAY_TOKEN: 'jc-token' }]) {

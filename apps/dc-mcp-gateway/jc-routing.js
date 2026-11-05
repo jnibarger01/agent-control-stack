@@ -64,7 +64,7 @@ export function resolveAuthorizer(table, tool) {
 }
 
 export function localRoutingFromEnv(env = process.env) {
-  const none = { enabled: false, isLocal: () => false };
+  const none = { enabled: false, isLocal: () => false, usesAcs: () => false };
   if (env.JC_PRESET !== 'local') return none;
   const explicit = env.JC_POLICY_PATH !== undefined;
   const file = env.JC_POLICY_PATH || DEFAULT_SYSTEM_POLICY_PATH;
@@ -77,10 +77,21 @@ export function localRoutingFromEnv(env = process.env) {
     if (doc.authorizers !== undefined) table = parseTable(doc.authorizers);
   } catch (error) {
     if (!(error && error.code === 'ENOENT' && !explicit)) {
-      return { enabled: true, isLocal: () => false, error: `policy unusable at the edge (${error.message}); issuing through ACS` };
+      return {
+        enabled: true,
+        isLocal: () => false,
+        usesAcs: () => true,
+        error: `policy unusable at the edge (${error.message}); issuing through ACS`,
+      };
     }
   }
-  return { enabled: true, isLocal: (tool) => resolveAuthorizer(table, tool) === 'local' };
+  return {
+    enabled: true,
+    isLocal: (tool) => resolveAuthorizer(table, tool) === 'local',
+    // A local-preset policy may still route some providers/tools to ACS. The
+    // lane is healthy only if those routes have a reachable issuer.
+    usesAcs: () => Object.keys(JC_TOOL_PROVIDERS).some((tool) => resolveAuthorizer(table, tool) === 'acs-capability'),
+  };
 }
 
 /**
