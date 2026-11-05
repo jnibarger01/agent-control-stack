@@ -119,10 +119,81 @@ const JC_RELEASE = JC ? jcInstalledRelease(JC_DIR) : null;
 // runtime is an installed, read-only release outside this development checkout,
 // selected explicitly through JC_RUNTIME_DIR. No fallback to the checkout.
 const JC_REQUIRE_RELEASE = JC && process.env.JC_REQUIRE_INSTALLED_RELEASE === "1";
+// The local preset must execute as a different uid from the bridge. Its stock
+// unit does that with setpriv, so DC_ARGS carries the wrapper before the runtime
+// path. A blanket DC_ARGS refusal would make the pin and uid separation
+// mutually exclusive and leave the local preset on the legacy vendor build
+// (which has no workload sandbox). Accept only the shape that still launches
+// exactly the pinned release entrypoint, cannot become root, cannot gain
+// capabilities, and selects the local preset.
+function pinnedDcArgsReason(args, releaseDir) {
+  if (path.basename(DC_CMD) !== "setpriv") return "DC_ARGS is only allowed with DC_CMD=setpriv for the local preset";
+  const expected = path.join(releaseDir, "dist", "cli.js");
+  const indexes = args.flatMap((arg, index) => (arg.endsWith(`${path.sep}dist${path.sep}cli.js`) ? [index] : []));
+  if (indexes.length !== 1) return "DC_ARGS must name exactly one dist/cli.js entrypoint";
+  const entryIndex = indexes[0];
+  let real;
+  let expectedReal;
+  try {
+    real = fs.realpathSync(args[entryIndex]);
+    expectedReal = fs.realpathSync(expected);
+  } catch {
+    return `DC_ARGS entrypoint ${args[entryIndex]} does not exist`;
+  }
+  if (real !== expectedReal) return `DC_ARGS entrypoint ${args[entryIndex]} is not the pinned release ${expected}`;
+  if (args.slice(entryIndex + 1).join(" ") !== "serve --preset local") return "DC_ARGS may only run `serve --preset local` after the pinned entrypoint";
+  if (entryIndex < 2) return "DC_ARGS must drop to a different uid before the pinned entrypoint";
+  const node = args[entryIndex - 1];
+  if (!path.isAbsolute(node)) return "DC_ARGS must invoke node by absolute path";
+  const allowed = new Set([
+    "reuid", "ruid", "euid", "regid", "rgid", "egid", "init-groups", "clear-groups", "keep-groups",
+    "inh-caps", "bounding-set", "ambient-caps", "reset-env", "no-new-privs",
+  ]);
+  const uidFlags = new Set(["reuid", "ruid", "euid", "regid", "rgid", "egid"]);
+  const selfUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  let selfUser;
+  try {
+    selfUser = os.userInfo().username;
+  } catch {
+    selfUser = undefined;
+  }
+  let droppedUid = false;
+  const wrapper = args.slice(0, entryIndex - 1);
+  for (let i = 0; i < wrapper.length; i += 1) {
+    const arg = wrapper[i];
+    if (arg === "--") continue;
+    const flag = arg.match(/^--([a-z-]+)(?:=(.*))?$/);
+    if (!flag || !allowed.has(flag[1])) return `DC_ARGS has an unsupported setpriv argument: ${arg}`;
+    const name = flag[1];
+    if (uidFlags.has(name) || name === "inh-caps" || name === "bounding-set" || name === "ambient-caps") {
+      let value = flag[2];
+      if (value === undefined) {
+        if (i + 1 >= wrapper.length) return `DC_ARGS ${name} needs a value`;
+        value = wrapper[(i += 1)];
+      }
+      if (uidFlags.has(name)) {
+        if (name === "reuid" || name === "ruid" || name === "euid") droppedUid = true;
+        if (value === "root" || (/^\d+$/.test(value) && Number(value) === 0)) return "DC_ARGS may not run the child as root";
+        if ((selfUser !== undefined && value === selfUser) || (/^\d+$/.test(value) && Number(value) === selfUid)) {
+          return "DC_ARGS must drop to a different uid";
+        }
+      } else if (value === "all" || value.split(",").some((entry) => entry.startsWith("+"))) {
+        return "DC_ARGS may not grant capabilities";
+      }
+    }
+  }
+  if (!droppedUid) return "DC_ARGS must drop to a different uid";
+  return null;
+}
 if (JC_REQUIRE_RELEASE) {
   const checkout = fs.realpathSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../.."));
   const reasons = [];
-  if (process.env.DC_ARGS) reasons.push("DC_ARGS overrides the runtime entrypoint");
+  if (process.env.DC_ARGS) {
+    const reason = JC_RELEASE && process.env.JC_PRESET === "local"
+      ? pinnedDcArgsReason(DC_ARGS, JC_RELEASE.realDir)
+      : "DC_ARGS overrides the runtime entrypoint";
+    if (reason) reasons.push(reason);
+  }
   if (!process.env.JC_RUNTIME_DIR) reasons.push("JC_RUNTIME_DIR is not set");
   if (!JC_RELEASE) reasons.push(`${JC_DIR} is not an installed release (no RELEASE.json)`);
   else {

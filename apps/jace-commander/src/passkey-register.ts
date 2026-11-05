@@ -2,7 +2,7 @@
 /**
  * Passkey registration for approverd privileged approvals (Jace's decision 2026-10-13).
  *
- *   node dist/jace-commander/passkey-register.js --rp-id localhost --origin http://localhost:7391 \
+ *   node dist/passkey-register.js --rp-id localhost --origin http://localhost:7391 \
  *     --operator jace --out ./passkeys.json [--from /etc/jace-commander/passkeys.json]
  *
  * Run by the human operator, physically present, in their own session. It serves a one-shot local page

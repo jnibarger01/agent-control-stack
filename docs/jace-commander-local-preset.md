@@ -33,7 +33,7 @@ key/state, helper nonces) stays root-owned.
 
 With `passkey` configured in approverd (Jace's decision 2026-10-13), privileged approvals instead require a WebAuthn passkey with user verification and are audited as `webauthn-uv` with the authenticated principal; see [jace-commander-passkey-approvals.md](jace-commander-passkey-approvals.md).
 
-Install with `sudo deploy/jace-commander/install-approverd.sh` (a root action; the
+Install with `sudo apps/jace-commander/deploy/jace-commander/install-approverd.sh` (a root action; the
 repo never runs it for you). It creates three distinct identities: the `jc` server
 account, the `jc-approverd` signer that alone holds the signing key, and your login,
 added to `jc-approvers`.
@@ -58,7 +58,7 @@ cannot be written nothing is approved or minted.
 ## Policy file
 
 `/etc/jace-commander/policy.json` (override: `JC_POLICY_PATH`). See
-`vendor/desktop-commander/deploy/jace-commander/policy.example.json`.
+`apps/jace-commander/deploy/jace-commander/policy.example.json`.
 
 **The policy must be root-controlled** (Jace's decision, 2026-10-13; restores
 #324's rule). The file and **every parent directory up to `/`** must be owned by
@@ -82,7 +82,7 @@ Supplying a root-owned path in dev and test:
   still loaded but reported as not immutable.
 - Unit tests never need root. `loadJcPolicy({ rootIo })` and
   `assertPolicyImmutable(path, io)` take a filesystem/uid seam (see
-  `test/test-jace-commander-policy-root-owned.js`); other suites pass
+  `apps/jace-commander/test/policy-root-owned.test.mjs`); other suites pass
   `requireImmutable: false`.
 
 An optional `<JC_STATE_DIR>/policy.user.json` may only **tighten**: stricter
@@ -99,8 +99,18 @@ in `jc_status`, and makes `jc_doctor` fail.
 and the user layer are added to the denied roots so the model cannot read or
 edit them. `exec.allowCommands`/`denyCommands` and `git.remotes` are
 **guardrails, not a sandbox**: an allowed interpreter runs arbitrary code. With
-`exec: allow` the real boundary is the OS account and unit hardening; use
+`exec: allow` the real boundary is the OS account, the unit hardening and JC's
+bubblewrap workload sandbox (every child runs inside it; a workload without a
+proven sandbox launches nothing); use
 `apps/dc-mcp-gateway/deploy/systemd/jace-commander-mcp-local.service.example`.
+That unit runs the native JC installed release (`/opt/jace-commander/current`,
+installed with `PREFIX=/opt/jace-commander apps/jace-commander/deploy/install-user-release.sh`)
+with `JC_REQUIRE_INSTALLED_RELEASE=1`, never `vendor/desktop-commander` (the
+legacy build has no workload sandbox) and never a writable checkout. Its
+hardening profile is deliberately bubblewrap-compatible (namespace allow-list,
+`@mount`, `AF_NETLINK`; no `ProtectKernelTunables`, `ProtectKernelLogs`,
+`ProtectHostname` or `RestrictSUIDSGID`), and the root install steps create the
+workspace root and the state directory that `ReadWritePaths=` requires.
 
 ## Audit
 
@@ -126,7 +136,7 @@ The root helper keeps **two** trust anchors, both only in its root-owned
 ignores as root): the ACS key (`acs.jc.v1`) and the approver key (`jc.local.v1`,
 `localPublicKey` + `localKeyId`). The envelope's `keyId` selects the anchor; the two
 keys must differ and neither can verify the other's artifact. Install the second
-anchor by re-running `install-privileged-helper.sh` with `JC_LOCAL_PUBLIC_KEY` and
+anchor by re-running `apps/jace-commander/deploy/jace-commander/install-privileged-helper.sh` with `JC_LOCAL_PUBLIC_KEY` and
 `JC_LOCAL_KEY_ID` (the values `install-approverd.sh` prints).
 
 Under the local preset the helper token comes **only** from approverd. A capability a

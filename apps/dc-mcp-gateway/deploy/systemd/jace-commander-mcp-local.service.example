@@ -2,17 +2,29 @@
 #
 # Root-only install steps (the repo ships files; it never runs these for you):
 #   useradd --system --create-home --home-dir /home/jc --shell /usr/sbin/nologin jc
+#   useradd --system --shell /usr/sbin/nologin jc-bridge
+#   install -d -o jc -g jc -m 0750 /home/jc/work          # the policy's only fs root
+#   install -d -o jc -g jc -m 0700 /var/lib/jace-commander-mcp   # JC state; not jc-bridge's
 #   install -d -o root -g root -m 0755 /etc/jace-commander
-#   install -o root -g root -m 0644 policy.json /etc/jace-commander/policy.json   # root-owned: jc CANNOT edit it
+#   install -o root -g root -m 0644 apps/jace-commander/deploy/jace-commander/policy.example.json /etc/jace-commander/policy.json
+#   PREFIX=/opt/jace-commander apps/jace-commander/deploy/install-user-release.sh   # as root
 #   cp this file /etc/systemd/system/jace-commander-mcp-local.service
 #   install -m 0600 -o root -g root jc-bridge.env /etc/jace-commander/bridge.env
 #   systemctl daemon-reload && systemctl enable --now jace-commander-mcp-local
 #
+# The unit runs the NATIVE Jace Commander installed release
+# (/opt/jace-commander/current), never vendor/desktop-commander (the legacy
+# build has no workload sandbox) and never a writable development checkout.
+# JC_REQUIRE_INSTALLED_RELEASE=1 refuses to start unless that release is
+# complete and read-only. The executor still drops from jc-bridge to jc via
+# setpriv; the pin accepts DC_ARGS only for exactly that setpriv shape and the
+# pinned entrypoint.
 # The policy MUST be unwritable by the `jc` user and its directory chain, or the JC
 # server rejects it as invalid and denies everything but jc.meta (jc_doctor explains).
 #
-# Containment is the OS's job, not the policy's: exec: allow is arbitrary code
-# execution. These directives are the actual boundary.
+# Containment is the OS's and the workload sandbox's job, not the policy's:
+# exec: allow is arbitrary code execution. These directives (kept compatible
+# with bubblewrap) are the actual boundary.
 [Unit]
 Description=Jace Commander MCP bridge, local preset (loopback only)
 After=network.target
@@ -20,8 +32,6 @@ After=network.target
 [Service]
 # The bridge holds the gateway secrets as `jc-bridge`; the executor (and every command the model
 # starts) runs as `jc` via setpriv, so same-uid /proc/<pid>/environ reads cannot reach those secrets.
-#   useradd --system --shell /usr/sbin/nologin jc-bridge
-#   install -d -o jc -g jc -m 0700 /var/lib/jace-commander-mcp
 User=jc-bridge
 Group=jc-bridge
 WorkingDirectory=/opt/agent-control-stack/apps/dc-mcp-gateway
@@ -32,8 +42,10 @@ Environment=JC_PRESET=local
 Environment=JC_POLICY_PATH=/etc/jace-commander/policy.json
 Environment=JC_STATE_DIR=/var/lib/jace-commander-mcp/state
 Environment=JC_RUNTIME_ID=jc-local
+Environment=JC_RUNTIME_DIR=/opt/jace-commander/current
+Environment=JC_REQUIRE_INSTALLED_RELEASE=1
 Environment=DC_CMD=/usr/bin/setpriv
-Environment="DC_ARGS=--reuid=jc --regid=jc --init-groups --inh-caps=-all --bounding-set=-all /usr/bin/node /opt/agent-control-stack/vendor/desktop-commander/dist/jace-commander/cli.js serve --preset local"
+Environment="DC_ARGS=--reuid=jc --regid=jc --init-groups --inh-caps=-all --bounding-set=-all /usr/bin/node /opt/jace-commander/current/dist/cli.js serve --preset local"
 EnvironmentFile=/etc/jace-commander/bridge.env
 ExecStart=/usr/bin/env node /opt/agent-control-stack/apps/dc-mcp-gateway/bridge.js
 Restart=on-failure
@@ -49,27 +61,38 @@ AmbientCapabilities=CAP_SETUID CAP_SETGID
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
-ProtectHome=true
-ProtectKernelTunables=true
+# The policy's only fs root is /home/jc/work. ProtectHome=true would hide it, and
+# ReadWritePaths= cannot re-expose a path hidden that way; read-only keeps /home
+# readable while ReadWritePaths= makes the workspace itself writable.
+ProtectHome=read-only
 ProtectKernelModules=true
-ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectClock=true
-ProtectHostname=true
-RestrictSUIDSGID=true
 RestrictRealtime=true
-RestrictNamespaces=true
 LockPersonality=true
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Workloads run in bubblewrap (sandbox.ts), which creates user, mount, pid, ipc,
+# uts, net and cgroup namespaces. systemd reads a namespace list as an ALLOW-list,
+# so RestrictNamespaces=true would deny the sandbox itself.
+RestrictNamespaces=user mnt pid ipc uts net cgroup
+# bubblewrap configures loopback in the new network namespace over NETLINK_ROUTE.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources
+SystemCallFilter=~@resources
+# bubblewrap mounts the new root and calls pivot_root; @mount allows those.
+# Do not add ~@privileged: it contains pivot_root and kills the sandbox (SIGSYS).
+SystemCallFilter=@mount
 # setpriv must be able to change uid/gid/groups: add those syscalls back.
 SystemCallFilter=@setuid
 UMask=0077
 # Only these paths are writable. Add the workspace roots named in policy.json.
 ReadWritePaths=/var/lib/jace-commander-mcp /home/jc/work
 ReadOnlyPaths=/etc/jace-commander
+# Deliberately NOT set: ProtectKernelTunables=, ProtectKernelLogs= and
+# ProtectHostname= remount /proc or create a UTS namespace that stop bubblewrap
+# from mounting /proc or unsharing, and RestrictSUIDSGID= breaks its
+# unprivileged setup. Each was measured to make the sandbox self-test fail. Do
+# not re-add them without re-running the local-preset sandbox probe.
 # Outbound network is a policy decision (network class = approve). To forbid it
 # outright, add: IPAddressDeny=any  and  IPAddressAllow=localhost
 # State lives in a DEDICATED directory owned by `jc` (created above; StateDirectory= would hand it to

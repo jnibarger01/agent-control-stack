@@ -45,10 +45,10 @@ If anything fails, approvals for passkey-required classes are impossible (fail c
 
 ## Installing
 
-If `passkey` is configured and the library is missing, approverd refuses to start, which fails closed. Run `npm ci` and `npm run build` in `vendor/desktop-commander`, then as root (Jace):
+If `passkey` is configured and the library is missing, approverd refuses to start, which fails closed. Run `npm ci` and `npm run build` in `apps/jace-commander`, then as root (Jace):
 
 ```sh
-sudo deploy/jace-commander/install-approverd.sh
+sudo apps/jace-commander/deploy/jace-commander/install-approverd.sh
 ```
 
 The installer copies `passkey-verifier.js` and `root-controlled-file.js`, installs the pinned `@simplewebauthn/server` and its runtime dependencies root-owned under `/opt/jace-commander/node_modules` (from the repo's `node_modules`; nothing is fetched), and writes a `passkey` block (`JC_PASSKEY_RP_ID`, default `localhost`; `JC_PASSKEY_ORIGIN`, default `http://localhost:7391`). Until a passkey is registered, privileged approvals fail closed. `JC_ALLOW_SELF_ASSERTED_PRIVILEGED=1` writes the audited opt-out instead.
@@ -58,7 +58,7 @@ The installer copies `passkey-verifier.js` and `root-controlled-file.js`, instal
 approverd has no registration operation. Run this as yourself, at the machine:
 
 ```sh
-node vendor/desktop-commander/dist/jace-commander/passkey-register.js \
+node apps/jace-commander/dist/passkey-register.js \
   --rp-id localhost --origin http://localhost:7391 --operator jace --out ~/passkeys.new.json \
   --from /etc/jace-commander/passkeys.json
 # Omit the --from line (and the trailing \ above it) for the first key; with it, existing keys are kept.
