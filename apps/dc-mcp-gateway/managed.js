@@ -28,6 +28,7 @@ import { claimHeaders, clientIdForAcs } from './client-attribution.js';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import { ACS_CORRELATION_HEADER, startAcsTiming } from './acs-timing.js';
 import os from 'node:os';
 import path from 'node:path';
 import { verifyRelease } from './release-integrity.js';
@@ -212,6 +213,7 @@ export function acsPost(managed, pathname, body, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const url = new URL(pathname, managed.acsGatewayUrl);
     const payload = JSON.stringify(body);
+    const timing = startAcsTiming(pathname);
     const req = http.request(
       {
         protocol: url.protocol,
@@ -223,23 +225,32 @@ export function acsPost(managed, pathname, body, extraHeaders = {}) {
           authorization: `Bearer ${managed.acsGatewayToken}`,
           'content-type': 'application/json',
           'content-length': Buffer.byteLength(payload),
+          ...(timing ? { [ACS_CORRELATION_HEADER]: timing.correlationId } : {}),
           ...extraHeaders,
         },
       },
       (res) => {
+        timing?.response();
         const chunks = [];
         let size = 0;
-        res.on('data', (c) => { size += c.length; if (size > 256 * 1024) { res.destroy(); reject(new Error('acs response too large')); } else chunks.push(c); });
+        res.on('data', (c) => { size += c.length; if (size > 256 * 1024) { res.destroy(); timing?.finish('response_too_large', { status: res.statusCode }); reject(new Error('acs response too large')); } else chunks.push(c); });
         res.on('end', () => {
           let json;
           try { json = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { json = null; }
+          timing?.finish('ok', { status: res.statusCode });
           resolve({ status: res.statusCode, json });
         });
-        res.on('error', reject);
+        res.on('error', (error) => { timing?.finish('response_error', { status: res.statusCode, error }); reject(error); });
       },
     );
-    req.setTimeout(managed.timeoutMs, () => req.destroy(new Error('acs issuance timeout')));
-    req.on('error', reject);
+    if (timing) {
+      req.on('socket', (socket) => {
+        timing.socket();
+        if (socket.connecting) socket.once('connect', () => timing.connect());
+      });
+    }
+    req.setTimeout(managed.timeoutMs, () => { timing?.timeout(); req.destroy(new Error('acs issuance timeout')); });
+    req.on('error', (error) => { timing?.finish('request_error', { error }); reject(error); });
     req.end(payload);
   });
 }

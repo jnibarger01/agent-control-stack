@@ -41,7 +41,7 @@ const CapabilityPayloadSchema = z.object({
   leaseId: z.string().min(1),
   leaseEpoch: z.number().int().nonnegative(),
   toolName: z.string().min(1),
-  normalizedArguments: z.record(z.unknown()),
+  normalizedArguments: z.record(z.string(), z.unknown()),
   invocationHash: z.string().regex(/^[a-f0-9]{64}$/),
   actionHash: z.string().regex(/^[a-f0-9]{64}$/),
   requestHash: z.string().regex(/^[a-f0-9]{64}$/),

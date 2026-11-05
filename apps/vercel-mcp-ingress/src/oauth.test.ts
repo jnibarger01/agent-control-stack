@@ -1,4 +1,5 @@
 import { generateKeyPairSync } from "node:crypto";
+import { errors } from "jose";
 import { describe, expect, it, vi } from "vitest";
 import { createBridgeAuthorizationAad, openBridgeAuthorization } from "@agent-control-stack/vercel-bridge-contract";
 import { createOauthBearerAuthorizer } from "./oauth.js";
@@ -71,7 +72,7 @@ describe("OAuth ingress authorizer", () => {
       resourceMetadataUrl: "https://acs.example/.well-known/oauth-protected-resource/mcp",
       bridgePublicKeyPem: publicKeyPem,
       verifyToken: vi.fn(async () => {
-        throw new Error("sensitive verifier detail");
+        throw new errors.JWSSignatureVerificationFailed("sensitive verifier detail");
       })
     });
 
@@ -84,8 +85,9 @@ describe("OAuth ingress authorizer", () => {
 
     expect(result).toEqual({
       ok: false,
+      status: 401,
       wwwAuthenticate:
-        'Bearer resource_metadata="https://acs.example/.well-known/oauth-protected-resource/mcp", error="invalid_token"'
+        'Bearer resource_metadata="https://acs.example/.well-known/oauth-protected-resource/mcp", error="invalid_token", error_description="the access token is not valid"'
     });
     expect(JSON.stringify(result)).not.toContain("sensitive");
   });

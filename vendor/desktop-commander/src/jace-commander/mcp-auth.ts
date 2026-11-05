@@ -21,6 +21,8 @@ export interface StoredMcpToken {
   refreshToken?: string;
   /** epoch ms */
   expiresAt: number;
+  /** Set when the issuer permanently refused the refresh token. Cleared by the next successful `connect`. */
+  reauthRequired?: { reason: 'no_refresh_token' | 'refresh_rejected' | 'invalid_client'; at: string };
 }
 
 export function mcpTokenPath(stateDir: string): string {
@@ -171,25 +173,43 @@ export async function connect(options: ConnectOptions): Promise<StoredMcpToken> 
   }
 }
 
+/**
+ * What a caller can learn about its credential. The distinction matters: only `reauth_required` means the user has to
+ * sign in again. `unavailable` (network down, edge down, 5xx, timeout) keeps the stored credential and can simply be
+ * retried; treating it as expired would make every outage look like a revoked connection.
+ */
+export type McpTokenOutcome =
+  | { kind: 'token'; accessToken: string }
+  | { kind: 'not_connected' }
+  | { kind: 'reauth_required'; reason: 'no_refresh_token' | 'refresh_rejected' | 'invalid_client' }
+  | { kind: 'unavailable'; reason: string };
+
+/** OAuth errors that mean the refresh token or client will never work again (RFC 6749 section 5.2). */
+const PERMANENT_REFRESH_ERRORS = new Map<string, 'refresh_rejected' | 'invalid_client'>([
+  ['invalid_grant', 'refresh_rejected'],
+  ['invalid_client', 'invalid_client'],
+  ['unauthorized_client', 'invalid_client'],
+]);
+
 /** In-flight refreshes keyed by `${stateDir}::${mcpUrl}`; single-flight dedupe. */
-const refreshInFlight = new Map<string, Promise<string | undefined>>();
+const refreshInFlight = new Map<string, Promise<McpTokenOutcome>>();
 
 /**
- * The bearer token for `mcpUrl`: JC_MCP_TOKEN, else the stored token
- * (refreshed when within 60 s of expiry). A stored token for a different
- * /jc/mcp URL is never sent (it is audience-bound to its own resource).
+ * The bearer token for `mcpUrl`: JC_MCP_TOKEN, else the stored token (refreshed when within 60 s of expiry).
+ * A stored token for a different /jc/mcp URL is never sent (it is audience-bound to its own resource).
  */
-export async function mcpAccessToken(
+export async function mcpAccessTokenOutcome(
   mcpUrl: string,
   stateDir: string,
   env: NodeJS.ProcessEnv = process.env,
   fetchImpl: typeof fetch = fetch,
-): Promise<string | undefined> {
-  if (env.JC_MCP_TOKEN) return env.JC_MCP_TOKEN;
+): Promise<McpTokenOutcome> {
+  if (env.JC_MCP_TOKEN) return { kind: 'token', accessToken: env.JC_MCP_TOKEN };
   const stored = loadMcpToken(stateDir);
-  if (!stored || stored.mcpUrl !== mcpUrl.replace(/\/$/, '')) return undefined;
-  if (stored.expiresAt - Date.now() > 60_000) return stored.accessToken;
-  if (!stored.refreshToken) return undefined;
+  if (!stored || stored.mcpUrl !== mcpUrl.replace(/\/$/, '')) return { kind: 'not_connected' };
+  if (stored.reauthRequired) return { kind: 'reauth_required', reason: stored.reauthRequired.reason };
+  if (stored.expiresAt - Date.now() > 60_000) return { kind: 'token', accessToken: stored.accessToken };
+  if (!stored.refreshToken) return { kind: 'reauth_required', reason: 'no_refresh_token' };
   const refreshToken = stored.refreshToken;
   // Single-flight: concurrent callers that all see an expired token share one
   // refresh. Otherwise each POSTs /token and the last write wins; if the issuer
@@ -198,18 +218,26 @@ export async function mcpAccessToken(
   const key = `${stateDir}::${stored.mcpUrl}`;
   const inFlight = refreshInFlight.get(key);
   if (inFlight) return inFlight;
-  const promise = (async (): Promise<string | undefined> => {
+  const promise = (async (): Promise<McpTokenOutcome> => {
+    let found: Discovery;
+    let response: Response;
+    let token: Record<string, unknown>;
     try {
-      const found = await discover(mcpUrl, fetchImpl);
-      const token = await json(await fetchImpl(found.tokenEndpoint, {
+      found = await discover(mcpUrl, fetchImpl);
+      response = await fetchImpl(found.tokenEndpoint, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
           grant_type: 'refresh_token', refresh_token: refreshToken, client_id: stored.clientId, resource: found.resource,
         }).toString(),
         signal: AbortSignal.timeout(10_000),
-      }));
-      if (typeof token.access_token !== 'string') return undefined;
+      });
+      token = await json(response);
+    } catch (error) {
+      // Network error, timeout, unparseable body: no verdict was reached. The credential is untouched.
+      return { kind: 'unavailable', reason: error instanceof Error ? error.message : 'refresh failed' };
+    }
+    if (typeof token.access_token === 'string' && response.ok) {
       const refreshed: StoredMcpToken = {
         ...stored,
         accessToken: token.access_token,
@@ -217,10 +245,26 @@ export async function mcpAccessToken(
         expiresAt: Date.now() + Number(token.expires_in ?? 3600) * 1000,
       };
       saveMcpToken(stateDir, refreshed);
-      return refreshed.accessToken;
-    } catch {
-      return undefined;
+      return { kind: 'token', accessToken: refreshed.accessToken };
     }
+    const permanent = response.status >= 400 && response.status < 500 && typeof token.error === 'string'
+      ? PERMANENT_REFRESH_ERRORS.get(token.error)
+      : undefined;
+    if (permanent) {
+      // Compare-and-swap: another process sharing this state directory may have refreshed (and rotated) in the meantime.
+      // Its token is good and ours was rejected only because it was already spent, so do not overwrite its credential.
+      const current = loadMcpToken(stateDir);
+      if (current && current.refreshToken !== refreshToken) {
+        return current.expiresAt - Date.now() > 60_000
+          ? { kind: 'token', accessToken: current.accessToken }
+          : { kind: 'unavailable', reason: 'credential was refreshed by another process; retry' };
+      }
+      // Remember the verdict so every later call (and a status check) says "reconnect" without another round trip.
+      const { refreshToken: _dead, ...rest } = stored;
+      saveMcpToken(stateDir, { ...rest, reauthRequired: { reason: permanent, at: new Date().toISOString() } });
+      return { kind: 'reauth_required', reason: permanent };
+    }
+    return { kind: 'unavailable', reason: `token endpoint answered HTTP ${response.status}` };
   })();
   refreshInFlight.set(key, promise);
   try {
@@ -228,4 +272,15 @@ export async function mcpAccessToken(
   } finally {
     refreshInFlight.delete(key);
   }
+}
+
+/** The bearer token, or undefined when there is none to send. Prefer {@link mcpAccessTokenOutcome} to learn why. */
+export async function mcpAccessToken(
+  mcpUrl: string,
+  stateDir: string,
+  env: NodeJS.ProcessEnv = process.env,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string | undefined> {
+  const outcome = await mcpAccessTokenOutcome(mcpUrl, stateDir, env, fetchImpl);
+  return outcome.kind === 'token' ? outcome.accessToken : undefined;
 }

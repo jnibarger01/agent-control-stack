@@ -707,3 +707,52 @@ describe("McpClientService", () => {
     expect(svc.list()[0]!.live).toBe(false);
   });
 });
+
+describe("MCP client authentication events (edge -> ACS)", () => {
+  const authEvent = (app: App, body: Record<string, unknown>, token = JC) =>
+    app.inject({ method: "POST", url: "/mcp-clients/auth-event", headers: bearer(token), payload: body });
+  const granted = { lane: "jc", clientId: "client-chatgpt", subject: "chatgpt:jacen", kind: "granted" };
+
+  it("records an edge-reported failure and shows reauthentication required with the reason", async () => {
+    setup();
+    const app = gateway();
+    expect((await authEvent(app, granted)).statusCode).toBe(202);
+    expect((await authEvent(app, { ...granted, kind: "refresh_failed", reason: "refresh_reused" })).statusCode).toBe(
+      202
+    );
+    const view = await clients(app);
+    expect(view.summary).toMatchObject({ reauthRequired: 1 });
+    expect(view.clients[0]).toMatchObject({
+      clientId: "client-chatgpt",
+      auth: { state: "reauth_required", failureReason: "refresh_reused" }
+    });
+    expect(view.clients[0]!.auth.lastSuccessAt).toEqual(expect.any(String));
+  });
+
+  it("requires the lane's own bridge identity and rejects other lanes, readers and unknown fields", async () => {
+    setup();
+    const app = gateway();
+    expect((await authEvent(app, granted, DC)).statusCode).toBe(403);
+    expect((await authEvent(app, granted, READER)).statusCode).toBeGreaterThanOrEqual(401);
+    expect((await authEvent(app, { ...granted, accessToken: "leak" })).statusCode).toBe(400);
+    expect((await authEvent(app, { ...granted, kind: "made_up" })).statusCode).toBe(400);
+    expect((await clients(app)).clients).toHaveLength(0);
+  });
+
+  it("an auth event never labels, approves or unblocks a client", async () => {
+    setup();
+    const app = gateway("require_label");
+    await authEvent(app, granted);
+    expect((await issue(app, "client-chatgpt")).statusCode).toBe(403);
+    expect((await clients(app)).clients[0]).toMatchObject({ status: "unrecognized" });
+  });
+
+  it("a reauth_required client keeps its label and is still gated only by the label policy", async () => {
+    setup();
+    const app = gateway();
+    await authEvent(app, granted);
+    await authEvent(app, { ...granted, kind: "refresh_failed", reason: "revoked" });
+    const list = await clients(app);
+    expect(list.clients[0]).toMatchObject({ status: "unrecognized", auth: { state: "reauth_required" } });
+  });
+});

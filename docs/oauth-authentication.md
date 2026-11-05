@@ -234,3 +234,11 @@ Behavior:
 
 Enforcement is on `tools/call` after authentication and scope checks. Denied
 calls return JSON-RPC error `-32003` with HTTP 403.
+
+## Reauthentication detection (Commander edge lanes)
+
+On `/jc/mcp` and `/mcp` the edge returns `WWW-Authenticate: Bearer resource_metadata="…"` with no `error` when no credential is
+sent, and adds `error="invalid_token"` when a token was presented but is expired or otherwise unusable (RFC 6750). Mission Control
+shows **Reauthentication required** for a client whose refresh token was rejected, reused, expired or revoked. See
+[ADR 0027](adr/0027-oauth-reauthentication-detection.md) and the "Reauthentication required" section of
+[the client visibility runbook](runbooks/mcp-client-visibility.md). Reporting to ACS is off unless the edge sets `ACS_MCP_AUTH_EVENTS=1`.

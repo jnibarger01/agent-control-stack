@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 /**
  * Utility for detecting parameters a caller sent that a tool's Zod schema does
  * not accept.
@@ -19,18 +21,14 @@
  * Returns null when the schema is not (and does not wrap) a plain object schema,
  * in which case we cannot determine the supported parameters and must not warn.
  */
-function getObjectShape(schema: any): Record<string, unknown> | null {
+function getObjectShape(schema: unknown): Record<string, unknown> | null {
   let current = schema;
-  for (let i = 0; current && current._def && i < 10; i++) {
-    const typeName = current._def.typeName;
-    if (typeName === 'ZodObject') {
-      const shape = typeof current.shape === 'function' ? current.shape() : current.shape;
-      return shape ?? null;
+  for (let i = 0; current && i < 10; i++) {
+    if (current instanceof z.ZodObject) return current.shape;
+    if (current instanceof z.ZodPipe) current = current.in;
+    else if (current instanceof z.ZodOptional || current instanceof z.ZodNullable || current instanceof z.ZodDefault || current instanceof z.ZodReadonly) {
+      current = current.unwrap();
     }
-    if (typeName === 'ZodEffects') current = current._def.schema;
-    else if (typeName === 'ZodOptional' || typeName === 'ZodNullable' || typeName === 'ZodDefault') {
-      current = typeof current._def.innerType === 'function' ? current._def.innerType() : current._def.innerType;
-    } else if (typeName === 'ZodBranded') current = current._def.type;
     else return null;
   }
   return null;

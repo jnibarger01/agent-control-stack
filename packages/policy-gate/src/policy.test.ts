@@ -170,6 +170,45 @@ describe("policy gate", () => {
     ).toContain("deny:self-approval");
   });
 
+  it("denies high-risk self-approval when the approver is the item's requesterSubject", () => {
+    // Agent-created items carry requester "agent" and the real actor in
+    // requesterSubject; the subject must not approve its own item over the
+    // generic work-item path.
+    expect(
+      evaluatePolicy({
+        ...base,
+        operation: "approve",
+        actor: "user-x",
+        requester: "agent",
+        requesterSubject: "user-x",
+        risk: "critical"
+      }).matchedRules
+    ).toContain("deny:self-approval");
+    expect(
+      evaluatePolicy({
+        ...base,
+        operation: "approve",
+        actor: "user-x",
+        requester: "agent",
+        requesterSubject: "user-x",
+        risk: "high"
+      }).matchedRules
+    ).toContain("deny:self-approval");
+  });
+
+  it("does not deny approval by a different subject with approve credentials", () => {
+    const rules = evaluatePolicy({
+      ...base,
+      operation: "approve",
+      actor: "user-y",
+      requester: "agent",
+      requesterSubject: "user-x",
+      risk: "critical"
+    }).matchedRules;
+    expect(rules).not.toContain("deny:self-approval");
+    expect(rules).toContain("approval:risk");
+  });
+
   it("fails closed when no allow rule matches", () => {
     expect(evaluatePolicy(base).matchedRules).toContain("deny:fail-closed");
   });

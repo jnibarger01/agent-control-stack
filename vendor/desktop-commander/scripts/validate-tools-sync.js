@@ -9,7 +9,8 @@
 import { readFile } from 'fs/promises';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { spawn } from 'child_process';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -44,91 +45,20 @@ async function extractToolsFromManifest() {
 }
 
 async function extractToolsFromServer() {
-  return new Promise((resolve, reject) => {
-    // Start the MCP server
-    const serverPath = join(rootDir, 'dist', 'index.js');
-    // Manifest parity describes the standalone/upstream surface. Managed mode
-    // intentionally advertises only the narrower ACS v1 allowlist.
-    const server = spawn('node', [serverPath, '--standalone'], {
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
-
-    let output = '';
-    let errorOutput = '';
-    const messages = [];
-
-    server.stdout.on('data', (data) => {
-      output += data.toString();
-      
-      // Try to parse each line as JSON-RPC message
-      const lines = output.split('\n');
-      output = lines.pop() || ''; // Keep incomplete line
-      
-      for (const line of lines) {
-        if (line.trim()) {
-          try {
-            messages.push(JSON.parse(line));
-          } catch (e) {
-            // Not JSON, might be debug output
-          }
-        }
-      }
-    });
-
-    server.stderr.on('data', (data) => {
-      errorOutput += data.toString();
-    });
-
-    // Step 1: Send initialize request
-    const initRequest = {
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2024-11-05',
-        capabilities: {},
-        clientInfo: {
-          name: 'validate-tools-sync',
-          version: '1.0.0'
-        }
-      }
-    };
-
-    server.stdin.write(JSON.stringify(initRequest) + '\n');
-
-    // Wait for initialize response, then send tools/list
-    setTimeout(() => {
-      // Step 2: Send tools/list request
-      const toolsRequest = {
-        jsonrpc: '2.0',
-        id: 2,
-        method: 'tools/list',
-        params: {}
-      };
-
-      server.stdin.write(JSON.stringify(toolsRequest) + '\n');
-
-      // Wait for tools/list response
-      setTimeout(() => {
-        server.kill();
-
-        // Find the tools/list response
-        const toolsResponse = messages.find(msg => msg.id === 2 && msg.result);
-
-        if (!toolsResponse) {
-          reject(new Error('No tools/list response received'));
-          return;
-        }
-
-        const tools = toolsResponse.result.tools.map(tool => tool.name).sort();
-        resolve(tools);
-      }, 1000);
-    }, 500);
-
-    server.on('error', (error) => {
-      reject(new Error(`Failed to start server: ${error.message}`));
-    });
+  // Wait for the protocol handshake instead of racing startup with fixed sleeps.
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [join(rootDir, 'dist', 'index.js'), '--standalone'],
+    stderr: 'pipe',
   });
+  const client = new Client({ name: 'validate-tools-sync', version: '1.0.0' }, { capabilities: {} });
+  try {
+    await client.connect(transport, { timeout: 15000 });
+    const response = await client.listTools(undefined, { timeout: 15000 });
+    return response.tools.map(tool => tool.name).sort();
+  } finally {
+    await client.close();
+  }
 }
 
 async function main() {

@@ -316,3 +316,117 @@ describe("MCP clients panel", () => {
     expect(ctx.document.body.dataset.activeView).toBe("connectors");
   });
 });
+
+describe("MCP clients panel: reauthentication required", () => {
+  const healthy = { state: "ok", lastSuccessAt: "2026-10-17T09:00:00.000Z" };
+  const broken = {
+    state: "reauth_required",
+    lastSuccessAt: "2026-10-16T09:00:00.000Z",
+    lastFailureAt: "2026-10-17T10:00:00.000Z",
+    failureReason: "refresh_reused"
+  };
+  const row = (over: Json = {}) =>
+    client({
+      clientId: "client-chatgpt",
+      status: "labelled",
+      label: "ChatGPT",
+      kind: "chatgpt",
+      auth: healthy,
+      ...over
+    });
+
+  it("shows the affected client, last successful authentication, plain-language reason and a Reconnect action", async () => {
+    const ctx = boot({
+      ...payload([row({ auth: broken })]),
+      summary: { ...payload([]).summary, total: 1, reauthRequired: 1 }
+    });
+    await ctx.settle();
+    const text = ctx.rows()[0]!.textContent ?? "";
+    expect(text).toContain("Reauthentication required");
+    expect(text).toContain("ChatGPT");
+    expect(text).toMatch(/last (successful )?(authentication|sign-in)/i);
+    expect(text).toMatch(/revoked|already used|replayed/i);
+    expect(ctx.rows()[0]!.querySelector("[data-mcp-reconnect]")).not.toBeNull();
+  });
+
+  it("healthy clients show no warning and no Reconnect action", async () => {
+    const ctx = boot(payload([row()]));
+    await ctx.settle();
+    expect(ctx.rows()[0]!.textContent).not.toContain("Reauthentication required");
+    expect(ctx.rows()[0]!.querySelector("[data-mcp-reconnect]")).toBeNull();
+  });
+
+  it("raises the global alert for a reauth-required client even when it is not live", async () => {
+    const ctx = boot({
+      ...payload([row({ auth: broken, live: false, lastSeenAt: "2026-10-01T10:00:00.000Z" })]),
+      summary: { ...payload([]).summary, total: 1, reauthRequired: 1 }
+    });
+    await ctx.settle();
+    const alert = ctx.document.getElementById("mcp-client-alert") as HTMLElement;
+    expect(alert.hidden).toBe(false);
+    expect(alert.textContent).toContain("Reauthentication required");
+    expect(alert.textContent).toContain("ChatGPT");
+  });
+
+  it("Reconnect explains the client-side steps and never sends credentials or starts OAuth for the client", async () => {
+    const ctx = boot(payload([row({ auth: broken })]));
+    await ctx.settle();
+    (ctx.rows()[0]!.querySelector("[data-mcp-reconnect]") as HTMLElement).click();
+    await ctx.settle();
+    const dialog = ctx.document.getElementById("mcp-client-dialog");
+    expect(dialog?.textContent).toMatch(/connector|reconnect/i);
+    expect(ctx.calls.filter((c) => c.method === "POST")).toHaveLength(0);
+  });
+
+  it("escapes a hostile failure reason as text", async () => {
+    const ctx = boot(payload([row({ auth: { ...broken, failureReason: '<img src=x onerror="alert(1)">' } })]));
+    await ctx.settle();
+    expect(ctx.document.querySelector("#mcp-clients-body img")).toBeNull();
+  });
+
+  it("never turns a stale expiry snapshot into an unconfirmed reconnect warning", async () => {
+    const soon = new Date(Date.now() - 1_500).toISOString();
+    const ctx = boot(
+      payload([
+        row({
+          auth: { state: "ok", lastSuccessAt: "2026-10-17T09:00:00.000Z", refreshExpiresAt: soon },
+          lastSeenAt: "2026-10-17T09:00:00.000Z",
+          live: false
+        })
+      ])
+    );
+    await ctx.settle();
+    expect(ctx.rows()[0]!.textContent).not.toContain("Reauthentication required");
+    // A refresh may have succeeded while its best-effort report was lost.
+    (ctx.dom.window as unknown as { renderMcpClients: () => void }).renderMcpClients?.();
+    await ctx.settle();
+    expect(ctx.rows()[0]!.textContent).not.toContain("Reauthentication required");
+  });
+
+  it("auth-only rows are not live in the browser even with a recent timestamp", async () => {
+    const ctx = boot(
+      payload([
+        row({
+          live: false,
+          connects: 0,
+          issued: 0,
+          denied: 0,
+          lastSeenAt: new Date().toISOString(),
+          auth: { state: "ok" }
+        })
+      ])
+    );
+    await ctx.settle();
+    expect(ctx.rows()[0]!.querySelector(".mcp-live")).toBeNull();
+    expect(ctx.document.getElementById("mcp-client-alert")?.hidden).toBe(true);
+  });
+
+  it("does not flag an expired-looking client that has been seen since the expiry", async () => {
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const ctx = boot(
+      payload([row({ auth: { state: "ok", refreshExpiresAt: past }, lastSeenAt: new Date().toISOString() })])
+    );
+    await ctx.settle();
+    expect(ctx.rows()[0]!.textContent).not.toContain("Reauthentication required");
+  });
+});

@@ -65,6 +65,19 @@ The approval grant:
 4. Stores the grant (`recordApproval`): work item ID, action hash, request hash, approver, expiry (default 10 minutes), status `granted`.
 5. Emits an `approval.granted` audit event.
 
+### Replay of an already-granted approval
+
+`approve_work_item` is idempotent for audit purposes. A call is a **replay** only when all of the following hold:
+
+- the work item is already `approved`;
+- the base approval for the supplied `actionHash` is `granted`, unexpired, and was made by the **same approver** as this call;
+- the **current** execution plan carries a granted approval for that action hash, and that approval is not an `acs:admin` approval unless the caller is `acs:admin`; and
+- policy still evaluates the caller as allowed (not `deny`) and the hash still matches a required action.
+
+A replay returns `200` with the current policy decision and `approvals: []`. It does **not** emit a second `approval.granted`, does not refresh the approval expiry, and does not touch the execution-plan approval. It appends a `policy.decided` event only for an action whose current evaluation differs from its latest recorded `policy.decided` in any `PolicyDecision` field (`decision`, `reason`, `matchedRules`, `requiredApprover`, `maxRuntimeMs`, `allowedPaths`), so the audit trail always matches what the response reported.
+
+Anything else takes the normal path above and emits `approval.granted`: a different approver (including a human replacing an `acs:admin` approval, which invalidates the admin plan approval), an expired approval (re-granted), a superseded execution plan that has no approval yet, or a denied policy decision (recorded and returned as `403`). A consumed approval is rejected with `approval_already_consumed`.
+
 No raw token is generated, shown, or transmitted at any point. MCP remote callers are explicitly barred from calling `approve_work_item` (`remoteMcpToolNames` filters it out in `apps/gateway/src/mcp.ts`).
 
 ## Executing with approval
@@ -81,15 +94,15 @@ When a worker claims the next approved item (`claim_next_approved_work_item` / `
 
 ## Failure behavior
 
-| Failure | Result |
-|---|---|
+| Failure                                                      | Result                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | No approval found, **or an approval exists but has expired** | Claim returns no item. Work item is returned to `needs_approval` (not left `blocked`). `hasApproval`'s own query excludes expired rows (`expires_at > now`), so an expired grant looks identical to a missing one — `consumeApproval` is never reached, and `approval_expired` is not observable through this path. |
-| Action hash on approve call doesn't match a required action | `approval_action_mismatch` |
-| Approval not required for the supplied action hash | `approval_not_required` |
-| Approval already consumed | `approval_already_consumed` (on re-approve attempt) / `approval_conflict` (on double-consume race) |
-| Request hash mismatch at consumption | `approval_request_mismatch` |
-| Current policy denies at claim time | Work item transitions to `blocked`, not executed |
-| Self-approval on high/critical risk | Denied by policy before an approval record is ever created |
+| Action hash on approve call doesn't match a required action  | `approval_action_mismatch`                                                                                                                                                                                                                                                                                          |
+| Approval not required for the supplied action hash           | `approval_not_required`                                                                                                                                                                                                                                                                                             |
+| Approval already consumed                                    | `approval_already_consumed` (on re-approve attempt) / `approval_conflict` (on double-consume race)                                                                                                                                                                                                                  |
+| Request hash mismatch at consumption                         | `approval_request_mismatch`                                                                                                                                                                                                                                                                                         |
+| Current policy denies at claim time                          | Work item transitions to `blocked`, not executed                                                                                                                                                                                                                                                                    |
+| Self-approval on high/critical risk                          | Denied by policy before an approval record is ever created                                                                                                                                                                                                                                                          |
 
 `approval_expired` is a real error thrown by the lower-level `store.consumeApproval` method (`packages/work-items/src/store.ts`), but the standard worker-claim flow above never reaches it — `hasApproval` filters expired rows out first. It's only observable by a caller that invokes `consumeApproval` directly, bypassing `hasApproval`.
 
