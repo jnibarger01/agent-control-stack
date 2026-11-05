@@ -20,8 +20,8 @@ Native branch pre-evidence HEAD: `51fbc2d5dc00ed42d69882ef24398461b65a9fd0`; rel
 
 ## Operational boundary and verdict
 
-The installed user service is active; `~/.local/lib/jace-commander/current` resolves to `~/.local/lib/jace-commander/releases/1.0.0-3662ddf96d50`. The *native JC child* is release-pinned, but the bridge `ExecStart` still uses the checkout's `apps/dc-mcp-gateway/bridge.js`; complete bridge packaging independence is not claimed.
+After `0497b505`, `npm run jc:verify-release` passed again (evidence commit records that hash). The user service was restarted onto `~/.local/lib/jace-commander/releases/1.0.0-0497b505a9c2` (`previous` remains `1.0.0-3662ddf96d50`). The unit is active and not enabled. The native JC child is that read-only release. `ExecStart` is still the checkout's `apps/dc-mcp-gateway/bridge.js`; that process is the loopback MCP adapter, not Desktop Commander, and the managed JC profile refuses a `DC_ARGS` override.
 
-The live bridge returns HTTP 503 for `/ready`, because its dedicated ACS authority credential has not been provisioned. No live credentials, services, ARES worktrees, or production authorization were modified.
+`/health` is 200. `/ready` is 503 because `~/.config/acs/jc-authority.token` does not exist. ACS is not listening on 127.0.0.1:3000. An unauthenticated `/mcp` initialize returns 401 `gateway attestation required`. No production credential was created, and no Tailscale or public ingress was enabled.
 
-**PARTIAL — not production-ready for governed execution.** Local source hardening and tested integration pass, but live ACS authority provisioning and production readiness remain blocked pending explicit approval. Existing modified status notes, backup files, and other worktrees are preserved. No push, deployment or merge into main.
+**BLOCK for live governed execution.** Local build, tests, clean-install verification, and the pinned native runtime pass. An operator must add a dedicated ACS credential (`id` distinct, `actor` `agent`, `roles` `["service"]`, `scopes` `["acs:read"]` only, `token` at least 32 characters) to `ACS_GATEWAY_CREDENTIALS_JSON`, put only that token in `~/.config/acs/jc-authority.token` (0600), and have ACS reachable at the configured gateway URL. Do not reuse the worker token or an operator token.
