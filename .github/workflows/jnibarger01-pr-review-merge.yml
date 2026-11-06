@@ -1,26 +1,121 @@
-name: PR merge gate (disabled)
+name: PR merge classifier
 
-# HOTFIX: this gate used to review and merge pull requests with a token. It is
-# disabled. It never merges, never enables auto-merge, and holds no credentials.
-# It fails closed so the check cannot be mistaken for an approval.
-# Merges are manual until the trusted classifier in #432 is verified.
+# Trusted classifier. `pull_request_target` runs THIS file from the default
+# branch, so a pull request cannot edit the code that decides its eligibility.
+# It never checks out or executes pull request code, has no App or other
+# secrets, and never calls the merge API. It only:
+#   - blocks when repository protections cannot be verified,
+#   - disables auto-merge for security-sensitive or unclassifiable changes,
+#   - enables GitHub's native auto-merge for ordinary changes, bound to the
+#     exact head SHA it classified.
+# GitHub's rulesets, not this job, enforce approvals and required checks.
 
 on:
-  pull_request:
-    types: [opened, reopened, synchronize, ready_for_review]
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, edited]
 
 permissions:
   contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-merge-classifier-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
-  review-and-merge:
+  classify:
+    # Same name as the previous check so the ruleset requirement is stable.
     name: PR review and merge gate
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
-      - name: Gate disabled
+      - name: Classify and enable auto-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          ATTESTED_ACTIONS_CANNOT_APPROVE: ${{ vars.ACS_ATTESTED_ACTIONS_CANNOT_APPROVE_PRS }}
         shell: bash
         run: |
-          echo "Automated review and merge is disabled. Merge only after an independent human review." >&2
-          exit 1
+          set -euo pipefail
+
+          # Protected paths: anything matching is security-sensitive and never
+          # auto-merges. Matched case-insensitively against every path in a PR,
+          # including the previous name of a renamed file.
+          SENSITIVE_RE='^\.github/|(^|/)CODEOWNERS$|^vendor/|auth|credential|secret|token|oauth|capab|approv|polic|execut|dispatch|gateway|relay|acs|lease|sandbox|permission|secur|key'
+          # Ordinary paths: only documentation is eligible for unattended merge.
+          # A path name cannot show whether code implements authorization, so all
+          # source code, including apps/ and packages/, needs a human. Anything
+          # not listed here is treated as sensitive (default deny).
+          ALLOW_RE='^docs/|^(README|CHANGELOG)\.md$'
+
+          block() { echo "BLOCK: $*" >&2; exit 1; }
+          summary() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
+
+          # 1. Read the PR once. Everything below is bound to EXPECTED_HEAD.
+          pr_json="$(gh api "repos/$REPO/pulls/$PR")" || block "could not read PR #$PR"
+          head_sha="$(jq -r '.head.sha' <<<"$pr_json")"
+          base_ref="$(jq -r '.base.ref' <<<"$pr_json")"
+          state="$(jq -r '.state' <<<"$pr_json")"
+          is_draft="$(jq -r '.draft' <<<"$pr_json")"
+          author="$(jq -r '.user.login' <<<"$pr_json")"
+          head_repo="$(jq -r '.head.repo.full_name // ""' <<<"$pr_json")"
+          changed_files="$(jq -r '.changed_files' <<<"$pr_json")"
+          [[ "$head_sha" == "$EXPECTED_HEAD" ]] || block "head moved from $EXPECTED_HEAD to $head_sha; a newer run will classify it"
+          [[ "$state" == "open" ]] || { summary "PR is not open; nothing to enable."; exit 0; }
+          [[ "$base_ref" == "main" ]] || block "base is '$base_ref', not main"
+
+          # 2. Verify protections BEFORE trusting any classification. Missing
+          #    evidence blocks the PR; it never falls through to auto-merge.
+          rules="$(gh api "repos/$REPO/rules/branches/main")" || block "could not read branch rules"
+          # Required checks must be bound to a GitHub Actions app, not a name alone.
+          for ctx in check test; do
+            jq -e --arg c "$ctx" '[.[] | select(.type=="required_status_checks")
+              | .parameters.required_status_checks[]? | select(.context==$c and .integration_id != null)] | length > 0' \
+              <<<"$rules" >/dev/null || block "required check '$ctx' is not bound to an app (integration_id) on main"
+          done
+          # Review protection: last-push approval and stale dismissal, and a path-scoped
+          # required reviewer covering .github/.
+          jq -e '[.[] | select(.type=="pull_request") | .parameters
+            | select(.require_last_push_approval==true and .dismiss_stale_reviews_on_push==true)] | length > 0' \
+            <<<"$rules" >/dev/null || block "review protection (last-push approval, stale dismissal) not verified on main"
+          jq -e '[.[] | select(.type=="pull_request") | .parameters.required_reviewers[]?
+            | select(.file_patterns | index(".github/**"))] | length > 0' \
+            <<<"$rules" >/dev/null || block "no required reviewer for .github/** verified on main"
+          # GitHub Actions cannot be read by this token. The owner must attest it.
+          [[ "$ATTESTED_ACTIONS_CANNOT_APPROVE" == "true" ]] || block "Actions can-approve setting not attested (repo variable ACS_ATTESTED_ACTIONS_CANNOT_APPROVE_PRS)"
+
+          # 3. Ineligible PRs: pass without enabling auto-merge; rulesets still apply.
+          if [[ "$is_draft" == "true" ]]; then summary "Draft: no auto-merge."; exit 0; fi
+          if [[ "$author" != "jnibarger01" ]]; then summary "Author is not the owner: human merge only."; exit 0; fi
+          if [[ "$head_repo" != "$REPO" ]]; then summary "Fork PR: human merge only."; exit 0; fi
+
+          # 4. Classify every changed file. Pagination and counts must match.
+          files_tsv="$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[] | [.filename, (.previous_filename // "-"), .status] | @tsv')" \
+            || block "could not list changed files"
+          rows="$(grep -c . <<<"$files_tsv" || true)"
+          [[ "$rows" == "$changed_files" ]] || block "file list incomplete ($rows of $changed_files); failing closed"
+
+          sensitive=0
+          while IFS=$'\t' read -r name prev status; do
+            [[ -n "$name" ]] || continue
+            for p in "$name" "$prev"; do
+              # "-" is the sentinel for "no previous name"; empty fields would collapse under tab IFS.
+              [[ -n "$p" && "$p" != "-" ]] || continue
+              if grep -Eiq "$SENSITIVE_RE" <<<"$p"; then sensitive=1; summary "sensitive path: $p"; fi
+              grep -Eiq "$ALLOW_RE" <<<"$p" || { sensitive=1; summary "unclassified path: $p"; }
+            done
+          done <<<"$files_tsv"
+
+          if (( sensitive )); then
+            gh pr merge --disable-auto "$PR" >/dev/null 2>&1 || true
+            gh pr comment "$PR" -b "Security-sensitive or unclassified paths changed. Auto-merge is disabled; this needs an independent human approval and a human merge." >/dev/null
+            summary "Result: human review required; auto-merge disabled."
+            exit 0
+          fi
+
+          # 5. Ordinary change: enable native auto-merge bound to the classified head.
+          gh pr merge --auto --squash --match-head-commit "$EXPECTED_HEAD" "$PR"
+          summary "Result: auto-merge enabled for head $EXPECTED_HEAD."

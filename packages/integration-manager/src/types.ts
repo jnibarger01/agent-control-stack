@@ -39,6 +39,8 @@ export interface PullRequestSnapshot {
   unresolvedThreads: number;
   checks: CheckSnapshot[];
   changedFiles: string[];
+  /** Changed paths whose previous name is unknown (renamed or copied, or change type not returned). Fails closed. */
+  unverifiedOriginFiles?: string[];
   /** True when the source had more review threads, checks or files than it returned. Never silently truncated. */
   truncated: { threads: boolean; checks: boolean; files: boolean };
 }
@@ -91,6 +93,11 @@ export interface GatePolicy {
   /** When set, only these authors may be reported eligible. Source integrity. */
   allowedAuthors?: readonly string[];
   allowForkPullRequests: boolean;
+  /**
+   * The classifier's path rules, as the same ERE strings it greps with (case-insensitive). A changed file blocks unless it
+   * matches `allowPattern` and not `sensitivePattern`. Mirrors `.github/workflows/jnibarger01-pr-review-merge.yml`.
+   */
+  autoMergePaths?: { allowPattern: string; sensitivePattern: string };
 }
 
 /**
@@ -104,7 +111,12 @@ export const DEFAULT_GATE_POLICY: GatePolicy = {
     ".github/instructions/jnibarger01-pr-review.instructions.md"
   ],
   allowedAuthors: ["jnibarger01"],
-  allowForkPullRequests: false
+  allowForkPullRequests: false,
+  autoMergePaths: {
+    allowPattern: "^docs/|^(README|CHANGELOG)\\.md$",
+    sensitivePattern:
+      "^\\.github/|(^|/)CODEOWNERS$|^vendor/|auth|credential|secret|token|oauth|capab|approv|polic|execut|dispatch|gateway|relay|acs|lease|sandbox|permission|secur|key"
+  }
 };
 
 /** How the repository will land a pull request. The simulated history differs for each. */
