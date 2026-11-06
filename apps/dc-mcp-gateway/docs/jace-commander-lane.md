@@ -44,7 +44,14 @@ ChatGPT/Claude ─► https://jacen-ubuntu.tailaa6d41.ts.net/jc/mcp
   A human approves in ACS, then the client retries the identical call.
 * **Bridge profile.**
   * `BRIDGE_PROFILE=jace-commander` requires `ACS_MANAGED_MODE=1` and
-    `JC_ACS_PUBLIC_KEY`, `JC_ACS_KEY_ID`, `JC_RUNTIME_ID`.
+    `JC_ACS_PUBLIC_KEY`, `JC_ACS_KEY_ID`, `JC_RUNTIME_ID`, and
+    `DC_GATEWAY_EXECUTION_TOKEN` (matching the edge `GATEWAY_EXECUTION_TOKEN`).
+  * Every managed bridge `/mcp` request requires a valid gateway attestation
+    before session creation or forwarding, including discovery, initialize,
+    notifications and session GET/DELETE. Attestation never replaces ACS
+    capability verification for `tools/call`.
+  * Managed JC refuses conflicting `JC_PRESET` or `--preset` child authorizers
+    at startup; local and standalone presets cannot satisfy managed readiness.
   * The child gets an explicit `JC_*` env allowlist (public key and
     endpoints only).
   * It never posts DC-shaped ACS results.
@@ -89,3 +96,17 @@ worker credential whose actor id is `acs-jc-bridge`.
 
 It has been verified live against the real ACS gateway, the real bridge and
 real `jace-commander serve` (see desktop-commander `docs/jace-commander.md`).
+
+## Readiness
+
+`GET /jc/ready` on the edge independently checks the JC lane, without probing
+`UPSTREAM` (the primary DC bridge, normally port 8002). It requires JC enabled,
+ACS issuance credentials and gateway attestation configured, ACS `/readyz`
+reachable with a successful status, and `JC_UPSTREAM` reporting an initialized,
+started managed JC bridge with capability verification and an execution token
+configured. Missing or malformed authority assertions fail closed. Local or
+ACS-optional configurations do not satisfy this managed readiness probe.
+
+The response is HTTP 200 or 503 with only `ready`, `configured`, `bridgeReady`,
+and `issuanceReady` booleans. Keys, tokens and capabilities are never returned.
+The primary DC `/ready` contract is unchanged.

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import test from 'node:test';
+import { createHmac } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -10,6 +11,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const executionToken = 'jc-result-test-execution-token';
+function attestedHeaders() {
+  const iat = Math.floor(Date.now() / 1000);
+  const body = Buffer.from(JSON.stringify({ sub: 'test', iat, exp: iat + 60 })).toString('base64url');
+  return { 'x-dc-agent': 'test', 'x-dc-attestation': `${body}.${createHmac('sha256', executionToken).update(body).digest('base64url')}` };
+}
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function freePort() {
@@ -55,6 +62,7 @@ async function startFixture() {
       BRIDGE_PORT: String(bridgePort),
       BRIDGE_PROFILE: 'jace-commander',
       ACS_MANAGED_MODE: '1',
+      DC_GATEWAY_EXECUTION_TOKEN: executionToken,
       DC_CMD: process.execPath,
       DC_ARGS: `${path.join(ROOT, 'test', 'stub-jc.mjs')} serve`,
       DC_CWD: ROOT,
@@ -85,7 +93,7 @@ async function startFixture() {
 
   const init = await fetch(`${base}/mcp`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    headers: { ...attestedHeaders(), 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
     body: JSON.stringify({
       jsonrpc: '2.0', id: 1, method: 'initialize',
       params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test', version: '1' } }
@@ -134,6 +142,7 @@ async function call(fixture, toolName, suffix, signal) {
     method: 'POST',
     signal,
     headers: {
+      ...attestedHeaders(),
       'content-type': 'application/json',
       accept: 'application/json, text/event-stream',
       'mcp-session-id': fixture.sessionId
@@ -192,7 +201,7 @@ test('JC bridge reports a failed terminal result when a governed session closes 
     await sleep(50);
     const closed = await fetch(`${fixture.base}/mcp`, {
       method: 'DELETE',
-      headers: { 'mcp-session-id': fixture.sessionId }
+      headers: { ...attestedHeaders(), 'mcp-session-id': fixture.sessionId }
     });
     assert.ok([200, 202, 204].includes(closed.status));
     abort.abort();
@@ -232,6 +241,7 @@ test('a governed call dropped before routing still reports a failed terminal res
     const response = await fetch(`${fixture.base}/mcp`, {
       method: 'POST',
       headers: {
+        ...attestedHeaders(),
         'content-type': 'application/json',
         accept: 'application/json, text/event-stream',
         'mcp-session-id': 'session-that-no-longer-exists'

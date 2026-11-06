@@ -340,6 +340,9 @@ export async function startEdge(
       ACS_GATEWAY_URL: acs.url,
       ACS_GATEWAY_TOKEN: acs.serviceToken,
       ACS_NATIVE_RUNTIME_BOOTSTRAP: "1",
+      // The gateway clamps this to 750 ms. The 400 ms default produced intermittent edge_timeout 503s on loaded CI runners
+      // while ACS answered in 10-30 ms. Fail-closed behaviour is unchanged: a bootstrap that exceeds the budget still returns 503.
+      MCP_INITIALIZE_ACS_TIMEOUT_MS: "750",
       ACS_DC_ENTRYPOINT: DC_ENTRY,
       ACS_DC_RUNTIME_SCOPES: RUNTIME_SCOPES.join(","),
       DESKTOP_COMMANDER_STATE_DIR: box.dcState
