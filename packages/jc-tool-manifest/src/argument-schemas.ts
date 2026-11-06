@@ -5,7 +5,7 @@ import { z } from "zod";
  * Strict per-tool argument schemas for the Jace Commander (`acs.jc.v1`) tool
  * surface. Canonical source: this file. Both ACS
  * (`packages/desktop-commander-adapter`) and Jace Commander itself
- * (`vendor/desktop-commander/src/jace-commander`) must validate identical
+ * (`apps/jace-commander`, the independent JC runtime) must validate identical
  * shapes; the root drift test enforces it.
  *
  * Unknown keys are rejected (`z.strictObject`). No defaults or coercion:
@@ -20,6 +20,32 @@ const ABSOLUTE = z
   .min(1)
   .max(4096)
   .refine((value) => isAbsolute(value) && !value.includes("\0"), "must be an absolute path");
+
+// An environment variable name a caller may set for a governed command.
+const ENV_NAME = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/u);
+const ENV_MAP = z
+  .record(
+    ENV_NAME,
+    z
+      .string()
+      .max(4096)
+      .refine((value) => !value.includes("\0"), "env values must not contain NUL")
+  )
+  .refine((value) => Object.keys(value).length <= 32, "at most 32 environment variables");
+const WAIT_MS = z.number().int().min(0).max(60_000);
+const NORMALIZED_ABSOLUTE = ABSOLUTE.refine(
+  (value) => normalize(value) === value,
+  "must be a normalized absolute path"
+);
+
+/** Terminal bounds shared by schema validation and the JC terminal engine. */
+export const JC_TERMINAL_LIMITS = Object.freeze({
+  maxCommandBytes: 16 * 1024,
+  maxInputBytes: 64 * 1024,
+  maxCommandTimeoutMs: 600_000,
+  maxSessionTimeoutMs: 3_600_000,
+  maxWaitMs: 60_000
+});
 
 /** Upper bounds shared by schema validation and the JC runtime's own output caps. */
 export const JC_FS_LIMITS = Object.freeze({
@@ -60,6 +86,10 @@ export const JC_TOOL_NAMES = Object.freeze([
   "read_process_output",
   "kill_process",
   "list_processes",
+  "run_command",
+  "start_terminal_session",
+  "interact_with_process",
+  "delete_file",
   "git_status",
   "git_diff",
   "git_log",
@@ -155,8 +185,10 @@ export const JC_TOOL_ARGUMENT_SCHEMAS: Readonly<Record<JcToolName, z.ZodType>> =
   write_file: z.strictObject({
     path: ABSOLUTE,
     content: z.string().max(256 * 1024),
-    overwrite: z.boolean().optional()
+    overwrite: z.boolean().optional(),
+    encoding: z.enum(["utf8", "base64"]).optional()
   }),
+  delete_file: z.strictObject({ path: ABSOLUTE, recursive: z.boolean().optional() }),
   create_directory: z.strictObject({ path: ABSOLUTE, recursive: z.boolean().optional() }),
   move_file: z.strictObject({ from: ABSOLUTE, to: ABSOLUTE }),
   edit_block: z.strictObject({
@@ -171,7 +203,34 @@ export const JC_TOOL_ARGUMENT_SCHEMAS: Readonly<Record<JcToolName, z.ZodType>> =
   }),
   read_process_output: z.strictObject({
     sessionId: ID,
-    offset: z.number().int().min(0).optional()
+    offset: z.number().int().min(0).optional(),
+    stdoutOffset: z.number().int().min(0).optional(),
+    stderrOffset: z.number().int().min(0).optional(),
+    waitMs: WAIT_MS.optional()
+  }),
+  run_command: z.strictObject({
+    command: z
+      .string()
+      .min(1)
+      .max(16 * 1024)
+      .refine((value) => !value.includes("\0"), "command must not contain NUL"),
+    cwd: ABSOLUTE,
+    shell: NORMALIZED_ABSOLUTE.optional(),
+    timeoutMs: z.number().int().min(1).max(600_000).optional(),
+    env: ENV_MAP.optional(),
+    pty: z.boolean().optional(),
+    waitMs: WAIT_MS.optional()
+  }),
+  start_terminal_session: z.strictObject({
+    cwd: ABSOLUTE,
+    shell: NORMALIZED_ABSOLUTE.optional(),
+    timeoutMs: z.number().int().min(1).max(3_600_000).optional(),
+    env: ENV_MAP.optional()
+  }),
+  interact_with_process: z.strictObject({
+    sessionId: ID,
+    input: z.string().max(64 * 1024),
+    waitMs: WAIT_MS.optional()
   }),
   list_processes: z.strictObject({}),
   kill_process: z.strictObject({ sessionId: ID.optional(), pid: z.number().int().positive().optional() }),

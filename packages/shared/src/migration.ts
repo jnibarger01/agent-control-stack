@@ -150,7 +150,12 @@ const migrationFiles = [
   { version: 71, name: "execution_receipts", filename: "071_execution_receipts.sql" },
   { version: 72, name: "cua_browser_execution", filename: "072_cua_browser_execution.sql" },
   { version: 73, name: "advisor_consultations", filename: "073_advisor_consultations.sql" },
-  { version: 74, name: "advisor_consultation_fencing", filename: "074_advisor_consultation_fencing.sql" }
+  { version: 74, name: "advisor_consultation_fencing", filename: "074_advisor_consultation_fencing.sql" },
+  // 075 is intentionally unassigned here: it is claimed by two unmerged branches
+  // (feat/ares-worker-integration: ares_execution_results; feat/jc-dc-exec:
+  // jace_commander_context_pack). Neither touches what 076 rebuilds, and the
+  // runner applies any missing version, so 075 may land before or after 076.
+  { version: 76, name: "jace_commander_native_tools", filename: "076_jace_commander_native_tools.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {

@@ -8,12 +8,14 @@
  * `jace-commander doctor` reports the live chain as healthy.
  */
 import { execFileSync } from "node:child_process";
+import { createHmac } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { jcMcpToolDescriptors, jcToolNames } from "@agent-control-stack/jc-tool-manifest";
 import {
   E2E_ENABLED,
+  EXECUTION_TOKEN,
   McpHttpClient,
   sleep,
   sandbox,
@@ -121,10 +123,11 @@ describe.skipIf(!E2E_ENABLED)("E2E JC-2: writes, processes, git, doctor via /jc/
     box?.cleanup();
   });
 
-  it("live tools/list is exactly the manifest's descriptors (36 tools)", async () => {
+  it("live tools/list is exactly the manifest's descriptors (40 tools)", async () => {
     const listed = await mcp.post({ jsonrpc: "2.0", id: 901, method: "tools/list", params: {} });
     const tools = listed.body.result.tools as Array<{ name: string; description: string; inputSchema: unknown }>;
-    expect(tools).toHaveLength(36);
+    expect(tools).toHaveLength(jcToolNames().length);
+    expect(tools).toHaveLength(40);
     expect(tools.map((tool) => tool.name).sort()).toEqual([...jcToolNames()].sort());
     const byName = <T extends { name: string }>(left: T, right: T) => left.name.localeCompare(right.name);
     expect(
@@ -254,7 +257,16 @@ describe.skipIf(!E2E_ENABLED)("E2E JC-2: writes, processes, git, doctor via /jc/
   });
 
   it("JC itself refuses a call that arrives without, or with a forged, ACS capability", async () => {
-    const direct = new McpHttpClient(`http://127.0.0.1:${bridge.port}/mcp`, () => ({}));
+    const url = `http://127.0.0.1:${bridge.port}/mcp`;
+    const unattested = new McpHttpClient(url, () => ({}));
+    expect((await unattested.initialize()).status).toBe(401);
+    await unattested.close();
+    const direct = new McpHttpClient(url, () => {
+      const iat = Math.floor(Date.now() / 1000);
+      const payload = Buffer.from(JSON.stringify({ sub: "operator", client_id: "e2e", jti: "e2e", iat, exp: iat + 60 })).toString("base64url");
+      const signature = createHmac("sha256", EXECUTION_TOKEN).update(payload).digest("base64url");
+      return { "x-dc-agent": "operator", "x-dc-attestation": `${payload}.${signature}` };
+    });
     try {
       expect((await direct.initialize()).status).toBe(200);
       const target = join(project, "bypass.txt");
@@ -366,7 +378,7 @@ describe.skipIf(!E2E_ENABLED)("E2E JC-2: writes, processes, git, doctor via /jc/
     const server = Object.fromEntries(
       report.server.checks.map((check: { name: string; ok: boolean }) => [check.name, check.ok])
     );
-    expect(server).toMatchObject({ manifest: true, "capability verification": true, "bridge path": true, acs: true });
-    expect(report.server.liveHandlerCount).toBe(36);
+    expect(server).toMatchObject({ manifest: true, "capability verification": true, "runtime path": true, "workload isolation": true, acs: true });
+    expect(report.server.liveHandlerCount).toBe(40);
   });
 });

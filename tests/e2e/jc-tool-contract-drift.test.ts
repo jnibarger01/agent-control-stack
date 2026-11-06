@@ -47,12 +47,12 @@ import {
 } from "@agent-control-stack/jc-tool-manifest";
 import { applyControlPlaneMigrations } from "@agent-control-stack/shared";
 import { JC_GENERATED_MANIFEST_PATH, renderJcGeneratedManifest } from "../../scripts/jc-tool-manifest.ts";
-import { JC_MANIFEST } from "../../vendor/desktop-commander/src/jace-commander/manifest.generated.ts";
-import { CLI_COMMANDS } from "../../vendor/desktop-commander/src/jace-commander/cli-commands.ts";
-import { JC_PROVIDERS, jcProviderOf } from "../../vendor/desktop-commander/src/jace-commander/providers.ts";
+import { JC_MANIFEST } from "../../apps/jace-commander/src/manifest.generated.ts";
+import { CLI_COMMANDS } from "../../apps/jace-commander/src/cli-commands.ts";
+import { JC_PROVIDERS, jcProviderOf } from "../../apps/jace-commander/src/providers.ts";
 // @ts-expect-error plain-JS edge module (no type declarations)
 import { JC_TOOL_PROVIDERS as EDGE_TOOL_PROVIDERS } from "../../apps/dc-mcp-gateway/jc-routing.js";
-import { isCredentialPath } from "../../vendor/desktop-commander/src/jace-commander/credential-paths.ts";
+import { isCredentialPath } from "../../apps/jace-commander/src/credential-paths.ts";
 import {
   JACE_COMMANDER_AUDIENCE,
   JACE_COMMANDER_CAPABILITY_VERSION,
@@ -64,8 +64,8 @@ import {
   signPreparedJaceCommanderCapability,
   validateJaceCommanderInvocation
 } from "@agent-control-stack/desktop-commander-adapter";
-import * as jcContract from "../../vendor/desktop-commander/src/jace-commander/contract.ts";
-import { JC_TOOLS } from "../../vendor/desktop-commander/src/jace-commander/tool-descriptors.ts";
+import * as jcContract from "../../apps/jace-commander/src/contract.ts";
+import { JC_TOOLS } from "../../apps/jace-commander/src/tool-descriptors.ts";
 
 const KEY_ID = "drift-jc-key-1";
 const RUNTIME_ID = "runtime_jc_drift";

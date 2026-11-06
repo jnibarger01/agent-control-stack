@@ -27,6 +27,14 @@ export const GATED_ARGS: Readonly<Record<string, Record<string, unknown>>> = {
   move_file: { from: "/srv/work/a.txt", to: "/srv/work/b.txt" },
   edit_block: { path: "/srv/work/app.ts", old: "const retries = 1;", new: `const token = "${FAKE_SECRET}";` },
   start_process: { argv: ["/usr/bin/node", "script.js", `--token=${FAKE_SECRET}`], cwd: "/srv/work", timeoutMs: 5000 },
+  run_command: { command: `echo ${FAKE_SECRET}`, cwd: "/srv/work", env: { TOKEN: FAKE_SECRET }, timeoutMs: 5000 },
+  start_terminal_session: { cwd: "/srv/work", shell: "/bin/bash" },
+  interact_with_process: {
+    sessionId: "proc_abc123",
+    input: `echo ${FAKE_SECRET}
+`
+  },
+  delete_file: { path: "/srv/work/delete.txt", recursive: false },
   kill_process: { sessionId: "proc_abc123", pid: 4242 },
   git_add: { repo: "/srv/work/repo", paths: ["README.md", "src/index.ts"] },
   git_commit: { repo: "/srv/work/repo", message: "docs: update readme" },
@@ -42,6 +50,10 @@ export const SUMMARY_FIELDS: Readonly<Record<string, Record<string, unknown>>> =
   move_file: { from: "/srv/work/a.txt", to: "/srv/work/b.txt" },
   edit_block: { path: "/srv/work/app.ts", oldPreview: "const retries = 1;" },
   start_process: { cwd: "/srv/work", timeoutMs: 5000 },
+  run_command: { cwd: "/srv/work", timeoutMs: 5000 },
+  start_terminal_session: { cwd: "/srv/work", shell: "/bin/bash" },
+  interact_with_process: { sessionId: "proc_abc123" },
+  delete_file: { path: "/srv/work/delete.txt", recursive: false },
   kill_process: { sessionId: "proc_abc123", pid: 4242 },
   git_add: { repo: "/srv/work/repo", paths: ["README.md", "src/index.ts"] },
   git_commit: { repo: "/srv/work/repo", message: "docs: update readme" },

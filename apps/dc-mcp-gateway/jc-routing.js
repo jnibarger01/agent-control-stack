@@ -22,10 +22,10 @@ import fs from 'node:fs';
 export const JC_TOOL_PROVIDERS = Object.freeze({
   list_directory: 'jc.fs', get_file_info: 'jc.fs', read_file: 'jc.fs', read_multiple_files: 'jc.fs',
   start_search: 'jc.fs', get_more_search_results: 'jc.fs', list_searches: 'jc.fs', stop_search: 'jc.fs',
-  write_file: 'jc.fs', create_directory: 'jc.fs', move_file: 'jc.fs', edit_block: 'jc.fs',
+  write_file: 'jc.fs', create_directory: 'jc.fs', move_file: 'jc.fs', edit_block: 'jc.fs', delete_file: 'jc.fs',
   git_status: 'jc.git', git_diff: 'jc.git', git_log: 'jc.git', git_branch: 'jc.git', git_show: 'jc.git',
   git_add: 'jc.git', git_commit: 'jc.git', git_fetch: 'jc.git', git_push: 'jc.git',
-  start_process: 'jc.process', read_process_output: 'jc.process', list_processes: 'jc.process', kill_process: 'jc.process',
+  start_process: 'jc.process', read_process_output: 'jc.process', list_processes: 'jc.process', kill_process: 'jc.process', run_command: 'jc.process', start_terminal_session: 'jc.process', interact_with_process: 'jc.process',
   privileged_exec: 'jc.privileged',
   ping: 'jc.meta', get_config: 'jc.meta', jc_status: 'jc.meta', jc_doctor: 'jc.meta', looptrace_verify: 'jc.meta',
   swarm_read: 'jc.integration', visualizer_read: 'jc.integration', mission_router_list: 'jc.integration',
