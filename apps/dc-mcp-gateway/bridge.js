@@ -141,6 +141,7 @@ const JC_CHILD_ENV_KEYS = [
   // Filesystem containment roots for the fs.read tools (defence in depth
   // behind ACS's own roots); without them every filesystem tool fails closed.
   "JC_FS_ROOTS",
+  "JC_FS_WRITE_ROOTS",
   "JC_FS_DENIED_ROOTS",
   // ADR 0026: local preset and its policy path. JC_POLICY_UNSAFE_DEV is deliberately
   // NOT forwarded: a policy the child can edit is never accepted through the bridge.

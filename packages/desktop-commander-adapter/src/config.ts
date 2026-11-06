@@ -134,12 +134,22 @@ export function desktopCommanderContainmentFromEnv(env: NodeJS.ProcessEnv = proc
  * (fail closed) while the non-filesystem tools keep working.
  */
 export function jaceCommanderContainmentFromEnv(env: NodeJS.ProcessEnv = process.env):
-  | { allowedRoots: string[]; deniedRoots: string[] }
+  | { allowedRoots: string[]; writeRoots?: string[]; deniedRoots: string[] }
   | undefined {
   const allowedRoots = parseRoots(env.ACS_JACE_COMMANDER_ALLOWED_ROOTS, "ACS_JACE_COMMANDER_ALLOWED_ROOTS");
   if (allowedRoots.length === 0) return undefined;
+  const writeRoots = env.ACS_JACE_COMMANDER_WRITE_ROOTS === undefined
+    ? undefined
+    : parseRoots(env.ACS_JACE_COMMANDER_WRITE_ROOTS, "ACS_JACE_COMMANDER_WRITE_ROOTS");
+  if (writeRoots !== undefined && writeRoots.length === 0) {
+    throw new ControlStackError("jace_commander_config_invalid", "ACS_JACE_COMMANDER_WRITE_ROOTS must not be empty");
+  }
+  if (writeRoots?.some((root) => !allowedRoots.some((allowed) => root === allowed || root.startsWith(`${allowed}/`)))) {
+    throw new ControlStackError("jace_commander_config_invalid", "write roots must be contained by read roots");
+  }
   return {
     allowedRoots,
+    ...(writeRoots === undefined ? {} : { writeRoots }),
     deniedRoots: parseRoots(env.ACS_JACE_COMMANDER_DENIED_ROOTS, "ACS_JACE_COMMANDER_DENIED_ROOTS")
   };
 }

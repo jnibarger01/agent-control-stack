@@ -56,6 +56,8 @@ export const JC_FS_RUNTIME_LIMITS = Object.freeze({
 
 export interface JcFsPolicy {
   readonly roots: readonly string[];
+  /** Mutations must remain inside these roots when configured; empty denies all. */
+  readonly writeRoots?: readonly string[];
   readonly deniedRoots: readonly string[];
 }
 
@@ -65,7 +67,9 @@ export function defaultDeniedRoots(stateDir: string, home = os.homedir()): strin
     stateDir,
     '/etc/jace-commander',
     ...['.ssh', '.gnupg', '.aws', '.azure', '.kube', '.docker', '.config/gcloud',
-      '.config/desktop-commander-mcp-gateway', '.config/dc-relay', '.desktop-commander']
+      '.config/desktop-commander-mcp-gateway', '.config/dc-relay', '.desktop-commander',
+      '.config/agent-control-stack', '.local/share/keyrings', '.config/google-chrome',
+      '.config/chromium', '.config/BraveSoftware', '.config/microsoft-edge', '.mozilla']
       .map((relative) => path.join(home, relative)),
   ];
 }
@@ -143,6 +147,16 @@ export function containJcPath(requested: unknown, policy: JcFsPolicy): string {
     throw fsError(error, requested);
   }
   assertContainedReal(real, policy);
+  return real;
+}
+
+/** Check both the read allowlist and an optional narrower write allowlist. */
+export function containJcWritePath(requested: unknown, policy: JcFsPolicy): string {
+  const real = containJcPath(requested, policy);
+  const writable = policy.writeRoots ?? policy.roots;
+  if (!writable.map(realpathOrSelf).some((root) => isInside(root, real))) {
+    throw new IntegrationError('path_not_allowed', 'path is outside the configured writable roots');
+  }
   return real;
 }
 

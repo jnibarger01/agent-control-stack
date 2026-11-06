@@ -16,7 +16,7 @@ import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { jcChildEnv } from './child-env.js';
-import { containJcPath, type JcFsPolicy } from './filesystem.js';
+import { containJcWritePath, type JcFsPolicy } from './filesystem.js';
 import { IntegrationError } from './integrations.js';
 
 const MAX_OUTPUT = 256 * 1024;
@@ -88,8 +88,12 @@ export function createProcessRegistry(): ProcessRegistry {
         }
         return part;
       });
+      if (policy.writeRoots !== undefined) {
+        throw new IntegrationError('path_not_allowed',
+          'start_process is disabled with split read/write roots until OS filesystem confinement is available');
+      }
       const executable = resolveExecutable(argv[0]!);
-      const cwd = containJcPath(args.cwd, policy);
+      const cwd = containJcWritePath(args.cwd, policy);
       const timeoutMs = args.timeoutMs === undefined ? 30_000 : args.timeoutMs;
       if (typeof timeoutMs !== 'number' || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
         throw new IntegrationError('invalid_argument', `timeoutMs must be an integer from 1 to ${MAX_TIMEOUT_MS}`);
