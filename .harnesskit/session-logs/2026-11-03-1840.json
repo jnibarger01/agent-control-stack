@@ -1,0 +1,16 @@
+{
+  "sessionId": "2026-11-03-1840",
+  "startedAt": "2026-10-27T09:32:33Z",
+  "endedAt": "2026-11-04T00:40:04Z",
+  "currentFeature": "",
+  "filesChanged": [
+    "apps/dc-mcp-gateway/test/jc-managed-attestation.test.mjs"
+  ],
+  "featuresCompleted": [],
+  "featuresFailed": [],
+  "errors": [],
+  "toolCallSequences": [],
+  "rawToolSequence": [],
+  "taskTimeDistribution": {},
+  "pluginUsage": {}
+}
