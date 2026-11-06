@@ -36,6 +36,7 @@
     { "path": "packages/moa-orchestrator" },
     { "path": "packages/vercel-bridge-contract" },
     { "path": "packages/looptrace-query" },
+    { "path": "packages/black-box-recorder" },
     { "path": "packages/mission-control-contract" },
     { "path": "apps/control-ui" },
     { "path": "apps/vercel-mcp-ingress" },
