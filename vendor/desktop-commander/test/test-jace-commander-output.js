@@ -253,5 +253,17 @@ await test('output is final once the session ends, even when a descendant held t
   assert.equal(after.stdout, ended.stdout, 'the final output does not change after the session ends');
 });
 
+await test('start and list replies omit argv too, so no reply carries arguments', async () => {
+  const started = registry.start({ argv: [process.execPath, '-e', 'setTimeout(() => {}, 300)', 'ARGV-MARKER-LIST'], cwd: tmp, timeoutMs: 60_000 }, policy);
+  assert.equal('argv' in started, false);
+  assert.doesNotMatch(JSON.stringify(started), /ARGV-MARKER-LIST/u);
+  const listed = registry.list();
+  const entry = listed.processes.find((item) => item.sessionId === started.sessionId);
+  assert.ok(entry, 'the session is listed');
+  assert.equal('argv' in entry, false);
+  assert.doesNotMatch(JSON.stringify(listed), /ARGV-MARKER-LIST/u);
+  await waitForExit(started.sessionId);
+});
+
 console.log(`output: ${passed} passed`);
 fs.rmSync(tmp, { recursive: true, force: true });

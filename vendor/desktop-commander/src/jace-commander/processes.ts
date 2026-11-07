@@ -302,10 +302,6 @@ export function createProcessRegistry(): ProcessRegistry {
     return session;
   }
 
-  function summary(session: Session): Record<string, unknown> {
-    return { ...status(session), argv: session.argv };
-  }
-
   /** Lifecycle fields only. Output replies use this, so argv (which can carry secrets) stays out of them. */
   function status(session: Session): Record<string, unknown> {
     return {
@@ -360,7 +356,8 @@ export function createProcessRegistry(): ProcessRegistry {
       const cwd = containJcPath(args.cwd, policy);
       const timeoutMs = parseTimeout(args.timeoutMs);
       const session = launch('process', argv, executable, argv.slice(1), cwd, timeoutMs);
-      return { sessionId: session.sessionId, pid: session.pid, cwd, argv, timeoutMs, kind: 'process' };
+      // argv is not echoed: the caller already holds it, and replies flow into ACS terminal summaries.
+      return { sessionId: session.sessionId, pid: session.pid, cwd, timeoutMs, kind: 'process' };
     },
 
     async output(args) {
@@ -385,7 +382,7 @@ export function createProcessRegistry(): ProcessRegistry {
 
     list() {
       prune(Date.now());
-      return { processes: [...sessions.values()].map(summary) };
+      return { processes: [...sessions.values()].map(status) };
     },
 
     kill(args) {
