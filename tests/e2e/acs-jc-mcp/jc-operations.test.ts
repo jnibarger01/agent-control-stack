@@ -121,10 +121,10 @@ describe.skipIf(!E2E_ENABLED)("E2E JC-2: writes, processes, git, doctor via /jc/
     box?.cleanup();
   });
 
-  it("live tools/list is exactly the manifest's descriptors (36 tools)", async () => {
+  it("live tools/list is exactly the manifest's descriptors (37 tools)", async () => {
     const listed = await mcp.post({ jsonrpc: "2.0", id: 901, method: "tools/list", params: {} });
     const tools = listed.body.result.tools as Array<{ name: string; description: string; inputSchema: unknown }>;
-    expect(tools).toHaveLength(36);
+    expect(tools).toHaveLength(37);
     expect(tools.map((tool) => tool.name).sort()).toEqual([...jcToolNames()].sort());
     const byName = <T extends { name: string }>(left: T, right: T) => left.name.localeCompare(right.name);
     expect(
@@ -367,6 +367,6 @@ describe.skipIf(!E2E_ENABLED)("E2E JC-2: writes, processes, git, doctor via /jc/
       report.server.checks.map((check: { name: string; ok: boolean }) => [check.name, check.ok])
     );
     expect(server).toMatchObject({ manifest: true, "capability verification": true, "bridge path": true, acs: true });
-    expect(report.server.liveHandlerCount).toBe(36);
+    expect(report.server.liveHandlerCount).toBe(37);
   });
 });

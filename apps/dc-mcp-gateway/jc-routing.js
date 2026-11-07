@@ -21,7 +21,7 @@ import fs from 'node:fs';
 
 export const JC_TOOL_PROVIDERS = Object.freeze({
   list_directory: 'jc.fs', get_file_info: 'jc.fs', read_file: 'jc.fs', read_multiple_files: 'jc.fs',
-  start_search: 'jc.fs', get_more_search_results: 'jc.fs', list_searches: 'jc.fs', stop_search: 'jc.fs',
+  start_search: 'jc.fs', get_more_search_results: 'jc.fs', list_searches: 'jc.fs', stop_search: 'jc.fs', context_pack: 'jc.fs',
   write_file: 'jc.fs', create_directory: 'jc.fs', move_file: 'jc.fs', edit_block: 'jc.fs',
   git_status: 'jc.git', git_diff: 'jc.git', git_log: 'jc.git', git_branch: 'jc.git', git_show: 'jc.git',
   git_add: 'jc.git', git_commit: 'jc.git', git_fetch: 'jc.git', git_push: 'jc.git',

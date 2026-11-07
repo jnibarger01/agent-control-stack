@@ -24,7 +24,7 @@ export interface JcManifest {
 
 export const JC_MANIFEST: JcManifest = {
   "version": "acs.jc.v1",
-  "manifestHash": "49863090b690af103b212bd89b56230eea38f61aa2a491adfef6eb709a2fc11f",
+  "manifestHash": "f4a89a88d90a9dadf26dc2773344c680397dfd5e3beec7ddb19e95e3c74cc563",
   "scopes": [
     "fs.read",
     "fs.write",
@@ -134,6 +134,95 @@ export const JC_MANIFEST: JcManifest = {
       "cliCommands": [
         "acs submit"
       ]
+    },
+    {
+      "name": "context_pack",
+      "description": "Assemble a deterministic, budgeted context pack from files and inline text. Each item carries provenance (source, content sha256, trust label), is redacted for common secret shapes, and is fenced as data unless its trust is operator. A file listed in pins with an expected sha256 is dropped as stale when its content differs, rather than read as current.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "files": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "string",
+              "description": "Absolute path, contained to the filesystem roots"
+            }
+          },
+          "pins": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "description": "Expected sha256 per path in files"
+          },
+          "fileTrust": {
+            "type": "string",
+            "enum": [
+              "operator",
+              "repo",
+              "tool-output",
+              "external"
+            ]
+          },
+          "inline": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "text": {
+                  "type": "string",
+                  "maxLength": 65536
+                },
+                "trust": {
+                  "type": "string",
+                  "enum": [
+                    "operator",
+                    "repo",
+                    "tool-output",
+                    "external"
+                  ]
+                },
+                "priority": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100
+                }
+              },
+              "required": [
+                "id",
+                "text",
+                "trust"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "budgetTokens": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200000
+          }
+        },
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.read"
+      ],
+      "actionKind": "jc.fs.read",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "filesystem",
+      "pathArguments": [
+        "files"
+      ],
+      "cliCommands": []
     },
     {
       "name": "create_directory",
@@ -975,7 +1064,7 @@ export const JC_MANIFEST: JcManifest = {
     },
     {
       "name": "read_process_output",
-      "description": "Read buffered stdout and stderr for a process this server started.",
+      "description": "Read buffered stdout and stderr for a process or shell session this server started. Pass the returned stdoutNextOffset / stderrNextOffset back as offset / stderrOffset to read only new output. stdoutSkipped reports the UTF-16 code units lost before the retained tail. Offsets and skipped counts are UTF-16 code units of the decoded text, not bytes. waitMs long-polls a running session for new output.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -985,7 +1074,19 @@ export const JC_MANIFEST: JcManifest = {
           },
           "offset": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Absolute stdout cursor (default 0)"
+          },
+          "stderrOffset": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Absolute stderr cursor (default 0)"
+          },
+          "waitMs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 30000,
+            "description": "Wait up to this long for new output when none is available"
           }
         },
         "required": [

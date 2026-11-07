@@ -320,14 +320,19 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'output',
-    options: ['offset'],
+    options: ['offset', 'stderr-offset'],
     maxPositionals: 1,
     tool: 'read_process_output',
-    usage: 'output <session-id> [--offset N]',
-    summary: 'Read output from a managed process',
+    usage: 'output <session-id> [--offset N] [--stderr-offset N]',
+    summary: 'Read output from a managed process (pass back the next offsets to read only new output)',
     toArguments: (args) => {
       const offset = intFlag(args, 'offset');
-      return { sessionId: requirePositional(args, 0, 'session-id'), ...(offset !== undefined ? { offset } : {}) };
+      const stderrOffset = intFlag(args, 'stderr-offset');
+      return {
+        sessionId: requirePositional(args, 0, 'session-id'),
+        ...(offset !== undefined ? { offset } : {}),
+        ...(stderrOffset !== undefined ? { stderrOffset } : {}),
+      };
     },
     render: (result) => asJson(result),
   },
