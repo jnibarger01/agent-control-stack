@@ -10,36 +10,50 @@ const workflow = readFileSync(
   "utf8"
 );
 
-/** Any text that can merge a pull request, or enable auto-merge for one. */
-const MERGE_CALL =
-  /gh pr merge|--auto\b|pulls\/[^\s"]*\/merge|\/merge\b|pulls?\.merge|enablePullRequestAutoMerge|mergePullRequest|github-script/u;
-/** The hotfix replaces the gate with a job that fails closed and holds no merge capability. */
-const gateDisabled = !MERGE_CALL.test(workflow);
+/** Reads a single-quoted shell assignment such as SENSITIVE_RE='...' from the classifier. */
+const shellPattern = (name: string): string => workflow.match(new RegExp(`^\\s*${name}='([^']*)'`, "mu"))?.[1] ?? "";
+
+const policyPaths = DEFAULT_GATE_POLICY.autoMergePaths!;
 
 /**
- * This engine reports on the repository's own merge gate and must never be more permissive than it. While the gate is
- * disabled, these tests assert that it cannot merge. Once it is live again, the original mirror assertions apply.
+ * This engine reports on the repository's own merge classifier and must never be more permissive than it. These tests read
+ * the classifier itself, so changing the rules in the workflow without changing the engine (or the other way round) fails.
  */
-describe("the default gate policy matches the workflow it mirrors", () => {
-  it.runIf(gateDisabled)("the disabled gate cannot merge and fails closed", () => {
-    expect(MERGE_CALL.test("gh pr merge --auto --squash")).toBe(true);
-    expect(MERGE_CALL.test("await github.rest.pulls.merge({})")).toBe(true);
-    expect(workflow).toMatch(/exit 1/u);
-    expect(workflow).not.toMatch(/contents: write|pull-requests: write/u);
-  });
-
-  it.skipIf(gateDisabled)("allows only the author the workflow acts on", () => {
+describe("the default gate policy matches the classifier it mirrors", () => {
+  it("allows only the author the classifier acts on", () => {
     const authors = [...workflow.matchAll(/author" != "([^"]+)"/gu)].map((m) => m[1]);
     expect(authors.length).toBeGreaterThan(0);
     expect([...new Set(authors)]).toEqual([...DEFAULT_GATE_POLICY.allowedAuthors!]);
-    const inline = [...workflow.matchAll(/pull_request\.user\.login == '([^']+)'/gu)].map((m) => m[1]);
-    expect([...new Set(inline)]).toEqual([...DEFAULT_GATE_POLICY.allowedAuthors!]);
   });
 
-  it.skipIf(gateDisabled)("protects exactly the files the workflow refuses to auto-merge a change to", () => {
-    const block = workflow.match(/policy_changes="[\s\S]*?\)"/u)?.[0] ?? "";
-    const files = [...block.matchAll(/\.filename == "([^"]+)"/gu)].map((m) => m[1]).sort();
-    expect(files).toEqual([...DEFAULT_GATE_POLICY.protectedPaths].sort());
+  it("uses the classifier's path rules verbatim", () => {
+    expect(shellPattern("ALLOW_RE")).not.toBe("");
+    expect(shellPattern("SENSITIVE_RE")).not.toBe("");
+    expect(policyPaths.allowPattern).toBe(shellPattern("ALLOW_RE"));
+    expect(policyPaths.sensitivePattern).toBe(shellPattern("SENSITIVE_RE"));
+  });
+
+  it("is never more permissive than the classifier for any path", () => {
+    const classifierAdmits = (file: string) =>
+      new RegExp(shellPattern("ALLOW_RE"), "i").test(file) && !new RegExp(shellPattern("SENSITIVE_RE"), "i").test(file);
+    const samples = [
+      "docs/guide.md",
+      "README.md",
+      "CHANGELOG.md",
+      "docs/keys.md",
+      "packages/a/README.md",
+      "apps/gateway/src/x.ts",
+      ".github/workflows/check.yml",
+      "vendor/x.js",
+      "CODEOWNERS"
+    ];
+    for (const file of samples) {
+      const engineAdmits = !evaluateGate(pr({ number: 1, changedFiles: [file] }), DEFAULT_GATE_POLICY).warnings.some(
+        (w) => w.startsWith("not auto-mergeable")
+      );
+      expect(engineAdmits && !classifierAdmits(file), file).toBe(false);
+    }
+    expect(classifierAdmits("docs/guide.md")).toBe(true);
   });
 
   it("blocks a change to either policy file and any other author", () => {
@@ -54,30 +68,20 @@ describe("the default gate policy matches the workflow it mirrors", () => {
     expect(evaluateGate(pr({ number: 1 }), DEFAULT_GATE_POLICY).status).toBe("eligible");
   });
 
-  it("selects the merge method in the documented order", () => {
+  it("enables native auto-merge squash bound to the head it classified", () => {
+    expect(workflow).toContain('gh pr merge --auto --squash --match-head-commit "$EXPECTED_HEAD" "$PR"');
     expect(selectMergeMethod({ allow_merge_commit: true, allow_squash_merge: true, allow_rebase_merge: true })).toBe(
       "merge"
     );
   });
 
-  it.skipIf(gateDisabled)("selects the merge method in the workflow's order", () => {
-    const order = [
-      ...workflow.matchAll(/\.(allow_(?:merge_commit|squash_merge|rebase_merge))' <<<"\$repo_json"\)" == "true"/gu)
-    ].map((m) => m[1]);
-    expect(order).toEqual(["allow_merge_commit", "allow_squash_merge", "allow_rebase_merge"]);
-    const methods = [...workflow.matchAll(/method="(merge|squash|rebase)"/gu)].map((m) => m[1]);
-    expect(methods).toEqual(["merge", "squash", "rebase"]);
-  });
-
-  it.skipIf(gateDisabled)("applies the same blocking rules the workflow states", () => {
-    for (const phrase of [
-      "has merge conflicts",
-      "requests changes",
-      "review thread(s) remain unresolved",
-      "status check(s) are failing/cancelled",
-      "more than 100 review threads or status checks"
-    ]) {
-      expect(workflow, phrase).toContain(phrase);
+  it("verifies every protection it relies on before trusting a classification", () => {
+    for (const ctx of ["check", "test"]) {
+      expect(workflow, ctx).toContain(`for ctx in check test; do`);
+      expect(workflow, ctx).toContain("integration_id != null");
     }
+    expect(workflow).toContain("require_last_push_approval==true and .dismiss_stale_reviews_on_push==true");
+    expect(workflow).toContain('index(".github/**")');
+    expect(workflow).toContain("ACS_ATTESTED_ACTIONS_CANNOT_APPROVE_PRS");
   });
 });

@@ -65,6 +65,25 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
   if (JC_READ_KINDS.has(context.action.kind) && context.write !== true && context.destructive !== true) {
     return risk("read_only", "Jace Commander read-only integration view is allowed", ["allow:jc-read"]);
   }
+  // Jace-Mem (acs.jm.v1): scoped reads and writes of the requester's own memory are allowed; deleting memory
+  // and reading another agent's memory need an approval from a human who is neither the requester nor the
+  // admin-mode approver. The issuance registry and its table constraints enforce the same rule again.
+  if (JM_ALLOWED_KINDS.has(context.action.kind) && context.destructive !== true) {
+    return risk(
+      context.action.kind === "jm.memory.read" ? "read_only" : "safe_mutation",
+      "Jace-Mem scoped memory access is allowed",
+      ["allow:jm-memory"]
+    );
+  }
+  if (JM_APPROVAL_KINDS.has(context.action.kind)) {
+    if (context.operation === "approve" && isRequestingActor(context)) {
+      return risk("forbidden", "Jace-Mem deletion or sharing cannot be self-approved", ["deny:self-approval"]);
+    }
+    if (context.operation === "approve" && context.actor === JM_ADMIN_APPROVER) {
+      return risk("forbidden", "Jace-Mem deletion or sharing requires a human approval", ["deny:jm-admin-approval"]);
+    }
+    return risk("requires_approval", "Jace-Mem deletion or sharing requires approval", ["approval:jm-memory"]);
+  }
   if (context.action.kind === "jc.integration.write" && context.destructive !== true) {
     // Creates an ACS work item that is itself policy-evaluated on its own.
     return risk("safe_mutation", "Jace Commander mission submission is allowed", ["allow:jc-mission-submit"]);
@@ -226,7 +245,11 @@ export const SUPPORTED_ACTION_KINDS: readonly string[] = Object.freeze([
   "jc.git.read",
   "jc.git.write",
   "jc.git.network",
-  "privileged.exec"
+  "privileged.exec",
+  "jm.memory.read",
+  "jm.memory.write",
+  "jm.memory.delete",
+  "jm.memory.share"
 ]);
 
 const PRIVILEGED_EXEC_KIND = "privileged.exec";
@@ -242,6 +265,11 @@ const JC_APPROVAL_KINDS: ReadonlySet<string> = new Set([
   "jc.git.write",
   "jc.git.network"
 ]);
+
+const JM_ALLOWED_KINDS: ReadonlySet<string> = new Set(["jm.memory.read", "jm.memory.write"]);
+const JM_APPROVAL_KINDS: ReadonlySet<string> = new Set(["jm.memory.delete", "jm.memory.share"]);
+/** Same value as execution-mode.ts ACS_ADMIN_APPROVER (not imported, to keep rules.ts free of that module). */
+const JM_ADMIN_APPROVER = "acs:admin";
 
 function isSupportedAction(kind: string): boolean {
   return SUPPORTED_ACTION_KINDS.includes(kind);

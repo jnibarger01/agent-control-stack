@@ -18,6 +18,7 @@
     { "path": "packages/execution-admission" },
     { "path": "packages/jc-tool-manifest" },
     { "path": "packages/desktop-commander-adapter" },
+    { "path": "packages/jace-mem-issuer" },
     { "path": "packages/workspace-manager" },
     { "path": "packages/engine-adapter" },
     { "path": "./packages/execution-controller" },
