@@ -302,8 +302,9 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       return fail('JC_POLICY_INVALID', 'the configured local policy is missing, invalid or modifiable by this process; run jc_doctor', { jaceCommanderMode: mode, ...jcAuthorizationMeta(mode, route, 'policy-invalid') });
     }
 
-    if (config.gatewayMetaTrusted && route.provider === 'jc.process' && !principal) {
-      return fail('JC_PRINCIPAL_REQUIRED', 'process tools require an authenticated gateway principal');
+    if (config.gatewayMetaTrusted && !principal &&
+      (route.provider === 'jc.process' || ['start_search', 'get_more_search_results', 'list_searches', 'stop_search'].includes(name))) {
+      return fail('JC_PRINCIPAL_REQUIRED', 'stateful process and search tools require an authenticated gateway principal');
     }
     let authorization: JcAuthorization | undefined;
     let localAuthorization: JcLocalAuthorization | undefined;
@@ -540,10 +541,10 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     get_file_info: async (args) => ok(await getFileInfo(args, fsPolicy)),
     read_file: async (args) => ok(await readFile(args, fsPolicy)),
     read_multiple_files: async (args) => ok(await readMultipleFiles(args, fsPolicy)),
-    start_search: async (args) => ok(await search.start(args, fsPolicy)),
-    get_more_search_results: async (args) => ok(search.more(args)),
-    list_searches: async () => ok(search.list()),
-    stop_search: async (args) => ok(search.stop(args)),
+    start_search: async (args, _capability, owner) => ok(await search.start(args, fsPolicy, owner)),
+    get_more_search_results: async (args, _capability, owner) => ok(search.more(args, owner)),
+    list_searches: async (_args, _capability, owner) => ok(search.list(owner)),
+    stop_search: async (args, _capability, owner) => ok(search.stop(args, owner)),
     write_file: async (args) => ok(await writeFile(args, fsPolicy)),
     create_directory: async (args) => ok(await createDirectory(args, fsPolicy)),
     move_file: async (args) => ok(await moveFile(args, fsPolicy)),

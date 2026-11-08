@@ -44,6 +44,7 @@ export interface SearchHit {
 
 interface SearchSession {
   searchId: string;
+  owner: string;
   root: string;
   mode: 'filename' | 'content';
   scanned: number;
@@ -56,10 +57,10 @@ interface SearchSession {
 }
 
 export interface SearchRegistry {
-  start(args: Record<string, unknown>, policy: JcFsPolicy): Promise<Record<string, unknown>>;
-  more(args: Record<string, unknown>): Record<string, unknown>;
-  list(): Record<string, unknown>;
-  stop(args: Record<string, unknown>): Record<string, unknown>;
+  start(args: Record<string, unknown>, policy: JcFsPolicy, owner?: string): Promise<Record<string, unknown>>;
+  more(args: Record<string, unknown>, owner?: string): Record<string, unknown>;
+  list(owner?: string): Record<string, unknown>;
+  stop(args: Record<string, unknown>, owner?: string): Record<string, unknown>;
 }
 
 function pageLimit(value: unknown): number {
@@ -214,7 +215,7 @@ export function createSearchRegistry(): SearchRegistry {
   }
 
   return {
-    async start(args, policy) {
+    async start(args, policy, owner = 'stdio') {
       const root = containJcPath(args.path, policy);
       const info = await fs.stat(root);
       if (!info.isDirectory()) throw new IntegrationError('invalid_argument', 'search path must be a directory');
@@ -227,6 +228,7 @@ export function createSearchRegistry(): SearchRegistry {
       const names = fileFilter(args.fileFilter, args.caseSensitive);
       const session: SearchSession = {
         searchId: `srch_${randomBytes(8).toString('hex')}`,
+        owner,
         root,
         mode,
         scanned: 0,
@@ -247,16 +249,16 @@ export function createSearchRegistry(): SearchRegistry {
       session.done = !session.cancelled;
       return page(session, pageLimit(args.limit));
     },
-    more(args) {
+    more(args, owner = 'stdio') {
       const id = args.searchId;
       if (typeof id !== 'string') throw new IntegrationError('invalid_argument', 'searchId is required');
       const session = sessions.get(id);
-      if (!session) throw new IntegrationError('not_found', 'search not found');
+      if (!session || session.owner !== owner) throw new IntegrationError('not_found', 'search not found');
       return page(session, pageLimit(args.limit));
     },
-    list() {
+    list(owner = 'stdio') {
       return {
-        searches: [...sessions.values()].map((session) => ({
+        searches: [...sessions.values()].filter((session) => session.owner === owner).map((session) => ({
           searchId: session.searchId,
           root: session.root,
           mode: session.mode,
@@ -268,11 +270,11 @@ export function createSearchRegistry(): SearchRegistry {
         })),
       };
     },
-    stop(args) {
+    stop(args, owner = 'stdio') {
       const id = args.searchId;
       if (typeof id !== 'string') throw new IntegrationError('invalid_argument', 'searchId is required');
       const session = sessions.get(id);
-      if (!session) throw new IntegrationError('not_found', 'search not found');
+      if (!session || session.owner !== owner) throw new IntegrationError('not_found', 'search not found');
       session.cancelled = true;
       session.done = true;
       return { searchId: session.searchId, cancelled: true };

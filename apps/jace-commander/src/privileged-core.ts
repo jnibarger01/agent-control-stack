@@ -227,6 +227,32 @@ export function assertRootControlledExecutable(executable: string): void {
   if (!fs.statSync(resolved).isFile()) untrusted(`${resolved} is not a regular file`);
 }
 
+/** A privileged command must not load cwd-relative modules or configuration from
+ * a directory controllable by the unprivileged requester. */
+export function assertRootControlledDirectory(directory: string): void {
+  const reject = (): never => {
+    throw new PrivilegedError('PRIVILEGED_EXECUTABLE_UNTRUSTED', 'privileged working directory is not exclusively root-controlled');
+  };
+  const checkChain = (target: string) => {
+    let current = target;
+    for (;;) {
+      const stat = fs.lstatSync(current);
+      if (stat.uid !== 0 || (!stat.isSymbolicLink() && (stat.mode & 0o022) !== 0)) reject();
+      const parent = path.dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+  };
+  try {
+    checkChain(directory);
+    const resolved = fs.realpathSync(directory);
+    checkChain(resolved);
+    if (!fs.statSync(resolved).isDirectory()) reject();
+  } catch {
+    reject();
+  }
+}
+
 function assertRootOwnedChain(target: string): void {
   let current = path.resolve(target);
   for (;;) {
@@ -311,6 +337,9 @@ export async function executePrivileged(
         actionHash: auth.actionHash,
       };
     }
+    // Prevent root execution from importing cwd-relative modules or config
+    // controlled by the requesting user, even when argv[0] is root-owned.
+    assertRootControlledDirectory(args.cwd ?? '/');
 
     const audit = new JsonlTraceChain(config.auditPath, 'jc-privileged-exec');
     // Boundary 1: durable intent BEFORE the side effect. No audit, no exec.
