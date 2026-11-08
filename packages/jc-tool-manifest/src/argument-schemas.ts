@@ -70,6 +70,8 @@ export const JC_TOOL_NAMES = Object.freeze([
   "mission_router_list",
   "looptrace_verify",
   "privileged_exec",
+  "gui_screenshot",
+  "gui_action",
   "list_directory",
   "get_file_info",
   "read_file",
@@ -150,6 +152,41 @@ export const JC_TOOL_ARGUMENT_SCHEMAS: Readonly<Record<JcToolName, z.ZodType>> =
       .max(64 * 1024)
       .optional()
   }),
+  gui_screenshot: z.strictObject({}),
+  gui_action: z
+    .strictObject({
+      action: z.enum(["click", "move", "drag", "type", "key", "scroll"]),
+      x: z.number().int().min(0).max(8191).optional(),
+      y: z.number().int().min(0).max(8191).optional(),
+      toX: z.number().int().min(0).max(8191).optional(),
+      toY: z.number().int().min(0).max(8191).optional(),
+      text: z
+        .string()
+        .min(1)
+        .max(2048)
+        .refine((v) => !v.includes("\0"))
+        .optional(),
+      direction: z.enum(["up", "down", "left", "right"]).optional(),
+      amount: z.number().int().min(1).max(15).optional()
+    })
+    .superRefine((value, ctx) => {
+      const required: Record<string, string[]> = {
+        click: ["x", "y"],
+        move: ["x", "y"],
+        drag: ["x", "y", "toX", "toY"],
+        type: ["text"],
+        key: ["text"],
+        scroll: ["direction", "amount"]
+      };
+      const provided = Object.keys(value)
+        .filter((name) => name !== "action")
+        .sort();
+      const expected = required[value.action]!.slice().sort();
+      if (provided.join(",") !== expected.join(","))
+        ctx.addIssue({ code: "custom", message: "arguments must match the exact GUI action" });
+      if (value.action === "key" && value.text !== undefined && !/^[A-Za-z0-9_+]{1,48}$/.test(value.text))
+        ctx.addIssue({ code: "custom", message: "invalid key chord" });
+    }),
   // Filesystem (read-only, fs.read). Paths must already be absolute: the
   // caller (CLI or MCP client) resolves `~` and relative paths before the
   // call, so the exact string ACS signs is the exact string JC contains and

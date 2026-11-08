@@ -32,6 +32,7 @@ describe("Jace Commander approval-gated tools (manifest-derived)", () => {
         "interact_with_process",
         "delete_file",
         "create_directory",
+        "gui_action",
         "edit_block",
         "git_add",
         "git_commit",
@@ -95,9 +96,13 @@ describe("B3: approvers see a bounded, redacted summary of the validated argumen
 
   it("binary writes show decoded size and digest without logging encoded bytes", () => {
     const content = Buffer.from("secret binary payload").toString("base64");
-    const summary = jaceCommanderApprovalSummary(validateJaceCommanderInvocation("write_file", {
-      path: "/srv/work/binary.bin", content, encoding: "base64"
-    }));
+    const summary = jaceCommanderApprovalSummary(
+      validateJaceCommanderInvocation("write_file", {
+        path: "/srv/work/binary.bin",
+        content,
+        encoding: "base64"
+      })
+    );
     expect(summary.bytes).toBe(21);
     expect(summary.encoding).toBe("base64");
     expect(JSON.stringify(summary)).not.toContain(content);

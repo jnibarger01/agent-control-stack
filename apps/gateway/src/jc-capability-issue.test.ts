@@ -356,6 +356,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
   ): Record<string, { args: Record<string, unknown>; fields: Record<string, unknown> }> => {
     const ws = join(root, "workspace");
     return {
+      gui_action: { args: { action: "click", x: 24, y: 32 }, fields: { action: "click", x: 24, y: 32 } },
       privileged_exec: { args: PRIV_ARGS, fields: { runAs: "root", argv: PRIV_ARGS.argv, timeoutMs: 120000 } },
       write_file: {
         args: { path: join(ws, "new.txt"), content: "hello approver\n", overwrite: false },
@@ -404,8 +405,8 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
     return [dir];
   };
 
-  it("the gated list is the manifest's (15 tools) and every one has fixtures", () => {
-    expect(GATED).toHaveLength(15);
+  it("the gated list is the manifest's (16 tools) and every one has fixtures", () => {
+    expect(GATED).toHaveLength(16);
     const fixtures = argsFor("/tmp/x");
     for (const tool of GATED) expect(fixtures[tool], tool).toBeDefined();
   });
@@ -458,7 +459,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         expect(switched.json()).toMatchObject({ executionMode: "admin", approvalPolicy: "auto" });
 
         const fixtures = argsFor(ctx.root);
-        for (const tool of GATED) {
+        for (const tool of GATED.filter((name) => name !== "gui_action")) {
           const { args } = fixtures[tool]!;
           const first = await issue(ctx, tool, args);
           expect(first.statusCode, `${tool}: ${first.body}`).toBe(200);

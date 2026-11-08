@@ -45,6 +45,7 @@ describe("jc-tool-manifest", () => {
   it("marks every approval-required tool, including the privileged tool", () => {
     const approval = new Set([
       "privileged_exec",
+      "gui_action",
       "write_file",
       "create_directory",
       "move_file",
@@ -66,7 +67,7 @@ describe("jc-tool-manifest", () => {
       expect(entry.requiresApproval, entry.name).toBe(approval.has(entry.name));
     }
     expect(jcToolContracts().filter((entry) => entry.requiresApproval && entry.name !== "privileged_exec").length).toBe(
-      14
+      15
     );
     expect(jcToolContract("privileged_exec")?.description).toContain("admin mode ACS may auto-authorize");
     expect(jcToolContracts().length).toBeGreaterThanOrEqual(30);

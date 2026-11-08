@@ -24,7 +24,7 @@ export interface JcManifest {
 
 export const JC_MANIFEST: JcManifest = {
   "version": "acs.jc.v1",
-  "manifestHash": "0dfb2a14ce82dde111723a46e712f7c07ab782ec371956495b9ea41f8fb1937b",
+  "manifestHash": "e7f5349217a5dd89aeab3bad20a292130b9af0963cc2efa6aaebd0277301344a",
   "scopes": [
     "fs.read",
     "fs.write",
@@ -35,7 +35,9 @@ export const JC_MANIFEST: JcManifest = {
     "process.privileged",
     "git.read",
     "git.write",
-    "git.network"
+    "git.network",
+    "gui.observe",
+    "gui.input"
   ],
   "tools": [
     {
@@ -640,6 +642,96 @@ export const JC_MANIFEST: JcManifest = {
       "cliCommands": [
         "git status"
       ]
+    },
+    {
+      "name": "gui_action",
+      "description": "Perform one exact mouse or keyboard action on the explicitly configured X11 desktop. Each invocation needs an ACS-approved gui.input capability. X11 only; no shell.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "click",
+              "move",
+              "drag",
+              "type",
+              "key",
+              "scroll"
+            ]
+          },
+          "x": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 8191
+          },
+          "y": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 8191
+          },
+          "toX": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 8191
+          },
+          "toY": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 8191
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "up",
+              "down",
+              "left",
+              "right"
+            ]
+          },
+          "amount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 15
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "gui.input"
+      ],
+      "actionKind": "jc.gui.input",
+      "risk": "medium",
+      "requiresApproval": true,
+      "group": "gui",
+      "pathArguments": [],
+      "cliCommands": []
+    },
+    {
+      "name": "gui_screenshot",
+      "description": "Capture a PNG screenshot of the explicitly configured isolated X11 desktop. Available only in ACS managed mode with a signed gui.observe capability. Screenshots may contain sensitive information.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "scopes": [
+        "gui.observe"
+      ],
+      "actionKind": "jc.gui.observe",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "gui",
+      "pathArguments": [],
+      "cliCommands": []
     },
     {
       "name": "interact_with_process",

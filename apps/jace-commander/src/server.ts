@@ -72,6 +72,7 @@ import {
   type JcRoute,
 } from './authorizers.js';
 import { JC_TOOLS } from './tool-descriptors.js';
+import { captureGuiScreenshot, executeGuiAction, GuiError } from './gui.js';
 export { JC_TOOLS };
 import { VERSION } from './version.js';
 
@@ -98,7 +99,7 @@ export interface JcServerDeps {
 
 
 type ToolResult = {
-  content: Array<{ type: 'text'; text: string }>;
+  content: Array<{ type: 'text'; text: string } | { type: 'image'; mimeType: string; data: string }>;
   structuredContent?: Record<string, unknown>;
   isError?: boolean;
   _meta?: Record<string, unknown>;
@@ -284,6 +285,10 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     const principal = callerPrincipal(request.params._meta as Record<string, unknown> | undefined, config.gatewayMetaTrusted);
     const route = Object.prototype.hasOwnProperty.call(JC_TOOL_POLICIES, name) ? resolver.resolve(name) : undefined;
     if (!route) return fail('unknown_tool', `unknown tool: ${name}`);
+    // Never expose GUI control through local or standalone authorization.
+    if (route.authorizer !== 'refused' && (name === 'gui_screenshot' || name === 'gui_action') &&
+        (mode !== 'managed' || route.authorizer !== 'acs-capability'))
+      return fail('GUI_MANAGED_REQUIRED', 'GUI tools require ACS managed mode');
     let routeMeta = jcAuthorizationMeta(mode, route);
     if (route.authorizer === 'refused') {
       // No capability exists in standalone mode, so nothing that writes,
@@ -529,6 +534,24 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       const parsed = readTraceFile(file);
       if (parsed.parseError) return ok({ path: file, ok: false, reason: `invalid JSON at line ${parsed.parseError.line}`, events: parsed.events.length });
       return ok({ path: file, events: parsed.events.length, ...verifyChain(parsed.events) });
+    },
+    gui_screenshot: async () => {
+      try {
+        const shot = await captureGuiScreenshot();
+        return { content: [
+          { type: 'text' as const, text: JSON.stringify({ width: shot.width, height: shot.height, mimeType: shot.mimeType }) },
+          { type: 'image' as const, mimeType: shot.mimeType, data: shot.data }
+        ] };
+      } catch (error) {
+        return error instanceof GuiError ? fail(error.code, error.message) : fail('GUI_BACKEND_UNAVAILABLE', 'GUI capture failed');
+      }
+    },
+    gui_action: async (args) => {
+      try {
+        return ok(await executeGuiAction(args));
+      } catch (error) {
+        return error instanceof GuiError ? fail(error.code, error.message) : fail('GUI_BACKEND_UNAVAILABLE', 'GUI action failed');
+      }
     },
     privileged_exec: async (args, capability) => {
       if (capability === undefined) {

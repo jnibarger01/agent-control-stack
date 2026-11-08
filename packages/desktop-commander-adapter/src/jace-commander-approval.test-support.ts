@@ -21,6 +21,7 @@ export const FAKE_SECRET = "ghp_" + "F".repeat(36);
 
 /** Valid arguments for every approval-gated tool (fake values only). */
 export const GATED_ARGS: Readonly<Record<string, Record<string, unknown>>> = {
+  gui_action: { action: "click", x: 25, y: 30 },
   privileged_exec: { argv: ["/usr/bin/apt-get", "update"], timeoutMs: 120000 },
   write_file: { path: "/srv/work/notes.txt", content: `hello world\nAPI_TOKEN=${FAKE_SECRET}\n`, overwrite: true },
   create_directory: { path: "/srv/work/new-dir", recursive: true },
@@ -44,6 +45,7 @@ export const GATED_ARGS: Readonly<Record<string, Record<string, unknown>>> = {
 
 /** The fields each tool's approval summary must show the approver. */
 export const SUMMARY_FIELDS: Readonly<Record<string, Record<string, unknown>>> = {
+  gui_action: { action: "click", x: 25, y: 30 },
   privileged_exec: { runAs: "root", argv: ["/usr/bin/apt-get", "update"], cwd: "/", timeoutMs: 120000, stdinBytes: 0 },
   write_file: { path: "/srv/work/notes.txt", overwrite: true },
   create_directory: { path: "/srv/work/new-dir" },
