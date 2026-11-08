@@ -14,6 +14,9 @@ export default defineConfig({
       "@agent-control-stack/mission-control-contract": fileURLToPath(
         new URL("./packages/mission-control-contract/src/index.ts", import.meta.url)
       ),
+      "@agent-control-stack/black-box-recorder": fileURLToPath(
+        new URL("./packages/black-box-recorder/src/index.ts", import.meta.url)
+      ),
       "@agent-control-stack/procedural-learning": fileURLToPath(
         new URL("./packages/procedural-learning/src/index.ts", import.meta.url)
       )

@@ -12,7 +12,8 @@
     "isolatedModules": true,
     "types": ["vite/client"],
     "paths": {
-      "@agent-control-stack/mission-control-contract": ["../../packages/mission-control-contract/src/index.ts"]
+      "@agent-control-stack/mission-control-contract": ["../../packages/mission-control-contract/src/index.ts"],
+      "@agent-control-stack/black-box-recorder": ["../../packages/black-box-recorder/src/index.ts"]
     }
   },
   "include": ["src"]

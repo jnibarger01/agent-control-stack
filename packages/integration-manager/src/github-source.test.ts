@@ -45,6 +45,22 @@ const node = (overrides: Record<string, unknown> = {}) => ({
 });
 
 describe("snapshotFromGraphQl", () => {
+  it("flags renamed and copied files, whose previous name is not returned, and leaves plain changes unflagged", () => {
+    const snapshot = snapshotFromGraphQl(
+      node({
+        files: {
+          totalCount: 3,
+          nodes: [
+            { path: "docs/a.md", changeType: "MODIFIED" },
+            { path: "docs/new.md", changeType: "RENAMED" },
+            { path: "docs/copy.md", changeType: "COPIED" }
+          ]
+        }
+      }) as never
+    );
+    expect(snapshot.unverifiedOriginFiles).toEqual(["docs/new.md", "docs/copy.md"]);
+  });
+
   it("maps fields, counts unresolved threads, and maps check runs and commit statuses", () => {
     const snapshot = snapshotFromGraphQl(node() as never);
     expect(snapshot).toMatchObject({

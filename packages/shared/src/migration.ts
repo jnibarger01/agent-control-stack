@@ -150,7 +150,9 @@ const migrationFiles = [
   { version: 71, name: "execution_receipts", filename: "071_execution_receipts.sql" },
   { version: 72, name: "cua_browser_execution", filename: "072_cua_browser_execution.sql" },
   { version: 73, name: "advisor_consultations", filename: "073_advisor_consultations.sql" },
-  { version: 74, name: "advisor_consultation_fencing", filename: "074_advisor_consultation_fencing.sql" }
+  { version: 74, name: "advisor_consultation_fencing", filename: "074_advisor_consultation_fencing.sql" },
+  // 075 and 076 are claimed by unmerged branches (ares/jace-commander); 077 is acs.jm.v1.
+  { version: 77, name: "jace_mem_capability_issuances", filename: "077_jace_mem_capability_issuances.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {

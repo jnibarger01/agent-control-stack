@@ -5,8 +5,9 @@ import type { ModelCaller, ModelRequest } from "@agent-control-stack/moa-orchest
 import { sha256, stableStringify } from "@agent-control-stack/moa-orchestrator";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildGateway } from "../server.js";
+import { OPEN_ITEMS_SUMMARY_PATH } from "../open-items-summary.js";
 import { createMoaAcsClient, verifyExecutableGrant } from "./acs-client.js";
 
 const actor = "operator";
@@ -227,5 +228,69 @@ describe("MoA ACS adapter", () => {
     expect(audit).toContain("moa.moa_execution_blocked");
     expect(audit).not.toContain("work item not found");
     await app.close();
+  });
+});
+
+describe("inference audit chain", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps one hash chain when the inference proxy and the open-items summary share a log", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-inference-audit-"));
+    try {
+      const auditLogPath = join(dir, "inference-audit.jsonl");
+      vi.stubEnv("ACS_INFERENCE_ENABLED", "true");
+      vi.stubEnv("ACS_OPENAI_API_KEY", "sk-test-key");
+      vi.stubEnv("ACS_INFERENCE_ALLOWED_MODELS", "gpt-test");
+      vi.stubEnv("ACS_INFERENCE_AUDIT_LOG", auditLogPath);
+      vi.stubEnv("ACS_OPEN_ITEMS_SUMMARY_MODEL", "gpt-test");
+      const encoder = new TextEncoder();
+      vi.stubGlobal(
+        "fetch",
+        async () =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(encoder.encode('data: {"type":"response.completed"}\n\n'));
+                controller.close();
+              }
+            }),
+            { status: 200, headers: { "content-type": "text/event-stream" } }
+          )
+      );
+      const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth });
+      try {
+        // Alternate routes: an unauthenticated proxy call is denied without any upstream request.
+        expect((await app.inject({ method: "GET", url: "/v1/models" })).statusCode).toBe(401);
+        const summary = await app.inject({
+          method: "POST",
+          url: OPEN_ITEMS_SUMMARY_PATH,
+          headers: { authorization: `Bearer ${auth.token}` }
+        });
+        expect(summary.statusCode).toBe(200);
+        expect(summary.body).toContain("event: done");
+        expect((await app.inject({ method: "GET", url: "/v1/models" })).statusCode).toBe(401);
+      } finally {
+        await app.close();
+      }
+      const records = readFileSync(auditLogPath, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { name: string; sequence: number; previousHash: string; eventHash: string });
+      expect(records.map((record) => record.name)).toEqual([
+        "inference.request_denied",
+        "inference.request_allowed",
+        "inference.upstream_completed",
+        "inference.request_denied"
+      ]);
+      expect(records.map((record) => record.sequence)).toEqual([1, 2, 3, 4]);
+      records.forEach((record, index) => {
+        expect(record.previousHash).toBe(index === 0 ? "" : records[index - 1]!.eventHash);
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
