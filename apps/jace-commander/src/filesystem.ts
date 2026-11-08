@@ -32,7 +32,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { isBinaryFile } from 'isbinaryfile';
 import { documentKind, readDocumentBytes, windowLines } from './documents.js';
-import { isCredentialPath } from './credential-paths.js';
+import { HOME_HIDDEN, isCredentialPath } from './credential-paths.js';
 import type { SandboxPolicy } from './sandbox.js';
 import { IntegrationError } from './integrations.js';
 
@@ -70,9 +70,9 @@ export function defaultDeniedRoots(stateDir: string, home = os.homedir()): strin
   return [
     stateDir,
     '/etc/jace-commander',
-    ...['.ssh', '.gnupg', '.aws', '.azure', '.kube', '.docker', '.config/gcloud',
-      '.config/desktop-commander-mcp-gateway', '.config/dc-relay', '.desktop-commander']
-      .map((relative) => path.join(home, relative)),
+    // Same credential/control-plane stores the workload sandbox masks: these tools run
+    // in-process, outside bubblewrap, so the sandbox masks alone do not protect them.
+    ...HOME_HIDDEN.map((relative) => path.join(home, relative)),
   ];
 }
 

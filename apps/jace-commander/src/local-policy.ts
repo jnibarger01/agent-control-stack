@@ -438,6 +438,13 @@ export function checkPolicyConstraints(effective: JcEffectivePolicy, tool: strin
     if (effective.denyCommands.some(matches)) return `command ${base || executable} is denied by policy`;
     if (effective.allowCommands && !effective.allowCommands.some(matches)) return `command ${base || executable} is not in the policy allowlist`;
   }
+  if (tool === 'run_command' || tool === 'start_terminal_session') {
+    // A shell runs arbitrary commands, so executable constraints cannot be enforced on it:
+    // refuse rather than silently bypass a configured allow/deny list.
+    if (effective.allowCommands || effective.denyCommands.length > 0) {
+      return `${tool} is refused because executable constraints are configured (use start_process)`;
+    }
+  }
   if (tool === 'git_fetch' || tool === 'git_push') {
     const remote = typeof args.remote === 'string' ? args.remote : 'origin';
     if (effective.gitRemotes && !effective.gitRemotes.includes(remote)) return `remote ${remote} is not in the policy allowlist`;

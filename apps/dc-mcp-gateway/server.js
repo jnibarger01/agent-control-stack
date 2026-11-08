@@ -402,8 +402,8 @@ async function handleAuthorize(req, res, q, laneHint = null) {
   if (!lane) return fail('invalid_target', 'unknown resource');
   if (response_type !== 'code') return fail('unsupported_response_type', 'response_type must be code');
   if (!code_challenge || code_challenge_method !== 'S256') return fail('invalid_request', 'PKCE with S256 is required');
-  if (/[^A-Za-z0-9\-._~]/.test(code_challenge) || code_challenge.length < 43 || code_challenge.length > 128)
-    return fail('invalid_request', 'malformed code_challenge');
+  // Same rule as the consent POST: an S256 challenge is exactly 43 base64url characters.
+  if (!isPkceChallenge(code_challenge)) return fail('invalid_request', 'malformed code_challenge');
   if (resource !== lane.resource) return fail('invalid_target', 'resource does not belong to this OAuth lane');
   const reqScope = (scope || 'mcp').split(' ').filter((s) => s === 'mcp' || s === 'openid' || s === 'email' || s === 'profile');
   if (reqScope.length === 0) return fail('invalid_scope', 'no permitted scope requested');

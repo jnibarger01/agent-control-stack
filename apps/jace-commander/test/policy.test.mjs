@@ -156,6 +156,12 @@ await test('constraint checks: command allow/deny by name or absolute path, git 
   assert.equal(checkPolicyConstraints(allow, 'start_process', { argv: ['/usr/bin/git'] }), undefined);
   assert.match(checkPolicyConstraints(effective, 'git_push', { remote: 'other' }), /remote other/);
   assert.equal(checkPolicyConstraints(effective, 'git_fetch', {}), undefined, 'default remote origin is allowed');
+  for (const shellTool of ['run_command', 'start_terminal_session']) {
+    assert.match(checkPolicyConstraints(effective, shellTool, { command: 'curl x' }), /executable constraints/);
+    assert.match(checkPolicyConstraints(allow, shellTool, { command: 'git status' }), /executable constraints/);
+    const open = { ...effective, denyCommands: [], allowCommands: undefined };
+    assert.equal(checkPolicyConstraints(open, shellTool, { command: 'ls' }), undefined, 'no exec constraints: shell tools unchanged');
+  }
 });
 
 // ---- server level ----

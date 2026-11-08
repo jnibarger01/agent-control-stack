@@ -244,6 +244,25 @@ await test('client: 404 then 503 on tools/call is execution_unknown (2 sends)', 
   assert.equal(result.exitCode, JC_EXIT.executionUnknown);
 });
 
+await test('client: a 200 with no usable tool result is execution_unknown, never ok or "nothing ran"', async () => {
+  const cases = [
+    () => json({}),
+    (msg) => json({ jsonrpc: '2.0', id: msg.id }),
+    (msg) => json({ jsonrpc: '2.0', id: msg.id, result: 'nope' }),
+    (msg) => json({ jsonrpc: '2.0', id: msg.id, error: 7 }),
+    () => new Response('<html>proxy</html>', { status: 200 }),
+    () => new Response('{"truncated', { status: 200, headers: { 'content-type': 'application/json' } }),
+  ];
+  for (const answer of cases) {
+    const { sends, client } = fakeEdge({ onToolCall: (_n, msg) => answer(msg) });
+    const result = await client.callTool('write_file', { path: '/x', content: 'y' });
+    assert.equal(sends['tools/call'], 1, 'an unusable 200 is never resent');
+    assert.equal(result.kind, 'execution_unknown');
+    assert.equal(result.retryable, false);
+    assert.equal(result.exitCode, JC_EXIT.executionUnknown);
+  }
+});
+
 await test('client: tools/list re-inits on a session-bearing 404 (status alone)', async () => {
   const { sends, client } = fakeEdge({ sessions: true, onList: (n, msg) => (n === 1 ? new Response('', { status: 404 }) : json({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'a' }] } })) });
   const tools = await client.listTools();

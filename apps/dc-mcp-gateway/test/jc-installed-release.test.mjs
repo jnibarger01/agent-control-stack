@@ -21,6 +21,8 @@ const gateway = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const repo = path.resolve(gateway, '..', '..');
 const app = path.join(repo, 'apps', 'jace-commander');
 const EXECUTION_TOKEN = 'p'.repeat(40);
+// ~/.cache does not exist on a fresh CI runner; create it before mkdtemp.
+fs.mkdirSync(path.join(os.homedir(), '.cache'), { recursive: true });
 const base = fs.mkdtempSync(path.join(os.homedir(), '.cache', 'jc-pin-test-'));
 
 function stageRelease(name, { readOnly = true, releaseJson = true } = {}) {

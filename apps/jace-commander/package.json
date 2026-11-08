@@ -17,7 +17,7 @@
     "build": "tsc -p tsconfig.json && cp src/pty-helper.py dist/pty-helper.py && chmod +x dist/cli.js dist/privileged-helper.js",
     "test": "npm run build && node test/run-all.mjs",
     "test:only": "node test/run-all.mjs",
-    "start": "node dist/cli.js serve-http"
+    "start": "node dist/cli.js serve"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

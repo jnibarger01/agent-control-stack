@@ -31,6 +31,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { IntegrationError } from './integrations.js';
+import { HOME_HIDDEN } from './credential-paths.js';
 
 export type WorkloadIsolation = 'bwrap' | 'none';
 export type WorkloadNetwork = 'none' | 'host';
@@ -60,17 +61,6 @@ export interface SandboxRun {
 const CODE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const RUNTIME_DEPENDENCIES = ['@modelcontextprotocol/sdk', '@simplewebauthn/server', 'isbinaryfile', 'pizzip', 'unpdf'];
 
-/** Credential and control-plane locations relative to $HOME that workloads never see. */
-const HOME_HIDDEN = [
-  '.ssh', '.gnupg', '.aws', '.azure', '.kube', '.docker', '.config/gcloud', '.config/gh',
-  '.config/jace-commander', '.jace-commander', '.config/desktop-commander-mcp-gateway', '.config/dc-relay',
-  '.desktop-commander', '.config/agent-control-stack', '.local/share/agent-control-stack',
-  '.config/acs', '.local/share/acs', '.local/state/acs', '.local/state/jace-commander', '.local/share/jace-commander',
-  '.local/share/keyrings', '.local/share/kwalletd', '.password-store', '.netrc', '.git-credentials',
-  '.npmrc', '.pypirc', '.config/hub', '.codex', '.claude', '.claude.json', '.config/Codex',
-  '.mozilla', '.config/google-chrome', '.config/chromium', '.config/BraveSoftware',
-  '.Xauthority', '.ICEauthority',
-];
 /** Persistence/escape vectors: masked even if they exist outside $HOME. */
 const SYSTEM_HIDDEN = ['/run/dbus', '/run/docker.sock', '/var/run/docker.sock', '/run/containerd', '/run/podman', '/etc/jace-commander'];
 

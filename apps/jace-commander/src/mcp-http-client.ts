@@ -407,9 +407,24 @@ export class McpHttpClient {
           params: { name, arguments: args },
         }));
       }
+      // A 200 that is not a usable JSON-RPC envelope arrived after dispatch: the call may
+      // have run, so it is neither success nor "nothing ran", and it is never retried.
+      const unusable = (detail: string): JcCallOutcome => outcome('execution_unknown', {
+        code: 'execution_unknown',
+        message: `tools/call may have executed: the edge answered HTTP 200 with ${detail}. Verify its effects before re-running it.`,
+        retryable: false,
+      });
+      if (status === 200 && !body) return unusable('an unparseable body');
       if (status !== 200 || !body) throw this.refusal(status, body, 'tools/call');
-      if ('error' in body) return classifyJsonRpcError(body.error as Record<string, unknown>);
-      return classifyToolResult((body.result ?? {}) as Record<string, unknown>);
+      if ('error' in body) {
+        const rpcError = body.error;
+        if (typeof rpcError === 'string' && rpcError.startsWith('managed_authorization_')) throw this.refusal(status, body, 'tools/call');
+        if (!rpcError || typeof rpcError !== 'object') return unusable('a malformed JSON-RPC error');
+        return classifyJsonRpcError(rpcError as Record<string, unknown>);
+      }
+      const result = body.result;
+      if (!result || typeof result !== 'object' || Array.isArray(result)) return unusable('no tool result');
+      return classifyToolResult(result as Record<string, unknown>);
     } catch (error) {
       if (error instanceof McpTransportError) return error.outcome;
       throw error;

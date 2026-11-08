@@ -87,10 +87,48 @@ export async function writeFile(args: Record<string, unknown>, policy: JcFsPolic
 }
 
 export async function createDirectory(args: Record<string, unknown>, policy: JcFsPolicy): Promise<Record<string, unknown>> {
+  if (args.recursive === true) return createDirectoryRecursive(args.path, policy);
   const dest = await destination(args.path, policy);
   await fs.mkdir(dest, { recursive: args.recursive === true });
   containJcPath(dest, policy);
   return { path: dest, created: true };
+}
+
+/**
+ * Recursive creation: contain the nearest existing ancestor, then create each
+ * missing component one level at a time, re-containing after every step, so a
+ * missing intermediate directory does not fail containment before mkdir runs.
+ */
+async function createDirectoryRecursive(requested: unknown, policy: JcFsPolicy): Promise<Record<string, unknown>> {
+  if (typeof requested !== 'string' || !path.isAbsolute(requested)) {
+    throw new IntegrationError('invalid_argument', 'path must be an absolute path');
+  }
+  refuseGitMetadata(requested);
+  const missing: string[] = [];
+  let cursor = path.resolve(requested);
+  for (;;) {
+    try {
+      await fs.lstat(cursor);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new IntegrationError('write_failed', 'cannot inspect destination');
+    }
+    const parent = path.dirname(cursor);
+    if (parent === cursor) throw new IntegrationError('not_found', 'no existing ancestor');
+    missing.unshift(path.basename(cursor));
+    cursor = parent;
+  }
+  let current = containJcPath(cursor, policy);
+  for (const part of missing) {
+    const next = path.join(current, part);
+    try {
+      await fs.mkdir(next);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw new IntegrationError('write_failed', 'cannot create directory');
+    }
+    current = containJcPath(next, policy);
+  }
+  return { path: current, created: true };
 }
 
 export async function moveFile(args: Record<string, unknown>, policy: JcFsPolicy): Promise<Record<string, unknown>> {

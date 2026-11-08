@@ -103,6 +103,19 @@ await test('writes cannot reach .git, traverse, or move a root', async () => {
   refused(await call('move_file', { from: home, to: path.join(root, 'moved-home') }), 'path_denied');
 });
 
+await test('recursive create_directory builds missing parents but stays contained', async () => {
+  const deep = path.join(root, 'rec-new', 'a', 'b');
+  const made = await call('create_directory', { path: deep, recursive: true });
+  assert.notEqual(made.isError, true, JSON.stringify(made));
+  assert.ok(fs.statSync(deep).isDirectory());
+  const again = await call('create_directory', { path: deep, recursive: true });
+  assert.notEqual(again.isError, true, 'recursive create of an existing directory succeeds');
+  refused(await call('create_directory', { path: path.join(root, 'rec-git', '.git', 'x'), recursive: true }), 'path_denied');
+  const outside = await call('create_directory', { path: path.join(tmp, 'rec-outside', 'x'), recursive: true });
+  assert.equal(outside.isError, true);
+  assert.ok(!fs.existsSync(path.join(tmp, 'rec-outside')));
+});
+
 await test('edit_block replaces atomically and keeps the file mode', async () => {
   fs.chmodSync(file, 0o640);
   okResult(await call('edit_block', { path: file, old: 'hello', new: 'hello world' }));
