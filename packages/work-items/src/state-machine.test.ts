@@ -1008,6 +1008,7 @@ describe("work item state machine", () => {
         { version: 72, name: "cua_browser_execution", filename: "072_cua_browser_execution.sql" },
         { version: 73, name: "advisor_consultations", filename: "073_advisor_consultations.sql" },
         { version: 74, name: "advisor_consultation_fencing", filename: "074_advisor_consultation_fencing.sql" },
+        { version: 76, name: "jace_commander_native_tools", filename: "076_jace_commander_native_tools.sql" },
         { version: 77, name: "jace_mem_capability_issuances", filename: "077_jace_mem_capability_issuances.sql" }
       ]);
       expect(store.listActors()).toEqual(

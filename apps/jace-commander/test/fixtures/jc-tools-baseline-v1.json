@@ -1,0 +1,889 @@
+{
+  "manifestVersion": "acs.jc.v1",
+  "manifestHash": "49863090b690af103b212bd89b56230eea38f61aa2a491adfef6eb709a2fc11f",
+  "capturedAt": "2026-11-03",
+  "tools": [
+    {
+      "name": "acs_read",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "view": {
+            "type": "string",
+            "enum": [
+              "health",
+              "work-items",
+              "work-item"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "description": "Work item id (view=work-item)"
+          },
+          "status": {
+            "type": "string",
+            "description": "Status filter (view=work-items)"
+          }
+        },
+        "required": [
+          "view"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "integration.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "acs_submit_mission",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Short title"
+          },
+          "intent": {
+            "type": "string",
+            "description": "What should happen and why"
+          },
+          "target": {
+            "type": "object",
+            "description": "ACS target {repo?, cwd?, files?, services?}"
+          },
+          "requestedActions": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "risk": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ]
+          },
+          "correlationId": {
+            "type": "string",
+            "description": "Caller correlation id"
+          }
+        },
+        "required": [
+          "title",
+          "intent",
+          "target"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "integration.write"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "create_directory",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute directory path"
+          },
+          "recursive": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.write"
+      ],
+      "requiresApproval": true
+    },
+    {
+      "name": "edit_block",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute file"
+          },
+          "old": {
+            "type": "string",
+            "description": "Text to replace, exactly once"
+          },
+          "new": {
+            "type": "string",
+            "description": "Replacement text"
+          }
+        },
+        "required": [
+          "path",
+          "old",
+          "new"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.write"
+      ],
+      "requiresApproval": true
+    },
+    {
+      "name": "get_config",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "scopes": [
+        "integration.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "get_file_info",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "get_more_search_results",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "searchId": {
+            "type": "string",
+            "description": "Search id returned by start_search"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "searchId"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "git_add",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Absolute git working tree"
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 50
+          }
+        },
+        "required": [
+          "repo",
+          "paths"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "git.write"
+      ],
+      "requiresApproval": true
+    },
+    {
+      "name": "git_branch",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Absolute git working tree"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "git.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "git_commit",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Absolute git working tree"
+          },
+          "message": {
+            "type": "string",
+            "description": "Commit message"
+          }
+        },
+        "required": [
+          "repo",
+          "message"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "git.write"
+      ],
+      "requiresApproval": true
+    },
+    {
+      "name": "git_diff",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Absolute git working tree"
+          },
+          "staged": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string",
+            "description": "Relative path"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "git.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "git_fetch",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Absolute git working tree"
+          },
+          "remote": {
+            "type": "string",
+            "description": "Configured remote name"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "git.network"
+      ],
+      "requiresApproval": true
+    },
+    {
+      "name": "git_log",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Absolute git working tree"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "git.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "git_push",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Absolute git working tree"
+          },
+          "expectedHead": {
+            "type": "string",
+            "description": "Full 40-hex commit the approver saw; must equal HEAD"
+          },
+          "remote": {
+            "type": "string",
+            "description": "Configured remote name"
+          },
+          "branch": {
+            "type": "string",
+            "description": "Must match the current branch"
+          }
+        },
+        "required": [
+          "repo",
+          "expectedHead"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "git.network"
+      ],
+      "requiresApproval": true
+    },
+    {
+      "name": "git_show",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Absolute git working tree"
+          },
+          "rev": {
+            "type": "string",
+            "description": "HEAD or 40-hex sha"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "git.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "git_status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Absolute git working tree"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "git.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "jc_doctor",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "scopes": [
+        "integration.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "jc_status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "scopes": [
+        "integration.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "kill_process",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id"
+          },
+          "pid": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": false
+      },
+      "scopes": [
+        "process.exec"
+      ],
+      "requiresApproval": true
+    },
+    {
+      "name": "list_directory",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute directory path"
+          },
+          "depth": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5,
+            "description": "Recursion depth (default 1)"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "list_processes",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "scopes": [
+        "process.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "list_searches",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "looptrace_verify",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path to a .jsonl trace"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "mission_router_list",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "move_file",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "description": "Absolute source"
+          },
+          "to": {
+            "type": "string",
+            "description": "Absolute destination"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.write"
+      ],
+      "requiresApproval": true
+    },
+    {
+      "name": "ping",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "scopes": [
+        "integration.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "privileged_exec",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "cwd": {
+            "type": "string",
+            "description": "Absolute working directory (default /)"
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 600000
+          },
+          "stdin": {
+            "type": "string",
+            "description": "Optional stdin (<= 64 KiB)"
+          }
+        },
+        "required": [
+          "argv"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "process.privileged"
+      ],
+      "requiresApproval": true
+    },
+    {
+      "name": "read_file",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute file path"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Start line (0-based); negative reads the last N lines"
+          },
+          "length": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000,
+            "description": "Max lines to return"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "read_multiple_files",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 20
+          }
+        },
+        "required": [
+          "paths"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "read_process_output",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "sessionId"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "process.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "start_process",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 32
+          },
+          "cwd": {
+            "type": "string",
+            "description": "Absolute working directory"
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 600000
+          }
+        },
+        "required": [
+          "argv",
+          "cwd"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "process.exec"
+      ],
+      "requiresApproval": true
+    },
+    {
+      "name": "start_search",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute directory to search"
+          },
+          "pattern": {
+            "type": "string",
+            "description": "Literal text, or a regular expression when regex is true"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "filename",
+              "content"
+            ]
+          },
+          "regex": {
+            "type": "boolean"
+          },
+          "caseSensitive": {
+            "type": "boolean"
+          },
+          "fileFilter": {
+            "type": "string",
+            "description": "Basename glob, for example *.ts"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "path",
+          "pattern",
+          "mode"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "stop_search",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "searchId": {
+            "type": "string",
+            "description": "Search id returned by start_search"
+          }
+        },
+        "required": [
+          "searchId"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "swarm_read",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "view": {
+            "type": "string",
+            "enum": [
+              "health",
+              "mission-control",
+              "runs",
+              "status",
+              "task"
+            ]
+          },
+          "taskId": {
+            "type": "string",
+            "description": "codex-swarm task id"
+          }
+        },
+        "required": [
+          "view"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "integration.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "visualizer_read",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "view": {
+            "type": "string",
+            "enum": [
+              "system-status",
+              "runtimes",
+              "executions",
+              "approvals",
+              "alerts",
+              "agents"
+            ]
+          }
+        },
+        "required": [
+          "view"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "integration.read"
+      ],
+      "requiresApproval": false
+    },
+    {
+      "name": "write_file",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute file path"
+          },
+          "content": {
+            "type": "string",
+            "description": "File contents, at most 256 KiB"
+          },
+          "overwrite": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.write"
+      ],
+      "requiresApproval": true
+    }
+  ]
+}

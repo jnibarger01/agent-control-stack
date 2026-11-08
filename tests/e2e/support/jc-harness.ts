@@ -5,8 +5,8 @@
  *   ACS gateway          apps/gateway (buildGateway, in-process, real SQLite, acs.jc.v1 signing)
  *   OAuth/ACS edge       apps/dc-mcp-gateway/server.js  (JC_ENABLED=1)
  *   jc stdio bridge      apps/dc-mcp-gateway/bridge.js  (BRIDGE_PROFILE=jace-commander)
- *   Jace Commander       vendor/desktop-commander/dist/jace-commander/cli.js serve
- *   jace-commander CLI   vendor/desktop-commander/dist/jace-commander/cli.js (MCP client of /jc/mcp)
+ *   Jace Commander       apps/jace-commander/dist/cli.js serve (native runtime; no Desktop Commander)
+ *   jace-commander CLI   apps/jace-commander/dist/cli.js (MCP client of /jc/mcp)
  */
 import { spawn } from "node:child_process";
 import { createHmac, generateKeyPairSync, randomBytes } from "node:crypto";
@@ -16,7 +16,7 @@ import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { buildGateway, type GatewayCredential } from "../../../apps/gateway/src/server.js";
 import {
-  DC_ROOT,
+  REPO_ROOT,
   EXECUTION_TOKEN,
   OAUTH_SIGNING_KEY,
   freePort,
@@ -25,12 +25,16 @@ import {
   type ServiceProcess
 } from "./chain-harness.js";
 
-export const JC_CLI = join(DC_ROOT, "dist/jace-commander/cli.js");
+export const JC_ROOT = join(REPO_ROOT, "apps/jace-commander");
+export const JC_CLI = join(JC_ROOT, "dist/cli.js");
 export const JC_RUNTIME_ID = "jc-e2e-runtime";
 const JC_KEY_ID = "e2e-jc-key";
 const OPERATOR_TOKEN = "e2e-jc-operator-token";
 const JC_BRIDGE_TOKEN = "e2e-jc-bridge-token";
 const DC_BRIDGE_TOKEN = "e2e-jc-unused-dc-bridge-token";
+/** JC's current-authority credential: acs:read ONLY (no write, approve or worker scope). */
+export const JC_AUTHORITY_READ_TOKEN = "e2e-jc-authority-read-only-token";
+export const JC_BRIDGE_WORKER_TOKEN = JC_BRIDGE_TOKEN;
 
 export function requireJaceCommanderBuild(): void {
   if (!existsSync(JC_CLI)) {
@@ -72,6 +76,15 @@ export async function startJcAcs(box: Sandbox, allowedRoots: string[]): Promise<
       actorId: "acs-jc-bridge",
       roles: ["service", "worker"],
       scopes: ["acs:read", "acs:write", "acs:worker"]
+    },
+    {
+      // Least privilege: what JC's live authority check needs, and nothing more.
+      id: "jc-authority-reader",
+      token: JC_AUTHORITY_READ_TOKEN,
+      actor: "agent",
+      actorId: "acs-jc-authority-reader",
+      roles: ["service"],
+      scopes: ["acs:read"]
     },
     {
       id: "dc-bridge",
@@ -121,8 +134,9 @@ export async function startJcBridge(
   box: Sandbox,
   acs: JcAcsHandle,
   fsRoots: string[],
-  options: { jcDir?: string } = {}
+  options: { jcDir?: string; authorityToken?: string | null } = {}
 ): Promise<ServiceProcess> {
+  const authorityToken = options.authorityToken === undefined ? JC_AUTHORITY_READ_TOKEN : options.authorityToken;
   const port = await freePort();
   return startNodeService(
     "bridge.js",
@@ -133,6 +147,12 @@ export async function startJcBridge(
       ACS_MANAGED_MODE: "1",
       DC_CMD: process.execPath,
       ...(options.jcDir ? { JC_DC_DIR: options.jcDir } : {}),
+      // Run the chain against an installed release instead of the source tree
+      // (apps/jace-commander/deploy/install-user-release.sh -> $PREFIX/current).
+      // ...with the production pin: the bridge refuses anything but a read-only installed release.
+      ...(!options.jcDir && process.env.JC_E2E_RUNTIME_DIR
+        ? { JC_RUNTIME_DIR: process.env.JC_E2E_RUNTIME_DIR, JC_REQUIRE_INSTALLED_RELEASE: "1" }
+        : {}),
       JC_ACS_PUBLIC_KEY: acs.publicKey,
       JC_ACS_KEY_ID: JC_KEY_ID,
       JC_RUNTIME_ID,
@@ -146,7 +166,10 @@ export async function startJcBridge(
       // releases the attempt-bound execution-admission permit. Without these the
       // permit is held for the full lease and the executor serializes forever.
       ACS_GATEWAY_URL: acs.url,
-      ACS_WORKER_TOKEN: JC_BRIDGE_TOKEN
+      ACS_WORKER_TOKEN: JC_BRIDGE_TOKEN,
+      // JC's live authority check uses its own acs:read-only credential, never
+      // the worker token above (apps/jace-commander/src/current-authority.ts).
+      ...(authorityToken ? { JC_ACS_AUTHORITY_TOKEN: authorityToken } : {})
     },
     port,
     "/healthz"
@@ -187,13 +210,13 @@ export async function startJcEdge(
 }
 
 /** A /jc/mcp-audience access token exactly as the edge's authorization server mints them. */
-export function jcAccessToken(origin: string, audience = `${origin}/jc/mcp`): string {
+export function jcAccessToken(origin: string, audience = `${origin}/jc/mcp`, sub = "jacen"): string {
   const now = Math.floor(Date.now() / 1000);
   const b64u = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
   const header = b64u({ alg: "HS256", typ: "JWT" });
   const payload = b64u({
     iss: `${origin}/jc`,
-    sub: "jacen",
+    sub,
     client_id: "jc-e2e-cli",
     aud: audience,
     scope: "mcp",

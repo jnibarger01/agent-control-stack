@@ -295,6 +295,14 @@ export const JACE_COMMANDER_APPROVAL_SUMMARY_BUILDERS: Readonly<Record<string, S
   },
   write_file: (args) => {
     const content = str(args.content) ?? "";
+    if (args.encoding === "base64") {
+      const decoded = Buffer.from(content, "base64");
+      return {
+        path: pathText(args.path), encoding: "base64", bytes: decoded.byteLength,
+        sha256: createHash("sha256").update(decoded).digest("hex"),
+        preview: "[binary content omitted]", overwrite: args.overwrite === true
+      };
+    }
     return {
       path: pathText(args.path),
       bytes: Buffer.byteLength(content, "utf8"),
@@ -321,6 +329,29 @@ export const JACE_COMMANDER_APPROVAL_SUMMARY_BUILDERS: Readonly<Record<string, S
       timeoutMs: typeof args.timeoutMs === "number" ? args.timeoutMs : "default"
     };
   },
+  run_command: (args) => ({
+    commandPreview: preview(str(args.command) ?? ""),
+    commandSha256: sha256Hex(str(args.command) ?? ""),
+    cwd: pathText(args.cwd),
+    shell: pathText(args.shell) ?? "/bin/bash",
+    timeoutMs: args.timeoutMs ?? 30_000,
+    pty: args.pty === true,
+    // Caller-supplied values stay in the signed invocation, never in an audit preview.
+    environmentNames: Object.keys((args.env ?? {}) as Record<string, unknown>).sort()
+  }),
+  start_terminal_session: (args) => ({
+    cwd: pathText(args.cwd),
+    shell: pathText(args.shell) ?? "/bin/bash",
+    timeoutMs: args.timeoutMs ?? 300_000,
+    environmentNames: Object.keys((args.env ?? {}) as Record<string, unknown>).sort()
+  }),
+  interact_with_process: (args) => ({
+    sessionId: str(args.sessionId),
+    inputBytes: Buffer.byteLength(str(args.input) ?? "", "utf8"),
+    inputSha256: sha256Hex(str(args.input) ?? ""),
+    inputPreview: preview(str(args.input) ?? "")
+  }),
+  delete_file: (args) => ({ path: pathText(args.path), recursive: args.recursive === true }),
   kill_process: (args) => ({
     ...(str(args.sessionId) !== undefined ? { sessionId: str(args.sessionId) } : {}),
     ...(typeof args.pid === "number" ? { pid: args.pid } : {}),

@@ -24,7 +24,7 @@ import {
   injectRuntimeBootstrap,
   issueRuntimeBootstrap
 } from "./managed.js";
-import { dcBridgeReady } from "./readiness.js";
+import { dcBridgeReady, jcServiceNotReadyReasons } from "./readiness.js";
 
 const ACS_CAPABILITY_META_KEY = "capability";
 const ACS_GUARD_META_KEY = "acsCapability";
@@ -70,8 +70,8 @@ if (JC && process.env.JC_PRESET === "local" && process.env.JC_ALLOW_SAME_UID_CHI
 // Default: this monorepo's own Desktop Commander build (vendor/desktop-commander,
 // next to apps/dc-mcp-gateway), never a legacy sibling checkout. A bridge left
 // on a stale checkout advertised a stale (or empty) Jace Commander tool list.
-const MONOREPO_DC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../vendor/desktop-commander");
-const JC_DIR = path.resolve(process.env.JC_DC_DIR || MONOREPO_DC_DIR);
+const MONOREPO_JC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../jace-commander");
+const JC_DIR = path.resolve(process.env.JC_RUNTIME_DIR || process.env.JC_DC_DIR || MONOREPO_JC_DIR);
 // Managed mode must launch the runtime that ACS actually attested. There is no
 // default Desktop Commander entrypoint: the previous fallback pointed at a
 // hardcoded developer checkout under /home/jacen, so a packaged deployment that
@@ -80,13 +80,72 @@ const JC_DIR = path.resolve(process.env.JC_DC_DIR || MONOREPO_DC_DIR);
 const DC_ARGS = process.env.DC_ARGS
   ? process.env.DC_ARGS.split(" ")
   : JC
-    ? [path.join(JC_DIR, "dist/jace-commander/cli.js"), "serve"]
+    ? [path.join(JC_DIR, "dist/cli.js"), "serve"]
     : (() => {
         console.error(
           "bridge: DC_ARGS is required when JC_DC_DIR is not in use; refusing to guess a Desktop Commander entrypoint"
         );
         process.exit(1);
       })();
+// Installed-release identity of the JC runtime (apps/jace-commander/deploy/
+// install-user-release.sh writes RELEASE.json and makes the release read-only).
+function jcInstalledRelease(dir) {
+  try {
+    const real = fs.realpathSync(dir);
+    const release = JSON.parse(fs.readFileSync(path.join(real, "RELEASE.json"), "utf8"));
+    const pkg = JSON.parse(fs.readFileSync(path.join(real, "package.json"), "utf8"));
+    const writable = (target) => {
+      try {
+        fs.accessSync(target, fs.constants.W_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const readOnly = ![real, path.join(real, "dist"), path.join(real, "dist", "cli.js"), path.join(real, "package.json")].some(writable);
+    return {
+      realDir: real,
+      packageName: typeof pkg.name === "string" ? pkg.name : null,
+      version: typeof release.version === "string" ? release.version : null,
+      commit: typeof release.commit === "string" ? release.commit : null,
+      readOnly
+    };
+  } catch {
+    return null;
+  }
+}
+const JC_RELEASE = JC ? jcInstalledRelease(JC_DIR) : null;
+// Production pin: JC_REQUIRE_INSTALLED_RELEASE=1 refuses to start unless the
+// runtime is an installed, read-only release outside this development checkout,
+// selected explicitly through JC_RUNTIME_DIR. No fallback to the checkout.
+const JC_REQUIRE_RELEASE = JC && process.env.JC_REQUIRE_INSTALLED_RELEASE === "1";
+if (JC_REQUIRE_RELEASE) {
+  const checkout = fs.realpathSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../.."));
+  const reasons = [];
+  if (process.env.DC_ARGS) reasons.push("DC_ARGS overrides the runtime entrypoint");
+  if (!process.env.JC_RUNTIME_DIR) reasons.push("JC_RUNTIME_DIR is not set");
+  if (!JC_RELEASE) reasons.push(`${JC_DIR} is not an installed release (no RELEASE.json)`);
+  else {
+    if (JC_RELEASE.packageName !== "@agent-control-stack/jace-commander") reasons.push(`unexpected package ${JC_RELEASE.packageName}`);
+    if (!JC_RELEASE.readOnly) reasons.push(`${JC_RELEASE.realDir} is writable`);
+    if (JC_RELEASE.realDir === checkout || JC_RELEASE.realDir.startsWith(checkout + path.sep)) {
+      reasons.push(`${JC_RELEASE.realDir} is inside the development checkout ${checkout}`);
+    }
+  }
+  if (reasons.length) {
+    console.error(`bridge: JC_REQUIRE_INSTALLED_RELEASE=1 but the runtime is not a pinned release (${reasons.join("; ")}); refusing to start`);
+    process.exit(1);
+  }
+}
+// A managed JC bridge must not advertise ACS authority over a child that
+// selects a different authorizer through its environment or command line.
+if (JC && MANAGED && (
+  (process.env.JC_PRESET !== undefined && process.env.JC_PRESET !== "managed") ||
+  DC_ARGS.some((arg, index) => arg === "--preset" && DC_ARGS[index + 1] !== "managed")
+)) {
+  console.error("bridge: managed jace-commander refuses a non-managed child preset; fix JC_PRESET or DC_ARGS");
+  process.exit(1);
+}
 if (MANAGED && DC_ARGS.includes("--standalone")) {
   console.error("bridge: managed mode refuses a --standalone executor; fix DC_ARGS");
   process.exit(1);
@@ -106,6 +165,10 @@ const EXECUTION_TOKEN = process.env.DC_GATEWAY_EXECUTION_TOKEN || "";
 // ADR 0026: under the local preset nothing but the authenticated gateway may reach the
 // child (no ACS capability stands behind read:allow), so gateway attestation is mandatory.
 const JC_LOCAL = JC && process.env.JC_PRESET === "local";
+if (JC && MANAGED && !EXECUTION_TOKEN) {
+  console.error("bridge: managed jace-commander requires DC_GATEWAY_EXECUTION_TOKEN; refusing to start");
+  process.exit(1);
+}
 if (JC_LOCAL && !EXECUTION_TOKEN) {
   console.error("bridge: JC_PRESET=local requires DC_GATEWAY_EXECUTION_TOKEN so gateway attestation can be enforced; refusing to start");
   process.exit(1);
@@ -126,8 +189,20 @@ const JC_CHILD_ENV_KEYS = [
   "JC_RUNTIME_ID",
   "JC_STATE_DIR",
   "JC_PUBLIC_MCP_URL",
+  "JC_SHELLS",
+  // Workload isolation (apps/jace-commander/src/sandbox.ts). JC_ALLOW_UNISOLATED_WORKLOADS
+  // is deliberately NOT forwarded: a bridged child always isolates its workloads.
+  "JC_WORKLOAD_ISOLATION",
+  "JC_WORKLOAD_NETWORK",
+  "JC_SANDBOX_HIDE",
+  "JC_SANDBOX_WRITABLE",
+  "JC_BWRAP_PATH",
+  "XDG_RUNTIME_DIR",
   "JC_ACS_URL",
   "JC_ACS_TOKEN",
+  // Read-scoped credential JC uses to confirm current ACS authority before every non-read call.
+  "JC_ACS_AUTHORITY_TOKEN",
+  "JC_ACS_AUTHORITY_TOKEN_FILE",
   "JC_SWARM_URL",
   "JC_SWARM_TOKEN",
   "JC_VISUALIZER_URL",
@@ -186,9 +261,13 @@ const CHILD_ENV = {
     ? { DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: process.env.DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR }
     : {}),
   // Only the bridge, which force-overwrites _meta.gateway, may vouch for it (local preset requires attestation).
-  ...(JC && process.env.JC_PRESET === "local" ? { JC_GATEWAY_META_TRUSTED: "1" } : {}),
+  ...(JC ? { JC_GATEWAY_META_TRUSTED: "1" } : {}),
   ...(JC
     ? Object.fromEntries(JC_CHILD_ENV_KEYS.filter((key) => process.env[key]).map((key) => [key, process.env[key]]))
+    : {}),
+  // The bridge's own code is control plane: workloads see it read-only.
+  ...(JC
+    ? { JC_SANDBOX_READONLY: [path.dirname(fileURLToPath(import.meta.url)), ...(process.env.JC_SANDBOX_READONLY || "").split(":").filter(Boolean)].join(":") }
     : {}),
   ...(!JC && MANAGED && ACS_DC_PUBLIC_KEY && ACS_DC_KEY_ID
     ? {
@@ -263,7 +342,9 @@ function isInitialize(msg) {
 
 function verifyAttestation(value, agentHeader) {
   try {
-    const [body, sig] = String(value).split(".");
+    const parts = String(value).split(".");
+    if (JC && MANAGED && (parts.length !== 2 || !parts.every((part) => /^[A-Za-z0-9_-]+$/.test(part)))) return null;
+    const [body, sig] = parts;
     if (!body || !sig) return null;
     const expect = createHmac("sha256", EXECUTION_TOKEN).update(body).digest("base64url");
     const a = Buffer.from(sig);
@@ -271,6 +352,12 @@ function verifyAttestation(value, agentHeader) {
     if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
     const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
     const t = Math.floor(Date.now() / 1000);
+    if (JC && MANAGED) {
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+      if (typeof payload.sub !== "string" || !payload.sub.trim() || payload.sub !== agentHeader) return null;
+      if (!Number.isSafeInteger(payload.iat) || !Number.isSafeInteger(payload.exp)) return null;
+      if (payload.iat > t || payload.exp <= t || payload.exp <= payload.iat || payload.exp - payload.iat > 60) return null;
+    }
     if (typeof payload.exp !== "number" || payload.exp < t) return null;
     if (typeof payload.iat === "number" && payload.exp - payload.iat > 60) return null;
     if (agentHeader && payload.sub !== agentHeader) return null;
@@ -1070,13 +1157,26 @@ function breakGlassStatus(file) {
     detail: `break-glass marker held by pid ${status.pid}`
   };
 }
+// Mirrors apps/jace-commander/src/current-authority.ts authorityToken(): the
+// dedicated credential only. JC_ACS_TOKEN (model-facing acs_read) and
+// ACS_WORKER_TOKEN (result submission) never count.
+function jcAuthorityCredentialConfigured() {
+  if (process.env.JC_ACS_AUTHORITY_TOKEN?.trim()) return true;
+  const file = process.env.JC_ACS_AUTHORITY_TOKEN_FILE;
+  if (!file) return false;
+  try {
+    return fs.readFileSync(file, "utf8").trim().length > 0;
+  } catch {
+    return false;
+  }
+}
 function computeJcAuthority() {
   const initialized = !!(pair && pair.initializedOnce);
   return {
     variant: "jc",
     configuredExecutionMode: MANAGED ? "managed" : "unmanaged_gateway",
-    // The child is always started as `serve` (managed); there is no standalone path.
-    childMode: "managed",
+    // Managed bridges reject alternate child authorizers at startup.
+    childMode: JC_LOCAL ? "local" : "managed",
     bridge: {
       hasUpstreamPair: !!pair,
       upstreamStarted: !!pair?.upstreamStarted,
@@ -1086,10 +1186,18 @@ function computeJcAuthority() {
     },
     // Which build the child runs (paths only, no secrets): lets `jace-commander
     // doctor` and operators spot a bridge left on a legacy checkout.
-    runtime: { dir: JC_DIR, entrypoint: DC_ARGS[0], monorepoDefault: JC_DIR === MONOREPO_DC_DIR },
+    runtime: {
+      dir: JC_DIR,
+      entrypoint: DC_ARGS[0],
+      monorepoDefault: JC_DIR === MONOREPO_JC_DIR,
+      releaseRequired: JC_REQUIRE_RELEASE,
+      installedRelease: JC_RELEASE
+    },
     enforcement: {
       executionTokenConfigured: !!EXECUTION_TOKEN,
-      capabilityVerificationConfigured: !!(process.env.JC_ACS_PUBLIC_KEY && process.env.JC_ACS_KEY_ID)
+      capabilityVerificationConfigured: !!(process.env.JC_ACS_PUBLIC_KEY && process.env.JC_ACS_KEY_ID),
+      // Without the read-scoped authority credential JC refuses every non-read call.
+      currentAuthorityCredentialConfigured: jcAuthorityCredentialConfigured()
     },
     authoritative: !!pair && initialized
   };
@@ -1152,14 +1260,18 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
   if (path === "/ready" && JC) {
-    const ready = !!pair?.upstreamStarted;
+    // Ready only when governed calls can actually execute: a started child is
+    // not enough (without the authority credential every mutation is refused).
+    const notReady = jcServiceNotReadyReasons(computeJcAuthority());
+    const ready = notReady.length === 0;
     res.writeHead(ready ? 200 : 503, { "Content-Type": "application/json" });
     res.end(
       JSON.stringify({
         ready,
         variant: "jc",
         hasUpstreamPair: !!pair,
-        upstreamStarted: !!pair?.upstreamStarted
+        upstreamStarted: !!pair?.upstreamStarted,
+        ...(ready ? {} : { notReady })
       })
     );
     return;
@@ -1203,6 +1315,12 @@ const httpServer = http.createServer(async (req, res) => {
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "not_found" }));
     return;
+  }
+
+  // Authenticate managed JC traffic before body parsing, session lookup, or
+  // result reporting. Unauthenticated capability metadata has no authority.
+  if (JC && MANAGED && !verifyAttestation(req.headers["x-dc-attestation"] || "", req.headers["x-dc-agent"])) {
+    return sendJsonRpcError(res, 401, -32001, "gateway attestation required");
   }
 
   if (JC_LOCAL && !verifyAttestation(req.headers["x-dc-attestation"] || "", req.headers["x-dc-agent"])) {

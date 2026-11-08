@@ -36,3 +36,39 @@ export function dcBridgeReady(authority, { managed }) {
     authority.bridge?.upstreamStarted === true
   );
 }
+
+/**
+ * Why a managed JC bridge cannot execute governed calls right now (empty: it can).
+ * The bridge's own /ready uses this; it does not require a client to have
+ * initialized yet (jcBridgeReady, used by the edge, additionally does).
+ */
+export function jcServiceNotReadyReasons(authority) {
+  if (!authority || typeof authority !== 'object' || authority.variant !== 'jc') return ['not a Jace Commander bridge'];
+  const reasons = [];
+  if (authority.configuredExecutionMode !== 'managed' || authority.childMode !== 'managed') reasons.push('not in managed mode');
+  if (authority.bridge?.hasUpstreamPair !== true || authority.bridge?.upstreamStarted !== true) reasons.push('jace-commander child not started');
+  const enforcement = authority.enforcement ?? {};
+  if (enforcement.executionTokenConfigured !== true) reasons.push('gateway execution token not configured');
+  if (enforcement.capabilityVerificationConfigured !== true) reasons.push('ACS capability verification key not configured');
+  if (enforcement.currentAuthorityCredentialConfigured !== true) reasons.push('dedicated ACS authority credential (JC_ACS_AUTHORITY_TOKEN_FILE) not configured');
+  const runtime = authority.runtime ?? {};
+  if (runtime.releaseRequired === true && runtime.installedRelease?.readOnly !== true) reasons.push('pinned runtime is not a read-only installed release');
+  return reasons;
+}
+
+/** Managed JC readiness uses explicit, non-secret authority assertions only. */
+export function jcBridgeReady(authority) {
+  return !!(
+    authority && typeof authority === 'object' &&
+    authority.variant === 'jc' &&
+    authority.configuredExecutionMode === 'managed' &&
+    authority.childMode === 'managed' &&
+    authority.authoritative === true &&
+    authority.bridge?.hasUpstreamPair === true &&
+    authority.bridge?.upstreamStarted === true &&
+    authority.bridge?.initialized === true &&
+    authority.enforcement?.executionTokenConfigured === true &&
+    authority.enforcement?.capabilityVerificationConfigured === true &&
+    authority.enforcement?.currentAuthorityCredentialConfigured === true
+  );
+}

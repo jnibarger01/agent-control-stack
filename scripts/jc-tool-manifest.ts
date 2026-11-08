@@ -6,10 +6,9 @@
  *   tsx scripts/jc-tool-manifest.ts           # rewrite the generated file
  *
  * Generated (byte-for-byte):
- *   vendor/desktop-commander/src/jace-commander/manifest.generated.ts
+ *   apps/jace-commander/src/manifest.generated.ts
  *
- * Jace Commander cannot import the workspace package (vendor/desktop-commander
- * is a subtree built outside the npm workspace graph), so its tools/list,
+ * Jace Commander embeds the contract so it can build independently, so its tools/list,
  * policy table and CLI verb table are all derived from this one generated
  * file instead of hand-maintained arrays.
  */
@@ -18,7 +17,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { jcPortableManifest } from "../packages/jc-tool-manifest/src/index.js";
 
-export const JC_GENERATED_MANIFEST_PATH = "vendor/desktop-commander/src/jace-commander/manifest.generated.ts";
+export const JC_GENERATED_MANIFEST_PATH = "apps/jace-commander/src/manifest.generated.ts";
 
 export function renderJcGeneratedManifest(): string {
   const manifest = jcPortableManifest();
@@ -60,7 +59,9 @@ if (isMain) {
   const actual = await readFile(target, "utf8").catch(() => undefined);
   if (actual !== expected) {
     if (process.argv.includes("--check")) {
-      console.error(`${JC_GENERATED_MANIFEST_PATH} is out of date with jc-tool-manifest; run npm run jc-contracts:generate`);
+      console.error(
+        `${JC_GENERATED_MANIFEST_PATH} is out of date with jc-tool-manifest; run npm run jc-contracts:generate`
+      );
       process.exit(1);
     }
     await writeFile(target, expected);
