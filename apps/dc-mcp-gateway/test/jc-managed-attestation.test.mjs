@@ -40,6 +40,22 @@ async function fixture(t, overrides = {}) {
   return { base, post, headers, state };
 }
 
+test('managed JC forwards only approved GUI activation variables to the child', async (t) => {
+  const f = await fixture(t, {
+    JC_GUI_ENABLED: '1',
+    JC_GUI_DISPLAY: ':81',
+    JC_GUI_XAUTHORITY: '/tmp/isolated-xauth',
+    JC_GUI_UNAPPROVED: 'must-not-forward',
+  });
+  const response = await f.post(init);
+  assert.equal(response.status, 200);
+  const child = JSON.parse(fs.readFileSync(path.join(f.state, 'argv.json'), 'utf8'));
+  for (const key of ['JC_GUI_ENABLED', 'JC_GUI_DISPLAY', 'JC_GUI_XAUTHORITY']) {
+    assert.ok(child.env.includes(key), key);
+  }
+  assert.equal(child.env.includes('JC_GUI_UNAPPROVED'), false);
+});
+
 test('managed JC refuses startup without an execution token', () => {
   const run = spawnSync(process.execPath, [`${root}bridge.js`], { env: baseEnv, encoding: 'utf8', timeout: 3000 });
   assert.equal(run.status, 1, run.stderr);

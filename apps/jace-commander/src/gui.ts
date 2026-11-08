@@ -53,7 +53,8 @@ function context(options: GuiOptions) {
       HOME: "/nonexistent",
       DISPLAY: display,
       ...(auth ? { XAUTHORITY: auth } : {}),
-      LANG: "C"
+      LANG: "C.UTF-8",
+      LC_ALL: "C.UTF-8"
     } as NodeJS.ProcessEnv,
     runner: options.runner ?? runFile
   };
@@ -140,7 +141,14 @@ export async function executeGuiAction(action: unknown, options: GuiOptions = {}
   try {
     await ctx.runner("/usr/bin/xdotool", args, {
       env: ctx.env,
-      timeout: 7000,
+      // 12ms between keystrokes can take ~25s for the allowed 2048 characters.
+      // Bound the timeout without truncating valid input mid-action.
+      timeout:
+        action && typeof action === "object" &&
+        (action as { action?: unknown }).action === "type" &&
+        typeof (action as { text?: unknown }).text === "string"
+          ? Math.min(40_000, 5000 + (action as { text: string }).text.length * 15)
+          : 7000,
       maxBuffer: 64 * 1024,
       shell: false
     });
