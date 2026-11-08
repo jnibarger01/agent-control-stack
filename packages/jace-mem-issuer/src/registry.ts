@@ -1,7 +1,16 @@
+import { createHash, randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { ControlStackError, applyControlPlaneMigrations, createId } from "@agent-control-stack/shared";
 import { executionPlanApprovalRequestHash } from "@agent-control-stack/work-items";
-import { jaceMemNonceHash, jaceMemSubjectHash, validateJaceMemSubject, type JaceMemSubject } from "./issuer.js";
+import {
+  JM_RUNTIME_BOOTSTRAP_SCHEMA_VERSION,
+  jaceMemNonceHash,
+  jaceMemSubjectHash,
+  validateJaceMemRuntimeIdentity,
+  validateJaceMemSubject,
+  type JaceMemRuntimeBootstrap,
+  type JaceMemSubject
+} from "./issuer.js";
 import { jmToolContract } from "./manifest.js";
 
 /** The approver identity ACS records for admin-mode auto-approval (policy-gate ACS_ADMIN_APPROVER). */
@@ -9,6 +18,10 @@ const ACS_ADMIN_APPROVER = "acs:admin";
 const HASH = /^[a-f0-9]{64}$/u;
 
 export interface JaceMemIssuanceBinding {
+  /** Required by the gateway; omitted only by the standalone issuer/vector path. */
+  readonly launchId?: string;
+  /** Required with launchId: ACS's own verification-config fingerprint, which the launch must have attested. */
+  readonly configFingerprint?: string;
   readonly runtimeId: string;
   readonly toolName: string;
   readonly leaseId: string;
@@ -53,6 +66,136 @@ export class SqliteJaceMemIssuanceRegistry {
     this.db.close();
   }
 
+  /** Trusted boot API only. Existing launch IDs can never acquire a different identity. */
+  registerLaunch(launchId: string, runtimeId: string, subject: JaceMemSubject): void {
+    if (![launchId, runtimeId].every((id) => /^[A-Za-z0-9._:-]{1,128}$/u.test(id))) {
+      throw new ControlStackError("jace_mem_launch_invalid", "launch or runtime ID is invalid");
+    }
+    const hash = jaceMemSubjectHash(validateJaceMemSubject(subject));
+    this.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO jace_mem_launches (launch_id, runtime_id, subject_hash, registered_at)
+        VALUES (?, ?, ?, ?) ON CONFLICT(launch_id) DO NOTHING`
+        )
+        .run(launchId, runtimeId, hash, new Date().toISOString());
+      this.assertLaunch(launchId, runtimeId, hash);
+    });
+  }
+
+  /**
+   * Starts a runtime identity exchange for a registered launch: stores only the hash of a fresh 32-byte
+   * challenge (single use, at most 120 s) and returns the exact bootstrap object the bridge must deliver to the
+   * Jace-Mem process in MCP initialize.
+   */
+  issueLaunchChallenge(
+    launchId: string,
+    subject: JaceMemSubject,
+    configFingerprint: string,
+    now = new Date(),
+    ttlMs = 60_000
+  ): JaceMemRuntimeBootstrap & { expiresAt: string } {
+    if (!Number.isInteger(ttlMs) || ttlMs <= 0 || ttlMs > 120_000) {
+      throw new ControlStackError("jace_mem_runtime_challenge_invalid", "challenge lifetime must be 1..120000 ms");
+    }
+    if (!HASH.test(configFingerprint))
+      throw new ControlStackError("jace_mem_runtime_invalid", "config fingerprint is invalid");
+    const validSubject = validateJaceMemSubject(subject);
+    const challenge = randomBytes(32).toString("base64url");
+    const issuedAt = now.toISOString();
+    const expiresAt = new Date(now.getTime() + ttlMs).toISOString();
+    const runtimeId = this.transaction(() => {
+      const row = this.db
+        .prepare("SELECT runtime_id, subject_hash FROM jace_mem_launches WHERE launch_id = ?")
+        .get(launchId) as { runtime_id: string; subject_hash: string } | undefined;
+      if (!row) throw new ControlStackError("jace_mem_launch_unknown", "trusted launch is not registered");
+      if (row.subject_hash !== jaceMemSubjectHash(validSubject)) {
+        throw new ControlStackError("jace_mem_launch_binding_mismatch", "launch identity cannot be rebound");
+      }
+      this.db
+        .prepare(
+          "INSERT INTO jace_mem_launch_challenges (challenge_hash, launch_id, issued_at, expires_at) VALUES (?, ?, ?, ?)"
+        )
+        .run(challengeHash(challenge), launchId, issuedAt, expiresAt);
+      return row.runtime_id;
+    });
+    return Object.freeze({
+      schemaVersion: JM_RUNTIME_BOOTSTRAP_SCHEMA_VERSION,
+      runtimeId,
+      launchId,
+      challenge,
+      subject: validSubject,
+      configFingerprint,
+      expiresAt
+    });
+  }
+
+  /**
+   * Completes the exchange with the identity the Jace-Mem process echoed. Every field must equal what ACS
+   * registered and issued: the unexpired, unconsumed challenge for this launch, the launch's runtime and subject,
+   * and ACS's own verification-config fingerprint. The challenge is consumed and an attestation is appended in
+   * one transaction. Any mismatch leaves the launch unattested.
+   */
+  completeLaunchAttestation(
+    launchId: string,
+    echoed: unknown,
+    expectedConfigFingerprint: string,
+    now = new Date()
+  ): { attestationId: string; attestedAt: string } {
+    const identity = validateJaceMemRuntimeIdentity(echoed);
+    const reject = (message: string): never => {
+      throw new ControlStackError("jace_mem_runtime_attestation_rejected", message);
+    };
+    if (identity.launchId !== launchId) reject("runtime identity names another launch");
+    if (identity.configFingerprint !== expectedConfigFingerprint)
+      reject("runtime verification config does not match ACS");
+    const hash = challengeHash(identity.challenge);
+    const attestedAt = now.toISOString();
+    return this.transaction(() => {
+      const launch = this.db
+        .prepare("SELECT runtime_id, subject_hash FROM jace_mem_launches WHERE launch_id = ?")
+        .get(launchId) as { runtime_id: string; subject_hash: string } | undefined;
+      if (!launch) throw new ControlStackError("jace_mem_launch_unknown", "trusted launch is not registered");
+      if (launch.runtime_id !== identity.runtimeId) reject("runtime identity names another runtime");
+      if (launch.subject_hash !== jaceMemSubjectHash(identity.subject))
+        reject("runtime identity names another subject");
+      const challenge = this.db
+        .prepare("SELECT launch_id, expires_at, consumed_at FROM jace_mem_launch_challenges WHERE challenge_hash = ?")
+        .get(hash) as { launch_id: string; expires_at: string; consumed_at: string | null } | undefined;
+      if (!challenge || challenge.launch_id !== launchId) reject("challenge was not issued for this launch");
+      if (challenge!.consumed_at !== null) reject("challenge was already used");
+      if (Date.parse(challenge!.expires_at) <= now.getTime()) reject("challenge expired");
+      this.db
+        .prepare("UPDATE jace_mem_launch_challenges SET consumed_at = ? WHERE challenge_hash = ?")
+        .run(attestedAt, hash);
+      const attestationId = createId("jm_attestation");
+      this.db
+        .prepare(
+          "INSERT INTO jace_mem_launch_attestations (attestation_id, launch_id, challenge_hash, config_fingerprint, attested_at) VALUES (?, ?, ?, ?, ?)"
+        )
+        .run(attestationId, launchId, hash, identity.configFingerprint, attestedAt);
+      return { attestationId, attestedAt };
+    });
+  }
+
+  /** True when the launch has attested with this verification-config fingerprint. */
+  isLaunchAttested(launchId: string, configFingerprint: string): boolean {
+    return (
+      this.db
+        .prepare("SELECT 1 FROM jace_mem_launch_attestations WHERE launch_id = ? AND config_fingerprint = ? LIMIT 1")
+        .get(launchId, configFingerprint) !== undefined
+    );
+  }
+
+  private assertLaunch(launchId: string, runtimeId: string, subjectHash: string): void {
+    const row = this.db
+      .prepare("SELECT runtime_id, subject_hash FROM jace_mem_launches WHERE launch_id = ?")
+      .get(launchId);
+    if (!row || row.runtime_id !== runtimeId || row.subject_hash !== subjectHash) {
+      throw new ControlStackError("jace_mem_launch_binding_mismatch", "launch identity cannot be rebound");
+    }
+  }
+
   recordIssuance(input: JaceMemIssuanceBinding): { requestHash: string; approvalId?: string } {
     const policy = jmToolContract(input.toolName);
     if (!policy) throw new ControlStackError("jace_mem_tool_not_allowlisted", "unknown tool");
@@ -77,6 +220,16 @@ export class SqliteJaceMemIssuanceRegistry {
     }
 
     return this.transaction(() => {
+      if (input.launchId !== undefined) {
+        this.assertLaunch(input.launchId, input.runtimeId, jaceMemSubjectHash(subject));
+        // JM-ACS-02: no capability for a launch whose Jace-Mem process has not proven its identity and config.
+        if (input.configFingerprint === undefined || !this.isLaunchAttested(input.launchId, input.configFingerprint)) {
+          throw new ControlStackError(
+            "jace_mem_launch_unattested",
+            "the launch has not completed runtime identity attestation"
+          );
+        }
+      }
       const lease = this.db
         .prepare(
           `SELECT leases.plan_hash, leases.approval_id, attempts.current_fencing_epoch, attempts.claimed_by_worker_id, heads.current_plan_hash
@@ -218,4 +371,11 @@ export class SqliteJaceMemIssuanceRegistry {
       throw error;
     }
   }
+}
+
+function challengeHash(challenge: string): string {
+  if (!/^[A-Za-z0-9_-]{43}$/u.test(challenge)) {
+    throw new ControlStackError("jace_mem_runtime_challenge_invalid", "bootstrap challenge is invalid");
+  }
+  return createHash("sha256").update(Buffer.from(challenge, "base64url")).digest("hex");
 }

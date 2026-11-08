@@ -22,6 +22,7 @@ import {
   JM_TOOL_NAMES,
   authorizeJaceMemExecution,
   jaceMemInvocationHash,
+  jaceMemRuntimeConfigFingerprint,
   jmToolContract,
   prepareJaceMemCapability,
   signPreparedJaceMemCapability,
@@ -52,6 +53,52 @@ interface VectorFile {
   runtimeId: string;
   positive: Case[];
   negative: Case[];
+  /** JM-ACS-02: initialize `_meta.acsRuntimeBootstrap` objects for `SUBJECT` and the expected Jace-Mem result. */
+  runtimeBootstrap: { name: string; bootstrap: Record<string, unknown>; expect?: string }[];
+}
+
+/** A bootstrap issued by the real launch registry for the vector key, plus mutations naming the Jace-Mem code. */
+function bootstraps(publicKey: string): VectorFile["runtimeBootstrap"] {
+  const directory = mkdtempSync(join(tmpdir(), "jm-vectors-bootstrap-"));
+  const registry = new SqliteJaceMemIssuanceRegistry(join(directory, "control.db"));
+  try {
+    const fingerprint = jaceMemRuntimeConfigFingerprint({ keyId: KEY_ID, publicKey, runtimeId: RUNTIME });
+    registry.registerLaunch("vector-launch", RUNTIME, SUBJECT);
+    const { expiresAt: _expiresAt, ...issued } = registry.issueLaunchChallenge("vector-launch", SUBJECT, fingerprint);
+    const good = structuredClone(issued) as unknown as Record<string, unknown>;
+    const variant = (name: string, expectCode: string, change: (b: Record<string, unknown>) => void) => {
+      const bootstrap = structuredClone(good);
+      change(bootstrap);
+      return { name, bootstrap, expect: expectCode };
+    };
+    return [
+      { name: "bootstrap issued by the ACS launch registry", bootstrap: good },
+      variant("bootstrap for another agent", "bootstrap_subject_mismatch", (b) => {
+        (b.subject as Record<string, string>).agent = "agent-b";
+      }),
+      variant("bootstrap for another invocation", "bootstrap_subject_mismatch", (b) => {
+        (b.subject as Record<string, string>).invocation = "inv-other";
+      }),
+      variant("bootstrap for another runtime", "bootstrap_runtime_mismatch", (b) => {
+        b.runtimeId = "other-runtime";
+      }),
+      variant("bootstrap for another verification config", "bootstrap_config_mismatch", (b) => {
+        b.configFingerprint = "0".repeat(64);
+      }),
+      variant("bootstrap with an extra field", "bootstrap_malformed", (b) => {
+        b.role = "admin";
+      }),
+      variant("bootstrap without its challenge", "bootstrap_malformed", (b) => {
+        delete b.challenge;
+      }),
+      variant("bootstrap with schema version 2", "bootstrap_malformed", (b) => {
+        b.schemaVersion = 2;
+      })
+    ];
+  } finally {
+    registry.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 function mint(privateKey: string): Case[] {
@@ -262,7 +309,8 @@ describe("acs.jm.v1 contract vectors", () => {
       publicKey,
       runtimeId: RUNTIME,
       positive,
-      negative: negatives(positive, privateKey)
+      negative: negatives(positive, privateKey),
+      runtimeBootstrap: bootstraps(publicKey)
     };
     mkdirSync(dirname(VECTOR_FILE), { recursive: true });
     writeFileSync(VECTOR_FILE, `${JSON.stringify(file, null, 2)}\n`);
@@ -290,6 +338,18 @@ describe("acs.jm.v1 contract vectors", () => {
       expect("approvalId" in payload).toBe(jmToolContract(c.toolName)!.requiresApproval);
       expect(payload.subject).toEqual(c.identity);
     }
+  });
+
+  it("committed runtime bootstrap vectors carry ACS's fingerprint for the vector key", () => {
+    const file = load();
+    const [good, ...bad] = file.runtimeBootstrap;
+    expect(good!.expect).toBeUndefined();
+    expect(good!.bootstrap).toMatchObject({ schemaVersion: 1, runtimeId: file.runtimeId, subject: SUBJECT });
+    expect(good!.bootstrap.configFingerprint).toBe(
+      jaceMemRuntimeConfigFingerprint({ keyId: file.keyId, publicKey: file.publicKey, runtimeId: file.runtimeId })
+    );
+    expect(bad.length).toBeGreaterThanOrEqual(7);
+    for (const c of bad) expect(c.expect, c.name).toMatch(/^bootstrap_/u);
   });
 
   it("committed negative vectors each name one expected rejection and cover the required attack classes", () => {

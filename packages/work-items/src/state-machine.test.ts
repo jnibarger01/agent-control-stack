@@ -1008,7 +1008,8 @@ describe("work item state machine", () => {
         { version: 72, name: "cua_browser_execution", filename: "072_cua_browser_execution.sql" },
         { version: 73, name: "advisor_consultations", filename: "073_advisor_consultations.sql" },
         { version: 74, name: "advisor_consultation_fencing", filename: "074_advisor_consultation_fencing.sql" },
-        { version: 77, name: "jace_mem_capability_issuances", filename: "077_jace_mem_capability_issuances.sql" }
+        { version: 77, name: "jace_mem_capability_issuances", filename: "077_jace_mem_capability_issuances.sql" },
+        { version: 78, name: "jace_mem_launches", filename: "078_jace_mem_launches.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])

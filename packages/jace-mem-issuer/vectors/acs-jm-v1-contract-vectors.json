@@ -2,7 +2,7 @@
   "contract": "acs.jm.v1",
   "note": "Synthetic identities and a throwaway key (private half discarded). Positive capabilities were minted by the ACS issuer path; negatives name the Jace-Mem rejection code.",
   "keyId": "acs-jm-v1-vector-key",
-  "publicKey": "MCowBQYDK2VwAyEAtgoUM5uA0T0qCzz3tX9MWwBLQoUsNWw3lSlydFsEyrQ",
+  "publicKey": "MCowBQYDK2VwAyEAQLRNTXUsXWA7sr8z4kJNfFEaQpYiE0nXl6GBBoQ5VVA",
   "runtimeId": "jm-test-runtime",
   "positive": [
     {
@@ -22,9 +22,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_72bfe50e-7d2b-4b39-90a0-5a649dae7d42",
-          "attemptId": "attempt_34446028-d5e0-4737-9142-0c4f2d72d90b",
-          "leaseId": "lease_bac2a2be-1fbc-4c3a-92f3-30dda3f491dc",
+          "workItemId": "wrk_ac3a98dc-bc06-4cb6-a677-091d7fabf4cd",
+          "attemptId": "attempt_54ed219e-e1f4-491e-afa0-337c314d55ce",
+          "leaseId": "lease_b5505399-4bf0-4647-a6d0-a8df4bd84651",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -36,18 +36,18 @@
           "toolName": "session_start",
           "normalizedArguments": {},
           "invocationHash": "8d099b56936e5f49bc2a1e5f0040d3f3f79ed4caed33405070b79823729b358a",
-          "actionHash": "9f6142fd90fa73f8b0da0015808ff8703b519769f112f5921aa8d89ea4c3ef6e",
-          "requestHash": "3544f83277a91ffd48782a91bf8d2197afc1dd6a555a19864a6ba0ae13d9c3d7",
-          "planHash": "4e8c94214c1b536ec025de081328a37539a98d6a4ed79cc9318f2fd1e068f26a",
+          "actionHash": "2456bb8fa5966dc2149fda4d67e32859714ac7973c582149b445f591e74d1eb9",
+          "requestHash": "7c4cd4212f56862b34d78136489818abf81570d07264c591c127718662a04260",
+          "planHash": "a63d419d0829c7488d8540dafe1a038aa67ed5c1d57b4419b25e1fd8aaca4f33",
           "scopes": ["memory.write"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "JoHj0KK1YWKd0pFDU-8a18YgjeAM9JTeFViTdgXSlq0"
+          "issuedAt": "2026-11-08T14:09:30.000Z",
+          "expiresAt": "2026-11-08T14:09:59.000Z",
+          "nonce": "6XOlwUWdZPvmoOuA01ojOZB1h2nAt-mYlkdei3LbQqs"
         },
-        "signature": "RHEavZwSj1Op7eS-Pdle8PCDBWm40nUkHLNhUfJSDscEcF-lZQdxQ5UDIkXukZ1PGEB8kgBug1Dr70WQa1EBCQ",
+        "signature": "DLKTLcUxl00RFJoDDShZl43dEr-OSHeWtr-B2Iylue9SVUZnjmj62DRPE4P6MFCueYM26_tZZ_zQ7shtkpl0Dw",
         "keyId": "acs-jm-v1-vector-key"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z"
+      "verifyAt": "2026-11-08T14:09:31.000Z"
     },
     {
       "name": "session_end issued by ACS",
@@ -68,9 +68,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_c347ab12-2281-451e-a292-069808d6b049",
-          "attemptId": "attempt_24d3c99b-7670-49ea-b163-a94628500723",
-          "leaseId": "lease_26604c56-896a-490a-970d-b2e1ee0bd98f",
+          "workItemId": "wrk_9caf715d-577f-4def-8c35-1292ddae2ead",
+          "attemptId": "attempt_d962ea3d-c5da-4f25-905d-9d07420c11c6",
+          "leaseId": "lease_dd3bc7f4-b031-46fc-bd4d-b8cea7203699",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -84,18 +84,18 @@
             "session": "sess-1"
           },
           "invocationHash": "89b350ba5122254edcebf148b2c2cdf48e19e75ee81e2f79ff57786579cbe219",
-          "actionHash": "d6944996fc422b1f80aca2bbf40f62adf64375b09fd92b132b33c569df258d3b",
-          "requestHash": "1d07e49baeecba72ffa720b0e2b5629201976c51621e55d6295474c4c0e4eaa5",
-          "planHash": "36280ac578bffee9257f09682b231678508062fc723851171327ff2d304237c4",
+          "actionHash": "7dc3b4470889dd06d501ab2ad1c7246e5879c7ef48f4a49b1393f0ebf82b1847",
+          "requestHash": "062836abef79f08982cf6c2fb6c3ab6b791c807e260c8617e2b8bcbcdcfee773",
+          "planHash": "cd42f52b365805b21e2dc5a674f708d17ad25609550617f58550a00e02bf7ede",
           "scopes": ["memory.write"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "gxq9Ipnrd-HqX2B9oHV9TTY9CFXP6iB9-tMeohlzxEc"
+          "issuedAt": "2026-11-08T14:09:30.000Z",
+          "expiresAt": "2026-11-08T14:09:59.000Z",
+          "nonce": "SCjSrasIRtF-NN1dVZKSAk538Ygc3CuDdzgpdP72PHY"
         },
-        "signature": "pqgXDgQ0uQ7HrQUpWEPVfOnYgPVpow9P8e2NMlIQMxlefoFmOU9gzCQvx2jq7lOwjFHyBHa6NmjtUCBGAxIrAw",
+        "signature": "v6QwCcPNR7PC8llki7gXi9GBvKroE0FPWmIXJeVY1FJK1nVvS5LVB5EmnjF8Ye5KhKSKx5DAS44r_1rtfKBiCg",
         "keyId": "acs-jm-v1-vector-key"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z"
+      "verifyAt": "2026-11-08T14:09:31.000Z"
     },
     {
       "name": "session_delete issued by ACS",
@@ -116,9 +116,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_cbd65267-3bdf-4aea-8bf1-833625c089ad",
-          "attemptId": "attempt_e4742d9e-9030-46d6-9dd3-e67bb93d2536",
-          "leaseId": "lease_4e055c61-ca9c-4eaf-9152-f4f5baf10eb2",
+          "workItemId": "wrk_95aedba1-70fe-43f5-a69d-0a03753849e2",
+          "attemptId": "attempt_a709cfe5-8717-4e68-bfdb-3c6378ed0101",
+          "leaseId": "lease_f1aba29e-87f9-4438-80ef-0a4e0c056716",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -133,18 +133,18 @@
           },
           "invocationHash": "852fe77b0b1cb761d448c08aaeae4a1063c5630b5be629b71d5f607d33ae1fdd",
           "actionHash": "1b6f250b851262d46752299afd6f3500865244484a626d8cabf2e7a9e55b0c29",
-          "requestHash": "38e21b04ec2685e6ffedafcae8e9d2d534992098a6f5035cbcb09cc877f57966",
-          "planHash": "b59332401203e30641dd45c31dcfd6cef0135e709c4629d3d56ec03f67e88cd5",
+          "requestHash": "326a241cd06300fd2838e8ab7c1e43ace64121d7c59c45c62843d46a7d11ddcb",
+          "planHash": "d97605789d84882148ac1eefae498861ad1b67ab654c32e16b50cf3ba85acde5",
           "scopes": ["memory.delete"],
-          "approvalId": "plan_approval_42f90c28-d53e-4444-a2cb-7b467bbcafd6",
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "J_TSonDK2Zobr6RYCbhkRnUiy5KA0Dd34sGKd6DSRvk"
+          "approvalId": "plan_approval_6589523c-a372-43cc-8e37-6a12fe40d6f6",
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "jGqye_YCzht4eoAAQ8fcERS4Eo-QWjNXGQ2yAjQFpZs"
         },
-        "signature": "G8QODg_72xmUI3s-0_sfqOrKK8l4gjEZwxCa6-iT0THeBnARVi6QOvybF7E3-VtiBhx9dRM2Bdrw8mCv48aBCQ",
+        "signature": "-XHNyxFjHd65Vw8NPgOVg1GqC-1oz59Mj3AyWVmZ0Og8abiaiaO74ewmPmVROY78gutc497RKD6kS2LOQwQpDw",
         "keyId": "acs-jm-v1-vector-key"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z"
+      "verifyAt": "2026-11-08T14:09:32.000Z"
     },
     {
       "name": "memory_capture issued by ACS",
@@ -169,9 +169,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_67ee5fba-e87b-45fe-82b0-a47d122f3b1b",
-          "attemptId": "attempt_019e8a50-c589-4fe0-a9c3-d2ba04da0260",
-          "leaseId": "lease_5afeea63-d906-4b2b-ac5d-5e7df410e138",
+          "workItemId": "wrk_6227e16c-7926-4132-94b3-c6d515a25f51",
+          "attemptId": "attempt_8b28dc1e-ecd7-46f0-a0b1-cc5b8c1e20e3",
+          "leaseId": "lease_cb2bf490-3189-437d-9ebc-47e34dfb12ec",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -189,18 +189,18 @@
             "text": "synthetic fact"
           },
           "invocationHash": "02b6e491c3e793b6cbb748451aaddb9590659b6eac607e12b517a7a22f6a2e66",
-          "actionHash": "e0ccd12ec309ff19a0d6acca26d74bdf48b85b565f70ee85fe07f29e1c4e6022",
-          "requestHash": "0216cd3a007d05e46bf7fe5b4cb53007d65ab1ce07cc0560e1d0523cc903b017",
-          "planHash": "0b2eb2d818912a0069b412540fd98af8e7035092f2dacd2a42633cef4f9c687f",
+          "actionHash": "5b0baab3e11b209f36d0e9c41fbd2e20be66273b47e8e444c1378d7d6012b3e4",
+          "requestHash": "c7cedbb64aef9a79b178363a54c33a18c153e61dcacaec136a16a958e4c4c435",
+          "planHash": "59cc4dd9154febb9529926e78de28d2a8672cacbf6b2692fcc6b92de7dab752c",
           "scopes": ["memory.write"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "IPeGQZ8PV7h_29-7owK85FU_K1muPIeEqAMcB-_awUY"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "6uLlXwoYHOniwVDD1IwpH0Dhd275WKxjnBOLl0xwLRc"
         },
-        "signature": "LZNnCQI5YlpCVJmQC54mArlO8LYxYL6jjH4TR9GYznvB3rPf8kcJUNhXlXi6z0Hy6-zGg5dFcSXOvZND9VyzDg",
+        "signature": "P5b5wDIKj6TIBua3TqCfn7gXyyx8bqvIhWKMZb3Qti8fd-b8VcHwFl2rPg90vk7pZHoDgsdUFcw5yBDD8OphCw",
         "keyId": "acs-jm-v1-vector-key"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z"
+      "verifyAt": "2026-11-08T14:09:32.000Z"
     },
     {
       "name": "memory_search issued by ACS",
@@ -222,9 +222,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -239,18 +239,18 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M"
         },
-        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "signature": "X63dPef_OzSCAGdAABjtdSfQolchl6e2VHrjAXmpa46VSglPwIGC4vTgjiiIdNb5q0xR8dIykYQAERg-7-BLAA",
         "keyId": "acs-jm-v1-vector-key"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z"
+      "verifyAt": "2026-11-08T14:09:32.000Z"
     },
     {
       "name": "memory_get issued by ACS",
@@ -271,9 +271,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_672727fc-e107-4493-bcbc-bd0fee669720",
-          "attemptId": "attempt_7380cc49-8568-4536-afff-3129635b4a9b",
-          "leaseId": "lease_a1fce606-e862-40c3-aeba-05c2385225fb",
+          "workItemId": "wrk_b6aaa7ab-b645-4351-93e7-f3315864feb6",
+          "attemptId": "attempt_d70f1432-a815-4f26-8ffc-5cccbb66345c",
+          "leaseId": "lease_4c9eb066-dfbe-4d29-990f-2aa928b00d07",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -287,18 +287,18 @@
             "id": "obs-1"
           },
           "invocationHash": "63b34d6bea314f7e83bd26faf18a2c9bfd7d7013d3189753fe47b4b63d10a835",
-          "actionHash": "ff72ca40d31490795045725ba6117363abf4fc55813c40b9a59191ff83bb9212",
-          "requestHash": "424ea5cbc86fda7b5603f7b91c76aac6a0363878318faecaa65a3078d69fefb4",
-          "planHash": "f9518b1e51860821501e79d2de990018705c114e59dc9de1486cccb8fa9ad425",
+          "actionHash": "c78ec55bc0949e6e75ed9472bc0632e2ee7072d4e570745d0e0d72c663a7daa5",
+          "requestHash": "cc58ca90484945e3c7e4395e8b04caf90e5c8f3bb2e7b94f974558c46faa4bd4",
+          "planHash": "e82cfc4e58cdb83223221db23213e4015ae9572e6f48ec5d97d86331321c612f",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "c4s8IQnXP5-P-NTEyIZ_9SO5RaOkilVg2TsX1KsSpV8"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "O1IsCDL9U-0AnB361Lmqjcxru__QWQ0tH7fuj-fkaOM"
         },
-        "signature": "_rfluJofE-mrcrpoVCPU5-9_lhfq8S3X3NT48hM3fJ6ML0Q-eOqDfktw7C2LCaQtALmeTUCK79uH-DlDAbW-CQ",
+        "signature": "8S3isQVeE1xqIwfBZXCyuGsDuM-hrp_OyGBqafn0J2r4x9JhJWfUAplPLbZUmYvC6TWpeJr0ncO5GzzQ2_BNDw",
         "keyId": "acs-jm-v1-vector-key"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z"
+      "verifyAt": "2026-11-08T14:09:32.000Z"
     },
     {
       "name": "memory_delete issued by ACS",
@@ -319,9 +319,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_390b90a3-35ac-42d8-a602-61d7ee8c2f97",
-          "attemptId": "attempt_33909f75-7977-408d-9a21-e1defc698570",
-          "leaseId": "lease_be386f80-8ebf-4e59-9d0a-098af81d2de1",
+          "workItemId": "wrk_ad48fd6f-0742-4917-a408-c2b3eca76907",
+          "attemptId": "attempt_35bdbba3-7ec9-4931-a5f8-07f3a56a4652",
+          "leaseId": "lease_f5717ef8-bb40-4c8c-90ce-6a989a539077",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -336,18 +336,18 @@
           },
           "invocationHash": "291055e93d98b73e2b9942d605188caa746c49760929ba154eca8e54a5f9138f",
           "actionHash": "5e77197a4a2e5e94ce97f4e21d2470596db5db49ac84f363ba1317f3491d4595",
-          "requestHash": "5e893f5896a8cc5ffed5ec9eaa5ba4ea35c68124117ea0326d11620bdfa3cdb1",
-          "planHash": "528ff6dd7f2f9a347ff97fdcde3bf56a96d4787e6ee2be2431d8ac124270805d",
+          "requestHash": "1e6fd2103c71afb8877f6083abdfe3ccef8f3157a880837fb6c7eb24df96fd1f",
+          "planHash": "3b191fc63d6e4572ee9a5984ff231a51e8456957bc309da37ec91acac7d84ede",
           "scopes": ["memory.delete"],
-          "approvalId": "plan_approval_0ed48244-1cd6-460e-ab49-961746b89647",
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "W-senWANlj3cMez7FOYCkUJ9irOpvLrNqd0p08AeP-I"
+          "approvalId": "plan_approval_ac47c0c1-13fb-4bae-8a83-65216223e4d6",
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "-3CoA2qu0n-YINqYT0Zc8Qq0PataGw1aPyvJdGab9R4"
         },
-        "signature": "C58F0LbhD1vmOUaD36wPGR07RZI9AOJ2AbuPbn5f1oU7GvgzHi6r6l6jFFZ5qp1sY7uDb-9X7hG_LTjRZjFSCA",
+        "signature": "V-KAlVxFPuk1uvw-DjY0JoEIGfqCgldZgPGUXvhr2AGxKeWyyP3MxiE8SHzi0J_C7sGA_2Wv3XD6pXAG48KOBw",
         "keyId": "acs-jm-v1-vector-key"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z"
+      "verifyAt": "2026-11-08T14:09:32.000Z"
     },
     {
       "name": "memory_retain_since issued by ACS",
@@ -368,9 +368,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_abbdf65c-d876-4e63-81fc-e255b54f2f16",
-          "attemptId": "attempt_b815a479-d0eb-4137-b150-32c99134c676",
-          "leaseId": "lease_7a34a5f9-3d77-4b01-b5ce-ce1c616d205c",
+          "workItemId": "wrk_adb3b1af-8a97-471f-b135-4f663d9f27b1",
+          "attemptId": "attempt_26f72faf-d5dd-48c1-86e7-d8598c9ddca5",
+          "leaseId": "lease_c5db0cdb-410c-4269-88c3-cc54df09090c",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -385,18 +385,18 @@
           },
           "invocationHash": "7bca8cba859ebf6f5b4d1953d7c55c0820073186a7decce7e28ea88ac7a6721b",
           "actionHash": "15cdbdfebd1c8e0ee90659e9b1b9d23d277ab5b2b93f872efbb372a5546981dd",
-          "requestHash": "ce61e79e63152e500af76b0e21f1f20210a4bf833ed6b83a893e3837df6f0c1c",
-          "planHash": "9e51cd71e69aed76ff7bc51c0bae04aa708789a2ca61b2e75976c6ebb4611b3b",
+          "requestHash": "0ae1425ef3f632e1a138fb3f0100f04634fb7bb10eeb26846537dbe6f72e2aa6",
+          "planHash": "f983e57a3611812a55bf2aba7c5a79cc03bbdd6891bce0b3d6d65bba5797a0c4",
           "scopes": ["memory.delete"],
-          "approvalId": "plan_approval_4de66b05-4835-4d2c-baae-d2936479617b",
-          "issuedAt": "2026-11-08T13:38:58.000Z",
-          "expiresAt": "2026-11-08T13:39:27.000Z",
-          "nonce": "acWc4PPuklXZJnK9c1AU0qWyEQ4Eh6YAVmcfMa5VAWc"
+          "approvalId": "plan_approval_6cb71a72-d192-491b-95df-bf4a0ae3baee",
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "dFN2Br8LuqFe83Lvhpz3QivREaMRp01WkJKlLGXK5zo"
         },
-        "signature": "WVlILXhm6shr9PHmfvDAIWttTzGyl1afTjc-_cF-23WTDyQfyVHhIUlfzVXE4k3aJZrZZuuPvgHsMVw15lmvDA",
+        "signature": "d5JblthdFTAX6AqojHokJlTNlWYpKbJa2J4beE6VDj08uG3BwgCu2DwYlrtul8h8NbfXQCCYqSSFtPU3piagCA",
         "keyId": "acs-jm-v1-vector-key"
       },
-      "verifyAt": "2026-11-08T13:38:59.000Z"
+      "verifyAt": "2026-11-08T14:09:32.000Z"
     },
     {
       "name": "memory_status issued by ACS",
@@ -415,9 +415,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_1961a6af-6a75-4912-b3dd-70c45e5e9bec",
-          "attemptId": "attempt_f42d1336-58d8-4abd-a052-17150ab94365",
-          "leaseId": "lease_2f3fcd2b-3306-434d-8516-4676522fa4c8",
+          "workItemId": "wrk_19ff8928-b6f1-46e4-ac39-cf0bfef3a16b",
+          "attemptId": "attempt_7097ba15-5545-4ac6-a6ed-9e42d264fb57",
+          "leaseId": "lease_8bce3b4f-8bf5-4da6-b8f8-d4e24df41d36",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -429,18 +429,18 @@
           "toolName": "memory_status",
           "normalizedArguments": {},
           "invocationHash": "6787270a9802bacbb99557997b8cab6789bb220f10eb22710cc3da4d0582b9d5",
-          "actionHash": "d6627a9845b1f7d7be64f1b30142434957e474bdb136473d9c392c9c78315fc7",
-          "requestHash": "516510a253c1082fff5481c336a06b23d4436e9d71dc012f6cdea0eb9df0a776",
-          "planHash": "4faf590cd788b4873d17ffe903ac0f02491af0e7bcab69a369258d3d26be2036",
+          "actionHash": "8c9f355bbe9931e314c74a5e5d5d61c3f5efde32f113376849fc058dbb71113d",
+          "requestHash": "50329be9b63ec68d19066ba1edaf279e45dfd276d4d2f32b3de64f9b83634e1c",
+          "planHash": "67c94d66bf2ee5de281231e008eb0d625a7403746822437a2baf19d269afaddc",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:58.000Z",
-          "expiresAt": "2026-11-08T13:39:27.000Z",
-          "nonce": "nEvpfF5n7_hIEM_Z44hzdIoMEFssL6vXPVr3mjt3fYw"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "XamQ_s12zNzfOpRDVdJ4d_6-zzpxPsjz-SpcDibZx4c"
         },
-        "signature": "9zogXTP3ZyMuAK0S8bJH2vPXnZ2IvpYFj8Y06_4sjJHuWGSQHFRGYRqe0OpjYQs5BrkCpVDjrdgtvCNrhZhHCw",
+        "signature": "Hj_1Xpc-oACH0vfJplALRrpn-6kVw9jN9OqsDFgRf17Aw4YATC0RYID0Rc4uHveeAXDeNxPNZz89sI4wO13nAA",
         "keyId": "acs-jm-v1-vector-key"
       },
-      "verifyAt": "2026-11-08T13:38:59.000Z"
+      "verifyAt": "2026-11-08T14:09:32.000Z"
     },
     {
       "name": "memory_search_shared issued by ACS",
@@ -462,9 +462,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_7785879f-5ea2-47e4-9c6e-414781e85a5a",
-          "attemptId": "attempt_a60decb0-a42a-4633-a280-342df7f9cc24",
-          "leaseId": "lease_cb72d8ce-867e-409f-b1dc-ce6753097b76",
+          "workItemId": "wrk_134526c4-133f-4769-944e-f5018d3cee27",
+          "attemptId": "attempt_0e4cc51d-d325-41d2-ba45-55312e266b84",
+          "leaseId": "lease_70118007-7bf8-4136-9866-e94b498875dc",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -480,18 +480,18 @@
           },
           "invocationHash": "b0bc0a9cf3cdab53bcf6984d4e0764bab989a841c98d54c977eb03484f8aed95",
           "actionHash": "9400bb8f0ae5ff6f3e9a5442b9b72fd2f5032e8d69d16abe2da0b8073f097ac5",
-          "requestHash": "dabbe8e9dd6d06b354ed472c5785c28e5a9c56cb5f7bacd86c15d80ccef22597",
-          "planHash": "9a943448591b2dd65ef4addc4bd74a9d0baae0210179a91cc6aa78c7ec8251ea",
+          "requestHash": "8e80b2feee4daad8a7e2ad93a0f26500a32ce8cdfb926086c48fc5d7a1056ee4",
+          "planHash": "233a295309b618ead81adf6f086980d6cdf359e1e51b3f3f6651c434f47dbbed",
           "scopes": ["memory.share"],
-          "approvalId": "plan_approval_bc54bb1e-5d88-4e32-a241-9aba5b0719b3",
-          "issuedAt": "2026-11-08T13:38:58.000Z",
-          "expiresAt": "2026-11-08T13:39:27.000Z",
-          "nonce": "-sfO3kMcVFmon4xe-Cqp6fAUZfIjeNEaes_LNF1m3F8"
+          "approvalId": "plan_approval_b466bb50-3bde-4bfb-b7f4-fa4cd69a8896",
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "p6Z8-Bg00aQ8XR6chKNFcWlbcRH46mYGzIlFcdqHoIo"
         },
-        "signature": "MouBIHtloVeMYdXYGtfiddk_gpHUnks_ncGrKlLJnwU0Fiafug6tqcyhEvUOsXoOSVifjvmnC139DZ8rm_bsDA",
+        "signature": "ZNxbQZ7m5-wUmSCAazAIKcuY8ZFS4AyV8R4n9kaUehZzztzfsmEwI9Yurb0-deCSW1Y6mYHtJvaF9DSOm7mxCw",
         "keyId": "acs-jm-v1-vector-key"
       },
-      "verifyAt": "2026-11-08T13:38:59.000Z"
+      "verifyAt": "2026-11-08T14:09:32.000Z"
     }
   ],
   "negative": [
@@ -515,9 +515,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -532,18 +532,18 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M"
         },
-        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "signature": "X63dPef_OzSCAGdAABjtdSfQolchl6e2VHrjAXmpa46VSglPwIGC4vTgjiiIdNb5q0xR8dIykYQAERg-7-BLAA",
         "keyId": "acs-jm-v1-vector-key"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "subject_mismatch"
     },
     {
@@ -566,9 +566,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -583,18 +583,18 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M"
         },
-        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "signature": "X63dPef_OzSCAGdAABjtdSfQolchl6e2VHrjAXmpa46VSglPwIGC4vTgjiiIdNb5q0xR8dIykYQAERg-7-BLAA",
         "keyId": "acs-jm-v1-vector-key"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "subject_mismatch"
     },
     {
@@ -617,9 +617,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -634,18 +634,18 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M"
         },
         "keyId": "acs-jm-v1-vector-key",
-        "signature": "45sfg3ROnMXXHN_c4YQWVGCo3fQQm88mpJ_o7Vr_0amaRAPBjxMJu-0WH9IkRLEjKxn9oUlaRkDQaMcFcIRmBg"
+        "signature": "mgupETfgQYauft97-uwL_R4QhNPpzhtYb3Vcfvqd9uZTSmhzdg6czBIxnB3vHmjDBz_l_uf9Gt-GuwRpXRUYBw"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "subject_mismatch"
     },
     {
@@ -668,9 +668,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -686,18 +686,18 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M"
         },
         "keyId": "acs-jm-v1-vector-key",
-        "signature": "srhdq1nT_7vx5XHQluJYXyyVcsptl8nXVzyK9qAgpK_gGzP0T8NMH1-o5FEnTBjvVIDRch5LThQu7Xnmu2yYCw"
+        "signature": "ZkiNW1ir6FMtR8b9u160y_55mw2INCmAapaq7fQWa7F8JHZ3yvbNhxJoWX0RA1cj0Xul_5a0OTeJhI4JSCytAQ"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "subject_malformed"
     },
     {
@@ -720,9 +720,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -737,18 +737,18 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M"
         },
         "keyId": "acs-jm-v1-vector-key",
-        "signature": "q5UJMUYT1DVz2d7qRO6g-OgSNU4VWWvUfhEKy7XQpZO7MGvHIFJbOCcpMrb4i-gT8Ea3rE4WUM5tae39nuvcBA"
+        "signature": "fhBYyL_5O086VWcDA4nft5PRHeqt8DkPBHG5V0ucTpZM-TPNSMp7jp0cR9H-ku10qhlWGN5OgoXhj2spI5VnDw"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "version_mismatch"
     },
     {
@@ -771,9 +771,9 @@
           "issuer": "acs",
           "audience": "jace-commander",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -788,18 +788,18 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M"
         },
         "keyId": "acs-jm-v1-vector-key",
-        "signature": "oA5g7pVx5Lyq8HGR0THxJWa1_8g1hEFbmW0y0oQjlrW46UP7l0g8Fpv7iVb5_-xKJ_cdJudnHgjGzWP4bwTSCw"
+        "signature": "h94fLJoACuTp9EZgySCzZKmkex4xMtpQ8_8BA1AoAObep1zILVEDhbMcacDqAX4hUOujeMzRExsl6QsPxQTsCQ"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "audience_mismatch"
     },
     {
@@ -822,9 +822,9 @@
           "issuer": "not-acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -839,18 +839,18 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M"
         },
         "keyId": "acs-jm-v1-vector-key",
-        "signature": "gtqlmZvkpwFwscXdOhO-Mo_ITpEVFwHlP4K_J2l5_YhYeKDVMkriu8WGVAqqU7hCOPbZJYmkJB9_ywovM-eKAg"
+        "signature": "IYdCGfZNYYhc8wvPwL5IRb_lVzkoOFQiBf7ALrgVT1HivmD70NLMxfCD8luWbEVhMzLHJ4rRBin_z1eWYMS0Cw"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "issuer_mismatch"
     },
     {
@@ -873,9 +873,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "other-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -890,18 +890,18 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M"
         },
         "keyId": "acs-jm-v1-vector-key",
-        "signature": "emyxdEnvfdie6JPmjvtpA1F-SvTC-ePAX7Pkz65VVL_KnsKgf0q8L-SaZhpmSpNCNtZQwkrTMknyTVB34MpXBQ"
+        "signature": "BG-1-i9DViGbCEMD5HQBaneWknUTLlK7uJpcPHSoFq8g2uO-7dciE6VYy9X1ZDfHFvPpmF_RhONEnZLv9c50DQ"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "runtime_mismatch"
     },
     {
@@ -923,9 +923,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -940,18 +940,18 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M"
         },
-        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "signature": "X63dPef_OzSCAGdAABjtdSfQolchl6e2VHrjAXmpa46VSglPwIGC4vTgjiiIdNb5q0xR8dIykYQAERg-7-BLAA",
         "keyId": "acs-jm-v1-vector-key"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "tool_mismatch"
     },
     {
@@ -974,9 +974,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -991,18 +991,18 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M"
         },
-        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "signature": "X63dPef_OzSCAGdAABjtdSfQolchl6e2VHrjAXmpa46VSglPwIGC4vTgjiiIdNb5q0xR8dIykYQAERg-7-BLAA",
         "keyId": "acs-jm-v1-vector-key"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "arguments_mismatch"
     },
     {
@@ -1025,9 +1025,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -1042,18 +1042,18 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.delete", "memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M"
         },
         "keyId": "acs-jm-v1-vector-key",
-        "signature": "Et2lS4Jyu3hlTQLNkfm_vD6FEaFcfZhcI4PCrHn7q2YdbWrsxDQSaiZlphTV60M4dHq40pkGism08csiVAhpDw"
+        "signature": "idoDVTrG0i8iGRbuCvpGY8y9TQxSHzBS_OXzgLosmGlhgaYAM2E-CXDYnHeXK3-MPXare-xJDhxB6T8-As_IDw"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "scope_mismatch"
     },
     {
@@ -1076,9 +1076,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -1093,19 +1093,19 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk",
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M",
           "approvalId": "approval-x"
         },
         "keyId": "acs-jm-v1-vector-key",
-        "signature": "gZGOLSLeGQ6tqq2xrnVAOBfVlc7dcSZgidH33yGgu38jOIiO1sc6xaMUzf4k63SEoxeiCPlFrrBjwYQONVWPAQ"
+        "signature": "XPmhMiqG6RwkFzR7bJl9-Rc8ZSXtO_-fx_GxVdg8obKUgIx1iCVwwq0LIbCo7BfuuyLnGSIcnCpOjxBF8IG8Cw"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "payload_keys"
     },
     {
@@ -1128,9 +1128,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -1145,19 +1145,19 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk",
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M",
           "admin": true
         },
         "keyId": "acs-jm-v1-vector-key",
-        "signature": "aTK93ROpMcen35UCDp5eCY6VOnkVt2IcqoH-YfX68gSo8b_lQwKJM_yu-qVIJHwEr8XHkkddo2BXf-ifttRWCQ"
+        "signature": "LFlOd_fs1iQ8lhx8D-thVyjinE5CgGphKevdXzaumpUlT5g_7dz4L_xoHIY0623NOhIHbtTy4cxygSjHNouDBg"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "payload_keys"
     },
     {
@@ -1180,9 +1180,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -1197,18 +1197,18 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:28.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:02.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M"
         },
         "keyId": "acs-jm-v1-vector-key",
-        "signature": "wLuOp-rvhja9SpbxrdNVYqmdkeq180szLeKIiH0hdbJuMQXUdgj2ISSX1zlQlbXs_QLQocv8xj4VqAEkSv74AQ"
+        "signature": "CTdmw0fqYSn3DVdisecvg3FFuvfgL4e928zzY2z3BiJihVuf01rwyBo8_SKuXOULHKJBnaQ65IoiCfpNsV6EBw"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "lifetime_invalid"
     },
     {
@@ -1231,9 +1231,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -1248,18 +1248,18 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M"
         },
-        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "signature": "X63dPef_OzSCAGdAABjtdSfQolchl6e2VHrjAXmpa46VSglPwIGC4vTgjiiIdNb5q0xR8dIykYQAERg-7-BLAA",
         "keyId": "acs-jm-v1-vector-key"
       },
-      "verifyAt": "2026-11-08T13:39:32.000Z",
+      "verifyAt": "2026-11-08T14:10:06.000Z",
       "expect": "expired"
     },
     {
@@ -1282,9 +1282,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -1299,18 +1299,18 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M"
         },
-        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "signature": "X63dPef_OzSCAGdAABjtdSfQolchl6e2VHrjAXmpa46VSglPwIGC4vTgjiiIdNb5q0xR8dIykYQAERg-7-BLAA",
         "keyId": "acs-jm-v1-vector-key"
       },
-      "verifyAt": "2026-11-08T13:38:51.000Z",
+      "verifyAt": "2026-11-08T14:09:25.000Z",
       "expect": "not_yet_valid"
     },
     {
@@ -1333,9 +1333,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 2,
           "subject": {
             "principal": "synthetic-principal",
@@ -1350,18 +1350,18 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M"
         },
-        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "signature": "X63dPef_OzSCAGdAABjtdSfQolchl6e2VHrjAXmpa46VSglPwIGC4vTgjiiIdNb5q0xR8dIykYQAERg-7-BLAA",
         "keyId": "acs-jm-v1-vector-key"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "signature_invalid"
     },
     {
@@ -1384,9 +1384,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -1401,18 +1401,18 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M"
         },
-        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "signature": "X63dPef_OzSCAGdAABjtdSfQolchl6e2VHrjAXmpa46VSglPwIGC4vTgjiiIdNb5q0xR8dIykYQAERg-7-BLAA",
         "keyId": "other-key"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "key_unknown"
     },
     {
@@ -1435,9 +1435,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -1452,19 +1452,19 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "_Q0Cr5vQ-DuK6Bb_bpphQXlnQigJ1kwlGQztWQPQh_M"
         },
-        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "signature": "X63dPef_OzSCAGdAABjtdSfQolchl6e2VHrjAXmpa46VSglPwIGC4vTgjiiIdNb5q0xR8dIykYQAERg-7-BLAA",
         "keyId": "acs-jm-v1-vector-key",
         "extra": 1
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "capability_malformed"
     },
     {
@@ -1487,9 +1487,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
-          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
-          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "workItemId": "wrk_0a2ab68b-80a8-4383-9116-3b714963c490",
+          "attemptId": "attempt_712c8cf6-849f-4c13-b851-96e9448f6751",
+          "leaseId": "lease_f60341e5-54e7-407b-bb3f-295db2bf92a8",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -1504,18 +1504,18 @@
             "query": "synthetic"
           },
           "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
-          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
-          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
-          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "actionHash": "09c1ecc88ff984d330d33e7d7baa73b9cbd1f1db69dee86588c4a6f5c0235b20",
+          "requestHash": "c9132a718e7c9d052b8a4bbdd3069c9dfd9fa4cfa2028f1cc04750d74dc68088",
+          "planHash": "ffc31d82942bf382c41217f6530c587af97b001b74bb93b74e06045f0be08547",
           "scopes": ["memory.read"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
           "nonce": "short"
         },
         "keyId": "acs-jm-v1-vector-key",
-        "signature": "BXgP6Py8IULPeyMwlXBrxMnrlGcXWEOlKjftj3BV8IgY5mza9dGXZqtN-81SjKUB52PRTKweCOnZvxZCz6yWAg"
+        "signature": "gBhFoO5zc0kIQwxR-IPVJlEs9-wMiY8cq8lYK4CJcug6-m6L-AsmD8ELrNe4dpe6Uol9ypgftjPLrYn4BWn4CA"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "nonce_malformed"
     },
     {
@@ -1537,9 +1537,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_390b90a3-35ac-42d8-a602-61d7ee8c2f97",
-          "attemptId": "attempt_33909f75-7977-408d-9a21-e1defc698570",
-          "leaseId": "lease_be386f80-8ebf-4e59-9d0a-098af81d2de1",
+          "workItemId": "wrk_ad48fd6f-0742-4917-a408-c2b3eca76907",
+          "attemptId": "attempt_35bdbba3-7ec9-4931-a5f8-07f3a56a4652",
+          "leaseId": "lease_f5717ef8-bb40-4c8c-90ce-6a989a539077",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -1554,17 +1554,17 @@
           },
           "invocationHash": "291055e93d98b73e2b9942d605188caa746c49760929ba154eca8e54a5f9138f",
           "actionHash": "5e77197a4a2e5e94ce97f4e21d2470596db5db49ac84f363ba1317f3491d4595",
-          "requestHash": "5e893f5896a8cc5ffed5ec9eaa5ba4ea35c68124117ea0326d11620bdfa3cdb1",
-          "planHash": "528ff6dd7f2f9a347ff97fdcde3bf56a96d4787e6ee2be2431d8ac124270805d",
+          "requestHash": "1e6fd2103c71afb8877f6083abdfe3ccef8f3157a880837fb6c7eb24df96fd1f",
+          "planHash": "3b191fc63d6e4572ee9a5984ff231a51e8456957bc309da37ec91acac7d84ede",
           "scopes": ["memory.delete"],
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "W-senWANlj3cMez7FOYCkUJ9irOpvLrNqd0p08AeP-I"
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "-3CoA2qu0n-YINqYT0Zc8Qq0PataGw1aPyvJdGab9R4"
         },
         "keyId": "acs-jm-v1-vector-key",
-        "signature": "aRXqacd-xsGNOSjLX_soFh-5dbPoM63s13u7PkOh25O5wbNbbaLfZSNme9_ZD2ItqRIMAhsJo5T_dQknJmiJDQ"
+        "signature": "QP_GyK8Qr7WpWYl2UdtmY2GRgWWqoFY66FR5qMs4Lqw7WvA7hEq8zJTPhFqdO8uOdNWgkN3Kmj4ji4rvJHFpBA"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "approval_missing"
     },
     {
@@ -1586,9 +1586,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_390b90a3-35ac-42d8-a602-61d7ee8c2f97",
-          "attemptId": "attempt_33909f75-7977-408d-9a21-e1defc698570",
-          "leaseId": "lease_be386f80-8ebf-4e59-9d0a-098af81d2de1",
+          "workItemId": "wrk_ad48fd6f-0742-4917-a408-c2b3eca76907",
+          "attemptId": "attempt_35bdbba3-7ec9-4931-a5f8-07f3a56a4652",
+          "leaseId": "lease_f5717ef8-bb40-4c8c-90ce-6a989a539077",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -1603,18 +1603,18 @@
           },
           "invocationHash": "291055e93d98b73e2b9942d605188caa746c49760929ba154eca8e54a5f9138f",
           "actionHash": "5e77197a4a2e5e94ce97f4e21d2470596db5db49ac84f363ba1317f3491d4595",
-          "requestHash": "5e893f5896a8cc5ffed5ec9eaa5ba4ea35c68124117ea0326d11620bdfa3cdb1",
-          "planHash": "528ff6dd7f2f9a347ff97fdcde3bf56a96d4787e6ee2be2431d8ac124270805d",
+          "requestHash": "1e6fd2103c71afb8877f6083abdfe3ccef8f3157a880837fb6c7eb24df96fd1f",
+          "planHash": "3b191fc63d6e4572ee9a5984ff231a51e8456957bc309da37ec91acac7d84ede",
           "scopes": ["memory.delete"],
-          "approvalId": "plan_approval_0ed48244-1cd6-460e-ab49-961746b89647",
-          "issuedAt": "2026-11-08T13:38:57.000Z",
-          "expiresAt": "2026-11-08T13:39:26.000Z",
-          "nonce": "W-senWANlj3cMez7FOYCkUJ9irOpvLrNqd0p08AeP-I"
+          "approvalId": "plan_approval_ac47c0c1-13fb-4bae-8a83-65216223e4d6",
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "-3CoA2qu0n-YINqYT0Zc8Qq0PataGw1aPyvJdGab9R4"
         },
-        "signature": "C58F0LbhD1vmOUaD36wPGR07RZI9AOJ2AbuPbn5f1oU7GvgzHi6r6l6jFFZ5qp1sY7uDb-9X7hG_LTjRZjFSCA",
+        "signature": "V-KAlVxFPuk1uvw-DjY0JoEIGfqCgldZgPGUXvhr2AGxKeWyyP3MxiE8SHzi0J_C7sGA_2Wv3XD6pXAG48KOBw",
         "keyId": "acs-jm-v1-vector-key"
       },
-      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "arguments_mismatch"
     },
     {
@@ -1637,9 +1637,9 @@
           "issuer": "acs",
           "audience": "jace-mem",
           "runtimeId": "jm-test-runtime",
-          "workItemId": "wrk_7785879f-5ea2-47e4-9c6e-414781e85a5a",
-          "attemptId": "attempt_a60decb0-a42a-4633-a280-342df7f9cc24",
-          "leaseId": "lease_cb72d8ce-867e-409f-b1dc-ce6753097b76",
+          "workItemId": "wrk_134526c4-133f-4769-944e-f5018d3cee27",
+          "attemptId": "attempt_0e4cc51d-d325-41d2-ba45-55312e266b84",
+          "leaseId": "lease_70118007-7bf8-4136-9866-e94b498875dc",
           "leaseEpoch": 1,
           "subject": {
             "principal": "synthetic-principal",
@@ -1655,19 +1655,164 @@
           },
           "invocationHash": "b0bc0a9cf3cdab53bcf6984d4e0764bab989a841c98d54c977eb03484f8aed95",
           "actionHash": "9400bb8f0ae5ff6f3e9a5442b9b72fd2f5032e8d69d16abe2da0b8073f097ac5",
-          "requestHash": "dabbe8e9dd6d06b354ed472c5785c28e5a9c56cb5f7bacd86c15d80ccef22597",
-          "planHash": "9a943448591b2dd65ef4addc4bd74a9d0baae0210179a91cc6aa78c7ec8251ea",
+          "requestHash": "8e80b2feee4daad8a7e2ad93a0f26500a32ce8cdfb926086c48fc5d7a1056ee4",
+          "planHash": "233a295309b618ead81adf6f086980d6cdf359e1e51b3f3f6651c434f47dbbed",
           "scopes": ["memory.share"],
-          "approvalId": "plan_approval_bc54bb1e-5d88-4e32-a241-9aba5b0719b3",
-          "issuedAt": "2026-11-08T13:38:58.000Z",
-          "expiresAt": "2026-11-08T13:39:27.000Z",
-          "nonce": "-sfO3kMcVFmon4xe-Cqp6fAUZfIjeNEaes_LNF1m3F8"
+          "approvalId": "plan_approval_b466bb50-3bde-4bfb-b7f4-fa4cd69a8896",
+          "issuedAt": "2026-11-08T14:09:31.000Z",
+          "expiresAt": "2026-11-08T14:10:00.000Z",
+          "nonce": "p6Z8-Bg00aQ8XR6chKNFcWlbcRH46mYGzIlFcdqHoIo"
         },
-        "signature": "MouBIHtloVeMYdXYGtfiddk_gpHUnks_ncGrKlLJnwU0Fiafug6tqcyhEvUOsXoOSVifjvmnC139DZ8rm_bsDA",
+        "signature": "ZNxbQZ7m5-wUmSCAazAIKcuY8ZFS4AyV8R4n9kaUehZzztzfsmEwI9Yurb0-deCSW1Y6mYHtJvaF9DSOm7mxCw",
         "keyId": "acs-jm-v1-vector-key"
       },
-      "verifyAt": "2026-11-08T13:38:59.000Z",
+      "verifyAt": "2026-11-08T14:09:32.000Z",
       "expect": "arguments_mismatch"
+    }
+  ],
+  "runtimeBootstrap": [
+    {
+      "name": "bootstrap issued by the ACS launch registry",
+      "bootstrap": {
+        "schemaVersion": 1,
+        "runtimeId": "jm-test-runtime",
+        "launchId": "vector-launch",
+        "challenge": "mYim6hr8xsL52eCbUDp7i69a6W-KiJzZfWcIt4jgtB4",
+        "subject": {
+          "principal": "synthetic-principal",
+          "agent": "agent-a",
+          "project": "synthetic-project",
+          "worktree": "/srv/synthetic/worktree",
+          "invocation": "inv-0001"
+        },
+        "configFingerprint": "9b1fe87b05316f1125f26e25baf33d2ccf9e9940e1116cc7e32c2982126bf5c5"
+      }
+    },
+    {
+      "name": "bootstrap for another agent",
+      "bootstrap": {
+        "schemaVersion": 1,
+        "runtimeId": "jm-test-runtime",
+        "launchId": "vector-launch",
+        "challenge": "mYim6hr8xsL52eCbUDp7i69a6W-KiJzZfWcIt4jgtB4",
+        "subject": {
+          "principal": "synthetic-principal",
+          "agent": "agent-b",
+          "project": "synthetic-project",
+          "worktree": "/srv/synthetic/worktree",
+          "invocation": "inv-0001"
+        },
+        "configFingerprint": "9b1fe87b05316f1125f26e25baf33d2ccf9e9940e1116cc7e32c2982126bf5c5"
+      },
+      "expect": "bootstrap_subject_mismatch"
+    },
+    {
+      "name": "bootstrap for another invocation",
+      "bootstrap": {
+        "schemaVersion": 1,
+        "runtimeId": "jm-test-runtime",
+        "launchId": "vector-launch",
+        "challenge": "mYim6hr8xsL52eCbUDp7i69a6W-KiJzZfWcIt4jgtB4",
+        "subject": {
+          "principal": "synthetic-principal",
+          "agent": "agent-a",
+          "project": "synthetic-project",
+          "worktree": "/srv/synthetic/worktree",
+          "invocation": "inv-other"
+        },
+        "configFingerprint": "9b1fe87b05316f1125f26e25baf33d2ccf9e9940e1116cc7e32c2982126bf5c5"
+      },
+      "expect": "bootstrap_subject_mismatch"
+    },
+    {
+      "name": "bootstrap for another runtime",
+      "bootstrap": {
+        "schemaVersion": 1,
+        "runtimeId": "other-runtime",
+        "launchId": "vector-launch",
+        "challenge": "mYim6hr8xsL52eCbUDp7i69a6W-KiJzZfWcIt4jgtB4",
+        "subject": {
+          "principal": "synthetic-principal",
+          "agent": "agent-a",
+          "project": "synthetic-project",
+          "worktree": "/srv/synthetic/worktree",
+          "invocation": "inv-0001"
+        },
+        "configFingerprint": "9b1fe87b05316f1125f26e25baf33d2ccf9e9940e1116cc7e32c2982126bf5c5"
+      },
+      "expect": "bootstrap_runtime_mismatch"
+    },
+    {
+      "name": "bootstrap for another verification config",
+      "bootstrap": {
+        "schemaVersion": 1,
+        "runtimeId": "jm-test-runtime",
+        "launchId": "vector-launch",
+        "challenge": "mYim6hr8xsL52eCbUDp7i69a6W-KiJzZfWcIt4jgtB4",
+        "subject": {
+          "principal": "synthetic-principal",
+          "agent": "agent-a",
+          "project": "synthetic-project",
+          "worktree": "/srv/synthetic/worktree",
+          "invocation": "inv-0001"
+        },
+        "configFingerprint": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expect": "bootstrap_config_mismatch"
+    },
+    {
+      "name": "bootstrap with an extra field",
+      "bootstrap": {
+        "schemaVersion": 1,
+        "runtimeId": "jm-test-runtime",
+        "launchId": "vector-launch",
+        "challenge": "mYim6hr8xsL52eCbUDp7i69a6W-KiJzZfWcIt4jgtB4",
+        "subject": {
+          "principal": "synthetic-principal",
+          "agent": "agent-a",
+          "project": "synthetic-project",
+          "worktree": "/srv/synthetic/worktree",
+          "invocation": "inv-0001"
+        },
+        "configFingerprint": "9b1fe87b05316f1125f26e25baf33d2ccf9e9940e1116cc7e32c2982126bf5c5",
+        "role": "admin"
+      },
+      "expect": "bootstrap_malformed"
+    },
+    {
+      "name": "bootstrap without its challenge",
+      "bootstrap": {
+        "schemaVersion": 1,
+        "runtimeId": "jm-test-runtime",
+        "launchId": "vector-launch",
+        "subject": {
+          "principal": "synthetic-principal",
+          "agent": "agent-a",
+          "project": "synthetic-project",
+          "worktree": "/srv/synthetic/worktree",
+          "invocation": "inv-0001"
+        },
+        "configFingerprint": "9b1fe87b05316f1125f26e25baf33d2ccf9e9940e1116cc7e32c2982126bf5c5"
+      },
+      "expect": "bootstrap_malformed"
+    },
+    {
+      "name": "bootstrap with schema version 2",
+      "bootstrap": {
+        "schemaVersion": 2,
+        "runtimeId": "jm-test-runtime",
+        "launchId": "vector-launch",
+        "challenge": "mYim6hr8xsL52eCbUDp7i69a6W-KiJzZfWcIt4jgtB4",
+        "subject": {
+          "principal": "synthetic-principal",
+          "agent": "agent-a",
+          "project": "synthetic-project",
+          "worktree": "/srv/synthetic/worktree",
+          "invocation": "inv-0001"
+        },
+        "configFingerprint": "9b1fe87b05316f1125f26e25baf33d2ccf9e9940e1116cc7e32c2982126bf5c5"
+      },
+      "expect": "bootstrap_malformed"
     }
   ]
 }

@@ -1,3 +1,4 @@
+import { JaceMemGatewayIssuer, JM_BRIDGE_WORKER_ID, SqliteJaceMemIssuanceRegistry, jaceMemVerificationKey, type JaceMemSigningConfig, type JaceMemLaunch } from "@agent-control-stack/jace-mem-issuer";
 import { probeExecutableVersion } from "@agent-control-stack/agent-cli";
 import { advisorPortFromEnv } from "./advisor-consultation.js";
 import { registerMissionDispatchRoutes } from "./mission-dispatch-routes.js";
@@ -358,6 +359,10 @@ export interface GatewayOptions {
    * Must be a different key from the acs.dc.v1 key.
    */
   jaceCommanderCapability?: JaceCommanderSigningConfig | false;
+  /** Dedicated ACS signing key; no environment fallback. Disabled unless explicitly supplied. */
+  jaceMemCapability?: JaceMemSigningConfig | false;
+  /** Trusted launcher boot registrations. Never accepted through HTTP or MCP. */
+  jaceMemLaunches?: readonly JaceMemLaunch[];
   /**
    * Containment roots for path-bearing Jace Commander tools. Defaults to
    * ACS_JACE_COMMANDER_ALLOWED_ROOTS / _DENIED_ROOTS; `false` or absent config
@@ -876,6 +881,22 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const jcSigningConfig = resolveJaceCommanderSigningConfig(options.jaceCommanderCapability);
   const jcContainment = resolveJcContainment(options.jaceCommanderContainment);
   const jcIssuanceRegistry = new SqliteJaceCommanderIssuanceRegistry(dbPath);
+  // JM is opt-in until launcher/bridge execution certification is complete.
+  const jmConfig = options.jaceMemCapability;
+  if (jmConfig) {
+    const jmPublicKey = jaceMemVerificationKey(jmConfig);
+    for (const other of [jcSigningConfig, capabilitySigningConfig]) {
+      if (other && jaceMemVerificationKey(other) === jmPublicKey) {
+        throw new ControlStackError("jace_mem_capability_key_shared", "acs.jm.v1 requires its own signing key");
+      }
+    }
+  }
+  const jmRegistry = jmConfig ? new SqliteJaceMemIssuanceRegistry(dbPath) : undefined;
+  const jmIssuer = jmConfig && jmRegistry ? new JaceMemGatewayIssuer({
+    store: workItems, policy, tools, registry: jmRegistry, config: jmConfig,
+    launches: options.jaceMemLaunches ?? [], maxPendingWorkItems
+  }) : undefined;
+
 
   const desktopExecutorCapabilities = () =>
     desktopCommanderManagedToolDispositions().map((disposition) => {
@@ -4055,6 +4076,52 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   );
 
+  // JM-ACS-02 runtime identity exchange: only the dedicated Jace-Mem bridge may start or complete it, and only for
+  // launches the trusted launcher registered at boot.
+  for (const [path, step] of [
+    ["/jm/runtime/bootstrap", "bootstrap"],
+    ["/jm/runtime/bootstrap/complete", "complete"]
+  ] as const) {
+    app.post(path, { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } }, async (request, reply) => {
+      const workerId = requireWorkerIdentity(request, reply, auth);
+      if (!workerId) return;
+      if (workerId !== JM_BRIDGE_WORKER_ID) {
+        return reply.code(403).send({ code: "jm_bridge_identity_required", error: "dedicated Jace-Mem bridge identity is required" });
+      }
+      if (!jmIssuer) return reply.code(503).send({ code: "capability_issuance_unconfigured", error: "Jace-Mem issuance is not configured" });
+      try {
+        if (step === "bootstrap") return reply.code(201).send(jmIssuer.bootstrap(request.body));
+        const attested = jmIssuer.completeBootstrap(request.body);
+        workItems.recordSystemEvent({ name: "jace_mem.runtime_attested", body: { attestationId: attested.attestationId, requestId: request.id }, attributes: { "worker.id": workerId } });
+        return reply.code(200).send(attested);
+      } catch (error) {
+        const code = error instanceof ControlStackError ? error.code : error instanceof ZodError ? "jace_mem_request_invalid" : "jace_mem_bootstrap_failed";
+        workItems.recordSystemEvent({ name: "jace_mem.runtime_attestation_denied", body: { code, step, requestId: request.id }, attributes: { "worker.id": workerId } });
+        const status = code === "jace_mem_request_invalid" || code === "jace_mem_runtime_identity_invalid" ? 400 : error instanceof ControlStackError ? 403 : 503;
+        return reply.code(status).send({ decision: "deny", code });
+      }
+    });
+  }
+
+  app.post("/jm/capability/issue", { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } }, async (request, reply) => {
+    const workerId = requireWorkerIdentity(request, reply, auth);
+    if (!workerId) return;
+    if (workerId !== JM_BRIDGE_WORKER_ID) {
+      return reply.code(403).send({ code: "jm_bridge_identity_required", error: "dedicated Jace-Mem bridge identity is required" });
+    }
+    if (!jmIssuer) return reply.code(503).send({ code: "capability_issuance_unconfigured", error: "Jace-Mem issuance is not configured" });
+    try {
+      const result = jmIssuer.issue(request.body);
+      return reply.code(result.decision === "allow" ? 200 : 409).send(result);
+    } catch (error) {
+      // Never echo arguments, identities, signing material, or database errors.
+      const code = error instanceof ControlStackError ? error.code : error instanceof ZodError ? "jace_mem_request_invalid" : "jace_mem_issuance_failed";
+      workItems.recordSystemEvent({ name: "jace_mem.capability_denied", body: { code, requestId: request.id }, attributes: { "worker.id": workerId } });
+      const status = code === "work_queue_full" ? 429 : code === "jace_mem_request_invalid" || code === "jace_mem_argument_invalid" ? 400 : error instanceof ControlStackError ? 403 : 503;
+      return reply.code(status).send({ decision: "deny", code });
+    }
+  });
+
   // Managed-runtime bootstrap: only the dedicated bridge can issue or
   // complete a challenge. Completion must include the exact identity metadata
   // echoed by the managed Desktop Commander child during MCP initialize.
@@ -4597,6 +4664,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     deviceAuthStore.close();
     capabilityIssuanceRegistry.close();
     jcIssuanceRegistry.close();
+    jmRegistry?.close();
     workItems.close();
   });
 
@@ -5347,6 +5415,9 @@ function isRateLimitedRoute(url: string): boolean {
     path === "/worker/claim" ||
     path === "/dc/capability/issue" ||
     path === "/jc/capability/issue" ||
+    path === "/jm/capability/issue" ||
+    path === "/jm/runtime/bootstrap" ||
+    path === "/jm/runtime/bootstrap/complete" ||
     path === "/dc/runtime/bootstrap" ||
     path === "/dc/runtime/bootstrap/complete" ||
     path === "/policy/explain" ||

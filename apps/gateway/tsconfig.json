@@ -20,6 +20,7 @@
     { "path": "../../packages/agent-cli" },
     { "path": "../../packages/shared" },
     { "path": "../../packages/verification" },
-    { "path": "../../packages/work-items" }
+    { "path": "../../packages/work-items" },
+    { "path": "../../packages/jace-mem-issuer" }
   ]
 }

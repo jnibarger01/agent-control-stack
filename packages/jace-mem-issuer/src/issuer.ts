@@ -442,3 +442,72 @@ export function jaceMemSigningConfigFromEnv(env: NodeJS.ProcessEnv = process.env
   validateJaceMemSigningConfig(config);
   return config;
 }
+
+// --- runtime identity bootstrap (JM-ACS-02) ---------------------------------------
+
+export const JM_RUNTIME_BOOTSTRAP_SCHEMA_VERSION = 1 as const;
+const BOOTSTRAP_KEYS = ["challenge", "configFingerprint", "launchId", "runtimeId", "schemaVersion", "subject"] as const;
+
+/**
+ * Fingerprint of the verification config a Jace-Mem runtime must run with:
+ * sha256("acs:jace-mem-runtime-config:v1\n" + strictCanonicalJsonV1({keyId, publicKey, runtimeId})), where
+ * publicKey is the base64url SPKI value Jace-Mem reads from JACE_MEM_ACS_PUBLIC_KEY. Jace-Mem computes the same
+ * value from its own environment, so a runtime configured with another key, key id or runtime id cannot attest.
+ */
+export function jaceMemRuntimeConfigFingerprint(input: {
+  keyId: string;
+  publicKey: string;
+  runtimeId: string;
+}): string {
+  return createHash("sha256")
+    .update(
+      `acs:jace-mem-runtime-config:v1\n${strictCanonicalJsonV1({ keyId: input.keyId, publicKey: input.publicKey, runtimeId: input.runtimeId })}`,
+      "utf8"
+    )
+    .digest("hex");
+}
+
+/**
+ * The exact object ACS sends as MCP `initialize.params._meta.acsRuntimeBootstrap` and Jace-Mem echoes back,
+ * unchanged, as `result._meta.acsRuntimeIdentity` after checking every field against its own launch identity
+ * and configuration.
+ */
+export interface JaceMemRuntimeBootstrap {
+  readonly schemaVersion: typeof JM_RUNTIME_BOOTSTRAP_SCHEMA_VERSION;
+  readonly runtimeId: string;
+  readonly launchId: string;
+  readonly challenge: string;
+  readonly subject: JaceMemSubject;
+  readonly configFingerprint: string;
+}
+
+/** Validates an echoed runtime identity's shape (exact keys) before the registry compares its values. */
+export function validateJaceMemRuntimeIdentity(value: unknown): JaceMemRuntimeBootstrap {
+  const fail = (): never => {
+    throw new ControlStackError("jace_mem_runtime_identity_invalid", "runtime identity is malformed");
+  };
+  if (!isPlainObject(value)) fail();
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  if (keys.length !== BOOTSTRAP_KEYS.length || keys.some((key, index) => key !== BOOTSTRAP_KEYS[index])) fail();
+  if (record.schemaVersion !== JM_RUNTIME_BOOTSTRAP_SCHEMA_VERSION) fail();
+  for (const key of ["runtimeId", "launchId"] as const) {
+    if (typeof record[key] !== "string" || !ID_PATTERN.test(record[key] as string)) fail();
+  }
+  if (typeof record.challenge !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(record.challenge)) fail();
+  if (typeof record.configFingerprint !== "string" || !HASH.test(record.configFingerprint)) fail();
+  let subject: JaceMemSubject;
+  try {
+    subject = validateJaceMemSubject(record.subject);
+  } catch {
+    return fail();
+  }
+  return Object.freeze({
+    schemaVersion: JM_RUNTIME_BOOTSTRAP_SCHEMA_VERSION,
+    runtimeId: record.runtimeId as string,
+    launchId: record.launchId as string,
+    challenge: record.challenge as string,
+    subject,
+    configFingerprint: record.configFingerprint as string
+  });
+}

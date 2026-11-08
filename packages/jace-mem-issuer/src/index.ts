@@ -14,6 +14,9 @@ export {
   jaceMemCapabilityId,
   jaceMemInvocationHash,
   jaceMemNonceHash,
+  jaceMemRuntimeConfigFingerprint,
+  validateJaceMemRuntimeIdentity,
+  JM_RUNTIME_BOOTSTRAP_SCHEMA_VERSION,
   jaceMemSigningConfigFromEnv,
   jaceMemSubjectHash,
   jaceMemVerificationKey,
@@ -29,8 +32,17 @@ export type {
   JaceMemCapabilityPayload,
   JaceMemExecutionAuthorization,
   JaceMemInvocation,
+  JaceMemRuntimeBootstrap,
   JaceMemSigningConfig,
   JaceMemSubject
 } from "./issuer.js";
 export { SqliteJaceMemIssuanceRegistry } from "./registry.js";
 export type { JaceMemIssuanceBinding } from "./registry.js";
+export {
+  JaceMemGatewayIssuer,
+  JM_BRIDGE_WORKER_ID,
+  jaceMemBootstrapCompleteSchema,
+  jaceMemBootstrapRequestSchema,
+  jaceMemIssueRequestSchema
+} from "./gateway-issuer.js";
+export type { JaceMemLaunch } from "./gateway-issuer.js";
