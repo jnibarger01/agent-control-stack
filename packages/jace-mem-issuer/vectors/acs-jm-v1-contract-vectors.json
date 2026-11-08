@@ -1,0 +1,1673 @@
+{
+  "contract": "acs.jm.v1",
+  "note": "Synthetic identities and a throwaway key (private half discarded). Positive capabilities were minted by the ACS issuer path; negatives name the Jace-Mem rejection code.",
+  "keyId": "acs-jm-v1-vector-key",
+  "publicKey": "MCowBQYDK2VwAyEAtgoUM5uA0T0qCzz3tX9MWwBLQoUsNWw3lSlydFsEyrQ",
+  "runtimeId": "jm-test-runtime",
+  "positive": [
+    {
+      "name": "session_start issued by ACS",
+      "toolName": "session_start",
+      "arguments": {},
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_72bfe50e-7d2b-4b39-90a0-5a649dae7d42",
+          "attemptId": "attempt_34446028-d5e0-4737-9142-0c4f2d72d90b",
+          "leaseId": "lease_bac2a2be-1fbc-4c3a-92f3-30dda3f491dc",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "session_start",
+          "normalizedArguments": {},
+          "invocationHash": "8d099b56936e5f49bc2a1e5f0040d3f3f79ed4caed33405070b79823729b358a",
+          "actionHash": "9f6142fd90fa73f8b0da0015808ff8703b519769f112f5921aa8d89ea4c3ef6e",
+          "requestHash": "3544f83277a91ffd48782a91bf8d2197afc1dd6a555a19864a6ba0ae13d9c3d7",
+          "planHash": "4e8c94214c1b536ec025de081328a37539a98d6a4ed79cc9318f2fd1e068f26a",
+          "scopes": ["memory.write"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "JoHj0KK1YWKd0pFDU-8a18YgjeAM9JTeFViTdgXSlq0"
+        },
+        "signature": "RHEavZwSj1Op7eS-Pdle8PCDBWm40nUkHLNhUfJSDscEcF-lZQdxQ5UDIkXukZ1PGEB8kgBug1Dr70WQa1EBCQ",
+        "keyId": "acs-jm-v1-vector-key"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z"
+    },
+    {
+      "name": "session_end issued by ACS",
+      "toolName": "session_end",
+      "arguments": {
+        "session": "sess-1"
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_c347ab12-2281-451e-a292-069808d6b049",
+          "attemptId": "attempt_24d3c99b-7670-49ea-b163-a94628500723",
+          "leaseId": "lease_26604c56-896a-490a-970d-b2e1ee0bd98f",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "session_end",
+          "normalizedArguments": {
+            "session": "sess-1"
+          },
+          "invocationHash": "89b350ba5122254edcebf148b2c2cdf48e19e75ee81e2f79ff57786579cbe219",
+          "actionHash": "d6944996fc422b1f80aca2bbf40f62adf64375b09fd92b132b33c569df258d3b",
+          "requestHash": "1d07e49baeecba72ffa720b0e2b5629201976c51621e55d6295474c4c0e4eaa5",
+          "planHash": "36280ac578bffee9257f09682b231678508062fc723851171327ff2d304237c4",
+          "scopes": ["memory.write"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "gxq9Ipnrd-HqX2B9oHV9TTY9CFXP6iB9-tMeohlzxEc"
+        },
+        "signature": "pqgXDgQ0uQ7HrQUpWEPVfOnYgPVpow9P8e2NMlIQMxlefoFmOU9gzCQvx2jq7lOwjFHyBHa6NmjtUCBGAxIrAw",
+        "keyId": "acs-jm-v1-vector-key"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z"
+    },
+    {
+      "name": "session_delete issued by ACS",
+      "toolName": "session_delete",
+      "arguments": {
+        "session": "sess-1"
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_cbd65267-3bdf-4aea-8bf1-833625c089ad",
+          "attemptId": "attempt_e4742d9e-9030-46d6-9dd3-e67bb93d2536",
+          "leaseId": "lease_4e055c61-ca9c-4eaf-9152-f4f5baf10eb2",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "session_delete",
+          "normalizedArguments": {
+            "session": "sess-1"
+          },
+          "invocationHash": "852fe77b0b1cb761d448c08aaeae4a1063c5630b5be629b71d5f607d33ae1fdd",
+          "actionHash": "1b6f250b851262d46752299afd6f3500865244484a626d8cabf2e7a9e55b0c29",
+          "requestHash": "38e21b04ec2685e6ffedafcae8e9d2d534992098a6f5035cbcb09cc877f57966",
+          "planHash": "b59332401203e30641dd45c31dcfd6cef0135e709c4629d3d56ec03f67e88cd5",
+          "scopes": ["memory.delete"],
+          "approvalId": "plan_approval_42f90c28-d53e-4444-a2cb-7b467bbcafd6",
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "J_TSonDK2Zobr6RYCbhkRnUiy5KA0Dd34sGKd6DSRvk"
+        },
+        "signature": "G8QODg_72xmUI3s-0_sfqOrKK8l4gjEZwxCa6-iT0THeBnARVi6QOvybF7E3-VtiBhx9dRM2Bdrw8mCv48aBCQ",
+        "keyId": "acs-jm-v1-vector-key"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z"
+    },
+    {
+      "name": "memory_capture issued by ACS",
+      "toolName": "memory_capture",
+      "arguments": {
+        "session": "sess-1",
+        "text": "synthetic fact",
+        "kind": "FACT",
+        "status": "CLAIMED",
+        "source": "fixture"
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_67ee5fba-e87b-45fe-82b0-a47d122f3b1b",
+          "attemptId": "attempt_019e8a50-c589-4fe0-a9c3-d2ba04da0260",
+          "leaseId": "lease_5afeea63-d906-4b2b-ac5d-5e7df410e138",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_capture",
+          "normalizedArguments": {
+            "kind": "FACT",
+            "session": "sess-1",
+            "source": "fixture",
+            "status": "CLAIMED",
+            "text": "synthetic fact"
+          },
+          "invocationHash": "02b6e491c3e793b6cbb748451aaddb9590659b6eac607e12b517a7a22f6a2e66",
+          "actionHash": "e0ccd12ec309ff19a0d6acca26d74bdf48b85b565f70ee85fe07f29e1c4e6022",
+          "requestHash": "0216cd3a007d05e46bf7fe5b4cb53007d65ab1ce07cc0560e1d0523cc903b017",
+          "planHash": "0b2eb2d818912a0069b412540fd98af8e7035092f2dacd2a42633cef4f9c687f",
+          "scopes": ["memory.write"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "IPeGQZ8PV7h_29-7owK85FU_K1muPIeEqAMcB-_awUY"
+        },
+        "signature": "LZNnCQI5YlpCVJmQC54mArlO8LYxYL6jjH4TR9GYznvB3rPf8kcJUNhXlXi6z0Hy6-zGg5dFcSXOvZND9VyzDg",
+        "keyId": "acs-jm-v1-vector-key"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z"
+    },
+    {
+      "name": "memory_search issued by ACS",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "synthetic",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+        },
+        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "keyId": "acs-jm-v1-vector-key"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z"
+    },
+    {
+      "name": "memory_get issued by ACS",
+      "toolName": "memory_get",
+      "arguments": {
+        "id": "obs-1"
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_672727fc-e107-4493-bcbc-bd0fee669720",
+          "attemptId": "attempt_7380cc49-8568-4536-afff-3129635b4a9b",
+          "leaseId": "lease_a1fce606-e862-40c3-aeba-05c2385225fb",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_get",
+          "normalizedArguments": {
+            "id": "obs-1"
+          },
+          "invocationHash": "63b34d6bea314f7e83bd26faf18a2c9bfd7d7013d3189753fe47b4b63d10a835",
+          "actionHash": "ff72ca40d31490795045725ba6117363abf4fc55813c40b9a59191ff83bb9212",
+          "requestHash": "424ea5cbc86fda7b5603f7b91c76aac6a0363878318faecaa65a3078d69fefb4",
+          "planHash": "f9518b1e51860821501e79d2de990018705c114e59dc9de1486cccb8fa9ad425",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "c4s8IQnXP5-P-NTEyIZ_9SO5RaOkilVg2TsX1KsSpV8"
+        },
+        "signature": "_rfluJofE-mrcrpoVCPU5-9_lhfq8S3X3NT48hM3fJ6ML0Q-eOqDfktw7C2LCaQtALmeTUCK79uH-DlDAbW-CQ",
+        "keyId": "acs-jm-v1-vector-key"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z"
+    },
+    {
+      "name": "memory_delete issued by ACS",
+      "toolName": "memory_delete",
+      "arguments": {
+        "id": "obs-1"
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_390b90a3-35ac-42d8-a602-61d7ee8c2f97",
+          "attemptId": "attempt_33909f75-7977-408d-9a21-e1defc698570",
+          "leaseId": "lease_be386f80-8ebf-4e59-9d0a-098af81d2de1",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_delete",
+          "normalizedArguments": {
+            "id": "obs-1"
+          },
+          "invocationHash": "291055e93d98b73e2b9942d605188caa746c49760929ba154eca8e54a5f9138f",
+          "actionHash": "5e77197a4a2e5e94ce97f4e21d2470596db5db49ac84f363ba1317f3491d4595",
+          "requestHash": "5e893f5896a8cc5ffed5ec9eaa5ba4ea35c68124117ea0326d11620bdfa3cdb1",
+          "planHash": "528ff6dd7f2f9a347ff97fdcde3bf56a96d4787e6ee2be2431d8ac124270805d",
+          "scopes": ["memory.delete"],
+          "approvalId": "plan_approval_0ed48244-1cd6-460e-ab49-961746b89647",
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "W-senWANlj3cMez7FOYCkUJ9irOpvLrNqd0p08AeP-I"
+        },
+        "signature": "C58F0LbhD1vmOUaD36wPGR07RZI9AOJ2AbuPbn5f1oU7GvgzHi6r6l6jFFZ5qp1sY7uDb-9X7hG_LTjRZjFSCA",
+        "keyId": "acs-jm-v1-vector-key"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z"
+    },
+    {
+      "name": "memory_retain_since issued by ACS",
+      "toolName": "memory_retain_since",
+      "arguments": {
+        "cutoff": "2026-01-01T00:00:00.000Z"
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_abbdf65c-d876-4e63-81fc-e255b54f2f16",
+          "attemptId": "attempt_b815a479-d0eb-4137-b150-32c99134c676",
+          "leaseId": "lease_7a34a5f9-3d77-4b01-b5ce-ce1c616d205c",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_retain_since",
+          "normalizedArguments": {
+            "cutoff": "2026-01-01T00:00:00.000Z"
+          },
+          "invocationHash": "7bca8cba859ebf6f5b4d1953d7c55c0820073186a7decce7e28ea88ac7a6721b",
+          "actionHash": "15cdbdfebd1c8e0ee90659e9b1b9d23d277ab5b2b93f872efbb372a5546981dd",
+          "requestHash": "ce61e79e63152e500af76b0e21f1f20210a4bf833ed6b83a893e3837df6f0c1c",
+          "planHash": "9e51cd71e69aed76ff7bc51c0bae04aa708789a2ca61b2e75976c6ebb4611b3b",
+          "scopes": ["memory.delete"],
+          "approvalId": "plan_approval_4de66b05-4835-4d2c-baae-d2936479617b",
+          "issuedAt": "2026-11-08T13:38:58.000Z",
+          "expiresAt": "2026-11-08T13:39:27.000Z",
+          "nonce": "acWc4PPuklXZJnK9c1AU0qWyEQ4Eh6YAVmcfMa5VAWc"
+        },
+        "signature": "WVlILXhm6shr9PHmfvDAIWttTzGyl1afTjc-_cF-23WTDyQfyVHhIUlfzVXE4k3aJZrZZuuPvgHsMVw15lmvDA",
+        "keyId": "acs-jm-v1-vector-key"
+      },
+      "verifyAt": "2026-11-08T13:38:59.000Z"
+    },
+    {
+      "name": "memory_status issued by ACS",
+      "toolName": "memory_status",
+      "arguments": {},
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_1961a6af-6a75-4912-b3dd-70c45e5e9bec",
+          "attemptId": "attempt_f42d1336-58d8-4abd-a052-17150ab94365",
+          "leaseId": "lease_2f3fcd2b-3306-434d-8516-4676522fa4c8",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_status",
+          "normalizedArguments": {},
+          "invocationHash": "6787270a9802bacbb99557997b8cab6789bb220f10eb22710cc3da4d0582b9d5",
+          "actionHash": "d6627a9845b1f7d7be64f1b30142434957e474bdb136473d9c392c9c78315fc7",
+          "requestHash": "516510a253c1082fff5481c336a06b23d4436e9d71dc012f6cdea0eb9df0a776",
+          "planHash": "4faf590cd788b4873d17ffe903ac0f02491af0e7bcab69a369258d3d26be2036",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:58.000Z",
+          "expiresAt": "2026-11-08T13:39:27.000Z",
+          "nonce": "nEvpfF5n7_hIEM_Z44hzdIoMEFssL6vXPVr3mjt3fYw"
+        },
+        "signature": "9zogXTP3ZyMuAK0S8bJH2vPXnZ2IvpYFj8Y06_4sjJHuWGSQHFRGYRqe0OpjYQs5BrkCpVDjrdgtvCNrhZhHCw",
+        "keyId": "acs-jm-v1-vector-key"
+      },
+      "verifyAt": "2026-11-08T13:38:59.000Z"
+    },
+    {
+      "name": "memory_search_shared issued by ACS",
+      "toolName": "memory_search_shared",
+      "arguments": {
+        "targetAgent": "agent-b",
+        "query": "synthetic"
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_7785879f-5ea2-47e4-9c6e-414781e85a5a",
+          "attemptId": "attempt_a60decb0-a42a-4633-a280-342df7f9cc24",
+          "leaseId": "lease_cb72d8ce-867e-409f-b1dc-ce6753097b76",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search_shared",
+          "normalizedArguments": {
+            "query": "synthetic",
+            "targetAgent": "agent-b"
+          },
+          "invocationHash": "b0bc0a9cf3cdab53bcf6984d4e0764bab989a841c98d54c977eb03484f8aed95",
+          "actionHash": "9400bb8f0ae5ff6f3e9a5442b9b72fd2f5032e8d69d16abe2da0b8073f097ac5",
+          "requestHash": "dabbe8e9dd6d06b354ed472c5785c28e5a9c56cb5f7bacd86c15d80ccef22597",
+          "planHash": "9a943448591b2dd65ef4addc4bd74a9d0baae0210179a91cc6aa78c7ec8251ea",
+          "scopes": ["memory.share"],
+          "approvalId": "plan_approval_bc54bb1e-5d88-4e32-a241-9aba5b0719b3",
+          "issuedAt": "2026-11-08T13:38:58.000Z",
+          "expiresAt": "2026-11-08T13:39:27.000Z",
+          "nonce": "-sfO3kMcVFmon4xe-Cqp6fAUZfIjeNEaes_LNF1m3F8"
+        },
+        "signature": "MouBIHtloVeMYdXYGtfiddk_gpHUnks_ncGrKlLJnwU0Fiafug6tqcyhEvUOsXoOSVifjvmnC139DZ8rm_bsDA",
+        "keyId": "acs-jm-v1-vector-key"
+      },
+      "verifyAt": "2026-11-08T13:38:59.000Z"
+    }
+  ],
+  "negative": [
+    {
+      "name": "capability minted for agent-a used by a process launched as agent-b",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "synthetic",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-b",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+        },
+        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "keyId": "acs-jm-v1-vector-key"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "subject_mismatch"
+    },
+    {
+      "name": "capability used from another worktree of the same agent",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "synthetic",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/other",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+        },
+        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "keyId": "acs-jm-v1-vector-key"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "subject_mismatch"
+    },
+    {
+      "name": "subject re-signed for another agent",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "synthetic",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-b",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+        },
+        "keyId": "acs-jm-v1-vector-key",
+        "signature": "45sfg3ROnMXXHN_c4YQWVGCo3fQQm88mpJ_o7Vr_0amaRAPBjxMJu-0WH9IkRLEjKxn9oUlaRkDQaMcFcIRmBg"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "subject_mismatch"
+    },
+    {
+      "name": "subject with an extra field",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "synthetic",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001",
+            "role": "admin"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+        },
+        "keyId": "acs-jm-v1-vector-key",
+        "signature": "srhdq1nT_7vx5XHQluJYXyyVcsptl8nXVzyK9qAgpK_gGzP0T8NMH1-o5FEnTBjvVIDRch5LThQu7Xnmu2yYCw"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "subject_malformed"
+    },
+    {
+      "name": "acs.jc.v1 version",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "synthetic",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jc.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+        },
+        "keyId": "acs-jm-v1-vector-key",
+        "signature": "q5UJMUYT1DVz2d7qRO6g-OgSNU4VWWvUfhEKy7XQpZO7MGvHIFJbOCcpMrb4i-gT8Ea3rE4WUM5tae39nuvcBA"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "version_mismatch"
+    },
+    {
+      "name": "jace-commander audience",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "synthetic",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-commander",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+        },
+        "keyId": "acs-jm-v1-vector-key",
+        "signature": "oA5g7pVx5Lyq8HGR0THxJWa1_8g1hEFbmW0y0oQjlrW46UP7l0g8Fpv7iVb5_-xKJ_cdJudnHgjGzWP4bwTSCw"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "audience_mismatch"
+    },
+    {
+      "name": "other issuer",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "synthetic",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "not-acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+        },
+        "keyId": "acs-jm-v1-vector-key",
+        "signature": "gtqlmZvkpwFwscXdOhO-Mo_ITpEVFwHlP4K_J2l5_YhYeKDVMkriu8WGVAqqU7hCOPbZJYmkJB9_ywovM-eKAg"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "issuer_mismatch"
+    },
+    {
+      "name": "other runtime",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "synthetic",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "other-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+        },
+        "keyId": "acs-jm-v1-vector-key",
+        "signature": "emyxdEnvfdie6JPmjvtpA1F-SvTC-ePAX7Pkz65VVL_KnsKgf0q8L-SaZhpmSpNCNtZQwkrTMknyTVB34MpXBQ"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "runtime_mismatch"
+    },
+    {
+      "name": "read capability presented for memory_get",
+      "toolName": "memory_get",
+      "arguments": {
+        "id": "obs-1"
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+        },
+        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "keyId": "acs-jm-v1-vector-key"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "tool_mismatch"
+    },
+    {
+      "name": "delivered arguments differ from the signed arguments",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "other",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+        },
+        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "keyId": "acs-jm-v1-vector-key"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "arguments_mismatch"
+    },
+    {
+      "name": "read capability widened to delete scope",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "synthetic",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.delete", "memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+        },
+        "keyId": "acs-jm-v1-vector-key",
+        "signature": "Et2lS4Jyu3hlTQLNkfm_vD6FEaFcfZhcI4PCrHn7q2YdbWrsxDQSaiZlphTV60M4dHq40pkGism08csiVAhpDw"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "scope_mismatch"
+    },
+    {
+      "name": "read capability carrying an approvalId",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "synthetic",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk",
+          "approvalId": "approval-x"
+        },
+        "keyId": "acs-jm-v1-vector-key",
+        "signature": "gZGOLSLeGQ6tqq2xrnVAOBfVlc7dcSZgidH33yGgu38jOIiO1sc6xaMUzf4k63SEoxeiCPlFrrBjwYQONVWPAQ"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "payload_keys"
+    },
+    {
+      "name": "extra payload key",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "synthetic",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk",
+          "admin": true
+        },
+        "keyId": "acs-jm-v1-vector-key",
+        "signature": "aTK93ROpMcen35UCDp5eCY6VOnkVt2IcqoH-YfX68gSo8b_lQwKJM_yu-qVIJHwEr8XHkkddo2BXf-ifttRWCQ"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "payload_keys"
+    },
+    {
+      "name": "lifetime over 30 seconds",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "synthetic",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:28.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+        },
+        "keyId": "acs-jm-v1-vector-key",
+        "signature": "wLuOp-rvhja9SpbxrdNVYqmdkeq180szLeKIiH0hdbJuMQXUdgj2ISSX1zlQlbXs_QLQocv8xj4VqAEkSv74AQ"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "lifetime_invalid"
+    },
+    {
+      "name": "verified after expiry plus skew",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "synthetic",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+        },
+        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "keyId": "acs-jm-v1-vector-key"
+      },
+      "verifyAt": "2026-11-08T13:39:32.000Z",
+      "expect": "expired"
+    },
+    {
+      "name": "verified before issuance minus skew",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "synthetic",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+        },
+        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "keyId": "acs-jm-v1-vector-key"
+      },
+      "verifyAt": "2026-11-08T13:38:51.000Z",
+      "expect": "not_yet_valid"
+    },
+    {
+      "name": "tampered payload without re-signing",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "synthetic",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 2,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+        },
+        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "keyId": "acs-jm-v1-vector-key"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "signature_invalid"
+    },
+    {
+      "name": "unknown key id",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "synthetic",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+        },
+        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "keyId": "other-key"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "key_unknown"
+    },
+    {
+      "name": "envelope with an extra field",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "synthetic",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "mNTYd8mVB-Jq2OIgxvGOsZP70gyzwxVpgHhKByT2ezk"
+        },
+        "signature": "vGpq34ERO8dKpm2RApqExlVSwcl2jqJda7v5LUwrKyOv4cjF1EEDrcLlJvAI-VZdfocnJx6Ze5XIehj2yWoGCw",
+        "keyId": "acs-jm-v1-vector-key",
+        "extra": 1
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "capability_malformed"
+    },
+    {
+      "name": "malformed nonce",
+      "toolName": "memory_search",
+      "arguments": {
+        "query": "synthetic",
+        "limit": 10
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_98c9c699-8efd-40c5-9714-08869a57a559",
+          "attemptId": "attempt_3d7e1d6c-15cf-4935-92a4-eb283c8845a7",
+          "leaseId": "lease_2bf9a019-dbc1-4e65-a95e-689e76fe3300",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search",
+          "normalizedArguments": {
+            "limit": 10,
+            "query": "synthetic"
+          },
+          "invocationHash": "f16eb4dd9bb23e36e445d84b72850eec9ac78a61f5f417ed7643910b756a3c35",
+          "actionHash": "b01f807e182368124a9ccdf5ec4d64cf3fc74e120a4ee9b77074e29ad703f1ed",
+          "requestHash": "ad00b7b20de3312ed998ba2d7ecdb33f278e6307c890233b48d054072872e665",
+          "planHash": "54df77a6c0f607114ef806f28668caa80f27e8ecdeeade414c766621652e7726",
+          "scopes": ["memory.read"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "short"
+        },
+        "keyId": "acs-jm-v1-vector-key",
+        "signature": "BXgP6Py8IULPeyMwlXBrxMnrlGcXWEOlKjftj3BV8IgY5mza9dGXZqtN-81SjKUB52PRTKweCOnZvxZCz6yWAg"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "nonce_malformed"
+    },
+    {
+      "name": "delete capability without its approval (approval bypass)",
+      "toolName": "memory_delete",
+      "arguments": {
+        "id": "obs-1"
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_390b90a3-35ac-42d8-a602-61d7ee8c2f97",
+          "attemptId": "attempt_33909f75-7977-408d-9a21-e1defc698570",
+          "leaseId": "lease_be386f80-8ebf-4e59-9d0a-098af81d2de1",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_delete",
+          "normalizedArguments": {
+            "id": "obs-1"
+          },
+          "invocationHash": "291055e93d98b73e2b9942d605188caa746c49760929ba154eca8e54a5f9138f",
+          "actionHash": "5e77197a4a2e5e94ce97f4e21d2470596db5db49ac84f363ba1317f3491d4595",
+          "requestHash": "5e893f5896a8cc5ffed5ec9eaa5ba4ea35c68124117ea0326d11620bdfa3cdb1",
+          "planHash": "528ff6dd7f2f9a347ff97fdcde3bf56a96d4787e6ee2be2431d8ac124270805d",
+          "scopes": ["memory.delete"],
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "W-senWANlj3cMez7FOYCkUJ9irOpvLrNqd0p08AeP-I"
+        },
+        "keyId": "acs-jm-v1-vector-key",
+        "signature": "aRXqacd-xsGNOSjLX_soFh-5dbPoM63s13u7PkOh25O5wbNbbaLfZSNme9_ZD2ItqRIMAhsJo5T_dQknJmiJDQ"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "approval_missing"
+    },
+    {
+      "name": "delete capability presented for another observation",
+      "toolName": "memory_delete",
+      "arguments": {
+        "id": "obs-2"
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_390b90a3-35ac-42d8-a602-61d7ee8c2f97",
+          "attemptId": "attempt_33909f75-7977-408d-9a21-e1defc698570",
+          "leaseId": "lease_be386f80-8ebf-4e59-9d0a-098af81d2de1",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_delete",
+          "normalizedArguments": {
+            "id": "obs-1"
+          },
+          "invocationHash": "291055e93d98b73e2b9942d605188caa746c49760929ba154eca8e54a5f9138f",
+          "actionHash": "5e77197a4a2e5e94ce97f4e21d2470596db5db49ac84f363ba1317f3491d4595",
+          "requestHash": "5e893f5896a8cc5ffed5ec9eaa5ba4ea35c68124117ea0326d11620bdfa3cdb1",
+          "planHash": "528ff6dd7f2f9a347ff97fdcde3bf56a96d4787e6ee2be2431d8ac124270805d",
+          "scopes": ["memory.delete"],
+          "approvalId": "plan_approval_0ed48244-1cd6-460e-ab49-961746b89647",
+          "issuedAt": "2026-11-08T13:38:57.000Z",
+          "expiresAt": "2026-11-08T13:39:26.000Z",
+          "nonce": "W-senWANlj3cMez7FOYCkUJ9irOpvLrNqd0p08AeP-I"
+        },
+        "signature": "C58F0LbhD1vmOUaD36wPGR07RZI9AOJ2AbuPbn5f1oU7GvgzHi6r6l6jFFZ5qp1sY7uDb-9X7hG_LTjRZjFSCA",
+        "keyId": "acs-jm-v1-vector-key"
+      },
+      "verifyAt": "2026-11-08T13:38:58.000Z",
+      "expect": "arguments_mismatch"
+    },
+    {
+      "name": "share capability presented against another target agent",
+      "toolName": "memory_search_shared",
+      "arguments": {
+        "targetAgent": "agent-c",
+        "query": "synthetic"
+      },
+      "identity": {
+        "principal": "synthetic-principal",
+        "agent": "agent-a",
+        "project": "synthetic-project",
+        "worktree": "/srv/synthetic/worktree",
+        "invocation": "inv-0001"
+      },
+      "capability": {
+        "payload": {
+          "version": "acs.jm.v1",
+          "issuer": "acs",
+          "audience": "jace-mem",
+          "runtimeId": "jm-test-runtime",
+          "workItemId": "wrk_7785879f-5ea2-47e4-9c6e-414781e85a5a",
+          "attemptId": "attempt_a60decb0-a42a-4633-a280-342df7f9cc24",
+          "leaseId": "lease_cb72d8ce-867e-409f-b1dc-ce6753097b76",
+          "leaseEpoch": 1,
+          "subject": {
+            "principal": "synthetic-principal",
+            "agent": "agent-a",
+            "project": "synthetic-project",
+            "worktree": "/srv/synthetic/worktree",
+            "invocation": "inv-0001"
+          },
+          "toolName": "memory_search_shared",
+          "normalizedArguments": {
+            "query": "synthetic",
+            "targetAgent": "agent-b"
+          },
+          "invocationHash": "b0bc0a9cf3cdab53bcf6984d4e0764bab989a841c98d54c977eb03484f8aed95",
+          "actionHash": "9400bb8f0ae5ff6f3e9a5442b9b72fd2f5032e8d69d16abe2da0b8073f097ac5",
+          "requestHash": "dabbe8e9dd6d06b354ed472c5785c28e5a9c56cb5f7bacd86c15d80ccef22597",
+          "planHash": "9a943448591b2dd65ef4addc4bd74a9d0baae0210179a91cc6aa78c7ec8251ea",
+          "scopes": ["memory.share"],
+          "approvalId": "plan_approval_bc54bb1e-5d88-4e32-a241-9aba5b0719b3",
+          "issuedAt": "2026-11-08T13:38:58.000Z",
+          "expiresAt": "2026-11-08T13:39:27.000Z",
+          "nonce": "-sfO3kMcVFmon4xe-Cqp6fAUZfIjeNEaes_LNF1m3F8"
+        },
+        "signature": "MouBIHtloVeMYdXYGtfiddk_gpHUnks_ncGrKlLJnwU0Fiafug6tqcyhEvUOsXoOSVifjvmnC139DZ8rm_bsDA",
+        "keyId": "acs-jm-v1-vector-key"
+      },
+      "verifyAt": "2026-11-08T13:38:59.000Z",
+      "expect": "arguments_mismatch"
+    }
+  ]
+}
