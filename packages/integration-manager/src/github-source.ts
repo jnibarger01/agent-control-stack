@@ -17,7 +17,7 @@ const QUERY = `query($owner:String!,$name:String!){
         number title state isDraft isCrossRepository headRefName headRefOid baseRefName mergeable reviewDecision
         author{login}
         reviewThreads(first:${PAGE}){totalCount nodes{isResolved}}
-        files(first:${PAGE}){totalCount nodes{path}}
+        files(first:${PAGE}){totalCount nodes{path changeType}}
         commits(last:1){nodes{commit{statusCheckRollup{contexts(first:${PAGE}){totalCount nodes{
           __typename
           ... on CheckRun{name status conclusion}
@@ -38,7 +38,7 @@ export const PULL_REQUEST_BY_NUMBER_QUERY = `query($owner:String!,$name:String!,
       number title state isDraft isCrossRepository headRefName headRefOid baseRefName baseRefOid mergeable reviewDecision
       author{login}
       reviewThreads(first:${PAGE}){totalCount nodes{isResolved}}
-      files(first:${PAGE}){totalCount nodes{path}}
+      files(first:${PAGE}){totalCount nodes{path changeType}}
       commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:${PAGE}){totalCount nodes{
         __typename
         ... on CheckRun{name status conclusion checkSuite{app{slug}}}
@@ -91,7 +91,7 @@ const pullSchema = z.object({
   }),
   files: z.object({
     totalCount: z.number().int().nonnegative(),
-    nodes: z.array(z.object({ path: z.string().min(1) }))
+    nodes: z.array(z.object({ path: z.string().min(1), changeType: z.string().nullish() }))
   }),
   commits: z.object({
     nodes: z.array(
@@ -138,6 +138,8 @@ function checkFrom(context: GqlContext, withIdentity: boolean): CheckSnapshot {
   };
 }
 
+const PLAIN_CHANGE_TYPES = new Set(["ADDED", "MODIFIED", "DELETED"]);
+
 /** Pure mapping from a validated GraphQL node, exported for tests. */
 export function snapshotFromGraphQl(node: GqlPull): PullRequestSnapshot {
   const rollup = node.commits.nodes[0]?.commit.statusCheckRollup ?? null;
@@ -162,6 +164,11 @@ export function snapshotFromGraphQl(node: GqlPull): PullRequestSnapshot {
     unresolvedThreads: node.reviewThreads.nodes.filter((thread) => !thread.isResolved).length,
     checks: contexts.map((context) => checkFrom(context, withIdentity)),
     changedFiles: node.files.nodes.map((file) => file.path),
+    // A renamed or copied file's old path is not returned, so the classifier's previous-name check cannot be made.
+    // Any change type other than a plain add, modify or delete, or a missing one, is unverifiable and fails closed.
+    unverifiedOriginFiles: node.files.nodes
+      .filter((file) => !PLAIN_CHANGE_TYPES.has(file.changeType ?? ""))
+      .map((file) => file.path),
     truncated: {
       threads: node.reviewThreads.totalCount > node.reviewThreads.nodes.length,
       checks: (rollup?.contexts.totalCount ?? 0) > contexts.length,
