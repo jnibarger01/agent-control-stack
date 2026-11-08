@@ -17,7 +17,9 @@ paths = [
   # Desktop Commander fixtures: a random OAuth client UUID and the canonical
   # fake AWS key AKIAABCDEFGHIJKLMNOP used as secret_scan test input.
   '''(^|/)apps/dc-relay/test/test-control-plane-pairing\.js$''',
-  '''(^|/)vendor/desktop-commander/test/test-execution-tools\.js$'''
+  '''(^|/)vendor/desktop-commander/test/test-execution-tools\.js$''',
+  # Black-box recorder: synthetic shapes (SYNTH*) used only to assert redaction.
+  '''(^|/)packages/black-box-recorder/src/redact-leaks\.test\.ts$'''
 ]
 regexes = [
   '''(?i)authorization:\s*bearer\s+(?:change-me-local-dev|local-dev-token)''',
