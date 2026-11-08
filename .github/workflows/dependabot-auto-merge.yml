@@ -1,20 +1,91 @@
-name: Dependabot auto-merge (disabled)
+name: Dependabot auto-merge
 
-# HOTFIX: disabled. This workflow used to enable auto-merge for dependency bumps
-# without independent human review. It has been removed from the active path.
-# It is kept as a no-op so the decision is visible in history. Re-enable only
-# through the trusted classifier once it is verified.
+# Patch/minor dependency bumps only, from the default-branch copy of this file.
+# No checkout, no App or other secrets. Auto-merge is enabled only after the
+# same protection checks as the PR classifier, and bound to the classified head.
+# Majors, labelled parked bumps, and any change outside dependency manifests
+# are left for a human.
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, reopened, synchronize, labeled, unlabeled]
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
   dependabot:
-    if: ${{ false }}
     runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - name: Disabled
-        run: exit 1
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Classify and enable auto-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          ATTESTED_ACTIONS_CANNOT_APPROVE: ${{ vars.ACS_ATTESTED_ACTIONS_CANNOT_APPROVE_PRS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          block() { echo "BLOCK: $*" >&2; exit 1; }
+          summary() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
+
+          # Hard blocks: majors and parked bumps are never auto-merged.
+          if [[ "$UPDATE_TYPE" == "version-update:semver-major" ]]; then
+            gh pr merge --disable-auto "$PR" >/dev/null 2>&1 || true
+            summary "Major update: human review only."; exit 0
+          fi
+          IFS=',' read -r -a labels <<< "$PR_LABELS"
+          for label in "${labels[@]}"; do
+            case "$label" in deps-major|deps-parked)
+              gh pr merge --disable-auto "$PR" >/dev/null 2>&1 || true
+              summary "Parked label ($label): human review only."; exit 0 ;;
+            esac
+          done
+          case "$UPDATE_TYPE" in
+            version-update:semver-patch|version-update:semver-minor) ;;
+            *) block "unrecognised update type '$UPDATE_TYPE'" ;;
+          esac
+
+          pr_json="$(gh api "repos/$REPO/pulls/$PR")" || block "could not read PR #$PR"
+          [[ "$(jq -r '.head.sha' <<<"$pr_json")" == "$EXPECTED_HEAD" ]] || block "head moved; a newer run will classify it"
+          [[ "$(jq -r '.base.ref' <<<"$pr_json")" == "main" ]] || block "base is not main"
+          changed_files="$(jq -r '.changed_files' <<<"$pr_json")"
+
+          # Protection evidence, same requirements as the PR classifier.
+          rules="$(gh api "repos/$REPO/rules/branches/main")" || block "could not read branch rules"
+          for ctx in check test; do
+            jq -e --arg c "$ctx" '[.[] | select(.type=="required_status_checks")
+              | .parameters.required_status_checks[]? | select(.context==$c and .integration_id != null)] | length > 0' \
+              <<<"$rules" >/dev/null || block "required check '$ctx' is not bound to an app on main"
+          done
+          jq -e '[.[] | select(.type=="pull_request") | .parameters
+            | select(.require_last_push_approval==true and .dismiss_stale_reviews_on_push==true)] | length > 0' \
+            <<<"$rules" >/dev/null || block "review protection not verified on main"
+          [[ "$ATTESTED_ACTIONS_CANNOT_APPROVE" == "true" ]] || block "Actions can-approve setting not attested"
+
+          # Only dependency manifests may change.
+          MANIFEST_RE='(^|/)(package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$'
+          files_tsv="$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[] | [.filename, (.previous_filename // "-")] | @tsv')" \
+            || block "could not list changed files"
+          rows="$(grep -c . <<<"$files_tsv" || true)"
+          [[ "$rows" == "$changed_files" ]] || block "file list incomplete ($rows of $changed_files)"
+          while IFS=$'\t' read -r name prev; do
+            for p in "$name" "$prev"; do
+              [[ -n "$p" && "$p" != "-" ]] || continue
+              grep -Eq "$MANIFEST_RE" <<<"$p" || { gh pr merge --disable-auto "$PR" >/dev/null 2>&1 || true; summary "Non-manifest change ($p): human review only."; exit 0; }
+            done
+          done <<<"$files_tsv"
+
+          gh pr merge --auto --squash --match-head-commit "$EXPECTED_HEAD" "$PR"
+          summary "Result: auto-merge enabled for $UPDATE_TYPE on head $EXPECTED_HEAD."
