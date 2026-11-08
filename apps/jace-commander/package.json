@@ -14,7 +14,7 @@
   },
   "main": "./dist/server.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json && cp src/pty-helper.py dist/pty-helper.py && chmod +x dist/cli.js dist/privileged-helper.js",
+    "build": "tsc -p tsconfig.json && cp src/pty-helper.py dist/pty-helper.py && chmod +x dist/cli.js dist/privileged-helper.js && node deploy/bundle-bridge.mjs",
     "test": "npm run build && node test/run-all.mjs",
     "test:only": "node test/run-all.mjs",
     "start": "node dist/cli.js serve"
@@ -28,6 +28,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
+    "esbuild": "0.28.1",
     "typescript": "^5.8.3"
   }
 }

@@ -1,6 +1,6 @@
 # ~/.config/systemd/user/jace-commander-mcp.service  (CachyOS, systemd user service)
 #
-# Native Jace Commander behind the managed bridge: bridge.js (BRIDGE_PROFILE=
+# Native Jace Commander behind the bundled installed bridge (BRIDGE_PROFILE=
 # jace-commander, 127.0.0.1:8003) runs the INSTALLED native JC release (no
 # Desktop Commander, not the development checkout) over stdio. The OAuth edge (server.js, 127.0.0.1:8010)
 # routes /jc/mcp here after authentication and per-call ACS acs.jc.v1 issuance.
@@ -21,7 +21,7 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/projects/agent-control-stack/apps/dc-mcp-gateway
+WorkingDirectory=%h/.local/lib/jace-commander/current
 Environment=NODE_ENV=production
 Environment=BRIDGE_PROFILE=jace-commander
 Environment=BRIDGE_PORT=8003
@@ -44,7 +44,7 @@ Environment=JC_REQUIRE_INSTALLED_RELEASE=1
 # Secrets and site values (keys, tokens, roots). Plain KEY=VALUE lines only.
 EnvironmentFile=%h/.config/acs/jc-bridge.env
 # /usr/bin/node is the distribution Node (>= 24.16); no version-manager shims.
-ExecStart=/usr/bin/node %h/projects/agent-control-stack/apps/dc-mcp-gateway/bridge.js
+ExecStart=/usr/bin/node %h/.local/lib/jace-commander/current/dist/bridge.mjs
 Restart=on-failure
 RestartSec=5
 # SIGTERM: the bridge closes sessions and its stdio child; JC terminates every

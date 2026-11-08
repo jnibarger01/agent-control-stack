@@ -175,7 +175,9 @@ test('the CachyOS unit pins the installed release the installer creates', () => 
   assert.match(installer, /\$PREFIX\/current/);
   // JC itself is never launched from the checkout: no DC_ARGS / JC_DC_DIR in the unit.
   assert.doesNotMatch(unit, /^Environment=(DC_ARGS|JC_DC_DIR)=/m);
-  assert.match(unit, /^ExecStart=\/usr\/bin\/node /m);
+  assert.match(unit, /^WorkingDirectory=%h\/\.local\/lib\/jace-commander\/current$/m);
+  assert.match(unit, /^ExecStart=\/usr\/bin\/node %h\/\.local\/lib\/jace-commander\/current\/dist\/bridge\.mjs$/m);
+  assert.doesNotMatch(unit, /^(WorkingDirectory|ExecStart)=.*projects\/agent-control-stack/m);
   assert.equal(environment.JC_ACS_AUTHORITY_TOKEN_FILE, '%h/.config/acs/jc-authority.token');
 });
 
