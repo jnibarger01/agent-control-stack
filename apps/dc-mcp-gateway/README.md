@@ -76,9 +76,16 @@ https://<host>/jc/mcp ─► server.js (Bearer <redacted> == JC_RESOURCE)
   A JSON-RPC batch containing `tools/call` is rejected fail-closed
   (`batched_tools_call_rejected`): the gateway cannot attribute ACS issuance
   or strip spoofed authority fields per batch element.
-- `/ready` reports the primary DC lane; the jc bridge is reported (not gating)
-  as `jcBridgeReady`, and `/authority` includes a `jcBridge` section when the
-  lane is enabled.
+- `/ready` reports only the primary DC lane. `GET /jc/ready` independently
+  checks managed JC configuration, ACS `/readyz`, and the initialized managed
+  JC bridge with capability verification and gateway attestation configured.
+  It returns 200 when ready or 503 otherwise, with booleans only. `/authority`
+  includes a `jcBridge` section when the lane is enabled.
+- Managed JC requires `DC_GATEWAY_EXECUTION_TOKEN` at bridge startup (matching
+  the edge `GATEWAY_EXECUTION_TOKEN`). Every bridge `/mcp` request requires a
+  valid short-lived gateway attestation, including initialize, discovery,
+  notifications, GET and DELETE. Rejection precedes session creation. Tool
+  execution still requires an ACS-issued `acs.jc.v1` capability.
 - Unit and env template: `deploy/systemd/jace-commander-mcp.service`,
   `deploy/jace-commander-bridge.env.example`.
 

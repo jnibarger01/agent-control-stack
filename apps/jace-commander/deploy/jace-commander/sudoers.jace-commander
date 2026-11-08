@@ -1,0 +1,11 @@
+# /etc/sudoers.d/jace-commander — install with install-privileged-helper.sh
+# (it validates with `visudo -cf` before moving into place; mode 0440).
+#
+# Exactly one passwordless rule: the agent user may run the root-owned
+# Jace Commander helper with NO arguments ("" pins an empty argv). The
+# helper itself refuses anything without an ACS acs.jc.v1 capability that
+# carries a human approvalId bound to the exact command.
+#
+# @AGENT_USER@ is substituted at install time (default: jacen).
+Defaults!/usr/local/libexec/jace-commander/jc-privileged-helper env_reset, !requiretty
+@AGENT_USER@ ALL=(root) NOPASSWD: /usr/local/libexec/jace-commander/jc-privileged-helper ""
