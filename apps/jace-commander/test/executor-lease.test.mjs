@@ -203,7 +203,11 @@ test('release identity comes from the spelled entrypoint and its RELEASE.json', 
 
   const bare = tmpDir();
   fs.mkdirSync(path.join(bare, 'dist'), { recursive: true });
-  assert.equal(resolveJcReleaseIdentity(path.join(bare, 'dist', 'cli.js')), undefined, 'no RELEASE.json means no release identity');
+  assert.deepEqual(
+    resolveJcReleaseIdentity(path.join(bare, 'dist', 'cli.js')),
+    { releaseRoot: bare, releaseCommit: 'unreleased' },
+    'a runtime outside an installed release is recorded as unreleased, never as a release',
+  );
 });
 
 test('standalone and local presets never require or acquire the managed lease', () => {

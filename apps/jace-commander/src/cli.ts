@@ -290,11 +290,9 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
         // The managed executor claims the ACS singleton slot before serving any tool.
         // A duplicate, unreadable or unidentifiable lease refuses at once; a transient
         // race or a dead owner still inside its grace window is retried for a bounded time.
+        // Every managed runtime claims the slot, even outside an installed release: such a
+        // runtime records `unreleased`, which ACS never recognizes, so it gains no authority.
         const identity = resolveJcReleaseIdentity(process.argv[1] ?? '');
-        if (!identity) {
-          out.stderr('jace-commander: managed serve must run from an installed release (RELEASE.json); refusing to hold the executor lease');
-          return JC_EXIT.authorityUnavailable;
-        }
         const deadline = Date.now() + EXECUTOR_LEASE_ACQUIRE_WINDOW_MS;
         let lease: HeldExecutorLease | undefined;
         for (;;) {

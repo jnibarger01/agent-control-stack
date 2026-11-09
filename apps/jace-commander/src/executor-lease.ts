@@ -80,21 +80,23 @@ export type RenewResult = { ok: true; record: ExecutorLeaseRecord } | { ok: fals
 export type ReleaseResult = { ok: true } | { ok: false; reason: 'not-held' | 'not-owner' };
 
 /**
- * The installed release this entrypoint belongs to, read from RELEASE.json.
- * The root is taken from the path as spelled (not realpath), because ACS matches
- * the holder by its command line, which names the `current` symlink.
+ * The runtime identity a managed lease is bound to. The root is the entrypoint
+ * directory's parent, taken from the path as spelled (not realpath), because ACS
+ * matches the holder by its command line, which names the `current` symlink.
+ * The commit comes from RELEASE.json; a runtime outside an installed release
+ * records `unreleased`, which ACS never recognizes as its managed executor.
  */
-export function resolveJcReleaseIdentity(entrypoint: string): { releaseRoot: string; releaseCommit: string } | undefined {
+export function resolveJcReleaseIdentity(entrypoint: string): { releaseRoot: string; releaseCommit: string } {
   const releaseRoot = path.dirname(path.dirname(path.resolve(entrypoint)));
   try {
     const release = JSON.parse(fs.readFileSync(path.join(releaseRoot, 'RELEASE.json'), 'utf8')) as { commit?: unknown };
-    if (typeof release.commit === 'string' && /^[0-9a-f]{7,40}$/u.test(release.commit)) {
+    if (typeof release.commit === 'string' && /^[A-Za-z0-9._-]{1,64}$/u.test(release.commit)) {
       return { releaseRoot, releaseCommit: release.commit };
     }
   } catch {
-    // Not an installed release: no release identity to bind a managed lease to.
+    // Not an installed release.
   }
-  return undefined;
+  return { releaseRoot, releaseCommit: 'unreleased' };
 }
 
 /** Only a managed executor claims the ACS singleton. Standalone and local never do. */

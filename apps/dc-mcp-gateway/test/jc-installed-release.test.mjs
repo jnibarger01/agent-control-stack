@@ -50,6 +50,8 @@ const env = (overrides = {}) => {
     DC_CMD: process.execPath, JC_ACS_PUBLIC_KEY: 'test-key', JC_ACS_KEY_ID: 'test-key-id', JC_RUNTIME_ID: 'jc-pin-test',
     DC_GATEWAY_EXECUTION_TOKEN: EXECUTION_TOKEN, JC_ACS_AUTHORITY_TOKEN: 'read-only-authority',
     JC_STATE_DIR: path.join(base, 'state'), JC_REQUIRE_INSTALLED_RELEASE: '1', JC_RUNTIME_DIR: current,
+    // Never let a test runtime claim the developer's real executor lease.
+    DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: path.join(base, 'locks'),
     ...(process.env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR } : {}),
   };
   for (const [key, entry] of Object.entries(overrides)) {
