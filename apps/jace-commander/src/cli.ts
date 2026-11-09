@@ -12,7 +12,23 @@
  * status --local, tools, version, help.
  */
 import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import {
+  defaultExecutorLockDir,
+  executorLeaseRequired,
+  holdJcExecutorLease,
+  isProcessAlive,
+  readLinuxProcessIdentity,
+  resolveJcReleaseIdentity,
+  type HeldExecutorLease,
+} from './executor-lease.js';
+
+/** Executor lease timing: a 3-minute deadline renewed every minute, with a 10 s dead-owner grace. */
+const EXECUTOR_LEASE_TTL_MS = 180_000;
+const EXECUTOR_LEASE_RENEW_MS = 60_000;
+const EXECUTOR_LEASE_GRACE_MS = 10_000;
+const EXECUTOR_LEASE_ACQUIRE_WINDOW_MS = 20_000;
 import { CLI_COMMANDS, CliUsageError, helpText, parseArgs, resolveCommand } from './cli-commands.js';
 import { loadJcConfig, type JcConfig } from './config.js';
 import { credentialsPath, deviceLogin, loadCredentials } from './device-login.js';
@@ -269,6 +285,54 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
           out.stderr(`jace-commander: workload isolation unavailable (${isolation.detail}); refusing to serve`);
           return JC_EXIT.authorityUnavailable;
         }
+      }
+      if (executorLeaseRequired(mode)) {
+        // The managed executor claims the ACS singleton slot before serving any tool.
+        // A duplicate, unreadable or unidentifiable lease refuses at once; a transient
+        // race or a dead owner still inside its grace window is retried for a bounded time.
+        // Every managed runtime claims the slot, even outside an installed release: such a
+        // runtime records `unreleased`, which ACS never recognizes, so it gains no authority.
+        const identity = resolveJcReleaseIdentity(process.argv[1] ?? '');
+        const deadline = Date.now() + EXECUTOR_LEASE_ACQUIRE_WINDOW_MS;
+        let lease: HeldExecutorLease | undefined;
+        for (;;) {
+          const attempt = holdJcExecutorLease({
+            lockDir: defaultExecutorLockDir(env),
+            pid: process.pid,
+            instanceId: `jc-${process.pid}-${randomUUID()}`,
+            ...identity,
+            nowMs: Date.now(),
+            ttlMs: EXECUTOR_LEASE_TTL_MS,
+            graceMs: EXECUTOR_LEASE_GRACE_MS,
+            renewMs: EXECUTOR_LEASE_RENEW_MS,
+            isAlive: isProcessAlive,
+            readIdentity: readLinuxProcessIdentity,
+            onLost: (reason) => {
+              out.stderr(`jace-commander: executor lease lost (${reason}); stopping to fail closed`);
+              process.exit(JC_EXIT.authorityUnavailable);
+            },
+          });
+          if (attempt.ok) {
+            lease = attempt.lease;
+            break;
+          }
+          const transient = attempt.reason === 'stale-within-grace' || attempt.reason === 'takeover-in-progress' || attempt.reason === 'lost-race';
+          if (!transient || Date.now() >= deadline) {
+            const holder = attempt.blockedBy === undefined ? '' : `, holder pid ${attempt.blockedBy}`;
+            out.stderr(`jace-commander: executor lease unavailable (${attempt.reason}${holder}); refusing to serve`);
+            return JC_EXIT.authorityUnavailable;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+        if (!lease) return JC_EXIT.authorityUnavailable;
+        const held = lease;
+        const stop = (code: number) => {
+          held.release();
+          process.exit(code);
+        };
+        process.once('SIGTERM', () => stop(0));
+        process.once('SIGINT', () => stop(0));
+        out.stderr(`jace-commander: holding executor lease as pid ${process.pid} (release ${identity.releaseCommit})`);
       }
       const server = createJcServer(config, mode);
       await server.connect(new StdioServerTransport());
