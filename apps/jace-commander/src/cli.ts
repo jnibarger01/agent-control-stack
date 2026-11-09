@@ -12,7 +12,9 @@
  * status --local, tools, version, help.
  */
 import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { executorLeaseRequired, startManagedJcExecutorLease } from './executor-lease.js';
 import { CLI_COMMANDS, CliUsageError, helpText, parseArgs, resolveCommand } from './cli-commands.js';
 import { loadJcConfig, type JcConfig } from './config.js';
 import { credentialsPath, deviceLogin, loadCredentials } from './device-login.js';
@@ -268,6 +270,32 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
         if (!isolation.ok) {
           out.stderr(`jace-commander: workload isolation unavailable (${isolation.detail}); refusing to serve`);
           return JC_EXIT.authorityUnavailable;
+        }
+      }
+      if (executorLeaseRequired(mode)) {
+        // The canonical ACS executor slot is claimed BEFORE any tool is served.
+        // Holding it grants no permission to act; ACS still authorizes every call.
+        const started = startManagedJcExecutorLease({
+          env,
+          entrypoint: process.argv[1] ?? '',
+          pid: process.pid,
+          instanceId: `jc-${process.pid}-${randomUUID()}`,
+          onLost: (reason) => {
+            out.stderr(`jace-commander: executor lease lost (${reason}); stopping`);
+            process.exit(JC_EXIT.authorityUnavailable);
+          },
+        });
+        if (!started.ok) {
+          const holder = started.blockedBy !== undefined ? `, held by pid ${started.blockedBy}` : '';
+          out.stderr(`jace-commander: managed executor lease unavailable (${started.reason}${holder}); managed mode runs only from an installed release (use --preset local for development); refusing to serve`);
+          return JC_EXIT.authorityUnavailable;
+        }
+        // A signal must release the lease; default signal handling skips 'exit' handlers.
+        for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
+          process.once(signal, () => {
+            started.lease.release();
+            process.exit(0);
+          });
         }
       }
       const server = createJcServer(config, mode);
