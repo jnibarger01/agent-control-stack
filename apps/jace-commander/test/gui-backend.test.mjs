@@ -1,0 +1,38 @@
+import assert from 'node:assert/strict';
+import { executeGuiAction, captureGuiScreenshot, GuiError } from '../dist/gui.js';
+
+const calls = [];
+const runner = async (bin, args, opts) => {
+  calls.push({bin,args,opts});
+  return { stdout: Buffer.from('ok') };
+};
+const env = { JC_GUI_ENABLED: '1', JC_GUI_DISPLAY: ':81' };
+const rejects = async (f,code) => assert.rejects(f, err => err instanceof GuiError && err.code === code);
+await rejects(() => executeGuiAction({action:'click',x:4,y:5}, {runner, env:{}}),'GUI_DISABLED');
+await rejects(() => captureGuiScreenshot({runner, env:{JC_GUI_ENABLED:'1',JC_GUI_DISPLAY:'../../evil'}}),'GUI_DISPLAY_INVALID');
+await rejects(() => executeGuiAction({action:'click',x:-1,y:5}, {runner, env}),'GUI_ARGUMENT_INVALID');
+await rejects(() => executeGuiAction({action:'type',text:'x'.repeat(2049)}, {runner, env}),'GUI_ARGUMENT_INVALID');
+await rejects(() => executeGuiAction({action:'key',text:'Return; rm -rf /'}, {runner, env}),'GUI_ARGUMENT_INVALID');
+await rejects(() => executeGuiAction({action:'click',x:4,y:5,extra:true}, {runner, env}),'GUI_ARGUMENT_INVALID');
+await executeGuiAction({action:'click',x:5,y:6},{runner,env});
+assert.equal(calls.at(-1).bin,'/usr/bin/xdotool');
+assert.deepEqual(calls.at(-1).args,['mousemove','--sync','5','6','click','1']);
+assert.equal(calls.at(-1).opts.shell,false);
+assert.equal(calls.at(-1).opts.env.DISPLAY, ':81');
+assert.equal(calls.at(-1).opts.env.LD_PRELOAD, undefined);
+assert.equal(calls.at(-1).opts.env.LANG, 'C.UTF-8');
+assert.equal(calls.at(-1).opts.env.LC_ALL, 'C.UTF-8');
+await executeGuiAction({action:'type',text:'hi; $(touch /tmp/evil)'},{runner,env});
+assert.deepEqual(calls.at(-1).args,['type','--clearmodifiers','--delay','12','--','hi; $(touch /tmp/evil)']);
+await executeGuiAction({action:'type',text:'café 世界'}, {runner,env});
+assert.equal(calls.at(-1).args.at(-1), 'café 世界');
+await executeGuiAction({action:'type',text:'x'.repeat(2048)}, {runner,env});
+assert.ok(calls.at(-1).opts.timeout >= 30000);
+assert.ok(calls.at(-1).opts.timeout <= 40000);
+const png = Buffer.from('89504e470d0a1a0a0000000d4948445200000001000000010806000000', 'hex');
+const screenshot = await captureGuiScreenshot({runner:async()=>({stdout:png}),env});
+assert.equal(screenshot.mimeType,'image/png');
+assert.equal(screenshot.data,png.toString('base64'));
+await rejects(() => captureGuiScreenshot({runner:async()=>({stdout:Buffer.from('not-png')}),env}),'GUI_CAPTURE_INVALID');
+await rejects(() => captureGuiScreenshot({runner:async()=>({stdout:Buffer.alloc(5*1024*1024)}),env}),'GUI_CAPTURE_TOO_LARGE');
+console.log('GUI backend negatives and command safety passed');

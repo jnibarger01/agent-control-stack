@@ -190,6 +190,10 @@ const JC_CHILD_ENV_KEYS = [
   "JC_STATE_DIR",
   "JC_PUBLIC_MCP_URL",
   "JC_SHELLS",
+  // Explicit opt-in GUI settings: never inherit the bridge's ambient display.
+  "JC_GUI_ENABLED",
+  "JC_GUI_DISPLAY",
+  "JC_GUI_XAUTHORITY",
   // Workload isolation (apps/jace-commander/src/sandbox.ts). JC_ALLOW_UNISOLATED_WORKLOADS
   // is deliberately NOT forwarded: a bridged child always isolates its workloads.
   "JC_WORKLOAD_ISOLATION",

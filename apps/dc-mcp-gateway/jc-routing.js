@@ -27,6 +27,7 @@ export const JC_TOOL_PROVIDERS = Object.freeze({
   git_add: 'jc.git', git_commit: 'jc.git', git_fetch: 'jc.git', git_push: 'jc.git',
   start_process: 'jc.process', read_process_output: 'jc.process', list_processes: 'jc.process', kill_process: 'jc.process', run_command: 'jc.process', start_terminal_session: 'jc.process', interact_with_process: 'jc.process',
   privileged_exec: 'jc.privileged',
+  gui_screenshot: 'jc.gui', gui_action: 'jc.gui',
   ping: 'jc.meta', get_config: 'jc.meta', jc_status: 'jc.meta', jc_doctor: 'jc.meta', looptrace_verify: 'jc.meta',
   swarm_read: 'jc.integration', visualizer_read: 'jc.integration', mission_router_list: 'jc.integration',
   acs_read: 'acs', acs_submit_mission: 'acs',

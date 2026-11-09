@@ -56,6 +56,17 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
     }
     return risk("requires_approval", "privileged execution requires an approval record", ["approval:privileged-exec"]);
   }
+  // Native GUI input can click consent buttons, type secrets, and mutate arbitrary
+  // applications. It must never inherit admin-mode auto-approval authority.
+  if (context.action.kind === "jc.gui.input") {
+    if (context.operation === "approve" && context.actor === "acs:admin") {
+      return risk("forbidden", "GUI control requires a human decision", ["deny:gui-admin-approval"]);
+    }
+    if (context.operation === "approve" && isRequestingActor(context)) {
+      return risk("forbidden", "GUI control cannot be self-approved", ["deny:self-approval"]);
+    }
+    return risk("requires_approval", "GUI input requires a human approval", ["approval:gui-input"]);
+  }
   if (JC_APPROVAL_KINDS.has(context.action.kind)) {
     if (context.operation === "approve" && isRequestingActor(context)) {
       return risk("forbidden", "Jace Commander mutations cannot be self-approved", ["deny:self-approval"]);
@@ -245,6 +256,8 @@ export const SUPPORTED_ACTION_KINDS: readonly string[] = Object.freeze([
   "jc.git.read",
   "jc.git.write",
   "jc.git.network",
+  "jc.gui.observe",
+  "jc.gui.input",
   "privileged.exec",
   "jm.memory.read",
   "jm.memory.write",
@@ -257,7 +270,8 @@ const JC_READ_KINDS: ReadonlySet<string> = new Set([
   "jc.integration.read",
   "jc.fs.read",
   "jc.process.read",
-  "jc.git.read"
+  "jc.git.read",
+  "jc.gui.observe"
 ]);
 const JC_APPROVAL_KINDS: ReadonlySet<string> = new Set([
   "jc.fs.write",

@@ -279,6 +279,23 @@ const strs = (value: unknown): string[] =>
  * has a builder here, and jaceCommanderApprovalSummary fails closed if not.
  */
 export const JACE_COMMANDER_APPROVAL_SUMMARY_BUILDERS: Readonly<Record<string, SummaryBuilder>> = Object.freeze({
+  // GUI text may be passwords, commands or private data. Never reveal it in
+  // persistent approval summaries: only the ACS-signed invocation hash binds it.
+  gui_action: (args) => ({
+    action: args.action,
+    ...(typeof args.x === "number" ? { x: args.x } : {}),
+    ...(typeof args.y === "number" ? { y: args.y } : {}),
+    ...(typeof args.toX === "number" ? { toX: args.toX } : {}),
+    ...(typeof args.toY === "number" ? { toY: args.toY } : {}),
+    ...(typeof args.direction === "string" ? { direction: args.direction } : {}),
+    ...(typeof args.amount === "number" ? { amount: args.amount } : {}),
+    ...(typeof args.text === "string"
+      ? {
+          inputBytes: Buffer.byteLength(args.text, "utf8"),
+          inputSha256: sha256Hex(args.text)
+        }
+      : {})
+  }),
   privileged_exec: (args) => {
     // Same bounded, argv-aware redacted path as start_process: the approver sees
     // the command shape, never a secret passed on the command line. The exact
@@ -298,9 +315,12 @@ export const JACE_COMMANDER_APPROVAL_SUMMARY_BUILDERS: Readonly<Record<string, S
     if (args.encoding === "base64") {
       const decoded = Buffer.from(content, "base64");
       return {
-        path: pathText(args.path), encoding: "base64", bytes: decoded.byteLength,
+        path: pathText(args.path),
+        encoding: "base64",
+        bytes: decoded.byteLength,
         sha256: createHash("sha256").update(decoded).digest("hex"),
-        preview: "[binary content omitted]", overwrite: args.overwrite === true
+        preview: "[binary content omitted]",
+        overwrite: args.overwrite === true
       };
     }
     return {

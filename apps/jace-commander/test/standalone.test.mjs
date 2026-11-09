@@ -56,13 +56,15 @@ async function test(name, fn) {
   console.log(`  ✓ ${name}`);
 }
 
-const MUTATING = ['delete_file', 'run_command', 'start_terminal_session', 'interact_with_process','write_file', 'move_file', 'edit_block', 'create_directory', 'start_process', 'kill_process',
+const MUTATING = ['gui_screenshot', 'gui_action', 'delete_file', 'run_command', 'start_terminal_session', 'interact_with_process','write_file', 'move_file', 'edit_block', 'create_directory', 'start_process', 'kill_process',
   'git_add', 'git_commit', 'git_fetch', 'git_push', 'privileged_exec', 'acs_submit_mission'];
-const gated = JC_MANIFEST.tools.filter((tool) => tool.requiresApproval || tool.scopes.some((scope) => !scope.endsWith('.read')));
+const gated = JC_MANIFEST.tools.filter((tool) => tool.requiresApproval || tool.scopes.some((scope) => !scope.endsWith('.read')) || tool.name === 'gui_screenshot');
 
 // Arguments that would succeed in managed mode, so a refusal can only come from the standalone gate.
 const planted = path.join(root, 'planted.sh');
 const ARGS = {
+  gui_screenshot: {},
+  gui_action: { action: 'click', x: 3, y: 4 },
   delete_file: {path: path.join(root, 'existing.txt')},
   run_command: {command: 'touch ran.txt', cwd: root},
   start_terminal_session: {cwd: root},

@@ -58,10 +58,10 @@ const standaloneRefused = names.filter((name) => !standaloneAllowed.includes(nam
 const managed = await connect('managed');
 const standalone = await connect('standalone');
 
-await test('golden: 36 tools, 24 standalone-allowed, 12 refused', () => {
-  assert.equal(names.length, 40);
+await test('golden: 42 tools, 24 standalone-allowed, 18 refused', () => {
+  assert.equal(names.length, 42);
   assert.equal(standaloneAllowed.length, 24);
-  assert.equal(standaloneRefused.length, 16);
+  assert.equal(standaloneRefused.length, 18);
 });
 
 await test('managed: tools/list is the whole manifest', async () => {

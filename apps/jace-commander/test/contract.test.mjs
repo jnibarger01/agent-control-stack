@@ -114,6 +114,7 @@ test('every registered tool has a policy and exactly the mutating tools require 
   // Changing this list is a policy change: update migration 031's CHECK too.
   assert.deepEqual(approvalTools, [
     'create_directory', 'edit_block', 'git_add', 'git_commit', 'git_fetch', 'git_push',
+    'gui_action',
     'delete_file', 'interact_with_process', 'run_command', 'start_terminal_session', 'kill_process', 'move_file', 'privileged_exec', 'start_process', 'write_file',
   ].sort());
   const privilegedTools = Object.entries(JC_TOOL_POLICIES).filter(([, p]) => p.scopes.includes('process.privileged')).map(([n]) => n);

@@ -41,7 +41,9 @@ export const JC_SCOPES = Object.freeze([
   "process.privileged",
   "git.read",
   "git.write",
-  "git.network"
+  "git.network",
+  "gui.observe",
+  "gui.input"
 ] as const);
 export type JcScope = (typeof JC_SCOPES)[number];
 
@@ -56,6 +58,8 @@ export const JC_ACTION_KINDS = Object.freeze([
   "jc.git.read",
   "jc.git.write",
   "jc.git.network",
+  "jc.gui.observe",
+  "jc.gui.input",
   "privileged.exec"
 ] as const);
 export type JcActionKind = (typeof JC_ACTION_KINDS)[number];
@@ -68,6 +72,7 @@ export const JC_TOOL_GROUPS = Object.freeze([
   "filesystem",
   "search",
   "process",
+  "gui",
   "git",
   "acs",
   "mission",
@@ -242,6 +247,38 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "critical",
     true,
     "root execution; approval is re-verified by a root-owned helper, not this process"
+  ),
+  gui_screenshot: row(
+    "Capture a PNG screenshot of the explicitly configured isolated X11 desktop. Available only in ACS managed mode with a signed gui.observe capability. Screenshots may contain sensitive information.",
+    { type: "object", properties: {}, additionalProperties: false },
+    ["gui.observe"],
+    "jc.gui.observe",
+    "low",
+    false,
+    "bounded observation; never available from standalone/local presets"
+  ),
+  gui_action: row(
+    "Perform one exact mouse or keyboard action on the explicitly configured X11 desktop. Each invocation needs an ACS-approved gui.input capability. X11 only; no shell.",
+    {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["click", "move", "drag", "type", "key", "scroll"] },
+        x: { type: "integer", minimum: 0, maximum: 8191 },
+        y: { type: "integer", minimum: 0, maximum: 8191 },
+        toX: { type: "integer", minimum: 0, maximum: 8191 },
+        toY: { type: "integer", minimum: 0, maximum: 8191 },
+        text: { type: "string", minLength: 1, maxLength: 2048 },
+        direction: { type: "string", enum: ["up", "down", "left", "right"] },
+        amount: { type: "integer", minimum: 1, maximum: 15 }
+      },
+      required: ["action"],
+      additionalProperties: false
+    },
+    ["gui.input"],
+    "jc.gui.input",
+    "medium",
+    true,
+    "GUI actions can mutate external state; policy approval required and no root/shell escape"
   ),
   list_directory: row(
     "List a directory under an allowed filesystem root. Returns structured entries (name, relative path, type, size), recursing up to `depth` levels (default 1, max 5). Output is capped; `truncated` reports when entries were omitted.",
@@ -775,6 +812,8 @@ const TOOL_SURFACE: Readonly<Record<JcToolName, SurfaceRow>> = {
   // has no view of those roots, so it does not contain them (unchanged).
   looptrace_verify: surface("mission", [], ["looptrace verify"]),
   privileged_exec: surface("privileged", [], ["sudo"]),
+  gui_screenshot: surface("gui", [], []),
+  gui_action: surface("gui", [], []),
   list_directory: surface("filesystem", ["path"], ["ls"]),
   get_file_info: surface("filesystem", ["path"], ["stat"]),
   read_file: surface("filesystem", ["path"], ["read", "cat"]),

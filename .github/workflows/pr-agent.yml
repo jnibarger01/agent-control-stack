@@ -1,8 +1,9 @@
 name: PR Agent
 
+# Automated PR Agent reviews are disabled. Keep manual dispatch available
+# for an operator after configuring the provider key; no CI bypass or fake pass.
 on:
-  pull_request:
-    types: [opened, reopened, synchronize, ready_for_review]
+  workflow_dispatch:
 
 permissions:
   contents: read

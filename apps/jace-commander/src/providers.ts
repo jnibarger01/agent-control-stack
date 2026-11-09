@@ -13,7 +13,7 @@
 import { JC_TOOL_POLICIES } from './contract.js';
 
 export const JC_PROVIDER_IDS = Object.freeze([
-  'jc.fs', 'jc.git', 'jc.process', 'jc.privileged', 'jc.meta', 'jc.integration', 'acs',
+  'jc.fs', 'jc.git', 'jc.process', 'jc.privileged', 'jc.gui', 'jc.meta', 'jc.integration', 'acs',
 ] as const);
 export type JcProviderId = typeof JC_PROVIDER_IDS[number];
 
@@ -67,6 +67,7 @@ export const JC_PROVIDERS: readonly JcProviderDefinition[] = Object.freeze([
     tools: ['start_process', 'read_process_output', 'list_processes', 'kill_process', 'run_command', 'start_terminal_session', 'interact_with_process'],
   },
   { id: 'jc.privileged', needs: 'root-helper', required: false, tools: ['privileged_exec'] },
+  { id: 'jc.gui', needs: 'local', required: false, tools: ['gui_screenshot', 'gui_action'] },
   {
     id: 'jc.meta',
     needs: 'none',
@@ -106,8 +107,8 @@ const SEVERITY: Readonly<Record<JcRiskClass, number>> = Object.freeze({ read: 0,
 /** Scope -> class. A scope outside this table is a hard error, never silently `read`. */
 function classOfScope(scope: string): JcRiskClass {
   switch (scope) {
-    case 'fs.read': case 'git.read': case 'process.read': case 'integration.read': return 'read';
-    case 'fs.write': case 'git.write': return 'mutate';
+    case 'fs.read': case 'git.read': case 'process.read': case 'integration.read': case 'gui.observe': return 'read';
+    case 'fs.write': case 'git.write': case 'gui.input': return 'mutate';
     case 'git.network': case 'integration.write': return 'network';
     case 'process.exec': return 'exec';
     case 'process.privileged': return 'privileged';
