@@ -24,7 +24,7 @@ describe("coding mission approval panel", () => {
         deploymentImpact: "no runtime mutation"
       }
     ];
-    const dom = new JSDOM(`<div id="coding-mission-list"></div>`, {
+    const dom = new JSDOM(`<div id="coding-mission-list" data-coding-missions="enabled"></div>`, {
       url: "http://127.0.0.1/",
       runScripts: "dangerously"
     });
@@ -52,6 +52,24 @@ describe("coding mission approval panel", () => {
     expect(window.document.body.textContent).toContain("This change set changed. Refreshing the proposal.");
     expect(window.document.querySelector("[data-approve-change-set]")?.getAttribute("data-change-set-hash")).toBe(NEXT);
     expect(posts).toHaveLength(1);
+    window.close();
+  });
+
+  it("does not probe the endpoint when the server says coding missions are not configured", async () => {
+    const dom = new JSDOM(
+      `<div id="coding-mission-list" data-coding-missions="disabled"><p class="empty">Coding missions are not configured on this gateway.</p></div>`,
+      { url: "http://127.0.0.1/", runScripts: "dangerously" }
+    );
+    const window = dom.window;
+    let fetches = 0;
+    window.fetch = (async () => {
+      fetches += 1;
+      return { status: 200, ok: true, json: async () => ({ missions: [] }) };
+    }) as unknown as typeof window.fetch;
+    window.eval(codingMissionPanelSource());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetches).toBe(0);
+    expect(window.document.body.textContent).toContain("not configured on this gateway");
     window.close();
   });
 });

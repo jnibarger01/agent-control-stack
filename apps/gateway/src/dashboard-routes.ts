@@ -106,6 +106,8 @@ export interface DashboardRouteDeps {
   projectTunnelSession: (session: RegisteredTunnelSession, heartbeatTtlMs: number) => { effectiveStatus: string };
   validateRegisteredAgentPromptTarget: (store: SqliteWorkItemStore, input: Record<string, unknown>) => void;
   requireRead: (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
+  /** True when the gateway has coding-mission ports, so the dashboard may call `/coding-missions`. */
+  codingMissionsEnabled: boolean;
   /** True when `/` should redirect to the React app. Evaluated per request; fail-closed. */
   missionControlWebDefaultRoot?: () => boolean;
   sendError: (reply: FastifyReply, error: unknown) => unknown;
@@ -125,6 +127,7 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardRou
     projectTunnelSession,
     validateRegisteredAgentPromptTarget,
     requireRead,
+    codingMissionsEnabled,
     missionControlWebDefaultRoot,
     sendError
   } = deps;
@@ -170,15 +173,17 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardRou
       events,
       registeredAgents,
       agents: projectedAgents,
-      executorSummaries: (getExecutorSummaries() as Array<{ id: string; displayName: string; configured: boolean; status: string }>).map(
-        (e) => ({ id: e.id, displayName: e.displayName, configured: e.configured, status: e.status })
-      ),
+      executorSummaries: (
+        getExecutorSummaries() as Array<{ id: string; displayName: string; configured: boolean; status: string }>
+      ).map((e) => ({ id: e.id, displayName: e.displayName, configured: e.configured, status: e.status })),
       connectorSummaries: connectors.map((connector) => ({
         id: connector.id,
         displayName: connector.displayName,
         status: connector.status,
         activeSessionCount: tunnelSessions.filter(
-          (session) => session.connectorId === connector.id && projectTunnelSession(session, heartbeatTtlMs).effectiveStatus === "active"
+          (session) =>
+            session.connectorId === connector.id &&
+            projectTunnelSession(session, heartbeatTtlMs).effectiveStatus === "active"
         ).length
       })),
       infrastructure: {
@@ -220,6 +225,7 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardRou
       executionTelemetry: executionReads.telemetry(now),
       readiness: mergeSandboxReadyzCheck(workItems.readinessHealth(), evaluateSandboxReadyzCheck(sandboxReadiness)),
       composerActionKinds: [...SUPPORTED_ACTION_KINDS],
+      codingMissionsEnabled,
       policyDecisionEvents: workItems.readEvents({ name: "policy.decided", limit: POLICY_SUMMARY_WINDOW }),
       now,
       ...dashboardExecutionMode()
@@ -263,7 +269,9 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardRou
   /** What this credential may do, so the UI avoids offering a control that is certain to be refused. Never authority. */
   function viewerFor(request: FastifyRequest) {
     const credential = auth ? gatewayCredentialForRequest(request, auth) : undefined;
-    const operatorish = Boolean(credential && (credential.roles.includes("operator") || credential.roles.includes("service")));
+    const operatorish = Boolean(
+      credential && (credential.roles.includes("operator") || credential.roles.includes("service"))
+    );
     return {
       canApprove: operatorish && Boolean(credential?.scopes.includes("acs:approve")),
       canWrite: operatorish && Boolean(credential?.scopes.includes("acs:write"))

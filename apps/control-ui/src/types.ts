@@ -105,6 +105,12 @@ export interface MissionControlViewModel {
   composerActionKinds?: string[];
   /** How long an approval may wait before it is flagged as over SLA. Defaults to 30 minutes. */
   approvalSlaMs?: number;
+  /**
+   * Whether the gateway has coding-mission ports configured. When false the
+   * dashboard does not call `/coding-missions`, which would otherwise answer a
+   * deliberate fail-closed 503 and add console noise on every page load.
+   */
+  codingMissionsEnabled?: boolean;
   /** Present when `workItems` carries only a window of finished items. */
   finishedWorkItems?: { shown: number; total: number; limit: number };
   /** Canonical execution mode. Absent when the row is missing or corrupt. */

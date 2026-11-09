@@ -3,6 +3,7 @@ import { JSDOM } from "jsdom";
 import { bootLive } from "./live-harness.test-support.js";
 import {
   DASHBOARD_FRAGMENT_TARGETS,
+  MIN_REFRESH_INTERVAL_MS,
   PERIODIC_REFRESH_MS,
   renderDashboard,
   renderDashboardFragments,
@@ -96,7 +97,11 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     const app = bootLive({
       workItems: [
         item("wrk_src", { intent: "same intent" }),
-        item("wrk_retry", { intent: "same intent", lineageType: "retry", sourceWorkItemId: "wrk_src" } as Partial<Item>),
+        item("wrk_retry", {
+          intent: "same intent",
+          lineageType: "retry",
+          sourceWorkItemId: "wrk_src"
+        } as Partial<Item>),
         item("wrk_proto_a", { intent: "__proto__" }),
         item("wrk_proto_b", { intent: "__proto__" }),
         item("wrk_future", { createdAt: "2999-01-01T00:00:00.000Z" })
@@ -124,10 +129,22 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     const app = bootLive({
       workItems: [
         item("wrk_src", { intent: "same intent" }),
-        item("wrk_src_retry", { intent: "same intent", lineageType: "retry", sourceWorkItemId: "wrk_src" } as Partial<Item>),
+        item("wrk_src_retry", {
+          intent: "same intent",
+          lineageType: "retry",
+          sourceWorkItemId: "wrk_src"
+        } as Partial<Item>),
         item("wrk_x", { intent: "clone intent" }),
-        item("wrk_x_clone", { intent: "clone intent", lineageType: "clone", sourceWorkItemId: "wrk_x" } as Partial<Item>),
-        item("wrk_y_clone", { intent: "clone intent", lineageType: "clone", sourceWorkItemId: "wrk_y" } as Partial<Item>)
+        item("wrk_x_clone", {
+          intent: "clone intent",
+          lineageType: "clone",
+          sourceWorkItemId: "wrk_x"
+        } as Partial<Item>),
+        item("wrk_y_clone", {
+          intent: "clone intent",
+          lineageType: "clone",
+          sourceWorkItemId: "wrk_y"
+        } as Partial<Item>)
       ],
       events: [],
       now: NOW
@@ -175,7 +192,7 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     for (const meta of Object.values(pageMeta)) {
       expect(Object.keys(meta).sort()).toEqual(["description", "title"]);
     }
-    expect(html).not.toContain('"icon"');
+    expect(html).not.toContain('"icon":');
   });
 
   it("contains no hard-reload paths in the client script (#7)", () => {
@@ -392,11 +409,15 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
   });
 
   it("keeps filter focus, caret and value while typing across a refresh (#5)", async () => {
-    const app = bootLive({
-      workItems: [item("wrk_a"), item("wrk_b", { status: "running" })],
-      events: [],
-      now: NOW
-    }, {}, { url: "https://acs.local/#execution" });
+    const app = bootLive(
+      {
+        workItems: [item("wrk_a"), item("wrk_b", { status: "running" })],
+        events: [],
+        now: NOW
+      },
+      {},
+      { url: "https://acs.local/#execution" }
+    );
     app.open();
     await app.advance(2_000);
     // The filter lives in the execution view; it must be visible to take focus.
@@ -626,6 +647,18 @@ describe("live dashboard review fixes", () => {
     await app.advance(PERIODIC_REFRESH_MS);
     // Reconnect attempts may catch up, but the periodic timer itself is idle while down.
     expect(app.fragmentFetches() - whileDown).toBeLessThanOrEqual(1);
+  });
+
+  it("issues one fragment fetch when the live stream first opens, even if open fires twice", async () => {
+    const app = bootLive({ workItems: [item("wrk_a")], events: [], now: NOW });
+    app.open();
+    await app.advance(0);
+    expect(app.fragmentFetches()).toBe(1);
+    app.open();
+    await app.advance(0);
+    expect(app.fragmentFetches()).toBe(1);
+    await app.advance(MIN_REFRESH_INTERVAL_MS);
+    expect(app.fragmentFetches()).toBe(2);
   });
 
   it("refreshes for execution attempt and lease events", async () => {
