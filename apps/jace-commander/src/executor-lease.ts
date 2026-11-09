@@ -325,7 +325,6 @@ export function holdJcExecutorLease(
   const acquired = acquireJcExecutorLease(options);
   if (!acquired.ok) return acquired;
   let record = acquired.record;
-  let timer: NodeJS.Timeout | undefined;
   let released = false;
   const release = (): void => {
     if (released) return;
@@ -333,7 +332,7 @@ export function holdJcExecutorLease(
     if (timer) clearInterval(timer);
     releaseJcExecutorLease({ lockDir: options.lockDir, record });
   };
-  timer = setInterval(() => {
+  const timer = setInterval(() => {
     const renewed = renewJcExecutorLease({ lockDir: options.lockDir, record, nowMs: Date.now(), ttlMs: options.ttlMs });
     if (renewed.ok) {
       record = renewed.record;
