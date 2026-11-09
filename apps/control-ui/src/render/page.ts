@@ -18,13 +18,17 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
   const events = model.events ?? [];
   const agents = dashboardAgents(model);
   const fragments = renderDashboardFragments(model, agents);
+  const codingMissionsEnabled = model.codingMissionsEnabled === true;
 
   return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Coordinate work, agents, and outcomes across the local-first ACS agent control plane." />
+    <meta name="color-scheme" content="dark light" />
     <title>ACS Mission Control</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <script>${themeBootScript()}</script>
     <style>${styles()}</style>
   </head>
@@ -78,7 +82,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
       </section>
       <section class="grid approvals-grid">
         <article id="approvals" class="panel wide" tabindex="-1" data-view-panel="approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">${fragments.approvalsCount}</span></div><div id="approvals-list">${fragments.approvalsList}</div></article>
-        <article id="coding-missions" class="panel wide" data-view-panel="approvals"><div class="panel-head"><h2>Coding missions</h2><span>change-set approval</span></div><div id="coding-mission-list"><p class="empty">No coding missions are waiting for approval.</p></div></article>
+        <article id="coding-missions" class="panel wide" data-view-panel="approvals"><div class="panel-head"><h2>Coding missions</h2><span>change-set approval</span></div><div id="coding-mission-list" data-coding-missions="${codingMissionsEnabled ? "enabled" : "disabled"}"><p class="empty">${codingMissionsEnabled ? "No coding missions are waiting for approval." : "Coding missions are not configured on this gateway."}</p></div></article>
       </section>
       <section class="grid lower">
         <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · counters</span></div><div id="operator-metrics-body">${fragments.metrics}</div><div id="live-metrics" class="live-metrics" aria-live="off"><p class="muted">Live counters load while this view is open.</p></div><p class="metrics-scrape">Full Prometheus text: authenticated <a href="/metrics"><code>GET /metrics</code></a> (<code>acs_rate_limit_rejected_total</code>, <code>acs_http_requests_total{status="429"}</code>, …). Names: <code>docs/runbooks/operator-metrics.md</code>.</p></article>

@@ -3,7 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Coordinate work, agents, and outcomes across the local-first ACS agent control plane." />
+    <meta name="color-scheme" content="dark light" />
     <title>ACS Mission Control</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <script>try{var t=localStorage.getItem("acs.mc.theme");if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;}catch(e){}</script>
     <style>
 :root {
@@ -841,7 +844,7 @@ body.acs-focus-plus :focus-visible { outline: 3px solid var(--accent); outline-o
       </section>
       <section class="grid approvals-grid">
         <article id="approvals" class="panel wide" tabindex="-1" data-view-panel="approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">2 waiting</span></div><div id="approvals-list"><div class="approvals-list" role="list"><article class="approval-item overdue" role="listitem" data-risk="high" data-status="needs_approval" data-work-item-ref="wrk_approve"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span> <small class="wait-badge" data-waiting-since="2026-07-05T00:00:00.000Z" data-sla-ms="1800000">waiting 40m · over SLA</small></span><strong id="approval-title-wrk_approve">Approve me</strong><small>Requester: user · Actions: fs.read</small><button type="button" data-inspect-work="wrk_approve">Review details</button><label class="reason-field" for="reason-wrk_approve"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_approve" data-reason="wrk_approve" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Approve me"><button type="button" data-approve="wrk_approve" data-risk="high" disabled aria-describedby="reason-wrk_approve">Approval hash unavailable</button><button type="button" data-reject="wrk_approve" data-risk="high" aria-describedby="reason-wrk_approve">Reject</button></div><output id="approval-result-wrk_approve" class="approval-result" aria-live="polite"></output></article><article class="approval-item" role="listitem" data-risk="low" data-status="blocked" data-work-item-ref="wrk_blocked"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span><small class="wait-badge" data-waiting-since="2026-07-05T00:30:00.000Z" data-sla-ms="1800000">waiting 10m</small></span><strong id="approval-title-wrk_blocked">Blocked task</strong><small>Actions: fs.read</small><small class="error-line">worker lease expired token=[redacted]</small><button type="button" data-inspect-work="wrk_blocked">Review details</button><label class="reason-field" for="reason-wrk_blocked"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_blocked" data-reason="wrk_blocked" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Blocked task"><button type="button" data-unblock="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Unblock</button><button type="button" data-reject="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Reject</button></div><output id="approval-result-wrk_blocked" class="approval-result" aria-live="polite"></output></article></div></div></article>
-        <article id="coding-missions" class="panel wide" data-view-panel="approvals"><div class="panel-head"><h2>Coding missions</h2><span>change-set approval</span></div><div id="coding-mission-list"><p class="empty">No coding missions are waiting for approval.</p></div></article>
+        <article id="coding-missions" class="panel wide" data-view-panel="approvals"><div class="panel-head"><h2>Coding missions</h2><span>change-set approval</span></div><div id="coding-mission-list" data-coding-missions="disabled"><p class="empty">Coding missions are not configured on this gateway.</p></div></article>
       </section>
       <section class="grid lower">
         <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · counters</span></div><div id="operator-metrics-body"><div class="operator-metrics"><dl>
@@ -4667,6 +4670,10 @@ function codingMissionCard(mission) {
 async function refreshCodingMissions() {
   const root = document.getElementById('coding-mission-list');
   if (!root) return;
+  // The server renders this attribute from its own configuration. A gateway
+  // without coding-mission ports answers /coding-missions with a deliberate
+  // fail-closed 503, so do not probe it and do not turn that into console noise.
+  if (root.getAttribute('data-coding-missions') !== 'enabled') return;
   let payload = null;
   try {
     const response = await fetch('/coding-missions', { credentials: 'same-origin', headers: { accept: 'application/json' } });

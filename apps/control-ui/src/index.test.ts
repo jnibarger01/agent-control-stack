@@ -92,6 +92,27 @@ describe("renderDashboard", () => {
     expect(html).toContain('data-execution-mode="strict"');
   });
 
+  it("declares page metadata and only probes coding missions when the gateway enables them", () => {
+    const disabled = renderDashboard({
+      workItems: [],
+      events: [],
+      now: new Date("2026-07-05T00:01:00.000Z")
+    });
+    expect(disabled).toContain('<meta name="description" content="Coordinate work');
+    expect(disabled).toContain('<link rel="icon" type="image/svg+xml" href="/favicon.svg" />');
+    expect(disabled).toContain('data-coding-missions="disabled"');
+    expect(disabled).toContain("Coding missions are not configured on this gateway.");
+
+    const enabled = renderDashboard({
+      workItems: [],
+      events: [],
+      codingMissionsEnabled: true,
+      now: new Date("2026-07-05T00:01:00.000Z")
+    });
+    expect(enabled).toContain('data-coding-missions="enabled"');
+    expect(enabled).toContain("No coding missions are waiting for approval.");
+  });
+
   it("renders registered agents as status cards with roster summaries", () => {
     const html = renderDashboard({
       workItems: [],
