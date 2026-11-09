@@ -31,11 +31,11 @@ function stageRelease(name, { readOnly = true, releaseJson = true } = {}) {
   fs.cpSync(path.join(app, 'dist'), path.join(dir, 'dist'), { recursive: true });
   fs.copyFileSync(path.join(app, 'package.json'), path.join(dir, 'package.json'));
   fs.symlinkSync(path.join(repo, 'node_modules'), path.join(dir, 'node_modules'));
-  if (releaseJson) fs.writeFileSync(path.join(dir, 'RELEASE.json'), JSON.stringify({ version: '1.0.0', commit: 'testcommit00', installedAt: new Date().toISOString() }));
+  if (releaseJson) fs.writeFileSync(path.join(dir, 'RELEASE.json'), JSON.stringify({ version: '1.0.0', commit: '0c0ffee5ab1e', installedAt: new Date().toISOString() }));
   if (readOnly) spawnSync('chmod', ['-R', 'a-w', dir]);
   return dir;
 }
-const release = stageRelease('releases/1.0.0-testcommit00'.replace('/', '-'));
+const release = stageRelease('releases/1.0.0-0c0ffee5ab1e'.replace('/', '-'));
 const current = path.join(base, 'current');
 fs.symlinkSync(release, current);
 const writable = stageRelease('writable', { readOnly: false });
@@ -50,6 +50,8 @@ const env = (overrides = {}) => {
     DC_CMD: process.execPath, JC_ACS_PUBLIC_KEY: 'test-key', JC_ACS_KEY_ID: 'test-key-id', JC_RUNTIME_ID: 'jc-pin-test',
     DC_GATEWAY_EXECUTION_TOKEN: EXECUTION_TOKEN, JC_ACS_AUTHORITY_TOKEN: 'read-only-authority',
     JC_STATE_DIR: path.join(base, 'state'), JC_REQUIRE_INSTALLED_RELEASE: '1', JC_RUNTIME_DIR: current,
+    // Isolate the canonical executor lease from the real ~/.desktop-commander.
+    DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: path.join(base, 'lock'),
     ...(process.env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR } : {}),
   };
   for (const [key, entry] of Object.entries(overrides)) {
@@ -104,7 +106,7 @@ test('the pinned installed release starts, reports its identity and becomes read
   assert.equal(authority.runtime.releaseRequired, true);
   assert.deepEqual(
     { realDir: authority.runtime.installedRelease.realDir, readOnly: authority.runtime.installedRelease.readOnly, commit: authority.runtime.installedRelease.commit },
-    { realDir: fs.realpathSync(release), readOnly: true, commit: 'testcommit00' },
+    { realDir: fs.realpathSync(release), readOnly: true, commit: '0c0ffee5ab1e' },
   );
   assert.equal(authority.runtime.entrypoint, path.join(current, 'dist', 'cli.js'));
   assert.doesNotMatch(JSON.stringify(authority.runtime), /desktop-commander|apps\/jace-commander/);

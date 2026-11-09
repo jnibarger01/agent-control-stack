@@ -108,10 +108,31 @@ test('attested initialization and discovery work; every subsequent method requir
   assert.ok([200, 202, 204].includes(closed.status));
 });
 
+/**
+ * A managed JC child only starts from an installed release (RELEASE.json names
+ * its commit, as install-user-release.sh writes it) and holds the canonical
+ * executor lease in an isolated lock dir, never the real ~/.desktop-commander.
+ */
+function stageInstalledRelease(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jc-attest-release-'));
+  const rel = path.join(dir, 'releases', '1.0.0-0c0ffee5ab1e');
+  const app = path.resolve(root, '../jace-commander');
+  fs.mkdirSync(rel, { recursive: true });
+  fs.cpSync(path.join(app, 'dist'), path.join(rel, 'dist'), { recursive: true });
+  fs.copyFileSync(path.join(app, 'package.json'), path.join(rel, 'package.json'));
+  fs.symlinkSync(path.resolve(root, '../../node_modules'), path.join(rel, 'node_modules'));
+  fs.writeFileSync(path.join(rel, 'RELEASE.json'), JSON.stringify({ version: '1.0.0', commit: '0c0ffee5ab1e' }));
+  fs.symlinkSync(rel, path.join(dir, 'current'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return { release: path.join(dir, 'current'), lockDir: path.join(dir, 'lock') };
+}
+
 test('real managed JC child refuses execution without an ACS capability', async (t) => {
   const { publicKey } = generateKeyPairSync('ed25519');
+  const { release, lockDir } = stageInstalledRelease(t);
   const f = await fixture(t, {
-    DC_ARGS: `${path.resolve(root, '../jace-commander/dist/cli.js')} serve`,
+    DC_ARGS: `${release}/dist/cli.js serve`,
+    DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: lockDir,
     JC_ACS_PUBLIC_KEY: publicKey.export({ format: 'der', type: 'spki' }).toString('base64url'),
   });
   const response = await f.post(init);
