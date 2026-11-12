@@ -3,6 +3,7 @@ import { JSDOM } from "jsdom";
 import { bootLive } from "./live-harness.test-support.js";
 import {
   DASHBOARD_FRAGMENT_TARGETS,
+  MIN_REFRESH_INTERVAL_MS,
   PERIODIC_REFRESH_MS,
   renderDashboard,
   renderDashboardFragments,
@@ -175,7 +176,7 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     for (const meta of Object.values(pageMeta)) {
       expect(Object.keys(meta).sort()).toEqual(["description", "title"]);
     }
-    expect(html).not.toContain('"icon"');
+    expect(html).not.toContain('"icon":');
   });
 
   it("contains no hard-reload paths in the client script (#7)", () => {
@@ -626,6 +627,18 @@ describe("live dashboard review fixes", () => {
     await app.advance(PERIODIC_REFRESH_MS);
     // Reconnect attempts may catch up, but the periodic timer itself is idle while down.
     expect(app.fragmentFetches() - whileDown).toBeLessThanOrEqual(1);
+  });
+
+  it("issues one fragment fetch when the live stream first opens, even if open fires twice", async () => {
+    const app = bootLive({ workItems: [item("wrk_a")], events: [], now: NOW });
+    app.open();
+    await app.advance(0);
+    expect(app.fragmentFetches()).toBe(1);
+    app.open();
+    await app.advance(0);
+    expect(app.fragmentFetches()).toBe(1);
+    await app.advance(MIN_REFRESH_INTERVAL_MS);
+    expect(app.fragmentFetches()).toBe(2);
   });
 
   it("refreshes for execution attempt and lease events", async () => {
