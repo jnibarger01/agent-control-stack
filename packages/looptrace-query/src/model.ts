@@ -68,6 +68,8 @@ export const EVENT_TYPES = [
   "observation.evidence_manifest",
   "observation.release",
   "observation.session",
+  "witness.observed",
+  "witness.incomplete",
   "verification.required",
   "verification.decided",
   "jc.session",
@@ -101,6 +103,8 @@ export const EVENT_STAGE: Record<EventType, EventStage> = {
   "observation.evidence_manifest": "observation",
   "observation.release": "observation",
   "observation.session": LIFECYCLE_STAGE,
+  "witness.observed": "observation",
+  "witness.incomplete": LIFECYCLE_STAGE,
   "verification.required": "verification",
   "verification.decided": "verification",
   // JC events are the executor's own (asserted) record. They stay in the lifecycle stage so they can never count as an

@@ -177,6 +177,8 @@ export function sandboxPolicyFromEnv(input: SandboxConfigInput, env: NodeJS.Proc
     // checkout reachable from the filesystem roots.
     ...[...new Set([...(repo ? [repo] : []), ...acsCheckoutsUnder(input.fsRoots)])]
       .flatMap((checkout) => [path.join(checkout, 'storage'), path.join(checkout, '.env'), path.join(checkout, 'acs.config.yaml')]),
+    ...(env.JC_WITNESS_SIGNING_KEY ? [path.resolve(env.JC_WITNESS_SIGNING_KEY)] : []),
+    ...(env.JC_WITNESS_RECEIPT_DIR ? [path.resolve(env.JC_WITNESS_RECEIPT_DIR)] : []),
     ...splitList(env.JC_SANDBOX_HIDE),
   ];
   const readOnly = [

@@ -546,6 +546,45 @@ export function analyzeJc(v: View): Gap[] {
       evidence_refs: v.refs(v.state, ...conflicts)
     });
   }
+  const conflictCorr = calls.filter((e) => e.flags.includes("jc_conflicting_correlation_ids") || e.flags.includes("jc_invalid_correlation_ids"));
+  if (conflictCorr.length > 0) {
+    gaps.push({
+      code: "JC_CORRELATION_CONFLICT",
+      severity: "high",
+      affected_stage: "integrity",
+      description: `${conflictCorr.length} JC tool-call record(s) have conflicting or invalid correlation IDs.`,
+      required_evidence: "consistent workItemId, attemptId, and leaseId across start and finish records",
+      evidence_refs: v.refs(...conflictCorr)
+    });
+  }
+  return gaps;
+}
+
+export function analyzeWitness(v: View): Gap[] {
+  const gaps: Gap[] = [];
+  const incomplete = v.of("witness.incomplete");
+  const forged = incomplete.filter((e) => e.flags.includes("witness_forged_or_tampered"));
+  if (forged.length > 0) {
+    gaps.push({
+      code: "WITNESS_PROVENANCE_INVALID",
+      severity: "high",
+      affected_stage: "integrity",
+      description: "A JC Kernel Witness receipt failed Ed25519 signature, canonical hash, chain, or replay verification.",
+      required_evidence: "a valid, un-tampered, Ed25519-signed jc.kernel-witness.receipt.v1 receipt",
+      evidence_refs: v.refs(...forged)
+    });
+  }
+  const unverified = incomplete.filter((e) => !e.flags.includes("witness_forged_or_tampered"));
+  if (unverified.length > 0) {
+    gaps.push({
+      code: "WITNESS_OBSERVATION_INCOMPLETE",
+      severity: "medium",
+      affected_stage: "observation",
+      description: "A JC Kernel Witness observation is incomplete, unanchored, or mismatched with ACS correlation IDs and cannot be promoted to observed.",
+      required_evidence: "a complete, ACS-anchored kernel witness receipt with matching attemptId and leaseId",
+      evidence_refs: v.refs(...unverified)
+    });
+  }
   return gaps;
 }
 
@@ -626,7 +665,7 @@ export function completenessOf(gaps: Gap[], eventCount: number, reports: SourceR
 }
 
 export function buildGapReport(v: View, c: Correlated, reports: SourceReport[], now: Date): GapReport {
-  const gaps = [...analyzeWorkItem(v, now), ...analyzeJc(v), ...analyzeCorrelation(c, v), ...sourceGaps(reports)].sort(
+  const gaps = [...analyzeWorkItem(v, now), ...analyzeJc(v), ...analyzeWitness(v), ...analyzeCorrelation(c, v), ...sourceGaps(reports)].sort(
     (a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] || a.code.localeCompare(b.code)
   );
   const observed = observedStages(v);

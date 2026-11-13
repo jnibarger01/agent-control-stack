@@ -19,6 +19,7 @@ export const LOOPTRACE_EVENT_TYPES = Object.freeze([
   'task_received', 'task_validated', 'risk_classified', 'route_selected',
   'approval_requested', 'approval_decision', 'rollback_checkpoint_created',
   'agent_started', 'tool_call_started', 'tool_call_finished',
+  'witness_observation_recorded', 'witness_observation_incomplete',
   'file_diff_detected', 'verification_started', 'verification_finished',
   'promotion_blocked', 'promotion_completed', 'run_failed', 'run_completed',
   'run_replay_started', 'replay_divergence_detected', 'trace_sealed',
@@ -167,6 +168,27 @@ export function verifyChain(events: readonly unknown[]): ChainVerification {
 }
 
 const MAX_TRACE_BYTES = 32 * 1024 * 1024;
+
+export interface TraceCorrelation {
+  workItemId?: string;
+  attemptId?: string;
+  leaseId?: string;
+  invocationHash?: string;
+}
+
+/** Extracts ACS execution correlation identifiers from a parsed LoopTrace event. */
+export function extractTraceCorrelation(event: unknown): TraceCorrelation {
+  if (!event || typeof event !== 'object') return {};
+  const payload = (event as { payload?: unknown }).payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return {};
+  const p = payload as Record<string, unknown>;
+  return {
+    ...(typeof p.workItemId === 'string' && p.workItemId.length > 0 ? { workItemId: p.workItemId } : {}),
+    ...(typeof p.attemptId === 'string' && p.attemptId.length > 0 ? { attemptId: p.attemptId } : {}),
+    ...(typeof p.leaseId === 'string' && p.leaseId.length > 0 ? { leaseId: p.leaseId } : {}),
+    ...(typeof p.invocationHash === 'string' && p.invocationHash.length > 0 ? { invocationHash: p.invocationHash } : {}),
+  };
+}
 
 /** Parses a JSONL trace file. Malformed lines are reported, never skipped. */
 export function readTraceFile(filePath: string): { events: unknown[]; parseError?: { line: number; reason: string } } {

@@ -284,12 +284,34 @@ export class JcTraceReader {
     let invalidWorkItem = 0;
     let notInterpreted = 0;
     const open = new Map<string, number>();
+    const startedCorr = new Map<string, Array<{ workItemId: string | null; attemptId: string | null; leaseId: string | null }>>();
+    const conflictSeqs = new Set<number>();
     for (const e of all) {
       const key = `${String(e.payload.tool)}|${String(e.payload.argumentsSha256)}`;
       if (e.type === "tool_call_started") {
         open.set(key, (open.get(key) ?? 0) + 1);
+        const list = startedCorr.get(key) ?? [];
+        list.push({
+          workItemId: typeof e.payload.workItemId === "string" ? e.payload.workItemId : null,
+          attemptId: typeof e.payload.attemptId === "string" ? e.payload.attemptId : null,
+          leaseId: typeof e.payload.leaseId === "string" ? e.payload.leaseId : null
+        });
+        startedCorr.set(key, list);
       } else if (e.type === "tool_call_finished") {
         if ((open.get(key) ?? 0) > 0) open.set(key, (open.get(key) ?? 0) - 1);
+        const start = startedCorr.get(key)?.shift();
+        if (start) {
+          const fw = typeof e.payload.workItemId === "string" ? e.payload.workItemId : null;
+          const fa = typeof e.payload.attemptId === "string" ? e.payload.attemptId : null;
+          const fl = typeof e.payload.leaseId === "string" ? e.payload.leaseId : null;
+          if (
+            (start.workItemId && fw && start.workItemId !== fw) ||
+            (start.attemptId && fa && start.attemptId !== fa) ||
+            (start.leaseId && fl && start.leaseId !== fl)
+          ) {
+            conflictSeqs.add(e.seq);
+          }
+        }
         const w = workItemOf(e);
         if (!w.present) withoutWorkItem += 1;
         else if (w.id === null) invalidWorkItem += 1;
@@ -342,11 +364,21 @@ export class JcTraceReader {
       const rawCode = p.code;
       const codeOk = rawCode === undefined || rawCode === null || (typeof rawCode === "string" && CODE_RE.test(rawCode));
       const sha = typeof p.argumentsSha256 === "string" && SHA_RE.test(p.argumentsSha256) ? p.argumentsSha256 : null;
+      const attemptId = typeof p.attemptId === "string" && ID_RE.test(p.attemptId) ? p.attemptId : null;
+      const leaseId = typeof p.leaseId === "string" && ID_RE.test(p.leaseId) ? p.leaseId : null;
+      const attemptInvalid = p.attemptId !== undefined && p.attemptId !== null && attemptId === null;
+      const leaseInvalid = p.leaseId !== undefined && p.leaseId !== null && leaseId === null;
       const clean = sanitizeUntrusted(p);
       const evFlags: string[] = [];
       if (okFlag === null) evFlags.push("jc_outcome_malformed");
       if (!codeOk) evFlags.push("jc_code_malformed");
+      if (attemptInvalid || leaseInvalid) evFlags.push("jc_invalid_correlation_ids");
+      if (attemptId === null || leaseId === null) evFlags.push("jc_missing_correlation_ids");
+      if (conflictSeqs.has(e.seq)) evFlags.push("jc_conflicting_correlation_ids");
       if (clean.flags.includes("injection_suspected")) evFlags.push("injection_suspected");
+      const refs: Record<string, string> = {};
+      if (attemptId) refs.attempt_id = attemptId;
+      if (leaseId) refs.lease_id = leaseId;
       events.push(
         this.seal({
           ...this.base(workItemId),
@@ -364,8 +396,11 @@ export class JcTraceReader {
             jc_seq: e.seq,
             jc_ok: okFlag,
             jc_code: codeOk && typeof rawCode === "string" ? rawCode : null,
-            jc_arguments_sha256: sha
+            jc_arguments_sha256: sha,
+            jc_attempt_id: attemptId,
+            jc_lease_id: leaseId
           } as Record<string, string | number | boolean | null>,
+          refs,
           untrusted: isRecord(clean.value) ? (clean.value as Record<string, unknown>) : {},
           flags: evFlags
         })

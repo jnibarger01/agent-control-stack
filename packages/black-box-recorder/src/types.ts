@@ -28,7 +28,30 @@ export type RecorderEvent = {
     sourceRecordRef: string | null;
     payloadSha256: string;
     integrityStatus: IntegrityStatus;
+    seq: number;
+    previousHash: string;
+    eventHash: string;
   };
+};
+
+export type ChainFindingKind =
+  | "sequence_gap"
+  | "previous_hash_mismatch"
+  | "payload_hash_mismatch"
+  | "event_hash_mismatch";
+
+export type ChainFinding = {
+  kind: ChainFindingKind;
+  seq?: number;
+  eventId?: string;
+  detail: string;
+};
+
+export type ChainVerification = {
+  valid: boolean;
+  eventCount: number;
+  headHash: string;
+  findings: ChainFinding[];
 };
 
 export type IngestDraft = {

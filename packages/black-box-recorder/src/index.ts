@@ -12,6 +12,9 @@
 export { SCHEMA_VERSION } from "./types.js";
 export type {
   AuthState,
+  ChainFinding,
+  ChainFindingKind,
+  ChainVerification,
   Completeness,
   Finding,
   FindingSeverity,
@@ -26,7 +29,28 @@ export type {
 } from "./types.js";
 export { canonicalJson, envelopeForDigest, sha256Hex } from "./canonical.js";
 export { containsSensitiveResidue, redact, redactField } from "./redact.js";
-export { RecorderStore, recorderEventIdFor, type RecorderStoreOptions } from "./store.js";
+export {
+  GENESIS_HASH,
+  RecorderStore,
+  computeEventHash,
+  recorderEventIdFor,
+  verifyRecorderChain,
+  type RecorderStoreOptions
+} from "./store.js";
+export {
+  JC_KERNEL_WITNESS_SCHEMA_VERSION,
+  ingestJcWitnessReceipt,
+  isJcKernelWitnessReceiptV1,
+  toWitnessRecorderDraft,
+  verifyJcWitnessReceipt,
+  witnessCanonicalBody,
+  type JcKernelWitnessReceiptV1,
+  type JcWitnessKernelEvent,
+  type JcWitnessProcessNode,
+  type VerifyJcWitnessOptions,
+  type WitnessIngestResult,
+  type WitnessVerificationResult
+} from "./jc-witness-adapter.js";
 export {
   exportRun,
   orderEvents,

@@ -14,6 +14,14 @@ import { jcChildEnv } from './child-env.js';
 import { containJcPath, type JcFsPolicy } from './filesystem.js';
 import { assertSandboxReady, killSandboxNamespace, processStartTicks, sandboxArgv } from './sandbox.js';
 import { IntegrationError } from './integrations.js';
+import {
+  assertWitnessBinaryReady,
+  buildWitnessRunArgv,
+  readAndVerifyWitnessReceipt,
+  type KernelWitnessConfig,
+  type SeenReceiptStore,
+  type WitnessRunOutcome,
+} from './kernel-witness.js';
 
 const MAX_OUTPUT = 256 * 1024;
 const MAX_SESSIONS = 32;
@@ -22,17 +30,29 @@ const QUIET_MS = 150;
 const DENIED_BASE = new Set(['sh','bash','dash','zsh','ksh','mksh','ash','fish','csh','tcsh','rbash','sudo','su','doas','pkexec','env','busybox']);
 const EXTRA_ENV = new Set(['LANG','LC_ALL','LC_CTYPE','TZ','TERM','COLORTERM','NO_COLOR','FORCE_COLOR']);
 interface Stream { data: Buffer; start: number; end: number }
+export interface ProcessExecutionContext {
+  workItemId?: string;
+  attemptId?: string;
+  leaseId?: string;
+  invocationHash?: string;
+  previousEvidenceHash?: string | null;
+  witness?: KernelWitnessConfig;
+  seenStore?: SeenReceiptStore;
+}
+
 interface Session {
   sessionId: string; pid: number; argv: string[]; cwd: string; owner: string;
   stdout: Stream; stderr: Stream; exitCode: number | null; signal: string | null;
   done: boolean; child: ChildProcess; timer: NodeJS.Timeout;
   /** Host PID and start time of the sandbox PID-namespace init (bubblewrap --info-fd). */
   sandboxPid?: number; sandboxStart?: string;
+  witnessReceiptPath?: string;
+  witnessOutcome?: WitnessRunOutcome;
 }
 export interface ProcessRegistry {
-  start(args: Record<string, unknown>, policy: JcFsPolicy, owner?: string): Record<string, unknown>;
-  run(args: Record<string, unknown>, policy: JcFsPolicy, owner?: string): Promise<Record<string, unknown>>;
-  terminal(args: Record<string, unknown>, policy: JcFsPolicy, owner?: string): Promise<Record<string, unknown>>;
+  start(args: Record<string, unknown>, policy: JcFsPolicy, owner?: string, context?: ProcessExecutionContext): Record<string, unknown>;
+  run(args: Record<string, unknown>, policy: JcFsPolicy, owner?: string, context?: ProcessExecutionContext): Promise<Record<string, unknown>>;
+  terminal(args: Record<string, unknown>, policy: JcFsPolicy, owner?: string, context?: ProcessExecutionContext): Promise<Record<string, unknown>>;
   interact(args: Record<string, unknown>, owner?: string): Promise<Record<string, unknown>>;
   read(args: Record<string, unknown>, owner?: string): Promise<Record<string, unknown>>;
   output(args: Record<string, unknown>, owner?: string): Record<string, unknown>;
@@ -98,7 +118,7 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
     timer.unref();
     s.child.once('close',()=>clearTimeout(timer));
   }
-  function launch(argv: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number, owner: string | undefined, policy: JcFsPolicy): Session {
+  function launch(argv: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number, owner: string | undefined, policy: JcFsPolicy, context?: ProcessExecutionContext): Session {
     if (!policy.workload) throw new IntegrationError('JC_SANDBOX_UNAVAILABLE', 'no workload sandbox is configured; nothing ran');
     assertSandboxReady(policy.workload.policy, policy.workload.homeDir, policy.workload.stateDir);
     const isolated = policy.workload.policy.isolation === 'bwrap';
@@ -110,12 +130,40 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
       if (!finished) throw new IntegrationError('too_many_processes','at most 32 managed processes may run at once');
       sessions.delete(finished.sessionId);
     }
-    const child = spawn(sandboxed[0]!,sandboxed.slice(1),{cwd,env:workloadEnv,shell:false,stdio:isolated?['pipe','pipe','pipe','pipe']:'pipe',detached:true});
+    const sessionId = 'proc_' + randomBytes(16).toString('hex');
+    let launchArgv = sandboxed;
+    let witnessReceiptPath: string | undefined;
+    let initialWitnessOutcome: WitnessRunOutcome | undefined;
+    const witness = context?.witness;
+    if (witness?.enabled) {
+      try {
+        assertWitnessBinaryReady(witness);
+        fs.mkdirSync(witness.receiptDir, { recursive: true, mode: 0o700 });
+        witnessReceiptPath = path.join(witness.receiptDir, `${sessionId}.json`);
+        launchArgv = buildWitnessRunArgv(witness, {
+          receiptOutPath: witnessReceiptPath,
+          workItemId: context?.workItemId,
+          attemptId: context?.attemptId,
+          leaseId: context?.leaseId,
+          invocationHash: context?.invocationHash,
+          previousEvidenceHash: context?.previousEvidenceHash,
+        }, sandboxed);
+      } catch (error) {
+        if (witness.required) throw error;
+        initialWitnessOutcome = {
+          receiptPath: '',
+          verification: { valid: false, complete: false, reasons: ['witness_binary_unavailable'] },
+        };
+      }
+    }
+    const child = spawn(launchArgv[0]!,launchArgv.slice(1),{cwd,env:workloadEnv,shell:false,stdio:isolated?['pipe','pipe','pipe','pipe']:'pipe',detached:true});
     if (!child.pid) { child.on('error',()=>{}); throw new IntegrationError('start_failed','process did not start'); }
     const stream = (): Stream => ({data:Buffer.alloc(0),start:0,end:0});
-    const s: Session = {sessionId:'proc_'+randomBytes(16).toString('hex'),pid:child.pid,argv,cwd,owner:owner ?? 'stdio',
+    const s: Session = {sessionId,pid:child.pid,argv,cwd,owner:owner ?? 'stdio',
       stdout:stream(),stderr:stream(),exitCode:null,signal:null,done:false,child,
-      timer:setTimeout(()=>terminate(s),timeoutMs)};
+      timer:setTimeout(()=>terminate(s),timeoutMs),
+      ...(witnessReceiptPath ? { witnessReceiptPath } : {}),
+      ...(initialWitnessOutcome ? { witnessOutcome: initialWitnessOutcome } : {})};
     child.stdout!.on('data',(chunk: Buffer)=>append(s.stdout,chunk));
     child.stderr!.on('data',(chunk: Buffer)=>append(s.stderr,chunk));
     child.stdin!.on('error',()=>{});
@@ -133,7 +181,25 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
     // The moment bubblewrap itself exits, take down its whole PID namespace:
     // a workload must never survive (or keep running unobserved after) its session.
     child.on('exit',()=>{killSandboxNamespace(s.sandboxPid,s.sandboxStart);});
-    child.on('close',(code,signal)=>{killSandboxNamespace(s.sandboxPid,s.sandboxStart); try { process.kill(-s.pid,'SIGKILL'); } catch { /* group already gone */ } s.done=true;s.exitCode=code;s.signal=signal;clearTimeout(s.timer);});
+    child.on('close',(code,signal)=>{
+      killSandboxNamespace(s.sandboxPid,s.sandboxStart);
+      try { process.kill(-s.pid,'SIGKILL'); } catch { /* group already gone */ }
+      if (s.witnessReceiptPath && witness) {
+        s.witnessOutcome = readAndVerifyWitnessReceipt(
+          s.witnessReceiptPath,
+          witness,
+          {
+            workItemId: context?.workItemId,
+            attemptId: context?.attemptId,
+            leaseId: context?.leaseId,
+            invocationHash: context?.invocationHash,
+            previousEvidenceHash: context?.previousEvidenceHash,
+          },
+          context?.seenStore,
+        );
+      }
+      s.done=true;s.exitCode=code;s.signal=signal;clearTimeout(s.timer);
+    });
     sessions.set(s.sessionId,s);
     return s;
   }
@@ -146,7 +212,8 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
       stderr:s.stderr.data.subarray(Math.max(0,b-s.stderr.start)).toString('utf8'),
       stdoutStartOffset:s.stdout.start,stderrStartOffset:s.stderr.start,
       nextStdoutOffset:s.stdout.end,nextStderrOffset:s.stderr.end,
-      truncated:a<s.stdout.start || b<s.stderr.start};
+      truncated:a<s.stdout.start || b<s.stderr.start,
+      ...(s.done && s.witnessOutcome ? { witness: s.witnessOutcome } : {})};
   }
   async function read(args: Record<string,unknown>,owner?: string): Promise<Record<string,unknown>> {
     const s=find(args.sessionId,owner);
@@ -159,7 +226,7 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
     }
     return output(args,owner);
   }
-  async function shell(args: Record<string,unknown>,policy: JcFsPolicy,owner: string|undefined,interactive: boolean): Promise<Record<string,unknown>> {
+  async function shell(args: Record<string,unknown>,policy: JcFsPolicy,owner: string|undefined,interactive: boolean,context?: ProcessExecutionContext): Promise<Record<string,unknown>> {
     const cwd=containJcPath(args.cwd,policy);
     const selected=args.shell === undefined ? shells[0] : args.shell;
     if (typeof selected !== 'string') invalid('shell must be a configured absolute executable');
@@ -170,7 +237,7 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
     // PTY allocation belongs to JC; Python's standard library needs no DC modules.
     const actual=interactive || args.pty === true
       ? ['/usr/bin/python3',fileURLToPath(new URL('./pty-helper.py',import.meta.url)),...argv] : argv;
-    const s=launch(actual,cwd,environment(args.env),timeout,owner,policy);
+    const s=launch(actual,cwd,environment(args.env),timeout,owner,policy,context);
     const wait=integer(args.waitMs,interactive?0:10_000,60_000,0);
     // run_command waits for completion, rather than returning on the first chunk.
     const until=Date.now()+wait;
@@ -178,7 +245,7 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
     return {...output({sessionId:s.sessionId},owner),cwd,timeoutMs:timeout,pty:interactive || args.pty===true};
   }
   return {
-    start(args,policy,owner) {
+    start(args,policy,owner,context) {
       if (!Array.isArray(args.argv)||args.argv.length<1||args.argv.length>32) invalid('argv must contain 1 to 32 strings');
       const argv=args.argv.map((part)=> {
         if (typeof part!=='string'||!part||part.length>1024||part.includes('\0')) invalid('invalid argv entry');
@@ -186,11 +253,11 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
       });
       const cwd=containJcPath(args.cwd,policy);
       const timeoutMs=integer(args.timeoutMs,30_000,600_000);
-      const s=launch([executable(argv[0]!),...argv.slice(1)],cwd,jcChildEnv(),timeoutMs,owner,policy);
+      const s=launch([executable(argv[0]!),...argv.slice(1)],cwd,jcChildEnv(),timeoutMs,owner,policy,context);
       return {sessionId:s.sessionId,pid:s.pid,cwd,argv,timeoutMs};
     },
-    run:(args,policy,owner)=>shell(args,policy,owner,false),
-    terminal:(args,policy,owner)=>shell(args,policy,owner,true),
+    run:(args,policy,owner,context)=>shell(args,policy,owner,false,context),
+    terminal:(args,policy,owner,context)=>shell(args,policy,owner,true,context),
     async interact(args,owner) {
       const s=find(args.sessionId,owner);
       if (typeof args.input!=='string'||Buffer.byteLength(args.input)>64*1024) invalid('input must be bounded text');
@@ -224,6 +291,7 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
       const until=Date.now()+KILL_GRACE_MS+2000;
       while (!s.done && Date.now()<until) await new Promise((resolve)=>setTimeout(resolve,10));
       return {sessionId:s.sessionId,pid:s.pid,signal:'SIGTERM',escalatesAfterMs:KILL_GRACE_MS,exited:s.done,exitSignal:s.signal,
+        ...(s.done && s.witnessOutcome ? { witness: s.witnessOutcome } : {}),
         // Diagnostics: the process itself exited, but its output streams were still open.
         ...(s.done ? {} : {exitObserved:s.child.exitCode!==null || s.child.signalCode!==null})};
     },

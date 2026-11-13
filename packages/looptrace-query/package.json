@@ -12,6 +12,7 @@
     }
   },
   "dependencies": {
+    "@agent-control-stack/black-box-recorder": "0.1.0",
     "@agent-control-stack/desktop-commander-adapter": "0.1.0",
     "@agent-control-stack/evidence": "0.1.0",
     "@agent-control-stack/shared": "0.1.0",

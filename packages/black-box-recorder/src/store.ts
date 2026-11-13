@@ -1,9 +1,99 @@
 import { canonicalJson, envelopeForDigest, sha256Hex } from "./canonical.js";
 import { recorderFeatureEnabled } from "./flag.js";
+import {
+  toWitnessRecorderDraft,
+  verifyJcWitnessReceipt,
+  type VerifyJcWitnessOptions,
+  type WitnessIngestResult
+} from "./jc-witness-adapter.js";
 import { importTrustedKey, signedPayload, verifyProvenance } from "./provenance.js";
 import { redact, redactField } from "./redact.js";
-import type { Finding, IngestDraft, IngestResult, RecorderEvent, RunAnnotation, TrustLevel } from "./types.js";
+import type {
+  ChainFinding,
+  ChainVerification,
+  Finding,
+  IngestDraft,
+  IngestResult,
+  RecorderEvent,
+  RunAnnotation,
+  TrustLevel
+} from "./types.js";
 import { SCHEMA_VERSION } from "./types.js";
+
+export const GENESIS_HASH = "0".repeat(64);
+
+export async function computeEventHash(
+  seq: number,
+  previousHash: string,
+  eventId: string,
+  payloadSha256: string
+): Promise<string> {
+  return sha256Hex(canonicalJson({ seq, previousHash, eventId, payloadSha256 }));
+}
+
+export async function verifyRecorderChain(events: readonly RecorderEvent[]): Promise<ChainVerification> {
+  const findings: ChainFinding[] = [];
+  let expectedSeq = 1;
+  let expectedPrev = GENESIS_HASH;
+  let headHash = GENESIS_HASH;
+
+  for (const event of events) {
+    const { seq, previousHash, eventHash, payloadSha256 } = event.evidence ?? {};
+    if (seq !== expectedSeq) {
+      findings.push({
+        kind: "sequence_gap",
+        seq,
+        eventId: event.eventId,
+        detail: `expected seq ${expectedSeq}, got ${String(seq)}`
+      });
+    }
+    if (previousHash !== expectedPrev) {
+      findings.push({
+        kind: "previous_hash_mismatch",
+        seq,
+        eventId: event.eventId,
+        detail: `expected previousHash ${expectedPrev}, got ${String(previousHash)}`
+      });
+    }
+    const recomputedPayload = await sha256Hex(envelopeForDigest(event));
+    if (payloadSha256 !== recomputedPayload) {
+      findings.push({
+        kind: "payload_hash_mismatch",
+        seq,
+        eventId: event.eventId,
+        detail: `payloadSha256 mismatch for ${event.eventId}`
+      });
+    }
+    if (typeof seq === "number" && typeof previousHash === "string" && typeof payloadSha256 === "string") {
+      const recomputedEvent = await computeEventHash(seq, previousHash, event.eventId, payloadSha256);
+      if (eventHash !== recomputedEvent) {
+        findings.push({
+          kind: "event_hash_mismatch",
+          seq,
+          eventId: event.eventId,
+          detail: `eventHash mismatch for ${event.eventId}`
+        });
+      }
+    } else {
+      findings.push({
+        kind: "event_hash_mismatch",
+        seq,
+        eventId: event.eventId,
+        detail: `missing chain fields for ${event.eventId}`
+      });
+    }
+    expectedSeq = (typeof seq === "number" ? seq : expectedSeq) + 1;
+    expectedPrev = typeof eventHash === "string" ? eventHash : "";
+    headHash = expectedPrev || headHash;
+  }
+
+  return {
+    valid: findings.length === 0,
+    eventCount: events.length,
+    headHash: events.length === 0 ? GENESIS_HASH : headHash,
+    findings
+  };
+}
 
 /**
  * Derives an event id within its trust namespace so an unsigned claim cannot
@@ -76,6 +166,10 @@ export class RecorderStore {
   readonly #annotations = new Map<string, RunAnnotation>();
   readonly #fingerprints = new Map<string, string>();
   readonly #conflictedAt = new Map<string, string>();
+  readonly #seenEvidenceHashes = new Set<string>();
+  #seq = 0;
+  #headHash = GENESIS_HASH;
+  #commitQueue: Promise<void> = Promise.resolve();
   #fingerprintKey?: Promise<CryptoKey>;
   readonly #enabled: boolean;
   readonly #maxEvents: number;
@@ -102,6 +196,12 @@ export class RecorderStore {
   get annotations(): ReadonlyMap<string, RunAnnotation> { return new Map(this.#annotations); }
   get conflicts() { return this.#conflicts.slice(); }
   get conflictedAt(): ReadonlyMap<string, string> { return new Map(this.#conflictedAt); }
+  get headHash(): string { return this.#headHash; }
+  get chainLength(): number { return this.#seq; }
+
+  async verifyChain(): Promise<ChainVerification> {
+    return verifyRecorderChain([...this.#events.values()]);
+  }
 
   annotationFor(runId: string): RunAnnotation | undefined { return this.#annotations.get(runId); }
   hasConflict(eventId: string): boolean { return this.#conflictedAt.has(eventId); }
@@ -126,7 +226,63 @@ export class RecorderStore {
     return true;
   }
 
+  async ingestWitnessReceipt(
+    rawReceipt: unknown,
+    options: VerifyJcWitnessOptions & { ingestedAt?: string }
+  ): Promise<WitnessIngestResult> {
+    if (!this.#enabled) {
+      return {
+        accepted: false,
+        observed: false,
+        trustLevel: "untrusted_claim",
+        reason: "ABBR_ENABLED is not set to 1",
+        reasons: ["ABBR_ENABLED is not set to 1"]
+      };
+    }
+    const verification = await verifyJcWitnessReceipt(rawReceipt, options);
+    if (!verification.valid) {
+      return {
+        accepted: false,
+        observed: false,
+        trustLevel: "untrusted_claim",
+        reason: verification.reasons.join("; "),
+        reasons: verification.reasons
+      };
+    }
+    const ingestedAt = options.ingestedAt ?? new Date().toISOString();
+    const draft = toWitnessRecorderDraft(verification.receipt, verification, ingestedAt);
+    const ingestResult = await this.#ingestInternal(draft, verification.observed);
+    if (ingestResult.status === "created" || ingestResult.status === "duplicate") {
+      if (options.seenEvidenceHashes) {
+        options.seenEvidenceHashes.add(verification.receipt.evidenceHash);
+      }
+      return {
+        accepted: true,
+        observed: verification.observed && ingestResult.event.trustLevel === "independently_verified",
+        trustLevel: ingestResult.event.trustLevel,
+        reasons: verification.reasons,
+        ingestResult
+      };
+    }
+    const reason =
+      ingestResult.status === "rejected" || ingestResult.status === "disabled"
+        ? ingestResult.reason
+        : "conflicting witness receipt for producer identity";
+    return {
+      accepted: false,
+      observed: false,
+      trustLevel: "untrusted_claim",
+      reason,
+      reasons: [reason],
+      ingestResult
+    };
+  }
+
   async ingest(input: IngestDraft): Promise<IngestResult> {
+    return this.#ingestInternal(input, false);
+  }
+
+  async #ingestInternal(input: IngestDraft, verifiedWitnessGrant: boolean): Promise<IngestResult> {
     if (!this.#enabled) return { status: "disabled", reason: "ABBR_ENABLED is not set to 1" };
     let draft: IngestDraft;
     let producerPayload: string;
@@ -154,10 +310,13 @@ export class RecorderStore {
     }
     // Every stored string passes through the same redaction, including identity and reference fields.
     const metadata = redact(draft.metadata ?? {}) as Record<string, unknown>;
-    // Authority is kept only when an ACS key signed exactly these fields, or the caller explicitly grants it.
+    // Authority is kept only when an ACS key signed exactly these fields, verified witness receipt, or explicit grant.
     const signed = await verifyProvenance(draft, canonicalJson, await this.#keys);
     const trustLevel: TrustLevel =
-      UNGRANTED.has(draft.trustLevel) && !signed && !this.#grantTrust(draft, draft.trustLevel)
+      UNGRANTED.has(draft.trustLevel) &&
+      !signed &&
+      !(verifiedWitnessGrant && draft.component === "jc-kernel-witness" && draft.trustLevel === "independently_verified") &&
+      !this.#grantTrust(draft, draft.trustLevel)
         ? "untrusted_claim"
         : draft.trustLevel;
     const source = {
@@ -194,40 +353,71 @@ export class RecorderStore {
     };
     // The digest covers the redacted envelope only, so it cannot be used to test a guessed secret.
     const payloadSha256 = await sha256Hex(envelopeForDigest(partial));
-    const event = deepFreeze({
-      ...partial,
-      evidence: { ...partial.evidence, payloadSha256 }
-    }) as RecorderEvent;
 
     // Retry comparison keeps the original payload private and ignores the recorder's observation time.
     const fingerprint = await this.#fingerprint("payload", producerPayload);
-    const existingId = this.#byProducer.get(producerKey);
-    if (existingId) {
-      const existing = this.#events.get(existingId);
-      if (!existing) throw new Error("producer index pointed at a missing event");
-      if (this.#fingerprints.get(existingId) === fingerprint) {
-        return { status: "duplicate", event: existing };
-      }
-      this.#conflictedAt.set(existingId, event.ingestedAt);
-      if (this.#conflicts.length < this.#maxEvents) {
-        this.#conflicts.push(Object.freeze({
-          producerKey,
-          existingEventId: existing.eventId,
-          rejectedSha256: payloadSha256,
-          ingestedAt: event.ingestedAt
-        }));
-      }
-      return { status: "conflict", event: existing, rejectedSha256: payloadSha256 };
-    }
+    const evidenceHashClaim =
+      typeof metadata.evidenceHash === "string" && /^[a-f0-9]{64}$/u.test(metadata.evidenceHash)
+        ? metadata.evidenceHash
+        : null;
 
-    if (this.#events.size >= this.#maxEvents) {
-      return { status: "rejected", reason: `store is at its ${this.#maxEvents}-record limit` };
-    }
-    if (this.#events.has(event.eventId)) return { status: "rejected", reason: "recorder event identity collision" };
-    this.#events.set(event.eventId, event);
-    this.#byProducer.set(producerKey, event.eventId);
-    this.#fingerprints.set(event.eventId, fingerprint);
-    return { status: "created", event };
+    let result!: IngestResult;
+    const runCommit = async (): Promise<void> => {
+      const existingId = this.#byProducer.get(producerKey);
+      if (existingId) {
+        const existing = this.#events.get(existingId);
+        if (!existing) throw new Error("producer index pointed at a missing event");
+        if (this.#fingerprints.get(existingId) === fingerprint) {
+          result = { status: "duplicate", event: existing };
+          return;
+        }
+        this.#conflictedAt.set(existingId, partial.ingestedAt);
+        if (this.#conflicts.length < this.#maxEvents) {
+          this.#conflicts.push(Object.freeze({
+            producerKey,
+            existingEventId: existing.eventId,
+            rejectedSha256: payloadSha256,
+            ingestedAt: partial.ingestedAt
+          }));
+        }
+        result = { status: "conflict", event: existing, rejectedSha256: payloadSha256 };
+        return;
+      }
+
+      if (evidenceHashClaim && this.#seenEvidenceHashes.has(evidenceHashClaim)) {
+        result = { status: "rejected", reason: "replayed evidenceHash under a different producer identity" };
+        return;
+      }
+      if (this.#events.size >= this.#maxEvents) {
+        result = { status: "rejected", reason: `store is at its ${this.#maxEvents}-record limit` };
+        return;
+      }
+      if (this.#events.has(partial.eventId)) {
+        result = { status: "rejected", reason: "recorder event identity collision" };
+        return;
+      }
+
+      const seq = this.#seq + 1;
+      const previousHash = this.#headHash;
+      const eventHash = await computeEventHash(seq, previousHash, partial.eventId, payloadSha256);
+      const event = deepFreeze({
+        ...partial,
+        evidence: { ...partial.evidence, payloadSha256, seq, previousHash, eventHash }
+      }) as RecorderEvent;
+
+      this.#seq = seq;
+      this.#headHash = eventHash;
+      this.#events.set(event.eventId, event);
+      this.#byProducer.set(producerKey, event.eventId);
+      this.#fingerprints.set(event.eventId, fingerprint);
+      if (evidenceHashClaim) this.#seenEvidenceHashes.add(evidenceHashClaim);
+      result = { status: "created", event };
+    };
+
+    const next = this.#commitQueue.then(runCommit, runCommit);
+    this.#commitQueue = next.catch(() => undefined);
+    await next;
+    return result;
   }
 
   eventsFor(runId: string): RecorderEvent[] {

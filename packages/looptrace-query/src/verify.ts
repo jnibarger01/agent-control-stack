@@ -203,6 +203,11 @@ function completenessUnproven(a: Assertion, v: View): { reasons: string[]; basis
     reasons.push("Jace Commander trace sessions in the configured roots carry no head anchor (no trace seal), so a truncated JC trace that hid a conflicting outcome cannot be ruled out");
     basis.push(...jc);
   }
+  const incompleteWitness = v.of("witness.incomplete");
+  if (incompleteWitness.length > 0 && a.type === "operation_completed") {
+    reasons.push("JC Kernel Witness observation is incomplete, unanchored, or unverified; execution completeness is unproven");
+    basis.push(...incompleteWitness);
+  }
   return { reasons, basis };
 }
 

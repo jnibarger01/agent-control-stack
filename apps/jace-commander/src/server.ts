@@ -56,7 +56,13 @@ import { jcConfigView, jcDoctor, jcPing } from './doctor.js';
 import { defaultDeniedRoots, getFileInfo, listDirectory, readFile, readMultipleFiles, type JcFsPolicy } from './filesystem.js';
 import { gitAdd, gitBranch, gitCommit, gitDiff, gitFetch, gitLog, gitPush, gitShow, gitStatus } from './git-ops.js';
 import { createDirectory, deleteFile, editBlock, moveFile, writeFile } from './mutations.js';
-import { createProcessRegistry } from './processes.js';
+import { createProcessRegistry, type ProcessExecutionContext } from './processes.js';
+import {
+  SeenReceiptStore,
+  kernelWitnessConfigFromEnv,
+  submitWitnessReceiptToAcs,
+  type WitnessRunOutcome,
+} from './kernel-witness.js';
 import { acsCheckoutsUnder, sandboxPolicyFromEnv, sandboxSelfTest } from './sandbox.js';
 import { createSearchRegistry } from './search.js';
 import { invokePrivilegedHelper, privilegedHelperAvailable } from './privileged-client.js';
@@ -222,6 +228,9 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     : undefined;
   const runId = `jc-mcp-${process.pid}-${Date.now()}`;
   const trace = new JsonlTraceChain(path.join(config.stateDir, 'traces', `${runId}.jsonl`), runId);
+  const witnessConfig = config.witness ?? kernelWitnessConfigFromEnv(config.stateDir);
+  const witnessSeenStore = new SeenReceiptStore(path.join(config.stateDir, 'witness-seen'));
+  let lastWitnessEvidenceHash: string | null = null;
 
   const acsGet = async (url: string) => requestJson(url, {
     timeoutMs: config.requestTimeoutMs,
@@ -358,6 +367,11 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
           recordTrace(trace, name, args, { ok: false, code, ...routeTrace(route) });
           return fail(code, 'Jace Commander managed authorization rejected', { acsAuthorization: { version: 'acs.jc.v1', decision: 'denied', code }, ...routeMeta });
         }
+        const corrError = validateAuthorizationCorrelation(authorization, request.params._meta as Record<string, unknown> | undefined, args);
+        if (corrError) {
+          recordTrace(trace, name, args, { ok: false, code: corrError, principal: principal ?? 'stdio', ...authTrace(authorization), ...routeTrace(route) });
+          return fail(corrError, 'Jace Commander authorization correlation rejected', { acsAuthorization: { version: 'acs.jc.v1', decision: 'denied', code: corrError }, ...routeMeta });
+        }
       }
     }
 
@@ -377,7 +391,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
         // answer (unreachable, timeout, non-200, oversized) is ACS_UNAVAILABLE.
         const code = error instanceof IntegrationError && error.code === 'JC_AUTHORITY_REVOKED' ? 'JC_AUTHORITY_REVOKED' : 'ACS_UNAVAILABLE';
         const detail = error instanceof IntegrationError ? `${error.code}: ${error.message}` : 'ACS unreachable';
-        recordTrace(trace, name, args, { ok: false, code, principal: principal ?? 'stdio', workItemId: authorization.workItemId, attemptId: authorization.attemptId, ...routeTrace(route) });
+        recordTrace(trace, name, args, { ok: false, code, principal: principal ?? 'stdio', ...authTrace(authorization), ...routeTrace(route) });
         return fail(code, `current ACS authority unavailable or revoked (${detail}); nothing ran`, { acsAuthorization: { version: 'acs.jc.v1', decision: 'denied-current-authority', code } });
       }
     }
@@ -387,19 +401,91 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     // read-class calls keep the best-effort behavior they always had.
     if (route.riskClass !== 'read') {
       try {
-        trace.append('tool_call_started', { tool: name, argumentsSha256: argsHash(args), ...routeTrace(route), principal: principal ?? 'stdio', workItemId: authorization?.workItemId, attemptId: authorization?.attemptId, leaseId: authorization?.leaseId, ...approvalTrace(localAuthorization) });
+        trace.append('tool_call_started', { tool: name, argumentsSha256: argsHash(args), ...routeTrace(route), principal: principal ?? 'stdio', ...authTrace(authorization), ...approvalTrace(localAuthorization) });
       } catch {
         return fail('JC_TRACE_UNAVAILABLE', 'the local audit trace cannot be written; refusing to run a mutating call', { jaceCommanderMode: mode, ...jcAuthorizationMeta(mode, route, 'trace-unavailable') });
       }
     }
 
     let result: ToolResult;
+    const processContext: ProcessExecutionContext | undefined = witnessConfig.enabled
+      ? {
+        ...(authorization ? {
+          workItemId: authorization.workItemId,
+          attemptId: authorization.attemptId,
+          leaseId: authorization.leaseId,
+          invocationHash: authorization.invocationHash,
+        } : {}),
+        previousEvidenceHash: lastWitnessEvidenceHash,
+        witness: witnessConfig,
+        seenStore: witnessSeenStore,
+      }
+      : undefined;
     try {
-      result = await dispatch(name, args, helperCapability, principal ?? (config.gatewayMetaTrusted ? undefined : 'stdio'));
+      result = await dispatch(name, args, helperCapability, principal ?? (config.gatewayMetaTrusted ? undefined : 'stdio'), processContext);
     } catch (error) {
       result = error instanceof IntegrationError
         ? fail(error.code, error.message)
         : fail('internal_error', 'tool failed');
+    }
+    if (!result.isError && result.structuredContent?.witness && witnessConfig.enabled) {
+      const witnessOutcome = result.structuredContent.witness as WitnessRunOutcome;
+      if (witnessOutcome.verification.valid && witnessOutcome.verification.complete && witnessOutcome.receipt) {
+        lastWitnessEvidenceHash = witnessOutcome.receipt.evidenceHash;
+        try {
+          trace.append('witness_observation_recorded', {
+            tool: name,
+            ...authTrace(authorization),
+            sessionId: result.structuredContent.sessionId,
+            evidenceHash: witnessOutcome.receipt.evidenceHash,
+            previousEvidenceHash: witnessOutcome.receipt.previousEvidenceHash,
+            observerMode: witnessOutcome.receipt.observerMode,
+            observerId: witnessOutcome.receipt.observerId,
+            cgroupId: witnessOutcome.receipt.cgroupId,
+            status: witnessOutcome.receipt.status,
+            eventCounts: witnessOutcome.receipt.eventCounts,
+            signingKeyId: witnessOutcome.receipt.signingKeyId,
+          });
+        } catch {
+          // Best-effort witness projection; never mutates asserted tool result.
+        }
+        if (config.acsUrl) {
+          const token = config.acsAuthorityToken ?? (await acsAccessToken(config.acsUrl, config.stateDir, process.env, fetchImpl).catch(() => undefined));
+          await submitWitnessReceiptToAcs({
+            acsUrl: config.acsUrl,
+            token,
+            receipt: witnessOutcome.receipt,
+            timeoutMs: config.requestTimeoutMs,
+            fetchImpl,
+          });
+        }
+      } else {
+        try {
+          trace.append('witness_observation_incomplete', {
+            tool: name,
+            ...authTrace(authorization),
+            sessionId: result.structuredContent.sessionId,
+            status: witnessOutcome.receipt?.status ?? 'missing',
+            reasons: witnessOutcome.verification.reasons,
+            ...(witnessOutcome.verification.evidenceHash ? { evidenceHash: witnessOutcome.verification.evidenceHash } : {}),
+          });
+        } catch {
+          // Best-effort witness projection.
+        }
+        if (witnessConfig.required) {
+          const reasons = witnessOutcome.verification.reasons;
+          const cryptoOrReplayFailure =
+            reasons.includes('evidence_hash_mismatch')
+            || reasons.includes('signature_invalid')
+            || reasons.includes('receipt_replayed')
+            || reasons.includes('previous_evidence_hash_mismatch')
+            || reasons.includes('public_key_unavailable')
+            || reasons.includes('receipt_missing_or_unreadable')
+            || reasons.some((r) => r.startsWith('correlation_mismatch'));
+          const errCode = cryptoOrReplayFailure ? 'JC_WITNESS_VERIFICATION_FAILED' : 'JC_WITNESS_INCOMPLETE';
+          result = fail(errCode, `kernel witness observation failed (${reasons.join(', ')})`);
+        }
+      }
     }
     const meta = {
       jaceCommanderMode: mode,
@@ -408,7 +494,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
         : { decision: name === 'privileged_exec' && route.authorizer !== 'local' ? 'delegated-to-privileged-helper' : 'not-required' },
       ...routeMeta,
     };
-    recordTrace(trace, name, args, { ok: !result.isError, workItemId: authorization?.workItemId, ...routeTrace(route), ...approvalTrace(localAuthorization) });
+    recordTrace(trace, name, args, { ok: !result.isError, ...authTrace(authorization), ...routeTrace(route), ...approvalTrace(localAuthorization) });
     return { ...result, _meta: { ...(result._meta ?? {}), ...meta } };
   });
 
@@ -455,7 +541,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     }
   }
 
-  type Handler = (args: Record<string, unknown>, capability: unknown, owner?: string) => Promise<ToolResult>;
+  type Handler = (args: Record<string, unknown>, capability: unknown, owner?: string, processContext?: ProcessExecutionContext) => Promise<ToolResult>;
   // Throws (refusing to construct the server) when the configuration asks for
   // unisolated workloads in managed mode: there is no unsandboxed fallback.
   const sandboxPolicy = sandboxPolicyFromEnv({
@@ -573,9 +659,9 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     move_file: async (args) => ok(await moveFile(args, fsPolicy)),
     edit_block: async (args) => ok(await editBlock(args, fsPolicy)),
     delete_file: async (args) => ok(await deleteFile(args, fsPolicy)),
-    start_process: async (args, _cap, owner) => ok(processes.start(args, fsPolicy, owner)),
-    run_command: async (args, _cap, owner) => ok(await processes.run(args, fsPolicy, owner)),
-    start_terminal_session: async (args, _cap, owner) => ok(await processes.terminal(args, fsPolicy, owner)),
+    start_process: async (args, _cap, owner, processContext) => ok(processes.start(args, fsPolicy, owner, processContext)),
+    run_command: async (args, _cap, owner, processContext) => ok(await processes.run(args, fsPolicy, owner, processContext)),
+    start_terminal_session: async (args, _cap, owner, processContext) => ok(await processes.terminal(args, fsPolicy, owner, processContext)),
     interact_with_process: async (args, _cap, owner) => ok(await processes.interact(args, owner)),
     read_process_output: async (args, _cap, owner) => ok(await processes.read(args, owner)),
     list_processes: async (_args, _cap, owner) => ok(processes.list(owner)),
@@ -605,9 +691,9 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
   });
   assertHandlerCoverage(Object.keys(handlers));
 
-  async function dispatch(name: string, args: Record<string, unknown>, capability: unknown, owner?: string): Promise<ToolResult> {
+  async function dispatch(name: string, args: Record<string, unknown>, capability: unknown, owner?: string, processContext?: ProcessExecutionContext): Promise<ToolResult> {
     const handler = Object.prototype.hasOwnProperty.call(handlers, name) ? handlers[name] : undefined;
-    return handler ? handler(args, capability, owner) : fail('unknown_tool', `unknown tool: ${name}`);
+    return handler ? handler(args, capability, owner, processContext) : fail('unknown_tool', `unknown tool: ${name}`);
   }
 
   /** Whether approverd is configured, reachable and the one we trust; and that WE cannot reach decide.sock. */
@@ -720,6 +806,44 @@ function jcAuthorizationMeta(mode: JcMode, route: JcRoute, decision?: string, ex
 /** Approval identifiers for trace records (ids only; never the token). */
 function approvalTrace(auth: JcLocalAuthorization | undefined): Record<string, unknown> {
   return auth ? { approvalId: auth.approvalId, approverId: auth.approverId, tokenId: auth.tokenId } : {};
+}
+
+const CORRELATION_FIELDS = ['workItemId', 'attemptId', 'leaseId', 'invocationHash'] as const;
+
+/** Authenticated ACS correlation identifiers for trace records (never agent-supplied). */
+function authTrace(auth: JcAuthorization | undefined): Record<string, unknown> {
+  if (!auth) return {};
+  return {
+    workItemId: auth.workItemId,
+    attemptId: auth.attemptId,
+    leaseId: auth.leaseId,
+    invocationHash: auth.invocationHash,
+  };
+}
+
+/** Rejects missing authorization correlation fields or conflicting agent-supplied identifiers. */
+function validateAuthorizationCorrelation(
+  auth: JcAuthorization,
+  meta: Record<string, unknown> | undefined,
+  args: Record<string, unknown>,
+): 'JC_CAPABILITY_ID_INVALID' | 'JC_CORRELATION_CONFLICT' | null {
+  for (const field of CORRELATION_FIELDS) {
+    if (typeof auth[field] !== 'string' || auth[field].length === 0) return 'JC_CAPABILITY_ID_INVALID';
+  }
+  const sources: Array<Record<string, unknown> | undefined> = [
+    meta,
+    isPlainRecord(meta?.acsContext) ? meta.acsContext : undefined,
+    args,
+  ];
+  for (const src of sources) {
+    if (!src) continue;
+    for (const field of CORRELATION_FIELDS) {
+      if (src[field] !== undefined && src[field] !== auth[field]) {
+        return 'JC_CORRELATION_CONFLICT';
+      }
+    }
+  }
+  return null;
 }
 
 function recordTrace(trace: JsonlTraceChain, tool: string, args: unknown, outcome: Record<string, unknown>): void {

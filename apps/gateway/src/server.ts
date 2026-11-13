@@ -253,6 +253,7 @@ import {
   sendReadAccessError,
   sessionCookie
 } from "./credentials.js";
+import { registerBlackBoxRoutes, type GatewayBlackBoxOptions } from "./black-box-routes.js";
 
 /** Conservative Fastify JSON bodyLimit for mutation routes (memory DoS bound). */
 const DEFAULT_JSON_BODY_LIMIT_BYTES = 256 * 1024;
@@ -388,6 +389,8 @@ export interface GatewayOptions {
    * lifecycle-only worker without changing authority behavior.
    */
   jevObservation?: GatewayJevObservationOptions | false;
+  /** Agent Black Box & JC Kernel Witness ingestion/query options. */
+  blackBox?: GatewayBlackBoxOptions;
 }
 
 /**
@@ -2600,6 +2603,15 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     } catch (error) {
       return sendError(reply, error);
     }
+  });
+
+  registerBlackBoxRoutes({
+    app,
+    auth,
+    workItems,
+    codingMissions,
+    broadcast,
+    options: options.blackBox
   });
 
   // Binding authority is a human act: the grant it names was issued by a human, and the binder must be one too. Binding

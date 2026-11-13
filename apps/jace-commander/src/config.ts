@@ -12,6 +12,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { authorityToken } from './current-authority.js';
+import { kernelWitnessConfigFromEnv, type KernelWitnessConfig } from './kernel-witness.js';
 
 export const DEFAULT_TAILNET_HOST = 'cachyos-x8664.tailaa6d41.ts.net';
 
@@ -59,6 +60,8 @@ export interface JcConfig {
   gatewayMetaTrusted: boolean;
   /** Raw workload-sandbox settings (sandbox.ts builds the policy with the preset). */
   sandboxEnv: Readonly<Record<string, string | undefined>>;
+  /** Kernel witness configuration (JC_WITNESS_*). */
+  witness?: KernelWitnessConfig;
   /** Read-scoped ACS credential for the live authority check (non-enumerable: never serialized). */
   readonly acsAuthorityToken?: string;
 }
@@ -133,7 +136,9 @@ export function loadJcConfig(env: NodeJS.ProcessEnv = process.env): JcConfig {
     sandboxEnv: Object.freeze(Object.fromEntries([
       'JC_WORKLOAD_ISOLATION', 'JC_WORKLOAD_NETWORK', 'JC_SANDBOX_HIDE', 'JC_SANDBOX_READONLY',
       'JC_SANDBOX_WRITABLE', 'JC_BWRAP_PATH', 'JC_ALLOW_UNISOLATED_WORKLOADS', 'XDG_RUNTIME_DIR',
+      'JC_WITNESS_SIGNING_KEY', 'JC_WITNESS_RECEIPT_DIR',
     ].map((name) => [name, env[name] ?? (name === 'XDG_RUNTIME_DIR' ? process.env.XDG_RUNTIME_DIR : undefined)]))),
+    witness: kernelWitnessConfigFromEnv(stateDir, env),
     mirrorMaxPending: boundedInt(env.JC_ACS_MIRROR_MAX_PENDING, 5000, 10, 1_000_000, 'JC_ACS_MIRROR_MAX_PENDING'),
   };
   Object.defineProperty(config, 'acsAuthorityToken', { value: authorityToken(env), enumerable: false, writable: false });
