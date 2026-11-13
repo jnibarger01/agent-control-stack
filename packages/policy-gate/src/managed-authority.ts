@@ -86,6 +86,13 @@ const JC_RELEASE_ROOT_PATTERN = /(?:^|\/)\.local\/lib\/jace-commander\/(?:curren
 
 /** Lease schema marker written by the native Jace Commander executor (additive, v2). */
 const JC_EXECUTOR_KIND = "jace-commander";
+/**
+ * A live JC pid is not enough once the lease timestamp has lapsed. The holder
+ * renews every 60s against a 180s TTL, so this grace only absorbs scheduling
+ * delay on the same machine. Desktop Commander leases omit executorKind and
+ * keep the older "expired timestamp, live pid" rule.
+ */
+export const JC_LEASE_EXPIRY_GRACE_MS = 5_000;
 
 export function acsExecutorRoot(command: string): string | undefined {
   let root: string | undefined;
@@ -250,8 +257,14 @@ function classifyLease(
       detail: `executor lease holder ${parsed.pid} is not alive`
     };
   }
-  // The canonical executor lock uses a 10s dead-PID grace and renews every 60s.
-  // expiresAt in the past does not invalidate a live, identity-matching holder.
+  if (parsed.executorKind === JC_EXECUTOR_KIND && parsed.expiresAt + JC_LEASE_EXPIRY_GRACE_MS <= runtime.nowMs) {
+    return {
+      active: false,
+      ambiguous: false,
+      pid: parsed.pid,
+      detail: `executor lease held by pid ${parsed.pid} expired`
+    };
+  }
   if (runtime.managedExecutorPids.length > 0 && !runtime.managedExecutorPids.includes(parsed.pid)) {
     return {
       active: false,

@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import {
   acsExecutorRoot,
   isManagedExecutorCommand,
+  JC_LEASE_EXPIRY_GRACE_MS,
   observeManagedAuthority,
   type AuthorityFiles,
   type AuthorityRuntime
@@ -79,7 +80,9 @@ describe("installed Jace Commander runtime is a managed executor", () => {
 
   it("rejects a jace-commander tree that is not an installed release", () => {
     expect(isManagedExecutorCommand(`${NODE} /home/jacen/src/jace-commander/dist/cli.js serve`)).toBe(false);
-    expect(isManagedExecutorCommand(`${NODE} /home/jacen/.local/lib/jace-commander/evil/dist/cli.js serve`)).toBe(false);
+    expect(isManagedExecutorCommand(`${NODE} /home/jacen/.local/lib/jace-commander/evil/dist/cli.js serve`)).toBe(
+      false
+    );
   });
 
   it("rejects a dist/cli.js vendored under node_modules inside a release", () => {
@@ -108,10 +111,7 @@ describe("Jace Commander lease holder binding", () => {
   });
 
   it("fails closed when the lease claims a root the holder process does not run from", () => {
-    const observed = observeManagedAuthority(
-      files(leaseJson({ releaseRoot: JC_PINNED_ROOT })),
-      runtime()
-    );
+    const observed = observeManagedAuthority(files(leaseJson({ releaseRoot: JC_PINNED_ROOT })), runtime());
     expect(observed.leaseAmbiguous).toBe(true);
     expect(observed.authoritative).toBe(false);
     expect(observed.managedRuntime).toBe(false);
@@ -133,10 +133,7 @@ describe("Jace Commander lease holder binding", () => {
   });
 
   it("fails closed when the boot id differs (lease from before a reboot)", () => {
-    const observed = observeManagedAuthority(
-      files(),
-      runtime({ bootId: "ffffffff-ffff-4fff-8fff-ffffffffffff" })
-    );
+    const observed = observeManagedAuthority(files(), runtime({ bootId: "ffffffff-ffff-4fff-8fff-ffffffffffff" }));
     expect(observed.leaseAmbiguous).toBe(true);
     expect(observed.authoritative).toBe(false);
   });
@@ -162,20 +159,48 @@ describe("Jace Commander lease holder binding", () => {
     expect(observed.authoritative).toBe(false);
   });
 
-  it("an expired TTL alone does not revoke a live, identity-matching holder", () => {
+  it("an expired JC lease fails closed even when the holder pid is still alive", () => {
+    const observed = observeManagedAuthority(files(leaseJson({ expiresAt: 1 })), runtime({ nowMs: 10_000_000 }));
+    expect(observed.leaseActive).toBe(false);
+    expect(observed.authoritative).toBe(false);
+    expect(observed.detail).toMatch(/expired/);
+  });
+
+  it("a JC lease inside the expiry grace stays authoritative", () => {
+    const nowMs = 10_000_000;
     const observed = observeManagedAuthority(
-      files(leaseJson({ expiresAt: 1 })),
-      runtime({ nowMs: 10_000_000 })
+      files(leaseJson({ expiresAt: nowMs - (JC_LEASE_EXPIRY_GRACE_MS - 1) })),
+      runtime({ nowMs })
+    );
+    expect(observed.leaseActive).toBe(true);
+    expect(observed.authoritative).toBe(true);
+  });
+
+  it("a Desktop Commander lease with a past timestamp stays active while its pid matches", () => {
+    const nowMs = 10_000_000;
+    const dcLease = JSON.stringify({
+      instanceId: "dc-expired",
+      pid: 777,
+      expiresAt: 1,
+      bootId: BOOT_ID,
+      processStartTicks: START_TICKS
+    });
+    const observed = observeManagedAuthority(
+      { leaseExists: true, breakGlassExists: false, leaseRaw: dcLease, breakGlassRaw: null },
+      runtime({
+        nowMs,
+        pidAlive: (pid) => pid === 777,
+        managedExecutorPids: [777],
+        holderCommand: dcBridge,
+        competingExecutorRoots: [DC_ROOT.replace(/\/$/u, "")]
+      })
     );
     expect(observed.leaseActive).toBe(true);
     expect(observed.authoritative).toBe(true);
   });
 
   it("an empty discovery set cannot verify the holder, so the lease is not authoritative", () => {
-    const observed = observeManagedAuthority(
-      files(),
-      runtime({ managedExecutorPids: [], competingExecutorRoots: [] })
-    );
+    const observed = observeManagedAuthority(files(), runtime({ managedExecutorPids: [], competingExecutorRoots: [] }));
     expect(observed.authoritative).toBe(false);
     expect(observed.managedExecutorDiscovered).toBe(false);
   });
@@ -229,7 +254,12 @@ describe("standalone and competing topologies cannot gain managed authority", ()
     });
     const observed = observeManagedAuthority(
       { leaseExists: true, breakGlassExists: false, leaseRaw: dcLease, breakGlassRaw: null },
-      runtime({ pidAlive: (pid) => pid === 777, managedExecutorPids: [777], holderCommand: dcBridge, competingExecutorRoots: [DC_ROOT.replace(/\/$/u, "")] })
+      runtime({
+        pidAlive: (pid) => pid === 777,
+        managedExecutorPids: [777],
+        holderCommand: dcBridge,
+        competingExecutorRoots: [DC_ROOT.replace(/\/$/u, "")]
+      })
     );
     expect(observed.authoritative).toBe(true);
     expect(observed.managedRuntime).toBe(true);
