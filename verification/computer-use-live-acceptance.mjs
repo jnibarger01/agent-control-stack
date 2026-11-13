@@ -405,10 +405,10 @@ async function main() {
   for (let i = 0; i < 40; i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 500));
     try {
-      const authority = await (await fetch(`${BRIDGE}/authority`)).json();
+      const bridgeReady = await (await fetch(`${BRIDGE}/ready`)).json();
       const acs = await (await fetch(`${ACS}/healthz`)).json();
-      const edge = await (await fetch("http://127.0.0.1:8010/jc/ready")).json();
-      if (authority.authoritative === true && acs.ok === true && edge.ready === true) {
+      const xvfb = execFileSync("systemctl", ["--user", "is-active", "acs-computer-use-xvfb.service"], { encoding: "utf8" }).trim();
+      if (bridgeReady.ready === true && bridgeReady.variant === "jc" && acs.ok === true && xvfb === "active") {
         healthy = true;
         break;
       }
