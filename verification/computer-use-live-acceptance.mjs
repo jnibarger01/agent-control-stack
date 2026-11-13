@@ -47,7 +47,12 @@ function readEnvFile(file) {
 function operatorCredential() {
   const env = readEnvFile(path.join(HOME, ".config/acs/acs-gateway.env"));
   const creds = JSON.parse(env.ACS_GATEWAY_CREDENTIALS_JSON);
-  const operator = creds.find((entry) => entry.actor === "omarchy-operator" && Array.isArray(entry.scopes) && entry.scopes.includes("acs:approve"));
+  const operator = creds.find(
+    (entry) =>
+      (entry.actorId === "omarchy-operator" || entry.id === "omarchy-operator") &&
+      Array.isArray(entry.scopes) &&
+      entry.scopes.includes("acs:approve")
+  );
   if (!operator?.token) throw new Error("operator credential missing");
   return operator.token;
 }
@@ -325,9 +330,13 @@ async function main() {
   const replay = await client.call("gui_action", { action: "move", x: 200, y: 160 });
   check("consumed approval cannot be replayed", denial(replay.body), replay.body?.error?.data?.kind ?? "");
 
-  const offscreen = await client.call("gui_action", { action: "move", x: 2000, y: 10 });
-  const offscreenText = JSON.stringify(offscreen.body?.error ?? offscreen.body?.result ?? {});
-  check("coordinates outside the display are rejected", /outside the isolated display|GUI_ARGUMENT_INVALID/.test(offscreenText), offscreenText.slice(0, 180));
+  const offscreen = await callApproved(client, "gui_action", { action: "move", x: 2000, y: 10 });
+  const offscreenText = JSON.stringify(offscreen.executed?.body ?? {});
+  check(
+    "coordinates outside the display are rejected after approval",
+    /outside the isolated display|GUI_ARGUMENT_INVALID/.test(offscreenText) && offscreen.executed?.body?.result?.structuredContent?.ok !== true,
+    offscreenText.slice(0, 220)
+  );
 
   const issuance = sql(
     `SELECT capability_issuance_id, tool_name, approved_by_actor_id, action_hash, lease_id FROM jace_commander_capability_issuances WHERE work_item_id = '${click.workItemId}'`
@@ -396,8 +405,17 @@ async function main() {
     }
   }
   check("executor crash respawns a new lease", Boolean(recovered), recovered ? `pid=${recovered.pid}` : "no new lease");
-  const afterCrash = await client.call("gui_screenshot", {});
-  check("screenshot works after executor respawn", Boolean(afterCrash.body?.result?.content?.find((part) => part.mimeType === "image/png")), afterCrash.body?.error?.message ?? "ok");
+  const staleAfterCrash = await client.call("gui_screenshot", {});
+  const staleText = JSON.stringify(staleAfterCrash.body ?? {});
+  check("crashed executor session cannot be reused", /session unknown|reconnect/.test(staleText), staleText.slice(0, 180));
+  const recoveredClient = new LiveMcpClient();
+  const recoveredInit = await recoveredClient.init();
+  const afterCrash = await recoveredClient.call("gui_screenshot", {});
+  check(
+    "screenshot works after executor respawn",
+    recoveredInit.status === 200 && Boolean(afterCrash.body?.result?.content?.find((part) => part.mimeType === "image/png")),
+    afterCrash.body?.error?.message ?? "ok"
+  );
 
   child.kill("SIGTERM");
   execFileSync("systemctl", ["--user", "restart", "acs-computer-use-xvfb.service", "jace-commander-mcp.service", "acs-recovery.service"], { stdio: "pipe" });
