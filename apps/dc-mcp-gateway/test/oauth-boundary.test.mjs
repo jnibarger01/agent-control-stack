@@ -33,7 +33,7 @@ function stub() {
 }
 
 let nextPort = 19400;
-async function boot() {
+async function boot(extraClients = {}) {
   const acs = stub();
   const dc = stub();
   const [acsPort, dcPort] = [await acs.listen(), await dc.listen()];
@@ -41,6 +41,7 @@ async function boot() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `oauth-boundary-${port}-`));
   fs.writeFileSync(path.join(dir, 'clients.json'), JSON.stringify({
     'public-app': { client_name: 'public', redirect_uris: ['https://app.test/cb', 'http://127.0.0.1:9/cb'], token_endpoint_auth_method: 'none', oauth_lane: 'jc', scope: 'mcp' },
+    ...extraClients,
   }));
   fs.writeFileSync(path.join(dir, 'tokens.json'), '{}');
   const child = spawn(process.execPath, ['server.js'], {
@@ -85,8 +86,8 @@ async function boot() {
   };
 }
 
-async function withGateway(fn) {
-  const gw = await boot();
+async function withGateway(fn, extraClients = {}) {
+  const gw = await boot(extraClients);
   try { await fn(gw); } finally { gw.close(); }
 }
 
@@ -221,4 +222,49 @@ test('a code redeemed with a different redirect_uri is refused', () =>
     const r = await gw.token({ grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: 'http://127.0.0.1:9/cb', client_id: 'public-app' });
     assert.equal(r.status, 400);
     assert.equal((await r.json()).error, 'invalid_grant');
+  }));
+
+// ---------------------------------------------------------------------------
+// Claude CIMD compatibility: metadata acceptance vs token grant authorization
+// ---------------------------------------------------------------------------
+
+const CLAUDE_CLIENT_ID = 'https://claude.ai/oauth/mcp-oauth-client-metadata';
+const CLAUDE_REDIRECT = 'https://claude.ai/api/mcp/auth_callback';
+
+test('Claude CIMD client reaches authorization consent (metadata shape accepted, no token issuance change)', () =>
+  withGateway(async (gw) => {
+    const { challenge } = pkce();
+    const r = await gw.authorize({
+      client_id: CLAUDE_CLIENT_ID,
+      redirect_uri: CLAUDE_REDIRECT,
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+    });
+    assert.equal(r.status, 200);
+    const html = await r.text();
+    assert.match(html, /Authorize MCP client/);
+    assert.match(html, /claude\.ai\/oauth\/mcp-oauth-client-metadata/);
+  }, {
+    [CLAUDE_CLIENT_ID]: {
+      client_name: 'Claude',
+      redirect_uris: [CLAUDE_REDIRECT],
+      token_endpoint_auth_method: 'none',
+      oauth_lane: 'jc',
+      scope: 'mcp',
+      // Accepted in metadata only; token endpoint must not issue jwt-bearer grants.
+      grant_types: ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:jwt-bearer'],
+    },
+  }));
+
+test('JWT Bearer token grants remain rejected at the token endpoint', () =>
+  withGateway(async (gw) => {
+    const r = await gw.token({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion: 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.e30.sig',
+      client_id: 'public-app',
+    });
+    assert.equal(r.status, 400);
+    const body = await r.json();
+    assert.equal(body.error, 'unsupported_grant_type');
+    assert.match(body.error_description, /supported: authorization_code, refresh_token/);
   }));
