@@ -19,7 +19,7 @@ jobs:
 
     steps:
       - name: Review pull request
-        uses: the-pr-agent/pr-agent@a8c604794ddb5766dc3fa674cbb64aac6f9f509f
+        uses: the-pr-agent/pr-agent@8257f6adb2514889fe2f3a96f332a010a4c36538
         env:
           OPENAI_KEY: ${{ secrets.OPENAI_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
