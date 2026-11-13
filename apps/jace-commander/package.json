@@ -22,7 +22,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@simplewebauthn/server": "14.0.3",
-    "isbinaryfile": "^5.0.4",
+    "isbinaryfile": "^6.0.0",
     "pizzip": "^3.2.0",
     "unpdf": "^1.4.0"
   },
