@@ -4,6 +4,7 @@ import { executeGuiAction, captureGuiScreenshot, GuiError } from '../dist/gui.js
 const calls = [];
 const runner = async (bin, args, opts) => {
   calls.push({bin,args,opts});
+  if (args[0] === 'getdisplaygeometry') return { stdout: Buffer.from('1280 800\n') };
   return { stdout: Buffer.from('ok') };
 };
 const env = { JC_GUI_ENABLED: '1', JC_GUI_DISPLAY: ':81' };
@@ -35,4 +36,24 @@ assert.equal(screenshot.mimeType,'image/png');
 assert.equal(screenshot.data,png.toString('base64'));
 await rejects(() => captureGuiScreenshot({runner:async()=>({stdout:Buffer.from('not-png')}),env}),'GUI_CAPTURE_INVALID');
 await rejects(() => captureGuiScreenshot({runner:async()=>({stdout:Buffer.alloc(5*1024*1024)}),env}),'GUI_CAPTURE_TOO_LARGE');
+await rejects(() => executeGuiAction({action:'click',x:1280,y:0}, {runner, env}),'GUI_ARGUMENT_INVALID');
+await rejects(() => executeGuiAction({action:'drag',x:1,y:1,toX:2000,toY:2}, {runner, env}),'GUI_ARGUMENT_INVALID');
+await executeGuiAction({action:'key',text:'ctrl+Return'},{runner,env});
+assert.deepEqual(calls.at(-1).args,['key','--clearmodifiers','--','ctrl+Return']);
+let inFlight = 0;
+let maxInFlight = 0;
+const slow = async (bin, args) => {
+  if (args[0] === 'getdisplaygeometry') return { stdout: Buffer.from('1280 800\n') };
+  inFlight += 1;
+  maxInFlight = Math.max(maxInFlight, inFlight);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  inFlight -= 1;
+  return { stdout: Buffer.from('ok') };
+};
+await Promise.all([
+  executeGuiAction({action:'move',x:10,y:10},{runner:slow,env}),
+  executeGuiAction({action:'move',x:20,y:20},{runner:slow,env}),
+  executeGuiAction({action:'type',text:'serial'},{runner:slow,env})
+]);
+assert.equal(maxInFlight, 1);
 console.log('GUI backend negatives and command safety passed');

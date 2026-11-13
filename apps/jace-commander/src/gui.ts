@@ -38,6 +38,18 @@ export type GuiAction =
   | { action: "type" | "key"; text: string }
   | { action: "scroll"; direction: "up" | "down" | "left" | "right"; amount: number };
 
+let exclusiveTail: Promise<void> = Promise.resolve();
+
+/** One X11 action at a time. Overlapping calls used to interleave xdotool. */
+function exclusive<T>(operation: () => Promise<T>): Promise<T> {
+  const run = exclusiveTail.then(operation, operation);
+  exclusiveTail = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
 function context(options: GuiOptions) {
   const env = options.env ?? process.env;
   if (env.JC_GUI_ENABLED !== "1") throw new GuiError("GUI_DISABLED", "native computer use is not enabled");
@@ -134,41 +146,93 @@ function validateAction(value: unknown): string[] {
   throw new GuiError("GUI_ARGUMENT_INVALID", "unsupported GUI action");
 }
 
+function actionName(action: unknown): string | undefined {
+  if (!action || typeof action !== "object") return undefined;
+  const name = (action as { action?: unknown }).action;
+  return typeof name === "string" ? name : undefined;
+}
+
+async function displaySize(ctx: ReturnType<typeof context>): Promise<{ width: number; height: number }> {
+  let stdout: Buffer;
+  try {
+    const result = await ctx.runner("/usr/bin/xdotool", ["getdisplaygeometry"], {
+      env: ctx.env,
+      timeout: 3000,
+      maxBuffer: 1024,
+      shell: false
+    });
+    stdout = result.stdout;
+  } catch {
+    throw new GuiError("GUI_BACKEND_UNAVAILABLE", "X11 display geometry is unavailable");
+  }
+  const parts = stdout.toString("utf8").trim().split(/\s+/);
+  const width = Number(parts[0]);
+  const height = Number(parts[1]);
+  if (
+    !Number.isInteger(width) ||
+    !Number.isInteger(height) ||
+    width < 1 ||
+    height < 1 ||
+    width > 8192 ||
+    height > 8192
+  ) {
+    throw new GuiError("GUI_BACKEND_UNAVAILABLE", "X11 display geometry is unavailable");
+  }
+  return { width, height };
+}
+
+function assertInside(size: { width: number; height: number }, x: unknown, y: unknown): void {
+  if (typeof x !== "number" || typeof y !== "number" || x >= size.width || y >= size.height) {
+    throw new GuiError("GUI_ARGUMENT_INVALID", "coordinates are outside the isolated display");
+  }
+}
+
 /** All validation happens before invoking the X11 backend. */
 export async function executeGuiAction(action: unknown, options: GuiOptions = {}): Promise<{ ok: true }> {
   const args = validateAction(action);
   const ctx = context(options);
-  try {
-    await ctx.runner("/usr/bin/xdotool", args, {
-      env: ctx.env,
-      // 12ms between keystrokes can take ~25s for the allowed 2048 characters.
-      // Bound the timeout without truncating valid input mid-action.
-      timeout:
-        action && typeof action === "object" &&
-        (action as { action?: unknown }).action === "type" &&
-        typeof (action as { text?: unknown }).text === "string"
-          ? Math.min(40_000, 5000 + (action as { text: string }).text.length * 15)
-          : 7000,
-      maxBuffer: 64 * 1024,
-      shell: false
-    });
-  } catch {
-    // A failed drag may leave the mouse button down. Release it best-effort.
-    if (args.includes("mousedown")) {
-      try {
-        await ctx.runner("/usr/bin/xdotool", ["mouseup", "1"], {
-          env: ctx.env,
-          timeout: 2000,
-          maxBuffer: 1024,
-          shell: false
-        });
-      } catch {
-        /* unrecoverable backend failure: still deny */
+  return exclusive(async () => {
+    try {
+      const name = actionName(action);
+      if (name === "click" || name === "move" || name === "drag") {
+        const size = await displaySize(ctx);
+        const point = action as { x: unknown; y: unknown; toX?: unknown; toY?: unknown };
+        assertInside(size, point.x, point.y);
+        if (name === "drag") assertInside(size, point.toX, point.toY);
       }
+      await ctx.runner("/usr/bin/xdotool", args, {
+        env: ctx.env,
+        // 12ms between keystrokes can take ~25s for the allowed 2048 characters.
+        // Bound the timeout without truncating valid input mid-action.
+        timeout:
+          action &&
+          typeof action === "object" &&
+          (action as { action?: unknown }).action === "type" &&
+          typeof (action as { text?: unknown }).text === "string"
+            ? Math.min(40_000, 5000 + (action as { text: string }).text.length * 15)
+            : 7000,
+        maxBuffer: 64 * 1024,
+        shell: false
+      });
+    } catch (error) {
+      if (error instanceof GuiError) throw error;
+      // A failed drag may leave the mouse button down. Release it best-effort.
+      if (args.includes("mousedown")) {
+        try {
+          await ctx.runner("/usr/bin/xdotool", ["mouseup", "1"], {
+            env: ctx.env,
+            timeout: 2000,
+            maxBuffer: 1024,
+            shell: false
+          });
+        } catch {
+          /* unrecoverable backend failure: still deny */
+        }
+      }
+      throw new GuiError("GUI_BACKEND_UNAVAILABLE", "X11 input action failed");
     }
-    throw new GuiError("GUI_BACKEND_UNAVAILABLE", "X11 input action failed");
-  }
-  return { ok: true };
+    return { ok: true };
+  });
 }
 
 const PNG_HEADER = Buffer.from("89504e470d0a1a0a", "hex");
@@ -180,24 +244,26 @@ export async function captureGuiScreenshot(options: GuiOptions = {}): Promise<{
   height: number;
 }> {
   const ctx = context(options);
-  let image: Buffer;
-  try {
-    const result = await ctx.runner("/usr/bin/import", ["-window", "root", "-depth", "8", "png:-"], {
-      env: ctx.env,
-      timeout: 10000,
-      maxBuffer: MAX_PNG_BYTES + 1,
-      shell: false
-    });
-    image = result.stdout;
-  } catch {
-    throw new GuiError("GUI_BACKEND_UNAVAILABLE", "X11 screenshot failed");
-  }
-  if (image.length > MAX_PNG_BYTES) throw new GuiError("GUI_CAPTURE_TOO_LARGE", "screenshot exceeds 4 MiB");
-  if (image.length < 29 || !image.subarray(0, 8).equals(PNG_HEADER) || image.toString("ascii", 12, 16) !== "IHDR")
-    throw new GuiError("GUI_CAPTURE_INVALID", "screenshot is not a PNG");
-  const width = image.readUInt32BE(16),
-    height = image.readUInt32BE(20);
-  if (width < 1 || height < 1 || width > 8192 || height > 8192)
-    throw new GuiError("GUI_CAPTURE_INVALID", "screenshot dimensions are invalid");
-  return { mimeType: "image/png", data: image.toString("base64"), width, height };
+  return exclusive(async () => {
+    let image: Buffer;
+    try {
+      const result = await ctx.runner("/usr/bin/import", ["-window", "root", "-depth", "8", "png:-"], {
+        env: ctx.env,
+        timeout: 10000,
+        maxBuffer: MAX_PNG_BYTES + 1,
+        shell: false
+      });
+      image = result.stdout;
+    } catch {
+      throw new GuiError("GUI_BACKEND_UNAVAILABLE", "X11 screenshot failed");
+    }
+    if (image.length > MAX_PNG_BYTES) throw new GuiError("GUI_CAPTURE_TOO_LARGE", "screenshot exceeds 4 MiB");
+    if (image.length < 29 || !image.subarray(0, 8).equals(PNG_HEADER) || image.toString("ascii", 12, 16) !== "IHDR")
+      throw new GuiError("GUI_CAPTURE_INVALID", "screenshot is not a PNG");
+    const width = image.readUInt32BE(16),
+      height = image.readUInt32BE(20);
+    if (width < 1 || height < 1 || width > 8192 || height > 8192)
+      throw new GuiError("GUI_CAPTURE_INVALID", "screenshot dimensions are invalid");
+    return { mimeType: "image/png", data: image.toString("base64"), width, height };
+  });
 }
