@@ -2607,6 +2607,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   registerBlackBoxRoutes({
     app,
+    dbPath,
     auth,
     workItems,
     codingMissions,

@@ -1,4 +1,5 @@
 import { canonicalJson, sha256Hex } from "./canonical.js";
+import type { ObserverKeyRegistry } from "./key-lifecycle.js";
 import { importTrustedKey } from "./provenance.js";
 import type { RecorderStore } from "./store.js";
 import type { IngestDraft, IngestResult, TrustLevel } from "./types.js";
@@ -63,7 +64,9 @@ export type JcKernelWitnessReceiptV1 = {
 };
 
 export type VerifyJcWitnessOptions = {
-  trustedWitnessKeys: Record<string, string>;
+  trustedWitnessKeys?: Record<string, string>;
+  keyRegistry?: ObserverKeyRegistry;
+  allowRotatedHistorical?: boolean;
   expectedPreviousEvidenceHash?: string | null;
   seenEvidenceHashes?: Set<string>;
   requireAcsAnchor?: boolean;
@@ -176,7 +179,26 @@ export async function verifyJcWitnessReceipt(
     };
   }
 
-  const keyPem = options.trustedWitnessKeys[receipt.signingKeyId];
+  let keyPem: string | undefined;
+  if (options.keyRegistry) {
+    const receiptTs = new Date(Math.floor(receipt.endTimeNs / 1_000_000)).toISOString();
+    const evalRes = options.keyRegistry.evaluateKey(receipt.signingKeyId, {
+      allowRotatedHistorical: options.allowRotatedHistorical,
+      receiptTimestampIso: receiptTs
+    });
+    if (!evalRes.allowed) {
+      return {
+        valid: false,
+        observed: false,
+        trustLevel: "untrusted_claim",
+        reasons: [evalRes.reason]
+      };
+    }
+    keyPem = evalRes.record.publicKeyPem;
+  } else {
+    keyPem = options.trustedWitnessKeys?.[receipt.signingKeyId];
+  }
+
   if (!keyPem) {
     return {
       valid: false,

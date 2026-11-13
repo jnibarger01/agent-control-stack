@@ -165,6 +165,7 @@ int cmd_replay(int argc, char** argv) {
     std::string cgroup_path = "/sys/fs/cgroup/synthetic";
     uint64_t cgroup_id = 1;
     uint64_t dropped_events = 0;
+    uint32_t root_pid = 0;
     std::optional<std::string> prev_hash, anchor_ref;
     bool ephemeral_key = false;
 
@@ -182,6 +183,7 @@ int cmd_replay(int argc, char** argv) {
         else if (arg == "--observer-id" && i + 1 < argc) observer_id = argv[++i];
         else if (arg == "--cgroup-id" && i + 1 < argc) cgroup_id = std::stoull(argv[++i]);
         else if (arg == "--cgroup-path" && i + 1 < argc) cgroup_path = argv[++i];
+        else if (arg == "--root-pid" && i + 1 < argc) root_pid = static_cast<uint32_t>(std::stoul(argv[++i]));
         else if (arg == "--dropped-events" && i + 1 < argc) dropped_events = std::stoull(argv[++i]);
         else if (arg == "--previous-evidence-hash" && i + 1 < argc) prev_hash = argv[++i];
         else if (arg == "--acs-anchor-ref" && i + 1 < argc) anchor_ref = argv[++i];
@@ -211,7 +213,7 @@ int cmd_replay(int argc, char** argv) {
 
     std::vector<std::string> parse_errors;
     auto raw_events = parse_events_jsonl(read_text_file(events_in), parse_errors);
-    auto recon = reconstruct_process_tree(raw_events, cgroup_id);
+    auto recon = reconstruct_process_tree(raw_events, cgroup_id, root_pid);
 
     ObservationReceipt receipt;
     receipt.observer_mode = "replay";
@@ -222,6 +224,7 @@ int cmd_replay(int argc, char** argv) {
     receipt.invocation_hash = invocation_hash;
     receipt.cgroup_id = cgroup_id;
     receipt.cgroup_path = cgroup_path;
+    receipt.root_pid = recon.root_pid;
     receipt.start_time_ns = recon.start_time_ns;
     receipt.end_time_ns = recon.end_time_ns;
     receipt.events = std::move(recon.events);
@@ -385,6 +388,8 @@ int cmd_run(int argc, char** argv) {
         return 72;
     }
 
+    receipt.root_pid = static_cast<uint32_t>(child_pid);
+
     int wstatus = 0;
     int child_exit_code = 1;
     while (true) {
@@ -432,7 +437,7 @@ int cmd_run(int argc, char** argv) {
         receipt.incomplete_reasons.push_back("cgroup_cleanup_failed");
     }
 
-    auto recon = reconstruct_process_tree(raw_events, leaf.cgroup_id);
+    auto recon = reconstruct_process_tree(raw_events, leaf.cgroup_id, receipt.root_pid);
     receipt.start_time_ns = recon.start_time_ns;
     receipt.end_time_ns = recon.end_time_ns;
     receipt.events = std::move(recon.events);

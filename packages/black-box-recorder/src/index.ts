@@ -38,6 +38,13 @@ export {
   type RecorderStoreOptions
 } from "./store.js";
 export {
+  ObserverKeyRegistry,
+  validatePublicKeyCustody,
+  type KeyEvaluationResult,
+  type ObserverKeyRecord,
+  type ObserverKeyStatus
+} from "./key-lifecycle.js";
+export {
   JC_KERNEL_WITNESS_SCHEMA_VERSION,
   ingestJcWitnessReceipt,
   isJcKernelWitnessReceiptV1,

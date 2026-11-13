@@ -24,6 +24,7 @@ struct ObservationReceipt {
     std::string invocation_hash;
     uint64_t cgroup_id{0};
     std::string cgroup_path;
+    uint32_t root_pid{0};
     uint64_t start_time_ns{0};
     uint64_t end_time_ns{0};
     std::string status{"complete"}; // "complete" | "incomplete" | "failed"
@@ -55,6 +56,7 @@ struct VerificationOptions {
     std::string invocation_hash;
     std::string previous_evidence_hash;
     std::string seen_hashes_file;
+    uint32_t expected_root_pid{0};
     bool require_live{false};
 };
 

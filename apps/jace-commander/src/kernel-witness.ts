@@ -24,6 +24,8 @@ export interface KernelWitnessConfig {
   signingKeyPath?: string;
   publicKeyPath?: string;
   publicKeyPem?: string;
+  publicKeysByKeyId?: Record<string, string>;
+  observerId?: string;
   signingKeyId?: string;
   cgroupRoot?: string;
   bpfObjPath?: string;
@@ -72,6 +74,7 @@ export interface KernelWitnessReceipt {
   invocationHash: string;
   cgroupId: number;
   cgroupPath: string;
+  rootPid?: number;
   startTimeNs: number;
   endTimeNs: number;
   status: 'complete' | 'incomplete' | 'failed';
@@ -93,6 +96,9 @@ export interface WitnessExpectedCorrelation {
   attemptId?: string;
   leaseId?: string;
   invocationHash?: string;
+  observerId?: string;
+  signingKeyId?: string;
+  rootPid?: number;
   previousEvidenceHash?: string | null;
 }
 
@@ -136,6 +142,7 @@ export function kernelWitnessConfigFromEnv(
     signingKeyPath: env.JC_WITNESS_SIGNING_KEY || undefined,
     publicKeyPath: env.JC_WITNESS_PUBLIC_KEY || undefined,
     publicKeyPem: env.JC_WITNESS_PUBLIC_KEY_PEM || undefined,
+    observerId: env.JC_WITNESS_OBSERVER_ID || undefined,
     signingKeyId: env.JC_WITNESS_SIGNING_KEY_ID || undefined,
     cgroupRoot: env.JC_WITNESS_CGROUP_ROOT || undefined,
     bpfObjPath: env.JC_WITNESS_BPF_OBJ || undefined,
@@ -178,9 +185,19 @@ export function canonicalWitnessBody(receipt: Record<string, unknown>): string {
   return strictCanonicalJsonV1(copy);
 }
 
-function loadPublicKey(config: { publicKeyPem?: string; publicKeyPath?: string }): crypto.KeyObject | null {
+function loadPublicKey(
+  config: { publicKeyPem?: string; publicKeyPath?: string; publicKeysByKeyId?: Record<string, string> },
+  signingKeyId?: string,
+): crypto.KeyObject | null {
   try {
-    const pem = config.publicKeyPem ?? (config.publicKeyPath ? fs.readFileSync(config.publicKeyPath, 'utf8') : undefined);
+    const mappedPem =
+      signingKeyId && config.publicKeysByKeyId && Object.prototype.hasOwnProperty.call(config.publicKeysByKeyId, signingKeyId)
+        ? config.publicKeysByKeyId[signingKeyId]
+        : undefined;
+    const pem =
+      mappedPem ??
+      config.publicKeyPem ??
+      (config.publicKeyPath ? fs.readFileSync(config.publicKeyPath, 'utf8') : undefined);
     if (!pem) return null;
     const key = crypto.createPublicKey(pem);
     return key.asymmetricKeyType === 'ed25519' ? key : null;
@@ -194,6 +211,7 @@ export function verifyKernelWitnessReceipt(
   options: {
     publicKeyPem?: string;
     publicKeyPath?: string;
+    publicKeysByKeyId?: Record<string, string>;
     expected?: WitnessExpectedCorrelation;
     seenStore?: SeenReceiptStore;
   },
@@ -227,7 +245,7 @@ export function verifyKernelWitnessReceipt(
     }
   }
 
-  const pubKey = loadPublicKey(options);
+  const pubKey = loadPublicKey(options, typeof receipt.signingKeyId === 'string' ? receipt.signingKeyId : undefined);
   if (!pubKey) {
     reasons.push('public_key_unavailable');
   } else if (bodyStr && typeof receipt.signature === 'string') {
@@ -251,6 +269,19 @@ export function verifyKernelWitnessReceipt(
     reasons.push('incomplete_observation');
   }
 
+  if (receipt.rootPid !== undefined) {
+    if (typeof receipt.rootPid !== 'number' || !Number.isSafeInteger(receipt.rootPid) || receipt.rootPid <= 0) {
+      reasons.push('root_pid_invalid');
+    } else if (
+      complete &&
+      Array.isArray(receipt.processTree) &&
+      receipt.processTree.length > 0 &&
+      !receipt.processTree.some((node) => node && (node.pid === receipt.rootPid || node.tgid === receipt.rootPid))
+    ) {
+      reasons.push('root_pid_missing_from_tree');
+    }
+  }
+
   if (options.expected) {
     const exp = options.expected;
     if (exp.workItemId !== undefined && receipt.workItemId !== exp.workItemId) {
@@ -264,6 +295,15 @@ export function verifyKernelWitnessReceipt(
     }
     if (exp.invocationHash !== undefined && receipt.invocationHash !== exp.invocationHash) {
       reasons.push('correlation_mismatch:invocationHash');
+    }
+    if (exp.observerId !== undefined && receipt.observerId !== exp.observerId) {
+      reasons.push('correlation_mismatch:observerId');
+    }
+    if (exp.signingKeyId !== undefined && receipt.signingKeyId !== exp.signingKeyId) {
+      reasons.push('correlation_mismatch:signingKeyId');
+    }
+    if (exp.rootPid !== undefined && receipt.rootPid !== exp.rootPid) {
+      reasons.push('correlation_mismatch:rootPid');
     }
     if (exp.previousEvidenceHash !== undefined && receipt.previousEvidenceHash !== exp.previousEvidenceHash) {
       reasons.push('previous_evidence_hash_mismatch');
@@ -292,6 +332,37 @@ export function verifyKernelWitnessReceipt(
   };
 }
 
+/** Enforces private signing-key custody: regular file, owned by current UID, mode 0600 or 0400 (no group/world bits). */
+export function assertSigningKeyCustody(signingKeyPath: string): void {
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(signingKeyPath);
+  } catch {
+    throw new IntegrationError(
+      'JC_WITNESS_KEY_CUSTODY_INVALID',
+      `kernel witness signing key is missing or unreadable: ${signingKeyPath}`,
+    );
+  }
+  if (!stat.isFile()) {
+    throw new IntegrationError(
+      'JC_WITNESS_KEY_CUSTODY_INVALID',
+      `kernel witness signing key must be a regular file (not symlink/dir): ${signingKeyPath}`,
+    );
+  }
+  if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
+    throw new IntegrationError(
+      'JC_WITNESS_KEY_CUSTODY_INVALID',
+      `kernel witness signing key must be owned by current user: ${signingKeyPath}`,
+    );
+  }
+  if ((stat.mode & 0o077) !== 0) {
+    throw new IntegrationError(
+      'JC_WITNESS_KEY_CUSTODY_INVALID',
+      `kernel witness signing key must not be group- or world-accessible (require 0600/0400): ${signingKeyPath}`,
+    );
+  }
+}
+
 export function assertWitnessBinaryReady(config: KernelWitnessConfig): void {
   try {
     const real = fs.realpathSync(config.binaryPath);
@@ -301,6 +372,9 @@ export function assertWitnessBinaryReady(config: KernelWitnessConfig): void {
       'JC_WITNESS_UNAVAILABLE',
       `kernel witness binary is missing or not executable: ${config.binaryPath}`,
     );
+  }
+  if (config.signingKeyPath) {
+    assertSigningKeyCustody(config.signingKeyPath);
   }
 }
 
@@ -356,7 +430,12 @@ export function readAndVerifyWitnessReceipt(
   const verification = verifyKernelWitnessReceipt(parsed, {
     publicKeyPem: config.publicKeyPem,
     publicKeyPath: config.publicKeyPath,
-    expected,
+    publicKeysByKeyId: config.publicKeysByKeyId,
+    expected: {
+      ...expected,
+      ...(config.observerId ? { observerId: config.observerId } : {}),
+      ...(config.signingKeyId ? { signingKeyId: config.signingKeyId } : {}),
+    },
     seenStore,
   });
   return {

@@ -17,6 +17,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   SeenReceiptStore,
+  assertSigningKeyCustody,
   buildWitnessRunArgv,
   canonicalWitnessBody,
   verifyKernelWitnessReceipt,
@@ -52,6 +53,7 @@ function makeReceipt(overrides = {}) {
     invocationHash: 'a'.repeat(64),
     cgroupId: 4242,
     cgroupPath: '/sys/fs/cgroup/user.slice/jc-test',
+    rootPid: 101,
     startTimeNs: 1000,
     endTimeNs: 2000,
     status: 'complete',
@@ -403,6 +405,7 @@ process.exit(child.status ?? 1);
     const pubPath = path.join(nativeDir, 'pub.pem');
     const kg = spawnSync(nativeBin, ['keygen', '--private-out', privPath, '--public-out', pubPath], { encoding: 'utf8' });
     assert.equal(kg.status, 0, kg.stderr);
+    fs.chmodSync(privPath, 0o600);
 
     const policy = {
       roots: [nativeWork],
@@ -449,6 +452,59 @@ process.exit(child.status ?? 1);
     assert.ok(out.witness.verification.reasons.includes('incomplete_observation'));
     assert.ok(!out.witness.verification.reasons.includes('signature_invalid'));
     assert.ok(!out.witness.verification.reasons.includes('evidence_hash_mismatch'));
+  });
+
+  await test('enforces signing-key custody (0600, non-symlink) and supports observerId/signingKeyId key rotation', async () => {
+    const goodKey = path.join(tmp, 'custody-good.pem');
+    fs.writeFileSync(goodKey, privateKeyPem, { mode: 0o600 });
+    assertSigningKeyCustody(goodKey);
+
+    const badPermKey = path.join(tmp, 'custody-bad-perm.pem');
+    fs.writeFileSync(badPermKey, privateKeyPem, { mode: 0o644 });
+    assert.throws(() => assertSigningKeyCustody(badPermKey), (err) => err.code === 'JC_WITNESS_KEY_CUSTODY_INVALID');
+
+    const linkKey = path.join(tmp, 'custody-link.pem');
+    fs.symlinkSync(goodKey, linkKey);
+    assert.throws(() => assertSigningKeyCustody(linkKey), (err) => err.code === 'JC_WITNESS_KEY_CUSTODY_INVALID');
+
+    // Key rotation: verifyKernelWitnessReceipt resolves key by receipt.signingKeyId via publicKeysByKeyId
+    const kp2 = crypto.generateKeyPairSync('ed25519');
+    const pub2Pem = kp2.publicKey.export({ type: 'spki', format: 'pem' }).toString();
+    const priv2Pem = kp2.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+    const baseRotated = {
+      ...makeReceipt({ observerId: 'obs-rot-1', signingKeyId: 'witness-key-2' }),
+    };
+    delete baseRotated.evidenceHash;
+    delete baseRotated.signature;
+    const bodyRot = canonicalWitnessBody(baseRotated);
+    const rotatedReceipt = {
+      ...baseRotated,
+      evidenceHash: crypto.createHash('sha256').update(bodyRot, 'utf8').digest('hex'),
+      signature: crypto.sign(null, Buffer.from(bodyRot, 'utf8'), priv2Pem).toString('base64'),
+    };
+    const resRot = verifyKernelWitnessReceipt(rotatedReceipt, {
+      publicKeysByKeyId: { 'witness-key-1': publicKeyPem, 'witness-key-2': pub2Pem },
+      expected: { observerId: 'obs-rot-1', signingKeyId: 'witness-key-2' },
+    });
+    assert.equal(resRot.valid, true, JSON.stringify(resRot));
+
+    const resWrongObs = verifyKernelWitnessReceipt(rotatedReceipt, {
+      publicKeysByKeyId: { 'witness-key-2': pub2Pem },
+      expected: { observerId: 'obs-other' },
+    });
+    assert.equal(resWrongObs.valid, false);
+    assert.ok(resWrongObs.reasons.includes('correlation_mismatch:observerId'));
+
+    // rootPid verification: matching rootPid passes, missing from processTree or mismatched rootPid fails
+    const withRoot = makeReceipt({ rootPid: 101 });
+    assert.equal(verifyKernelWitnessReceipt(withRoot, { publicKeyPem, expected: { rootPid: 101 } }).valid, true);
+    const badRoot = makeReceipt({ rootPid: 999 });
+    const resBadRoot = verifyKernelWitnessReceipt(badRoot, { publicKeyPem, expected: { rootPid: 999 } });
+    assert.equal(resBadRoot.valid, false);
+    assert.ok(resBadRoot.reasons.includes('root_pid_missing_from_tree'));
+    const resMismatchRoot = verifyKernelWitnessReceipt(withRoot, { publicKeyPem, expected: { rootPid: 202 } });
+    assert.equal(resMismatchRoot.valid, false);
+    assert.ok(resMismatchRoot.reasons.includes('correlation_mismatch:rootPid'));
   });
 
   console.log(`\njace-commander kernel-witness: ${passed} passed`);

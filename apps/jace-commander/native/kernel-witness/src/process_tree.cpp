@@ -134,9 +134,11 @@ std::vector<ObservedEvent> parse_events_jsonl(std::string_view jsonl, std::vecto
 
 ReconstructionResult reconstruct_process_tree(
     const std::vector<ObservedEvent>& raw_events,
-    uint64_t target_cgroup_id)
+    uint64_t target_cgroup_id,
+    uint32_t root_pid)
 {
     ReconstructionResult res;
+    res.root_pid = root_pid;
 
     for (const auto& ev : raw_events) {
         if (ev.cgroup_id != target_cgroup_id) {
@@ -194,22 +196,28 @@ ReconstructionResult reconstruct_process_tree(
         switch (ev.event_type) {
             case EventType::Fork: {
                 ++res.counts.fork;
-                ProcessNode& parent = ensure_node(key, ev.pid);
-                if (parent.ppid == 0 && ev.ppid != 0) parent.ppid = ev.ppid;
-                if (parent.comm.empty() && !ev.comm.empty()) parent.comm = ev.comm;
-                parent.uid = ev.uid;
-                parent.gid = ev.gid;
-
                 uint32_t child_key = ev.child_tgid != 0 ? ev.child_tgid : ev.child_pid;
+                bool is_external_root_fork = (root_pid != 0 && child_key == root_pid && key != root_pid);
+
+                if (!is_external_root_fork) {
+                    ProcessNode& parent = ensure_node(key, ev.pid);
+                    if (parent.ppid == 0 && ev.ppid != 0) parent.ppid = ev.ppid;
+                    if (parent.comm.empty() && !ev.comm.empty()) parent.comm = ev.comm;
+                    parent.uid = ev.uid;
+                    parent.gid = ev.gid;
+                }
+
                 if (child_key != 0) {
                     ProcessNode& child = ensure_node(child_key, ev.child_pid);
                     child.ppid = key;
                     child.uid = ev.uid;
                     child.gid = ev.gid;
                     if (child.forked_at_ns == 0) child.forked_at_ns = ev.timestamp_ns;
-                    auto& vec = children_by_parent[key];
-                    if (std::find(vec.begin(), vec.end(), child_key) == vec.end()) {
-                        vec.push_back(child_key);
+                    if (!is_external_root_fork) {
+                        auto& vec = children_by_parent[key];
+                        if (std::find(vec.begin(), vec.end(), child_key) == vec.end()) {
+                            vec.push_back(child_key);
+                        }
                     }
                 }
                 break;
@@ -277,6 +285,10 @@ ReconstructionResult reconstruct_process_tree(
         if (!visited.count(pid_key)) {
             res.process_tree.push_back(build_subtree(build_subtree, pid_key));
         }
+    }
+
+    if (res.root_pid == 0 && !res.process_tree.empty()) {
+        res.root_pid = res.process_tree[0].tgid;
     }
 
     return res;

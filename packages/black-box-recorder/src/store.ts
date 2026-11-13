@@ -163,6 +163,7 @@ function deepFreeze<T>(value: T): T {
 export class RecorderStore {
   readonly #events = new Map<string, RecorderEvent>();
   readonly #byProducer = new Map<string, string>();
+  readonly #producerKeyByEventId = new Map<string, string>();
   readonly #annotations = new Map<string, RunAnnotation>();
   readonly #fingerprints = new Map<string, string>();
   readonly #conflictedAt = new Map<string, string>();
@@ -201,6 +202,44 @@ export class RecorderStore {
 
   async verifyChain(): Promise<ChainVerification> {
     return verifyRecorderChain([...this.#events.values()]);
+  }
+
+  persistenceMetadataFor(eventId: string): { producerKey: string; fingerprint: string } | undefined {
+    const producerKey = this.#producerKeyByEventId.get(eventId);
+    const fingerprint = this.#fingerprints.get(eventId);
+    if (!producerKey || !fingerprint) return undefined;
+    return { producerKey, fingerprint };
+  }
+
+  async hydrate(
+    entries: ReadonlyArray<{
+      event: RecorderEvent;
+      producerKey: string;
+      fingerprint: string;
+      evidenceHash?: string | null;
+    }>
+  ): Promise<ChainVerification> {
+    if (this.#events.size > 0) {
+      throw new Error("cannot hydrate non-empty RecorderStore");
+    }
+    const events = entries.map((e) => e.event);
+    const verification = await verifyRecorderChain(events);
+    if (!verification.valid) {
+      throw new Error(`durable black-box chain verification failed: ${verification.findings.map((f) => f.detail).join("; ")}`);
+    }
+    for (const entry of entries) {
+      const ev = deepFreeze(structuredClone(entry.event));
+      this.#events.set(ev.eventId, ev);
+      this.#byProducer.set(entry.producerKey, ev.eventId);
+      this.#producerKeyByEventId.set(ev.eventId, entry.producerKey);
+      this.#fingerprints.set(ev.eventId, entry.fingerprint);
+      if (entry.evidenceHash && /^[a-f0-9]{64}$/u.test(entry.evidenceHash)) {
+        this.#seenEvidenceHashes.add(entry.evidenceHash);
+      }
+      this.#seq = ev.evidence.seq;
+      this.#headHash = ev.evidence.eventHash;
+    }
+    return verification;
   }
 
   annotationFor(runId: string): RunAnnotation | undefined { return this.#annotations.get(runId); }
@@ -409,6 +448,7 @@ export class RecorderStore {
       this.#headHash = eventHash;
       this.#events.set(event.eventId, event);
       this.#byProducer.set(producerKey, event.eventId);
+      this.#producerKeyByEventId.set(event.eventId, producerKey);
       this.#fingerprints.set(event.eventId, fingerprint);
       if (evidenceHashClaim) this.#seenEvidenceHashes.add(evidenceHashClaim);
       result = { status: "created", event };

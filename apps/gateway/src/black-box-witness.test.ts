@@ -2,6 +2,7 @@ import { generateKeyPairSync, sign } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import {
   canonicalJson,
   sha256Hex,
@@ -234,5 +235,176 @@ describe("Gateway Black Box & Kernel Witness ingestion", () => {
     expect(bbNonExistentJson.events).toHaveLength(1);
     expect(bbNonExistentJson.events[0]!.trustLevel).toBe("untrusted_claim");
     expect(bbNonExistentJson.events[0]!.metadata.observed).toBe(false);
+
+    // 9. Verify SQLite immutability triggers on black_box_events
+    const db = new DatabaseSync(dbPath);
+    expect(() => db.exec("DELETE FROM black_box_events WHERE seq = 1")).toThrow(/append-only/i);
+    expect(() => db.exec("UPDATE black_box_events SET trust_level = 'acs_authoritative' WHERE seq = 1")).toThrow(/append-only/i);
+    db.close();
+
+    // 10. Gateway restart & recovery: close and recreate gateway on same dbPath
+    await app.close();
+    const app2 = buildGateway({
+      dbPath,
+      logger: false,
+      auth: {
+        token: "writer-token",
+        actor: "jc-bridge",
+        credentials: [
+          {
+            id: "writer",
+            token: "writer-token",
+            actor: "service",
+            actorId: "jc-bridge",
+            roles: ["service"],
+            scopes: ["acs:read", "acs:write"]
+          },
+          {
+            id: "reader",
+            token: "reader-token",
+            actor: "user",
+            actorId: "viewer",
+            roles: ["operator"],
+            scopes: ["acs:read"]
+          }
+        ]
+      },
+      blackBox: { enabled: true }
+    });
+
+    // Reloaded chain & events match pre-restart state
+    const bbAfterRestart = await app2.inject({
+      method: "GET",
+      url: `/coding-missions/${workItemId}/black-box`,
+      headers: { authorization: "Bearer reader-token" }
+    });
+    expect(bbAfterRestart.statusCode).toBe(200);
+    const bbAfterJson = bbAfterRestart.json() as {
+      chain: { valid: boolean; eventCount: number; headHash: string };
+      events: Array<{ evidence: { seq: number; eventHash: string } }>;
+    };
+    expect(bbAfterJson.chain.valid).toBe(true);
+    expect(bbAfterJson.chain.eventCount).toBe(3);
+    expect(bbAfterJson.events).toHaveLength(2);
+    const prevHead = bbAfterJson.chain.headHash;
+
+    // Replay of pre-restart receipt is STILL rejected after restart
+    const replayAfterRestart = await app2.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/receipts",
+      headers: { authorization: "Bearer writer-token" },
+      payload: { receipt }
+    });
+    expect(replayAfterRestart.statusCode).toBe(409);
+
+    // Observer key lifecycle: custody rejection + register + rotate + revoke
+    const dyn1 = makeEd25519Keys();
+    const dyn2 = makeEd25519Keys();
+
+    // Private key custody check rejects private key PEM
+    const privReg = await app2.inject({
+      method: "POST",
+      url: "/black-box/observers/register",
+      headers: { authorization: "Bearer writer-token" },
+      payload: { keyId: "wk-dyn-1", observerId: "obs-dyn", publicKeyPem: dyn1.privateKeyPem }
+    });
+    expect(privReg.statusCode).toBe(422);
+
+    // Register wk-dyn-1
+    const regRes = await app2.inject({
+      method: "POST",
+      url: "/black-box/observers/register",
+      headers: { authorization: "Bearer writer-token" },
+      payload: { keyId: "wk-dyn-1", observerId: "obs-dyn", publicKeyPem: dyn1.publicKeyPem }
+    });
+    expect(regRes.statusCode).toBe(201);
+
+    // New receipt signed with wk-dyn-1 chains onto seq 4 after restart
+    const postRestartReceipt = await signReceipt(
+      {
+        workItemId,
+        acsAnchorRef: `acs:work_item:${workItemId}`,
+        signingKeyId: "wk-dyn-1",
+        previousEvidenceHash: unanchoredWorkItemReceipt.evidenceHash
+      },
+      dyn1.privateKeyPem
+    );
+    const postRestartIngest = await app2.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/receipts",
+      headers: { authorization: "Bearer writer-token" },
+      payload: { receipt: postRestartReceipt }
+    });
+    expect(postRestartIngest.statusCode).toBe(201);
+    expect((postRestartIngest.json() as { observed: boolean }).observed).toBe(true);
+
+    const bbAfterNew = await app2.inject({
+      method: "GET",
+      url: `/coding-missions/${workItemId}/black-box`,
+      headers: { authorization: "Bearer reader-token" }
+    });
+    const bbAfterNewJson = bbAfterNew.json() as {
+      chain: { valid: boolean; eventCount: number };
+      events: Array<{ evidence: { seq: number; previousHash: string } }>;
+    };
+    expect(bbAfterNewJson.chain.valid).toBe(true);
+    expect(bbAfterNewJson.chain.eventCount).toBe(4);
+    expect(bbAfterNewJson.events[2]!.evidence.seq).toBe(4);
+    expect(bbAfterNewJson.events[2]!.evidence.previousHash).toBe(prevHead);
+
+    // Rotate wk-dyn-1 -> wk-dyn-2
+    const rotRes = await app2.inject({
+      method: "POST",
+      url: "/black-box/observers/rotate",
+      headers: { authorization: "Bearer writer-token" },
+      payload: { oldKeyId: "wk-dyn-1", newKeyId: "wk-dyn-2", newPublicKeyPem: dyn2.publicKeyPem }
+    });
+    expect(rotRes.statusCode).toBe(200);
+
+    // Old key wk-dyn-1 is now rejected for new receipts
+    const rOldKey = await signReceipt(
+      {
+        workItemId,
+        acsAnchorRef: `acs:work_item:${workItemId}`,
+        signingKeyId: "wk-dyn-1",
+        endTimeNs: Date.now() * 1_000_000
+      },
+      dyn1.privateKeyPem
+    );
+    const oldKeyIngest = await app2.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/receipts",
+      headers: { authorization: "Bearer writer-token" },
+      payload: { receipt: rOldKey }
+    });
+    expect(oldKeyIngest.statusCode).toBe(422);
+
+    // Revoke wk-dyn-2 -> rejected
+    const revRes = await app2.inject({
+      method: "POST",
+      url: "/black-box/observers/revoke",
+      headers: { authorization: "Bearer writer-token" },
+      payload: { keyId: "wk-dyn-2", reason: "decommissioned" }
+    });
+    expect(revRes.statusCode).toBe(200);
+
+    const rRevoked = await signReceipt(
+      {
+        workItemId,
+        acsAnchorRef: `acs:work_item:${workItemId}`,
+        signingKeyId: "wk-dyn-2",
+        endTimeNs: Date.now() * 1_000_000
+      },
+      dyn2.privateKeyPem
+    );
+    const revokedIngest = await app2.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/receipts",
+      headers: { authorization: "Bearer writer-token" },
+      payload: { receipt: rRevoked }
+    });
+    expect(revokedIngest.statusCode).toBe(422);
+
+    await app2.close();
   });
 });

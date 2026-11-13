@@ -60,6 +60,7 @@ struct ReconstructionResult {
     uint64_t excluded_unrelated_cgroup_events{0};
     uint64_t start_time_ns{0};
     uint64_t end_time_ns{0};
+    uint32_t root_pid{0};
     std::vector<std::string> anomalies;
 };
 
@@ -74,6 +75,7 @@ std::vector<ObservedEvent> parse_events_jsonl(std::string_view jsonl, std::vecto
 
 ReconstructionResult reconstruct_process_tree(
     const std::vector<ObservedEvent>& raw_events,
-    uint64_t target_cgroup_id);
+    uint64_t target_cgroup_id,
+    uint32_t root_pid = 0);
 
 } // namespace jc::witness

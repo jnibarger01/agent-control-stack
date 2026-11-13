@@ -442,6 +442,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
             observerMode: witnessOutcome.receipt.observerMode,
             observerId: witnessOutcome.receipt.observerId,
             cgroupId: witnessOutcome.receipt.cgroupId,
+            ...(witnessOutcome.receipt.rootPid !== undefined ? { rootPid: witnessOutcome.receipt.rootPid } : {}),
             status: witnessOutcome.receipt.status,
             eventCounts: witnessOutcome.receipt.eventCounts,
             signingKeyId: witnessOutcome.receipt.signingKeyId,

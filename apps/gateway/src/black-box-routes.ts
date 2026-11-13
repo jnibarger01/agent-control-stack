@@ -1,4 +1,5 @@
 import {
+  ObserverKeyRegistry,
   RecorderStore,
   recomputeFindings,
   recorderFeatureEnabled,
@@ -8,6 +9,7 @@ import {
 import type { CodingMissionController } from "@agent-control-stack/coding-mission";
 import type { SqliteWorkItemStore, StoredAuditEvent } from "@agent-control-stack/work-items";
 import type { FastifyInstance } from "fastify";
+import { SqliteBlackBoxPersistence } from "./black-box-durable.js";
 import {
   gatewayCredentialForRequest,
   requireMutationActor,
@@ -18,6 +20,7 @@ export interface GatewayBlackBoxOptions {
   enabled?: boolean;
   trustedWitnessKeys?: Record<string, string>;
   requireLiveMode?: boolean;
+  allowRotatedHistorical?: boolean;
 }
 
 function loadWitnessKeysFromEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
@@ -38,19 +41,54 @@ function loadWitnessKeysFromEnv(env: NodeJS.ProcessEnv = process.env): Record<st
 
 export function registerBlackBoxRoutes(params: {
   app: FastifyInstance;
+  dbPath: string;
   auth: GatewayAuthOptions | undefined;
   workItems: SqliteWorkItemStore;
   codingMissions: CodingMissionController | undefined;
   broadcast: (event: StoredAuditEvent) => void;
   options?: GatewayBlackBoxOptions;
 }): void {
-  const { app, auth, workItems, codingMissions, broadcast, options } = params;
+  const { app, dbPath, auth, workItems, codingMissions, broadcast, options } = params;
   const enabled = options?.enabled ?? recorderFeatureEnabled();
-  const trustedWitnessKeys = options?.trustedWitnessKeys ?? loadWitnessKeysFromEnv();
+  const seedKeys = options?.trustedWitnessKeys ?? loadWitnessKeysFromEnv();
   const seenEvidenceHashes = new Set<string>();
   const recorderStore = new RecorderStore({ enabled });
+  const persistence = dbPath !== ":memory:" ? new SqliteBlackBoxPersistence(dbPath) : null;
+  let keyRegistry = new ObserverKeyRegistry();
+
+  const readyPromise = (async () => {
+    if (persistence) {
+      const persistedEvents = persistence.loadEvents();
+      if (persistedEvents.length > 0) {
+        await recorderStore.hydrate(persistedEvents);
+        for (const row of persistedEvents) {
+          if (row.evidenceHash) seenEvidenceHashes.add(row.evidenceHash);
+        }
+      }
+      const persistedKeys = persistence.loadObserverKeys();
+      keyRegistry = new ObserverKeyRegistry(persistedKeys);
+    }
+    for (const [keyId, publicKeyPem] of Object.entries(seedKeys)) {
+      if (!keyRegistry.get(keyId)) {
+        const rec = await keyRegistry.registerKey({
+          keyId,
+          observerId: `seed:${keyId}`,
+          publicKeyPem,
+          registeredBy: "gateway-config"
+        });
+        persistence?.upsertObserverKey(rec);
+      }
+    }
+  })();
+
+  if (persistence) {
+    app.addHook("onClose", async () => {
+      persistence.close();
+    });
+  }
 
   app.post("/black-box/kernel-witness/receipts", async (request, reply) => {
+    await readyPromise;
     const actor = requireMutationActor(request, reply, auth, "acs:write");
     if (!actor) return;
     if (!enabled) {
@@ -62,7 +100,8 @@ export function registerBlackBoxRoutes(params: {
     }
 
     const precheck = await verifyJcWitnessReceipt(body.receipt, {
-      trustedWitnessKeys,
+      keyRegistry,
+      allowRotatedHistorical: options?.allowRotatedHistorical ?? false,
       seenEvidenceHashes,
       requireAcsAnchor: false,
       requireLiveMode: options?.requireLiveMode ?? false
@@ -110,7 +149,8 @@ export function registerBlackBoxRoutes(params: {
     }
 
     const ingested = await recorderStore.ingestWitnessReceipt(receipt, {
-      trustedWitnessKeys,
+      keyRegistry,
+      allowRotatedHistorical: options?.allowRotatedHistorical ?? false,
       seenEvidenceHashes,
       requireAcsAnchor: true,
       acsAnchorVerified: workItemExists,
@@ -124,6 +164,21 @@ export function registerBlackBoxRoutes(params: {
         code: isReplay ? "witness_receipt_replay" : "invalid_witness_receipt",
         reasons: ingested.reasons
       });
+    }
+
+    if (persistence && ingested.ingestResult?.status === "created") {
+      const ev = ingested.ingestResult.event;
+      const meta = recorderStore.persistenceMetadataFor(ev.eventId);
+      if (meta) {
+        persistence.appendEvent({
+          event: ev,
+          producerKey: meta.producerKey,
+          fingerprint: meta.fingerprint,
+          evidenceHash: receipt.evidenceHash,
+          auditEventId: anchored.event.id,
+          auditEventHash: anchored.event.eventHash
+        });
+      }
     }
 
     const statusCode = ingested.ingestResult?.status === "duplicate" ? 200 : 201;
@@ -143,7 +198,108 @@ export function registerBlackBoxRoutes(params: {
     });
   });
 
+  app.post("/black-box/observers/register", async (request, reply) => {
+    await readyPromise;
+    const actor = requireMutationActor(request, reply, auth, "acs:write");
+    if (!actor) return;
+    const body = request.body as { keyId?: unknown; observerId?: unknown; publicKeyPem?: unknown } | null | undefined;
+    if (!body || typeof body.keyId !== "string" || typeof body.observerId !== "string" || typeof body.publicKeyPem !== "string") {
+      return reply.code(400).send({ error: "keyId, observerId, and publicKeyPem are required", code: "invalid_request" });
+    }
+    try {
+      const audit = workItems.recordSystemEvent({
+        name: "black_box.observer_key_registered",
+        attributes: { "observer.id": body.observerId, "observer.key_id": body.keyId, "black_box.actor": actor },
+        body: { keyId: body.keyId, observerId: body.observerId }
+      });
+      const record = await keyRegistry.registerKey({
+        keyId: body.keyId,
+        observerId: body.observerId,
+        publicKeyPem: body.publicKeyPem,
+        registeredBy: actor,
+        auditEventId: audit.id
+      });
+      persistence?.upsertObserverKey(record);
+      broadcast(audit);
+      return reply.code(201).send({ key: record, auditEventId: audit.id });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "failed to register observer key";
+      const code = message.includes("already registered") ? 409 : 422;
+      return reply.code(code).send({ error: message, code: "observer_key_registration_failed" });
+    }
+  });
+
+  app.post("/black-box/observers/rotate", async (request, reply) => {
+    await readyPromise;
+    const actor = requireMutationActor(request, reply, auth, "acs:write");
+    if (!actor) return;
+    const body = request.body as { oldKeyId?: unknown; newKeyId?: unknown; newPublicKeyPem?: unknown; observerId?: unknown } | null | undefined;
+    if (!body || typeof body.oldKeyId !== "string" || typeof body.newKeyId !== "string" || typeof body.newPublicKeyPem !== "string") {
+      return reply.code(400).send({ error: "oldKeyId, newKeyId, and newPublicKeyPem are required", code: "invalid_request" });
+    }
+    try {
+      const audit = workItems.recordSystemEvent({
+        name: "black_box.observer_key_rotated",
+        attributes: { "observer.old_key_id": body.oldKeyId, "observer.new_key_id": body.newKeyId, "black_box.actor": actor },
+        body: { oldKeyId: body.oldKeyId, newKeyId: body.newKeyId }
+      });
+      const { oldRecord, newRecord } = await keyRegistry.rotateKey({
+        oldKeyId: body.oldKeyId,
+        newKeyId: body.newKeyId,
+        newPublicKeyPem: body.newPublicKeyPem,
+        observerId: typeof body.observerId === "string" ? body.observerId : undefined,
+        rotatedBy: actor,
+        auditEventId: audit.id
+      });
+      persistence?.upsertObserverKey(oldRecord);
+      persistence?.upsertObserverKey(newRecord);
+      broadcast(audit);
+      return reply.code(200).send({ oldKey: oldRecord, newKey: newRecord, auditEventId: audit.id });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "failed to rotate observer key";
+      const code = message.includes("does not exist") ? 404 : message.includes("already registered") ? 409 : 422;
+      return reply.code(code).send({ error: message, code: "observer_key_rotation_failed" });
+    }
+  });
+
+  app.post("/black-box/observers/revoke", async (request, reply) => {
+    await readyPromise;
+    const actor = requireMutationActor(request, reply, auth, "acs:write");
+    if (!actor) return;
+    const body = request.body as { keyId?: unknown; reason?: unknown } | null | undefined;
+    if (!body || typeof body.keyId !== "string" || typeof body.reason !== "string") {
+      return reply.code(400).send({ error: "keyId and reason are required", code: "invalid_request" });
+    }
+    try {
+      const record = keyRegistry.revokeKey({
+        keyId: body.keyId,
+        reason: body.reason,
+        revokedBy: actor
+      });
+      persistence?.upsertObserverKey(record);
+      const audit = workItems.recordSystemEvent({
+        name: "black_box.observer_key_revoked",
+        attributes: { "observer.key_id": body.keyId, "black_box.actor": actor },
+        body: { keyId: body.keyId, reason: body.reason }
+      });
+      broadcast(audit);
+      return reply.code(200).send({ key: record, auditEventId: audit.id });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "failed to revoke observer key";
+      const code = message.includes("does not exist") ? 404 : 422;
+      return reply.code(code).send({ error: message, code: "observer_key_revocation_failed" });
+    }
+  });
+
+  app.get("/black-box/observers", async (request, reply) => {
+    await readyPromise;
+    const credential = gatewayCredentialForRequest(request, auth);
+    if (!credential?.scopes.includes("acs:read")) return reply.code(401).send({ error: "unauthorized" });
+    return { keys: keyRegistry.list() };
+  });
+
   app.get<{ Params: { id: string } }>("/coding-missions/:id/black-box", async (request, reply) => {
+    await readyPromise;
     const credential = gatewayCredentialForRequest(request, auth);
     if (!credential?.scopes.includes("acs:read")) return reply.code(401).send({ error: "unauthorized" });
     const missionId = request.params.id;

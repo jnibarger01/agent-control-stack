@@ -18,6 +18,7 @@ JsonValue receipt_body_to_json(const ObservationReceipt& r) {
     obj["invocationHash"] = r.invocation_hash;
     obj["cgroupId"] = r.cgroup_id;
     obj["cgroupPath"] = r.cgroup_path;
+    obj["rootPid"] = static_cast<uint64_t>(r.root_pid);
     obj["startTimeNs"] = r.start_time_ns;
     obj["endTimeNs"] = r.end_time_ns;
     obj["status"] = r.status;
@@ -164,6 +165,37 @@ VerificationResult verify_receipt(
     if (opts.require_live) {
         if (get_opt_string(obj, "observerMode") != "live") {
             res.reasons.push_back("observer_mode_not_live");
+        }
+    }
+
+    auto root_pid_it = obj.find("rootPid");
+    uint64_t receipt_root_pid = 0;
+    if (root_pid_it != obj.end() && root_pid_it->second.is_number()) {
+        receipt_root_pid = root_pid_it->second.as_uint64();
+    }
+    if (opts.expected_root_pid != 0 && receipt_root_pid != opts.expected_root_pid) {
+        res.reasons.push_back("mismatched_root_pid");
+    }
+    if (receipt_root_pid != 0) {
+        auto tree_it = obj.find("processTree");
+        if (tree_it != obj.end() && tree_it->second.is_array() && !tree_it->second.as_array().empty()) {
+            bool found_root = false;
+            for (const auto& node_val : tree_it->second.as_array()) {
+                if (node_val.is_object()) {
+                    const auto& nobj = node_val.as_object();
+                    auto tgid_it = nobj.find("tgid");
+                    auto pid_it = nobj.find("pid");
+                    uint64_t tgid = (tgid_it != nobj.end() && tgid_it->second.is_number()) ? tgid_it->second.as_uint64() : 0;
+                    uint64_t pid = (pid_it != nobj.end() && pid_it->second.is_number()) ? pid_it->second.as_uint64() : 0;
+                    if (tgid == receipt_root_pid || pid == receipt_root_pid) {
+                        found_root = true;
+                        break;
+                    }
+                }
+            }
+            if (!found_root) {
+                res.reasons.push_back("root_pid_missing_from_process_tree");
+            }
         }
     }
 

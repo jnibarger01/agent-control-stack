@@ -299,6 +299,67 @@ void test_pre_exec_cgroup_v2_lifecycle() {
     assert(!std::filesystem::exists(leaf.path));
 }
 
+void test_root_fork_exec_3_subprocesses_and_root_pid_verification() {
+    auto [priv, pub] = generate_ephemeral_ed25519_keypair_pem();
+    const uint64_t target_cg = 8888;
+    const uint32_t external_witness_pid = 50;
+    const uint32_t root_pid = 100;
+
+    std::vector<ObservedEvent> raw = {
+        // Initial clone3(CLONE_INTO_CGROUP) FORK from external witness pid 50 -> root_pid 100
+        make_ev(1, 900, target_cg, EventType::Fork, external_witness_pid, 1, root_pid, 0, "jc-kernel-witne"),
+        make_ev(2, 1000, target_cg, EventType::Exec, root_pid, external_witness_pid, 0, 0, "sh"),
+        make_ev(3, 1100, target_cg, EventType::Fork, root_pid, external_witness_pid, 101, 0, "sh"),
+        make_ev(4, 1200, target_cg, EventType::Exec, 101, root_pid, 0, 0, "python3"),
+        make_ev(5, 1300, target_cg, EventType::Fork, 101, root_pid, 102, 0, "python3"),
+        make_ev(6, 1400, target_cg, EventType::Exec, 102, 101, 0, 0, "ls"),
+        make_ev(7, 1500, target_cg, EventType::Exit, 102, 101, 0, 0, "ls"),
+        make_ev(8, 1600, target_cg, EventType::Exit, 101, root_pid, 0, 0, "python3"),
+        make_ev(9, 1700, target_cg, EventType::Fork, root_pid, external_witness_pid, 103, 0, "sh"),
+        make_ev(10, 1800, target_cg, EventType::Exec, 103, root_pid, 0, 0, "echo"),
+        make_ev(11, 1900, target_cg, EventType::Exit, 103, root_pid, 0, 0, "echo"),
+        make_ev(12, 2000, target_cg, EventType::Exit, root_pid, external_witness_pid, 0, 0, "sh"),
+    };
+
+    auto recon = reconstruct_process_tree(raw, target_cg, root_pid);
+    assert(recon.root_pid == root_pid);
+    assert(recon.process_tree.size() == 1);
+    // Root node is 100 (NOT external spawner 50), with ppid == 50 and forkedAtNs == 900
+    assert(recon.process_tree[0].tgid == root_pid);
+    assert(recon.process_tree[0].ppid == external_witness_pid);
+    assert(recon.process_tree[0].forked_at_ns == 900);
+    assert(recon.process_tree[0].execed_at_ns == 1000);
+    assert(recon.process_tree[0].exited_at_ns == 2000);
+    assert(recon.process_tree[0].children.size() == 2);
+
+    ObservationReceipt r;
+    r.observer_mode = "live";
+    r.observer_id = "test-obs";
+    r.work_item_id = "wi-root";
+    r.attempt_id = "att-root";
+    r.lease_id = "lease-root";
+    r.invocation_hash = "inv-root";
+    r.cgroup_id = target_cg;
+    r.cgroup_path = "/sys/fs/cgroup/root-test";
+    r.root_pid = recon.root_pid;
+    r.start_time_ns = recon.start_time_ns;
+    r.end_time_ns = recon.end_time_ns;
+    r.events = recon.events;
+    r.process_tree = recon.process_tree;
+    r.event_counts = recon.counts;
+    r.status = "complete";
+    finalize_and_sign_receipt(r, priv, false);
+
+    VerificationOptions opts;
+    opts.expected_root_pid = root_pid;
+    auto vr_ok = verify_receipt(receipt_to_json(r), pub, opts, false);
+    assert(vr_ok.valid);
+
+    opts.expected_root_pid = 999;
+    auto vr_bad = verify_receipt(receipt_to_json(r), pub, opts, false);
+    assert(!vr_bad.valid);
+}
+
 } // namespace
 
 int main() {
@@ -309,6 +370,7 @@ int main() {
     RUN_TEST(test_hash_chain_tamper_replay_and_correlation);
     RUN_TEST(test_bpf_object_open_and_btf_check);
     RUN_TEST(test_pre_exec_cgroup_v2_lifecycle);
+    RUN_TEST(test_root_fork_exec_3_subprocesses_and_root_pid_verification);
     std::cout << "All " << g_tests_run << " tests passed.\n";
     return 0;
 }
