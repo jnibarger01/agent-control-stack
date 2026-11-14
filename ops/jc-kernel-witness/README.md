@@ -31,26 +31,48 @@ For staging into an isolated root directory (e.g., inside a disposable VM or pac
 - **Register initial key**:
   ```bash
   /usr/lib/jace-commander/jc-kernel-witness key-admin register \
-    --state-dir /var/lib/jace-commander/witness-signer \
-    --observer-id jc-witness-prod-1
+    --manifest /var/lib/jace-commander/witness-signer/key-manifest.json \
+    --private-out /var/lib/jace-commander/witness-signer/keys/active.priv.pem \
+    --public-out /etc/jace-commander/observer.pub.pem
   ```
-- **Rotate key**:
+- **Rotate key** (previous key transitions to `rotated` and can no longer sign new receipts per `[RC-P1-01]`):
   ```bash
-  ./ops/jc-kernel-witness/upgrade-kernel-witness.sh --rotate-key --old-key-id <old-id> --new-key-id <new-id>
+  ./ops/jc-kernel-witness/upgrade-kernel-witness.sh --rotate-key
   ```
 - **Retire a rotated key** (preserves historical verification before `rotatedAt` while disabling future use):
   ```bash
   /usr/lib/jace-commander/jc-kernel-witness key-admin retire \
-    --state-dir /var/lib/jace-commander/witness-signer \
+    --manifest /var/lib/jace-commander/witness-signer/key-manifest.json \
     --key-id <old-id>
   ```
 - **Emergency revocation**:
   ```bash
   /usr/lib/jace-commander/jc-kernel-witness key-admin revoke \
-    --state-dir /var/lib/jace-commander/witness-signer \
+    --manifest /var/lib/jace-commander/witness-signer/key-manifest.json \
     --key-id <compromised-id> \
     --reason "key_compromise_drill"
   ```
+
+## 4. Database Migration, Online Backup, & WORM Retention
+
+- **Migrations**: `install-kernel-witness.sh` applies `storage/migrations/079_black_box_durable.sql` and `storage/migrations/080_black_box_transactional_worm_v2.sql` idempotently to `/var/lib/acs-core/acs.sqlite`.
+- **Online Backup**: `upgrade-kernel-witness.sh` uses SQLite `VACUUM INTO` to snapshot `/var/lib/acs-core/acs.sqlite` to `acs.sqlite.pre-upgrade.bak` (`0600`, `acs-core:acs-core`) without tearing active WAL frames.
+- **Retention & Off-Host WORM**: Use `./ops/jc-kernel-witness/retention-policy.sh` for local retention pruning (never deleting unanchored WORM outbox entries), and configure `ACS_WORM_SINK_MODE=s3-object-lock` (with `COMPLIANCE` or `GOVERNANCE` mode) in `/etc/acs-secrets/acs-core.env`.
+
+## 5. Health-Check & Post-Deploy Verification
+
+```bash
+# 1. Verify CO-RE eBPF object & binary integrity
+/usr/lib/jace-commander/jc-kernel-witness check-bpf --bpf-obj /usr/lib/jace-commander/witness.bpf.o
+sha256sum -c /etc/jace-commander/witness-manifest.sha256
+
+# 2. Verify systemd services and signer socket permissions
+systemctl is-active jc-witness-signerd.service acs-jc-bridge.service acs-core.service
+ls -l /run/jc-witness-signer/sign.sock /var/lib/jace-commander/witness-signer/keys/active.priv.pem
+
+# 3. Verify ACS WORM outbox health (with operator token)
+curl -sf -H "Authorization: Bearer ${ACS_TOKEN}" http://127.0.0.1:4318/black-box/kernel-witness/worm-status
+```
 
 ## 4. Rollback & Uninstall
 

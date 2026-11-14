@@ -35,6 +35,14 @@ run_cmd() {
   fi
 }
 
+reject_symlink() {
+  local target="$1"
+  if [[ -L "${target}" ]]; then
+    echo "ERROR: refusing to operate on symlink: ${target}" >&2
+    exit 1
+  fi
+}
+
 echo "=== JC Kernel Witness V2 Rollback (dry_run=${DRY_RUN}, prefix='${PREFIX:-/}') ==="
 
 if [[ ! -f "${LIB_DIR}/jc-kernel-witness.prev" || ! -f "${LIB_DIR}/witness.bpf.o.prev" ]]; then
@@ -43,6 +51,8 @@ if [[ ! -f "${LIB_DIR}/jc-kernel-witness.prev" || ! -f "${LIB_DIR}/witness.bpf.o
 fi
 
 for item in jc-kernel-witness jc-witness-signerd witness.bpf.o; do
+  reject_symlink "${LIB_DIR}/${item}"
+  reject_symlink "${LIB_DIR}/${item}.prev"
   if [[ -f "${LIB_DIR}/${item}.prev" ]]; then
     run_cmd cp -p "${LIB_DIR}/${item}.prev" "${LIB_DIR}/${item}.restore"
     run_cmd mv -f "${LIB_DIR}/${item}.restore" "${LIB_DIR}/${item}"

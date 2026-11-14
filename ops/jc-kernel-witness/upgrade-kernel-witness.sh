@@ -56,6 +56,19 @@ run_cmd() {
   fi
 }
 
+apply_chown() {
+  local owner_spec="$1"
+  shift
+  local user_part="${owner_spec%%:*}"
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "[DRY-RUN] chown ${owner_spec} $*"
+    return 0
+  fi
+  if [[ "${EUID}" -eq 0 ]] && id -u "${user_part}" >/dev/null 2>&1; then
+    chown "${owner_spec}" "$@"
+  fi
+}
+
 echo "=== JC Kernel Witness V2 Upgrade (dry_run=${DRY_RUN}, prefix='${PREFIX:-/}', rotate_key=${ROTATE_KEY}) ==="
 
 # 1. Verify new build artifacts before touching installed files
@@ -72,18 +85,35 @@ if [[ -f "${ETC_DIR}/witness-manifest.sha256" ]]; then
   run_cmd cp -p "${ETC_DIR}/witness-manifest.sha256" "${ETC_DIR}/witness-manifest.sha256.prev"
 fi
 if [[ -f "${DB_PATH}" ]]; then
-  run_cmd cp -p "${DB_PATH}" "${DB_PATH}.pre-upgrade.bak"
+  BACKUP_PATH="${DB_PATH}.pre-upgrade.bak"
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "[DRY-RUN] Online SQLite backup ${DB_PATH} -> ${BACKUP_PATH}"
+  else
+    rm -f "${BACKUP_PATH}"
+    node -e '
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(process.argv[1]);
+      const escaped = process.argv[2].replace(/'\''/g, "'\'''\''");
+      db.exec(`VACUUM INTO '\''${escaped}'\''`);
+      db.close();
+    ' "${DB_PATH}" "${BACKUP_PATH}"
+    chmod 0600 "${BACKUP_PATH}"
+    apply_chown acs-core:acs-core "${BACKUP_PATH}"
+  fi
 fi
 
 # 3. Atomic swap of binaries
 echo "[2/4] Atomically installing upgraded binaries..."
 run_cmd install -m 0750 "${BUILD_DIR}/jc-kernel-witness" "${LIB_DIR}/jc-kernel-witness.new"
+apply_chown root:acs-jc "${LIB_DIR}/jc-kernel-witness.new"
 run_cmd mv -f "${LIB_DIR}/jc-kernel-witness.new" "${LIB_DIR}/jc-kernel-witness"
 if [[ -f "${BUILD_DIR}/jc-witness-signerd" ]]; then
   run_cmd install -m 0750 "${BUILD_DIR}/jc-witness-signerd" "${LIB_DIR}/jc-witness-signerd.new"
+  apply_chown root:jc-witness-signer "${LIB_DIR}/jc-witness-signerd.new"
   run_cmd mv -f "${LIB_DIR}/jc-witness-signerd.new" "${LIB_DIR}/jc-witness-signerd"
 fi
 run_cmd install -m 0640 "${BUILD_DIR}/witness.bpf.o" "${LIB_DIR}/witness.bpf.o.new"
+apply_chown root:acs-jc "${LIB_DIR}/witness.bpf.o.new"
 run_cmd mv -f "${LIB_DIR}/witness.bpf.o.new" "${LIB_DIR}/witness.bpf.o"
 
 if [[ "${DRY_RUN}" -eq 0 ]]; then
@@ -104,6 +134,7 @@ if [[ "${ROTATE_KEY}" -eq 1 ]]; then
     --manifest "${SIGNER_STATE_DIR}/key-manifest.json" \
     --private-out "${SIGNER_STATE_DIR}/keys/active.priv.pem" \
     --public-out "${ETC_DIR}/observer.pub.pem"
+  apply_chown jc-witness-signer:jc-witness-signer "${SIGNER_STATE_DIR}/key-manifest.json" "${SIGNER_STATE_DIR}/keys/active.priv.pem"
 fi
 
 # 5. Post-upgrade verification

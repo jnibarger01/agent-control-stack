@@ -20,6 +20,7 @@ ExecStart=/usr/lib/jace-commander/jc-witness-signerd \
   --private-key /var/lib/jace-commander/witness-signer/keys/active.priv.pem \
   --key-manifest /var/lib/jace-commander/witness-signer/key-manifest.json \
   --audit-log /var/lib/jace-commander/witness-signer/audit.jsonl \
+  --allow-exe /usr/lib/jace-commander/jc-kernel-witness \
   --forbid-workload-uid 65534 \
   --require-distinct-uid
 Restart=on-failure
