@@ -24,6 +24,19 @@ struct LiveObserverConfig {
     uint64_t invocation_tag{1};
 };
 
+struct LiveObserverStats {
+    uint64_t total_events{0};
+    uint64_t dropped_events{0};
+    uint64_t process_events{0};
+    uint64_t fs_events{0};
+    uint64_t net_events{0};
+    uint64_t process_drops{0};
+    uint64_t fs_drops{0};
+    uint64_t net_drops{0};
+    uint64_t mmap_write_events{0};
+    uint64_t io_uring_events{0};
+};
+
 class LiveBpfObserver {
 public:
     explicit LiveBpfObserver(LiveObserverConfig cfg);
@@ -37,6 +50,8 @@ public:
     void stop_and_drain(uint64_t& dropped_events_out);
 
     const std::vector<ObservedEvent>& events() const { return events_; }
+    const LiveObserverStats& stats() const { return stats_; }
+    const std::vector<std::string>& attach_warnings() const { return attach_warnings_; }
     bool ringbuf_error() const { return ringbuf_error_; }
 
 private:
@@ -44,6 +59,8 @@ private:
     std::unique_ptr<Impl> impl_;
     LiveObserverConfig cfg_;
     std::vector<ObservedEvent> events_;
+    LiveObserverStats stats_{};
+    std::vector<std::string> attach_warnings_;
     bool ringbuf_error_{false};
 };
 
