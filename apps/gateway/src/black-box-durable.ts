@@ -1418,7 +1418,7 @@ export class SqliteBlackBoxPersistence {
               idempotency_key, status, worm_provider, worm_object_key,
               worm_version_id, worm_etag_sha256, retention_mode, retain_until,
               attempt_count, created_at, updated_at, anchored_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'anchored', ?, ?, ?, ?, 'FS_IMMUTABLE', ?, 1, ?, ?, ?)`
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'anchored', ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`
           )
           .run(
             env.seq,
@@ -1434,6 +1434,9 @@ export class SqliteBlackBoxPersistence {
             `receipts/seq-${String(env.seq).padStart(8, "0")}-${env.eventId}.json`,
             `v1-${env.eventHash.slice(0, 16)}`,
             env.eventHash,
+            sink.providerId === "s3-object-lock-worm"
+              ? "COMPLIANCE"
+              : "FS_IMMUTABLE",
             env.anchoredAt,
             env.anchoredAt,
             env.anchoredAt,

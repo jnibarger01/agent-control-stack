@@ -2,6 +2,7 @@ import {
   ImmutableFsWormSink,
   ObserverKeyRegistry,
   RecorderStore,
+  S3ObjectLockWormSink,
   recomputeFindings,
   recorderFeatureEnabled,
   summarizeRun,
@@ -56,6 +57,42 @@ function loadWitnessKeysFromEnv(
   }
 }
 
+function resolveWormSinkFromConfig(
+  options?: GatewayBlackBoxOptions,
+  env: NodeJS.ProcessEnv = process.env
+): WormEvidenceSink | undefined {
+  if (options?.wormSink) return options.wormSink;
+  if (options?.wormRootDir) {
+    return new ImmutableFsWormSink({ rootDir: options.wormRootDir });
+  }
+  const s3Endpoint = env.ACS_BLACK_BOX_WORM_S3_ENDPOINT?.trim();
+  const s3Bucket = env.ACS_BLACK_BOX_WORM_S3_BUCKET?.trim();
+  if (s3Endpoint && s3Bucket) {
+    const retentionMode =
+      env.ACS_BLACK_BOX_WORM_S3_MODE === "GOVERNANCE"
+        ? "GOVERNANCE"
+        : "COMPLIANCE";
+    const parsedDays = Number(env.ACS_BLACK_BOX_WORM_RETENTION_DAYS);
+    const retentionDays =
+      Number.isFinite(parsedDays) && parsedDays > 0 ? parsedDays : undefined;
+    const authToken = env.ACS_BLACK_BOX_WORM_S3_AUTH_TOKEN?.trim();
+    return new S3ObjectLockWormSink({
+      endpointUrl: s3Endpoint,
+      bucket: s3Bucket,
+      prefix: env.ACS_BLACK_BOX_WORM_S3_PREFIX?.trim() || undefined,
+      retentionMode,
+      retentionDays,
+      headers: authToken ? { authorization: `Bearer ${authToken}` } : undefined
+    });
+  }
+  if (env.ACS_BLACK_BOX_WORM_DIR) {
+    return new ImmutableFsWormSink({
+      rootDir: env.ACS_BLACK_BOX_WORM_DIR
+    });
+  }
+  return undefined;
+}
+
 export function registerBlackBoxRoutes(params: {
   app: FastifyInstance;
   dbPath: string;
@@ -74,15 +111,7 @@ export function registerBlackBoxRoutes(params: {
   const persistence =
     dbPath !== ":memory:" ? new SqliteBlackBoxPersistence(dbPath) : null;
   let keyRegistry = new ObserverKeyRegistry();
-  const wormSink: WormEvidenceSink | undefined =
-    options?.wormSink ??
-    (options?.wormRootDir
-      ? new ImmutableFsWormSink({ rootDir: options.wormRootDir })
-      : process.env.ACS_BLACK_BOX_WORM_DIR
-        ? new ImmutableFsWormSink({
-            rootDir: process.env.ACS_BLACK_BOX_WORM_DIR
-          })
-        : undefined);
+  const wormSink: WormEvidenceSink | undefined = resolveWormSinkFromConfig(options);
 
   const readyPromise = (async () => {
     if (persistence) {

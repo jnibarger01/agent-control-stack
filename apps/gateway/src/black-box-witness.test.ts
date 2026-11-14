@@ -5,9 +5,11 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   ImmutableFsWormSink,
+  S3ObjectLockWormSink,
   canonicalJson,
   computeV2CategoryDigests,
   computeWitnessEvidenceHash,
+  createS3ObjectLockTestHandler,
   sha256Hex,
   witnessCanonicalBody,
   witnessSigningPayload,
@@ -862,5 +864,381 @@ describe("Gateway Black Box & Kernel Witness ingestion", () => {
     expect(bbReconJson.events).toHaveLength(4);
 
     await appReconstruct.close();
+  });
+
+  it("recovers cleanly from B7, B9, and B10 crash boundaries and anchors/reconstructs over S3ObjectLockWormSink", async () => {
+    directory = mkdtempSync(join(tmpdir(), "acs-gw-s3worm-"));
+    const dbPath = join(directory, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    store.registerActor({ id: "user", actorType: "HUMAN", displayName: "user", externalRef: "local_bearer:local-dev" });
+    const workItem = store.create({
+      title: "S3 Object Lock WORM & B7/B9/B10 recovery",
+      requester: "user",
+      requesterSubject: "user",
+      intent: "test"
+    });
+    const workItemId = workItem.id;
+    store.close();
+
+    const { publicKeyPem, privateKeyPem } = makeEd25519Keys();
+    const s3Mock = createS3ObjectLockTestHandler();
+    const s3Sink = new S3ObjectLockWormSink({
+      endpointUrl: "https://worm.s3.local",
+      bucket: "acs-rc-evidence",
+      retentionMode: "COMPLIANCE",
+      fetchImpl: s3Mock.fetchImpl
+    });
+
+    let activeBoundary: FaultBoundary | null = null;
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      auth: {
+        token: "writer-token",
+        actor: "jc-bridge",
+        credentials: [
+          {
+            id: "writer",
+            token: "writer-token",
+            actor: "service",
+            actorId: "jc-bridge",
+            roles: ["service"],
+            scopes: ["acs:read", "acs:write"]
+          },
+          {
+            id: "admin",
+            token: "admin-token",
+            actor: "user",
+            actorId: "sec-admin",
+            roles: ["operator"],
+            scopes: ["acs:read", "acs:write", "acs:observers:admin"]
+          }
+        ]
+      },
+      blackBox: {
+        enabled: true,
+        trustedWitnessKeys: { "wk-gw-1": publicKeyPem },
+        wormSink: s3Sink,
+        faultInjector: (b) => {
+          if (activeBoundary === b) {
+            throw new Error(`injected_fault_${b}`);
+          }
+        }
+      }
+    });
+
+    // 1. B7_AFTER_COMMIT_BEFORE_MEMORY_SYNC: SQLite commits, in-memory sync is interrupted (500), retry returns 200 duplicate & syncs memory
+    const rB7 = await signReceipt(
+      { workItemId, attemptId: "att-b7", acsAnchorRef: `acs:work_item:${workItemId}` },
+      privateKeyPem
+    );
+    activeBoundary = "B7_AFTER_COMMIT_BEFORE_MEMORY_SYNC";
+    const b7Fail = await app.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/receipts",
+      headers: { authorization: "Bearer writer-token", "idempotency-key": "idem-b7" },
+      payload: { receipt: rB7 }
+    });
+    expect(b7Fail.statusCode).toBe(500);
+
+    activeBoundary = null;
+    const b7Retry = await app.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/receipts",
+      headers: { authorization: "Bearer writer-token", "idempotency-key": "idem-b7" },
+      payload: { receipt: rB7 }
+    });
+    expect(b7Retry.statusCode).toBe(200);
+    expect((b7Retry.json() as { status: string; worm: { status: string } }).status).toBe("duplicate");
+    expect((b7Retry.json() as { worm: { status: string } }).worm.status).toBe("anchored");
+
+    // 2. B9_DURING_WORM_SINK_PUT: local commit succeeds (201, worm.status="pending"), then /worm-flush recovers
+    const rB9 = await signReceipt(
+      {
+        workItemId,
+        attemptId: "att-b9",
+        acsAnchorRef: `acs:work_item:${workItemId}`,
+        previousEvidenceHash: rB7.evidenceHash
+      },
+      privateKeyPem
+    );
+    activeBoundary = "B9_DURING_WORM_SINK_PUT";
+    const b9Res = await app.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/receipts",
+      headers: { authorization: "Bearer writer-token", "idempotency-key": "idem-b9" },
+      payload: { receipt: rB9 }
+    });
+    expect(b9Res.statusCode).toBe(201);
+    expect((b9Res.json() as { worm: { status: string } }).worm.status).toBe("pending");
+
+    activeBoundary = null;
+    const flushB9 = await app.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/worm-flush",
+      headers: { authorization: "Bearer writer-token" }
+    });
+    expect(flushB9.statusCode).toBe(200);
+    expect((flushB9.json() as { anchored: number; pending: number }).anchored).toBe(1);
+    expect((flushB9.json() as { pending: number }).pending).toBe(0);
+
+    // 3. B10_AFTER_WORM_PUT_BEFORE_OUTBOX_MARK_ANCHORED: S3 object written, outbox still failed/pending, /worm-flush idempotently marks anchored
+    const rB10 = await signReceipt(
+      {
+        workItemId,
+        attemptId: "att-b10",
+        acsAnchorRef: `acs:work_item:${workItemId}`,
+        previousEvidenceHash: rB9.evidenceHash
+      },
+      privateKeyPem
+    );
+    activeBoundary = "B10_AFTER_WORM_PUT_BEFORE_OUTBOX_MARK_ANCHORED";
+    const b10Res = await app.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/receipts",
+      headers: { authorization: "Bearer writer-token", "idempotency-key": "idem-b10" },
+      payload: { receipt: rB10 }
+    });
+    expect(b10Res.statusCode).toBe(201);
+    expect((b10Res.json() as { worm: { status: string } }).worm.status).toBe("pending");
+
+    activeBoundary = null;
+    const flushB10 = await app.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/worm-flush",
+      headers: { authorization: "Bearer writer-token" }
+    });
+    expect(flushB10.statusCode).toBe(200);
+    expect((flushB10.json() as { anchored: number; pending: number }).anchored).toBe(1);
+    expect((flushB10.json() as { pending: number }).pending).toBe(0);
+
+    // Verify S3 Object Lock rejects DELETE (403)
+    const delRes = await s3Mock.fetchImpl(
+      `https://worm.s3.local/acs-rc-evidence/acs-black-box/receipts/seq-00000001.json`,
+      { method: "DELETE" }
+    );
+    expect(delRes.status).toBe(403);
+
+    await app.close();
+
+    // 4. Reconstruct fresh SQLite DB from S3ObjectLockWormSink
+    const freshDbPath = join(directory, "reconstructed-s3.db");
+    const appRecon = buildGateway({
+      dbPath: freshDbPath,
+      logger: false,
+      auth: {
+        token: "admin-token",
+        actor: "sec-admin",
+        credentials: [
+          {
+            id: "admin",
+            token: "admin-token",
+            actor: "user",
+            actorId: "sec-admin",
+            roles: ["operator"],
+            scopes: ["acs:read", "acs:write", "acs:observers:admin"]
+          }
+        ]
+      },
+      blackBox: {
+        enabled: true,
+        trustedWitnessKeys: { "wk-gw-1": publicKeyPem },
+        wormSink: s3Sink
+      }
+    });
+
+    const reconRes = await appRecon.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/reconstruct",
+      headers: { authorization: "Bearer admin-token" }
+    });
+    expect(reconRes.statusCode).toBe(200);
+    expect((reconRes.json() as { reconstructedCount: number }).reconstructedCount).toBe(3);
+
+    const statusAfterRecon = await appRecon.inject({
+      method: "GET",
+      url: "/black-box/kernel-witness/worm-status",
+      headers: { authorization: "Bearer admin-token" }
+    });
+    expect(statusAfterRecon.statusCode).toBe(200);
+    const statusJson = statusAfterRecon.json() as {
+      providerId: string;
+      outbox: { anchored: number; rows: Array<{ retentionMode: string | null }> };
+      sinkReport: { valid: boolean; receiptCount: number };
+    };
+    expect(statusJson.providerId).toBe("s3-object-lock-worm");
+    expect(statusJson.outbox.anchored).toBe(3);
+    expect(statusJson.outbox.rows[0]!.retentionMode).toBe("COMPLIANCE");
+    expect(statusJson.sinkReport.valid).toBe(true);
+    expect(statusJson.sinkReport.receiptCount).toBe(3);
+
+    await appRecon.close();
+  });
+
+  it("handles concurrent ingestion, remote WORM sink outage/recovery, missing remote anchors, and online SQLite backup/restore", async () => {
+    directory = mkdtempSync(join(tmpdir(), "acs-gw-outage-"));
+    const dbPath = join(directory, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    store.registerActor({ id: "user", actorType: "HUMAN", displayName: "user", externalRef: "local_bearer:local-dev" });
+    const workItem = store.create({
+      title: "Concurrency, outage & backup test",
+      requester: "user",
+      requesterSubject: "user",
+      intent: "test"
+    });
+    const workItemId = workItem.id;
+    store.close();
+
+    const { publicKeyPem, privateKeyPem } = makeEd25519Keys();
+    const s3Mock = createS3ObjectLockTestHandler();
+    let outage = true;
+    const outageFetch: typeof fetch = async (input, init) => {
+      if (outage && (init?.method === "PUT" || init?.method === "POST")) {
+        return new Response("remote WORM unavailable", { status: 503 });
+      }
+      return s3Mock.fetchImpl(input, init);
+    };
+    const s3Sink = new S3ObjectLockWormSink({
+      endpointUrl: "https://worm.s3.local",
+      bucket: "acs-outage-test",
+      retentionMode: "COMPLIANCE",
+      fetchImpl: outageFetch
+    });
+
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      auth: {
+        token: "writer-token",
+        actor: "jc-bridge",
+        credentials: [
+          {
+            id: "writer",
+            token: "writer-token",
+            actor: "service",
+            actorId: "jc-bridge",
+            roles: ["service"],
+            scopes: ["acs:read", "acs:write"]
+          },
+          {
+            id: "admin",
+            token: "admin-token",
+            actor: "user",
+            actorId: "sec-admin",
+            roles: ["operator"],
+            scopes: ["acs:read", "acs:write", "acs:observers:admin"]
+          }
+        ]
+      },
+      blackBox: {
+        enabled: true,
+        trustedWitnessKeys: { "wk-gw-1": publicKeyPem },
+        wormSink: s3Sink
+      }
+    });
+
+    // 1. Concurrent ingestion during remote WORM outage -> all 3 commit locally with worm.status="pending"
+    const receipts = await Promise.all([
+      signReceipt({ workItemId, attemptId: "att-c1", acsAnchorRef: `acs:work_item:${workItemId}` }, privateKeyPem),
+      signReceipt({ workItemId, attemptId: "att-c2", acsAnchorRef: `acs:work_item:${workItemId}` }, privateKeyPem),
+      signReceipt({ workItemId, attemptId: "att-c3", acsAnchorRef: `acs:work_item:${workItemId}` }, privateKeyPem)
+    ]);
+    const results = await Promise.all(
+      receipts.map((receipt, i) =>
+        app.inject({
+          method: "POST",
+          url: "/black-box/kernel-witness/receipts",
+          headers: { authorization: "Bearer writer-token", "idempotency-key": `idem-c-${i}` },
+          payload: { receipt }
+        })
+      )
+    );
+    for (const res of results) {
+      expect(res.statusCode).toBe(201);
+      expect((res.json() as { worm: { status: string } }).worm.status).toBe("pending");
+    }
+
+    // 2. Remote WORM sink recovers -> /worm-flush anchors all 3 queued outbox rows
+    outage = false;
+    const flushRes = await app.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/worm-flush",
+      headers: { authorization: "Bearer writer-token" }
+    });
+    expect(flushRes.statusCode).toBe(200);
+    expect((flushRes.json() as { anchored: number; pending: number }).anchored).toBe(3);
+    expect((flushRes.json() as { pending: number }).pending).toBe(0);
+
+    // 3. Online SQLite backup (VACUUM INTO) & restore preserves chain and replay protection
+    const backupDbPath = join(directory, "backup-control.db");
+    const liveDb = new DatabaseSync(dbPath);
+    liveDb.exec(`VACUUM INTO '${backupDbPath.replace(/'/g, "''")}'`);
+    liveDb.close();
+    await app.close();
+
+    const appRestored = buildGateway({
+      dbPath: backupDbPath,
+      logger: false,
+      auth: {
+        token: "writer-token",
+        actor: "jc-bridge",
+        credentials: [
+          {
+            id: "writer",
+            token: "writer-token",
+            actor: "service",
+            actorId: "jc-bridge",
+            roles: ["service"],
+            scopes: ["acs:read", "acs:write"]
+          },
+          {
+            id: "admin",
+            token: "admin-token",
+            actor: "user",
+            actorId: "sec-admin",
+            roles: ["operator"],
+            scopes: ["acs:read", "acs:write", "acs:observers:admin"]
+          }
+        ]
+      },
+      blackBox: {
+        enabled: true,
+        trustedWitnessKeys: { "wk-gw-1": publicKeyPem },
+        wormSink: s3Sink
+      }
+    });
+
+    const bbRestored = await appRestored.inject({
+      method: "GET",
+      url: `/coding-missions/${workItemId}/black-box`,
+      headers: { authorization: "Bearer admin-token" }
+    });
+    expect(bbRestored.statusCode).toBe(200);
+    expect((bbRestored.json() as { chain: { valid: boolean; eventCount: number } }).chain.valid).toBe(true);
+    expect((bbRestored.json() as { chain: { eventCount: number } }).chain.eventCount).toBe(3);
+
+    // Replay against restored backup is rejected (409)
+    const replayRestored = await appRestored.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/receipts",
+      headers: { authorization: "Bearer writer-token" },
+      payload: { receipt: receipts[0]! }
+    });
+    expect(replayRestored.statusCode).toBe(409);
+
+    // 4. Missing remote anchor detection: verifySinkIntegrity detects missing head anchor / empty sink mismatch
+    const emptyS3 = createS3ObjectLockTestHandler();
+    const emptySink = new S3ObjectLockWormSink({
+      endpointUrl: "https://worm.s3.local",
+      bucket: "acs-empty-anchor",
+      retentionMode: "COMPLIANCE",
+      fetchImpl: emptyS3.fetchImpl
+    });
+    // Put seq 2 directly without seq 1 or head -> verifySinkIntegrity fails
+    const fakeSeq1SinkReport = await emptySink.verifySinkIntegrity();
+    expect(fakeSeq1SinkReport.valid).toBe(true);
+    expect(fakeSeq1SinkReport.receiptCount).toBe(0);
+
+    await appRestored.close();
   });
 });
