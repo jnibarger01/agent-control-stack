@@ -1,0 +1,58 @@
+[Unit]
+Description=JC Kernel Witness Privilege-Separated Ed25519 Signing Broker (jc-witness-signerd)
+Documentation=file:///opt/acs-runtime/current/ops/jc-kernel-witness/README.md
+After=local-fs.target
+Before=acs-jc-bridge.service
+
+[Service]
+Type=simple
+User=jc-witness-signer
+Group=jc-witness-signer
+SupplementaryGroups=acs-jc
+EnvironmentFile=-/etc/acs-secrets/jc-witness-signerd.env
+RuntimeDirectory=jc-witness-signer
+RuntimeDirectoryMode=0750
+StateDirectory=jace-commander/witness-signer
+StateDirectoryMode=0700
+UMask=0007
+ExecStart=/usr/lib/jace-commander/jc-witness-signerd \
+  --socket /run/jc-witness-signer/sign.sock \
+  --private-key /var/lib/jace-commander/witness-signer/keys/active.priv.pem \
+  --key-manifest /var/lib/jace-commander/witness-signer/key-manifest.json \
+  --audit-log /var/lib/jace-commander/witness-signer/audit.jsonl \
+  --forbid-workload-uid 65534 \
+  --require-distinct-uid
+Restart=on-failure
+RestartSec=2
+
+# Strict privilege & namespace isolation: zero Linux capabilities, no network access
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateNetwork=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateUsers=no
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=default
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@mount @privileged @resources @reboot @swap @obsolete @debug
+ReadWritePaths=/var/lib/jace-commander/witness-signer /run/jc-witness-signer
+
+[Install]
+WantedBy=multi-user.target

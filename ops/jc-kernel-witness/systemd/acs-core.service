@@ -1,0 +1,47 @@
+[Unit]
+Description=ACS Authorization Authority & Agent Black Box WORM Evidence Service
+Documentation=file:///opt/acs-runtime/current/ops/jc-kernel-witness/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=acs-core
+Group=acs-core
+WorkingDirectory=/opt/acs-runtime/current
+EnvironmentFile=/etc/acs-secrets/acs-core.env
+Environment=ACS_BLACK_BOX_DB_PATH=/var/lib/acs-core/acs.sqlite
+Environment=ACS_WORM_SINK_PROVIDER=fs
+Environment=ACS_WORM_SINK_DIR=/var/lib/acs-core/worm-vault
+Environment=ACS_WITNESS_REQUIRE_LIVE_MODE=1
+ExecStart=/usr/bin/node apps/gateway/dist/cli.js
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+# Zero Linux capabilities; strict filesystem containment
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+StateDirectory=acs-core acs-core/worm-vault
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/acs-core
+ReadOnlyPaths=/etc/jace-commander
+InaccessiblePaths=/var/lib/jace-commander/witness-signer /run/jc-witness-signer
+
+[Install]
+WantedBy=multi-user.target

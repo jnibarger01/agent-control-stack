@@ -1,0 +1,1 @@
+vm-adversarial-acceptance.sh
