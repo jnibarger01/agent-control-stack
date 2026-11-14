@@ -966,6 +966,127 @@ void test_phase6_v1_and_v2_domain_separation_and_category_tamper() {
     assert(verify_receipt(receipt_to_json(r_v1), pub, opts_v1, false).valid);
 }
 
+void test_rc_p1_01_rotated_key_signing_rejected() {
+    std::string base = "/tmp/jc_rc_p1_01_" + std::to_string(getpid());
+    std::string manifest_path = base + "_manifest.json";
+    std::string priv1 = base + "_priv1.pem", pub1 = base + "_pub1.pem";
+    std::string priv2 = base + "_priv2.pem", pub2 = base + "_pub2.pem";
+    std::string sock_path = base + ".sock";
+
+    std::filesystem::remove(manifest_path);
+    std::filesystem::remove(priv1);
+    std::filesystem::remove(pub1);
+    std::filesystem::remove(priv2);
+    std::filesystem::remove(pub2);
+    std::filesystem::remove(sock_path);
+
+    KeyRecord k1 = key_admin_register(manifest_path, priv1, pub1);
+    assert(k1.state == "active");
+    KeyRecord k2 = key_admin_rotate(manifest_path, priv2, pub2);
+    assert(k2.state == "active");
+
+    // Start SignerDaemon loaded with the ROTATED key priv1
+    SignerConfig cfg;
+    cfg.socket_path = sock_path;
+    cfg.private_key_path = priv1;
+    cfg.key_manifest_path = manifest_path;
+    cfg.allowed_uids = {geteuid()};
+    cfg.require_distinct_uid = false;
+
+    std::atomic<bool> stop_flag{false};
+    SignerDaemon daemon(cfg);
+    daemon.start_listening();
+    std::thread server_thread([&]() { daemon.serve_forever(stop_flag); });
+
+    const uint64_t cg = 6666;
+    auto recon = reconstruct_process_tree({
+        make_ev(1, 1000, cg, EventType::Exec, 900, 1, 0, 0, "sh"),
+        make_ev(2, 1100, cg, EventType::Exit, 900, 1, 0, 0, "sh"),
+    }, cg, 900);
+
+    ObservationReceipt r;
+    r.observer_mode = "live";
+    r.observer_id = "obs-rot";
+    r.work_item_id = "wi-rot";
+    r.attempt_id = "att-rot";
+    r.lease_id = "lease-rot";
+    r.invocation_hash = "inv-rot";
+    r.cgroup_id = cg;
+    r.cgroup_path = "/sys/fs/cgroup/rot";
+    r.root_pid = 900;
+    r.start_time_ns = recon.start_time_ns;
+    r.end_time_ns = recon.end_time_ns;
+    r.events = recon.events;
+    r.process_tree = recon.process_tree;
+    r.category_completeness = recon.category_completeness;
+    r.event_counts = recon.counts;
+    r.status = "complete";
+
+    bool rotated_rejected = false;
+    try {
+        sign_receipt_via_socket(r, sock_path);
+    } catch (const std::exception& ex) {
+        rotated_rejected = (std::string(ex.what()).find("signing_key_not_active:rotated") != std::string::npos);
+    }
+    assert(rotated_rejected);
+
+    stop_flag.store(true);
+    server_thread.join();
+    daemon.stop();
+
+    std::filesystem::remove(manifest_path);
+    std::filesystem::remove(priv1);
+    std::filesystem::remove(pub1);
+    std::filesystem::remove(priv2);
+    std::filesystem::remove(pub2);
+    std::filesystem::remove(sock_path);
+}
+
+void test_rc_fs_io_uring_and_net_timeout_unreachable() {
+    const uint64_t cg = 7777;
+    std::vector<ObservedEvent> raw;
+    raw.push_back(make_ev(1, 1000, cg, EventType::Exec, 950, 1, 0, 0, "app"));
+
+    ObservedEvent uring_ev = make_ev(2, 1100, cg, EventType::Fs, 950, 1, 0, 0, "app");
+    uring_ev.op = WITNESS_FS_IO_URING;
+    uring_ev.phase = WITNESS_PHASE_ATTEMPTED;
+    raw.push_back(uring_ev);
+
+    ObservedEvent timeout_ev = make_ev(3, 1200, cg, EventType::Net, 950, 1, 0, 0, "app");
+    timeout_ev.op = WITNESS_NET_CONNECT;
+    timeout_ev.phase = WITNESS_PHASE_COMPLETED;
+    timeout_ev.outcome = WITNESS_NET_OUTCOME_TIMED_OUT;
+    timeout_ev.result_errno = 110;
+    timeout_ev.sock_cookie = 5001;
+    timeout_ev.af = AF_INET;
+    timeout_ev.proto = IPPROTO_TCP;
+    timeout_ev.remote_port = 443;
+    raw.push_back(timeout_ev);
+
+    ObservedEvent unreach_ev = make_ev(4, 1300, cg, EventType::Net, 950, 1, 0, 0, "app");
+    unreach_ev.op = WITNESS_NET_CONNECT;
+    unreach_ev.phase = WITNESS_PHASE_COMPLETED;
+    unreach_ev.outcome = WITNESS_NET_OUTCOME_UNREACHABLE;
+    unreach_ev.result_errno = 101;
+    unreach_ev.sock_cookie = 5002;
+    unreach_ev.af = AF_INET6;
+    unreach_ev.proto = IPPROTO_TCP;
+    unreach_ev.remote_port = 443;
+    raw.push_back(unreach_ev);
+
+    raw.push_back(make_ev(5, 1400, cg, EventType::Exit, 950, 1, 0, 0, "app"));
+
+    auto recon = reconstruct_process_tree(raw, cg, 950);
+    assert(recon.category_completeness.filesystem.status == "partial");
+    assert(recon.category_completeness.filesystem.unsupported_operations.size() == 1);
+    assert(recon.category_completeness.filesystem.unsupported_operations[0] == "io_uring");
+    assert(recon.network_events.size() == 2);
+    assert(recon.network_events[0].outcome == "timed_out");
+    assert(recon.network_events[0].errno_val == 110);
+    assert(recon.network_events[1].outcome == "unreachable");
+    assert(recon.network_events[1].errno_val == 101);
+}
+
 } // namespace
 
 int main() {
@@ -986,6 +1107,8 @@ int main() {
     RUN_TEST(test_phase4_filesystem_events_hmac_digest_and_completeness);
     RUN_TEST(test_phase5_network_ipv4_ipv6_tcp_udp_and_incomplete);
     RUN_TEST(test_phase6_v1_and_v2_domain_separation_and_category_tamper);
+    RUN_TEST(test_rc_p1_01_rotated_key_signing_rejected);
+    RUN_TEST(test_rc_fs_io_uring_and_net_timeout_unreachable);
     std::cout << "All " << g_tests_run << " tests passed.\n";
     return 0;
 }

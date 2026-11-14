@@ -552,7 +552,7 @@ JsonValue SignerDaemon::process_sign_request(
         if (kr->state == "retired") {
             return reject("signing_key_retired", wi, att, lease, inv);
         }
-        if (kr->state != "active" && kr->state != "rotated") {
+        if (kr->state != "active") {
             return reject("signing_key_not_active:" + kr->state, wi, att, lease, inv);
         }
     }
@@ -777,7 +777,7 @@ int run_signerd_cli(int argc, char** argv, int start_idx) {
         else if (arg == "--audit-log" && i + 1 < argc) cfg.audit_log_path = argv[++i];
         else if (arg == "--allow-uid" && i + 1 < argc) cfg.allowed_uids.push_back(static_cast<uid_t>(std::stoul(argv[++i])));
         else if (arg == "--forbid-workload-uid" && i + 1 < argc) cfg.forbidden_workload_uid = static_cast<uid_t>(std::stoul(argv[++i]));
-        else if (arg == "--allow-exe" && i + 1 < argc) cfg.allowed_exe_paths.emplace_back(argv[++i]);
+        else if ((arg == "--allow-exe" || arg == "--allowed-exe") && i + 1 < argc) cfg.allowed_exe_paths.emplace_back(argv[++i]);
         else if (arg == "--require-distinct-uid") cfg.require_distinct_uid = true;
         else if (arg == "--allow-same-uid-for-tests") cfg.require_distinct_uid = false;
         else if (arg == "--allow-synthetic-for-tests") cfg.allow_synthetic_for_tests = true;
