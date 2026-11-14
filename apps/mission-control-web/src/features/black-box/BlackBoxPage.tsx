@@ -255,6 +255,10 @@ function lead(summary: RunSummary, findings: Finding[]): string {
 function TimelineRow({ event, prior, open, onToggle, onCopy, copied }: { event: RecorderEvent; prior?: RecorderEvent; open: boolean; onToggle: () => void; onCopy: (value: string) => void; copied: string | null }) {
   const name = typeof event.metadata.acsEventName === "string" ? event.metadata.acsEventName : event.eventType;
   const tied = Boolean(prior?.sourceTimestamp && prior.sourceTimestamp === event.sourceTimestamp);
+  const isWitness = event.source.component === "jc-kernel-witness";
+  const procStatus = typeof event.metadata.processCategoryStatus === "string" ? event.metadata.processCategoryStatus : null;
+  const fsStatus = typeof event.metadata.filesystemCategoryStatus === "string" ? event.metadata.filesystemCategoryStatus : null;
+  const netStatus = typeof event.metadata.networkCategoryStatus === "string" ? event.metadata.networkCategoryStatus : null;
   return (
     <li className="border-l border-line py-2 pl-3">
       <button type="button" onClick={onToggle} className="min-h-11 w-full text-left">
@@ -269,6 +273,13 @@ function TimelineRow({ event, prior, open, onToggle, onCopy, copied }: { event: 
           <p>release {event.source.releaseId ?? "unknown"}</p>
           <p>digest {event.evidence.payloadSha256}</p>
           <p>integrity {event.evidence.integrityStatus}</p>
+          {isWitness && (procStatus || fsStatus || netStatus) ? (
+            <div className="mt-2 flex flex-wrap gap-1.5 font-sans">
+              {procStatus ? <StatusPill tone={procStatus === "complete" ? "ok" : "warn"}>Process {procStatus}</StatusPill> : null}
+              {fsStatus ? <StatusPill tone={fsStatus === "complete" ? "ok" : fsStatus === "incomplete" ? "bad" : "neutral"}>FS {fsStatus}</StatusPill> : null}
+              {netStatus ? <StatusPill tone={netStatus === "complete" ? "ok" : netStatus === "incomplete" ? "bad" : "neutral"}>Net {netStatus}</StatusPill> : null}
+            </div>
+          ) : null}
           <button type="button" onClick={() => onCopy(event.eventId)} className="mt-2 min-h-11 font-sans text-sm text-accent">{copied === event.eventId ? "Copied" : "Copy event id"}</button>
         </div>
       ) : null}

@@ -59,6 +59,7 @@ import { createDirectory, deleteFile, editBlock, moveFile, writeFile } from './m
 import { createProcessRegistry, type ProcessExecutionContext } from './processes.js';
 import {
   SeenReceiptStore,
+  WitnessChainStateStore,
   kernelWitnessConfigFromEnv,
   submitWitnessReceiptToAcs,
   type WitnessRunOutcome,
@@ -230,7 +231,73 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
   const trace = new JsonlTraceChain(path.join(config.stateDir, 'traces', `${runId}.jsonl`), runId);
   const witnessConfig = config.witness ?? kernelWitnessConfigFromEnv(config.stateDir);
   const witnessSeenStore = new SeenReceiptStore(path.join(config.stateDir, 'witness-seen'));
-  let lastWitnessEvidenceHash: string | null = null;
+  const witnessChainStore = new WitnessChainStateStore(config.stateDir);
+  let lastWitnessEvidenceHash: string | null = witnessChainStore.getHeadHash();
+  const reportedWitnessSessions = new Set<string>();
+
+  async function recordWitnessOutcome(
+    toolName: string,
+    sessionId: string | undefined,
+    auth: JcAuthorization | undefined,
+    witnessOutcome: WitnessRunOutcome,
+  ): Promise<void> {
+    if (sessionId && reportedWitnessSessions.has(sessionId)) return;
+    if (sessionId) reportedWitnessSessions.add(sessionId);
+    if (witnessOutcome.verification.valid && witnessOutcome.verification.complete && witnessOutcome.receipt) {
+      lastWitnessEvidenceHash = witnessOutcome.receipt.evidenceHash;
+      try {
+        witnessChainStore.recordHeadHash(witnessOutcome.receipt.evidenceHash);
+      } catch {
+        // Best-effort chain state persistence.
+      }
+      try {
+        trace.append('witness_observation_recorded', {
+          tool: toolName,
+          ...authTrace(auth),
+          sessionId,
+          schemaVersion: witnessOutcome.receipt.schemaVersion,
+          evidenceHash: witnessOutcome.receipt.evidenceHash,
+          previousEvidenceHash: witnessOutcome.receipt.previousEvidenceHash,
+          observerMode: witnessOutcome.receipt.observerMode,
+          observerId: witnessOutcome.receipt.observerId,
+          cgroupId: witnessOutcome.receipt.cgroupId,
+          ...(witnessOutcome.receipt.rootPid !== undefined ? { rootPid: witnessOutcome.receipt.rootPid } : {}),
+          ...(witnessOutcome.receipt.signedAtUtc ? { signedAtUtc: witnessOutcome.receipt.signedAtUtc } : {}),
+          ...(witnessOutcome.receipt.acsAnchorRef ? { acsAnchorRef: witnessOutcome.receipt.acsAnchorRef } : {}),
+          ...(witnessOutcome.receipt.observationScope ? { observationScope: witnessOutcome.receipt.observationScope } : {}),
+          ...(witnessOutcome.receipt.categoryCompleteness ? { categoryCompleteness: witnessOutcome.receipt.categoryCompleteness } : {}),
+          status: witnessOutcome.receipt.status,
+          eventCounts: witnessOutcome.receipt.eventCounts,
+          signingKeyId: witnessOutcome.receipt.signingKeyId,
+        });
+      } catch {
+        // Best-effort witness projection; never mutates asserted tool result.
+      }
+      if (config.acsUrl) {
+        const token = config.acsAuthorityToken ?? (await acsAccessToken(config.acsUrl, config.stateDir, process.env, fetchImpl).catch(() => undefined));
+        await submitWitnessReceiptToAcs({
+          acsUrl: config.acsUrl,
+          token,
+          receipt: witnessOutcome.receipt,
+          timeoutMs: config.requestTimeoutMs,
+          fetchImpl,
+        });
+      }
+    } else {
+      try {
+        trace.append('witness_observation_incomplete', {
+          tool: toolName,
+          ...authTrace(auth),
+          sessionId,
+          status: witnessOutcome.receipt?.status ?? 'missing',
+          reasons: witnessOutcome.verification.reasons,
+          ...(witnessOutcome.verification.evidenceHash ? { evidenceHash: witnessOutcome.verification.evidenceHash } : {}),
+        });
+      } catch {
+        // Best-effort witness projection.
+      }
+    }
+  }
 
   const acsGet = async (url: string) => requestJson(url, {
     timeoutMs: config.requestTimeoutMs,
@@ -408,6 +475,9 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     }
 
     let result: ToolResult;
+    if (witnessConfig.enabled) {
+      lastWitnessEvidenceHash = witnessChainStore.getHeadHash() ?? lastWitnessEvidenceHash;
+    }
     const processContext: ProcessExecutionContext | undefined = witnessConfig.enabled
       ? {
         ...(authorization ? {
@@ -417,8 +487,10 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
           invocationHash: authorization.invocationHash,
         } : {}),
         previousEvidenceHash: lastWitnessEvidenceHash,
+        managed: mode === 'managed',
         witness: witnessConfig,
         seenStore: witnessSeenStore,
+        onWitnessComplete: (sid, outcome) => recordWitnessOutcome(name, sid, authorization, outcome),
       }
       : undefined;
     try {
@@ -430,62 +502,22 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     }
     if (!result.isError && result.structuredContent?.witness && witnessConfig.enabled) {
       const witnessOutcome = result.structuredContent.witness as WitnessRunOutcome;
-      if (witnessOutcome.verification.valid && witnessOutcome.verification.complete && witnessOutcome.receipt) {
-        lastWitnessEvidenceHash = witnessOutcome.receipt.evidenceHash;
-        try {
-          trace.append('witness_observation_recorded', {
-            tool: name,
-            ...authTrace(authorization),
-            sessionId: result.structuredContent.sessionId,
-            evidenceHash: witnessOutcome.receipt.evidenceHash,
-            previousEvidenceHash: witnessOutcome.receipt.previousEvidenceHash,
-            observerMode: witnessOutcome.receipt.observerMode,
-            observerId: witnessOutcome.receipt.observerId,
-            cgroupId: witnessOutcome.receipt.cgroupId,
-            ...(witnessOutcome.receipt.rootPid !== undefined ? { rootPid: witnessOutcome.receipt.rootPid } : {}),
-            status: witnessOutcome.receipt.status,
-            eventCounts: witnessOutcome.receipt.eventCounts,
-            signingKeyId: witnessOutcome.receipt.signingKeyId,
-          });
-        } catch {
-          // Best-effort witness projection; never mutates asserted tool result.
-        }
-        if (config.acsUrl) {
-          const token = config.acsAuthorityToken ?? (await acsAccessToken(config.acsUrl, config.stateDir, process.env, fetchImpl).catch(() => undefined));
-          await submitWitnessReceiptToAcs({
-            acsUrl: config.acsUrl,
-            token,
-            receipt: witnessOutcome.receipt,
-            timeoutMs: config.requestTimeoutMs,
-            fetchImpl,
-          });
-        }
-      } else {
-        try {
-          trace.append('witness_observation_incomplete', {
-            tool: name,
-            ...authTrace(authorization),
-            sessionId: result.structuredContent.sessionId,
-            status: witnessOutcome.receipt?.status ?? 'missing',
-            reasons: witnessOutcome.verification.reasons,
-            ...(witnessOutcome.verification.evidenceHash ? { evidenceHash: witnessOutcome.verification.evidenceHash } : {}),
-          });
-        } catch {
-          // Best-effort witness projection.
-        }
-        if (witnessConfig.required) {
-          const reasons = witnessOutcome.verification.reasons;
-          const cryptoOrReplayFailure =
-            reasons.includes('evidence_hash_mismatch')
-            || reasons.includes('signature_invalid')
-            || reasons.includes('receipt_replayed')
-            || reasons.includes('previous_evidence_hash_mismatch')
-            || reasons.includes('public_key_unavailable')
-            || reasons.includes('receipt_missing_or_unreadable')
-            || reasons.some((r) => r.startsWith('correlation_mismatch'));
-          const errCode = cryptoOrReplayFailure ? 'JC_WITNESS_VERIFICATION_FAILED' : 'JC_WITNESS_INCOMPLETE';
-          result = fail(errCode, `kernel witness observation failed (${reasons.join(', ')})`);
-        }
+      const sid = typeof result.structuredContent.sessionId === 'string' ? result.structuredContent.sessionId : undefined;
+      await recordWitnessOutcome(name, sid, authorization, witnessOutcome);
+      if ((!witnessOutcome.verification.valid || !witnessOutcome.verification.complete) && witnessConfig.required) {
+        const reasons = witnessOutcome.verification.reasons;
+        const cryptoOrReplayFailure =
+          reasons.includes('evidence_hash_mismatch')
+          || reasons.includes('signature_invalid')
+          || reasons.includes('receipt_replayed')
+          || reasons.includes('previous_evidence_hash_mismatch')
+          || reasons.includes('public_key_unavailable')
+          || reasons.includes('receipt_missing_or_unreadable')
+          || reasons.includes('observer_mode_not_live')
+          || reasons.some((r) => r.startsWith('correlation_mismatch'))
+          || reasons.some((r) => r.startsWith('category_digest_mismatch'));
+        const errCode = cryptoOrReplayFailure ? 'JC_WITNESS_VERIFICATION_FAILED' : 'JC_WITNESS_INCOMPLETE';
+        result = fail(errCode, `kernel witness observation failed (${reasons.join(', ')})`);
       }
     }
     const meta = {
@@ -551,6 +583,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     fsRoots: policy?.effective.fsRoots ?? config.fsRoots,
     fsDeniedRoots: [...config.fsDeniedRoots, ...(policy?.effective.fsDeniedRoots ?? []), ...(mode === 'local' ? [config.policyPath, config.policyUserPath] : [])],
     managed: mode === 'managed',
+    witness: witnessConfig,
   }, config.sandboxEnv as NodeJS.ProcessEnv);
   const fsPolicy: JcFsPolicy = {
     workload: { policy: sandboxPolicy, homeDir: config.homeDir, stateDir: config.stateDir },
@@ -558,6 +591,13 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     deniedRoots: [
       ...defaultDeniedRoots(config.stateDir, config.homeDir),
       ...config.fsDeniedRoots,
+      witnessConfig.receiptDir,
+      path.join(config.stateDir, 'witness-seen'),
+      '/run/jc-witness-signer',
+      '/var/lib/jace-commander/witness-signer',
+      ...(witnessConfig.signingKeyPath ? [witnessConfig.signingKeyPath] : []),
+      ...(witnessConfig.signerSocketPath ? [witnessConfig.signerSocketPath] : []),
+      ...(witnessConfig.pathHmacKeyFile ? [witnessConfig.pathHmacKeyFile] : []),
       // The model must not be able to read the policy it is governed by, or edit it.
       ...(mode === 'local' ? [config.policyPath, config.policyUserPath] : []),
       ...(policy?.effective.fsDeniedRoots ?? []),

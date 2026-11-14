@@ -2,7 +2,16 @@ import { generateKeyPairSync, sign } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { canonicalJson, sha256Hex, type JcKernelWitnessReceiptV1 } from "@agent-control-stack/black-box-recorder";
+import {
+  canonicalJson,
+  computeV2CategoryDigests,
+  computeWitnessEvidenceHash,
+  sha256Hex,
+  witnessCanonicalBody,
+  witnessSigningPayload,
+  type JcKernelWitnessReceiptV1,
+  type JcKernelWitnessReceiptV2
+} from "@agent-control-stack/black-box-recorder";
 import { canonicalTraceJson, traceSha256 } from "@agent-control-stack/work-items";
 import { afterEach, describe, expect, it } from "vitest";
 import { correlate } from "../src/correlate.js";
@@ -15,7 +24,10 @@ import {
   type EvidenceEvent
 } from "../src/model.js";
 import { JcTraceReader } from "../src/sources/jc-trace.js";
-import { witnessReceiptToEvidence } from "../src/sources/witness.js";
+import {
+  witnessReceiptToCategoryEvidence,
+  witnessReceiptToEvidence
+} from "../src/sources/witness.js";
 import { verifyAssertions } from "../src/verify.js";
 
 const dirs: string[] = [];
@@ -277,5 +289,279 @@ describe("LoopTrace Query JC correlation & Witness verification", () => {
 
     const gaps = buildGapReport(viewForged as never, corrForged, [{ source: "acs", status: "ok", detail: "" }], now);
     expect(gaps.gaps.some((g) => g.code === "WITNESS_PROVENANCE_INVALID")).toBe(true);
+  });
+
+  it("enforces Phase 6 v2 scope coverage: process-only cannot satisfy full-scope policy, and incomplete fs/net downgrades to INCONCLUSIVE", async () => {
+    const { publicKeyPem, privateKeyPem } = makeEd25519Keys();
+    const now = new Date("2026-11-13T00:00:05.000Z");
+
+    const processTree = [
+      {
+        pid: 4001,
+        tgid: 4001,
+        ppid: 4000,
+        comm: "bash",
+        uid: 1000,
+        gid: 1000,
+        forkedAtNs: 0,
+        execedAtNs: 1100,
+        exitedAtNs: 1900,
+        exitCode: 0,
+        children: []
+      }
+    ];
+    const filesystemEvents = [
+      {
+        seq: 1,
+        timestampNs: 1200,
+        cgroupId: 1001,
+        pid: 4001,
+        tgid: 4001,
+        comm: "bash",
+        uid: 1000,
+        gid: 1000,
+        op: "MODIFY" as const,
+        phase: "completed" as const,
+        succeeded: true,
+        resultErrno: 0,
+        bytes: 16,
+        flags: 1,
+        dev: 1,
+        inode: 42,
+        mountId: 10,
+        pathDigest: await sha256Hex("/workspace/file.txt"),
+        pathDigestKeyId: "hmac-1",
+        displayPath: "/workspace/file.txt",
+        targetPathDigest: null,
+        targetDisplayPath: null,
+        targetInode: 0
+      }
+    ];
+    const networkEvents = [
+      {
+        seq: 1,
+        timestampNs: 1300,
+        cgroupId: 1001,
+        pid: 4001,
+        tgid: 4001,
+        comm: "bash",
+        sockCookie: 77,
+        af: "INET" as const,
+        proto: "TCP" as const,
+        op: "CONNECT" as const,
+        phase: "completed" as const,
+        stateTransition: "SYN_SENT->ESTABLISHED",
+        outcome: "connected" as const,
+        errnoVal: 0,
+        remoteAddrDigest: await sha256Hex("10.0.0.5"),
+        displayRemoteAddr: "10.0.0.5",
+        remotePort: 8443,
+        localPort: 50000,
+        bytes: 0
+      }
+    ];
+
+    const digests = await computeV2CategoryDigests({
+      processTree,
+      filesystemEvents,
+      networkEvents
+    });
+
+    async function makeV2Receipt(
+      overrides?: Partial<Omit<JcKernelWitnessReceiptV2, "evidenceHash" | "signature">>
+    ): Promise<JcKernelWitnessReceiptV2> {
+      const body: Omit<JcKernelWitnessReceiptV2, "evidenceHash" | "signature"> = {
+        schemaVersion: "jc.kernel-witness.receipt.v2",
+        observerVersion: "0.2.0",
+        observerMode: "live",
+        observerId: "witness-v2",
+        workItemId: "wi-1",
+        attemptId: "att-1",
+        leaseId: "lease-1",
+        invocationHash: "a".repeat(64),
+        cgroupId: 1001,
+        cgroupPath: "/sys/fs/cgroup/jc-wi-1",
+        rootPid: 4001,
+        startTimeNs: 1000,
+        endTimeNs: 2000,
+        signedAtUtc: "2026-11-13T00:00:05.000Z",
+        status: "complete",
+        incompleteReasons: [],
+        observationScope: {
+          policyRequired: ["process", "filesystem", "network"],
+          requested: ["process", "filesystem", "network"],
+          active: ["process", "filesystem", "network"]
+        },
+        categoryCompleteness: {
+          process: {
+            category: "process",
+            enabled: true,
+            status: "complete",
+            eventCount: 1,
+            droppedEvents: 0,
+            sequenceGaps: 0,
+            firstSeq: 1,
+            lastSeq: 1,
+            categoryDigestSha256: digests.process,
+            incompleteReasons: [],
+            unsupportedOperations: []
+          },
+          filesystem: {
+            category: "filesystem",
+            enabled: true,
+            status: "complete",
+            eventCount: 1,
+            droppedEvents: 0,
+            sequenceGaps: 0,
+            firstSeq: 1,
+            lastSeq: 1,
+            categoryDigestSha256: digests.filesystem,
+            incompleteReasons: [],
+            unsupportedOperations: []
+          },
+          network: {
+            category: "network",
+            enabled: true,
+            status: "complete",
+            eventCount: 1,
+            droppedEvents: 0,
+            sequenceGaps: 0,
+            firstSeq: 1,
+            lastSeq: 1,
+            categoryDigestSha256: digests.network,
+            incompleteReasons: [],
+            unsupportedOperations: []
+          }
+        },
+        events: [],
+        processTree,
+        filesystemEvents,
+        networkEvents,
+        eventCounts: {
+          total: 3,
+          fork: 0,
+          exec: 1,
+          exit: 0,
+          filesystem: 1,
+          network: 1
+        },
+        droppedEvents: 0,
+        sequenceGaps: 0,
+        previousEvidenceHash: null,
+        acsAnchorRef: "acs:work_item:wi-1",
+        signingKeyId: "wk-1",
+        ...overrides
+      };
+      const canonical = witnessCanonicalBody(body);
+      const evidenceHash = await computeWitnessEvidenceHash(body);
+      const sigPayload = witnessSigningPayload({ ...body, evidenceHash }, canonical);
+      const signature = sign(null, Buffer.from(sigPayload, "utf8"), privateKeyPem).toString("base64");
+      return { ...body, evidenceHash, signature };
+    }
+
+    // 1. Full-scope v2 receipt -> PASS and emits category evidence events
+    const fullV2 = await makeV2Receipt();
+    const catEvents = await witnessReceiptToCategoryEvidence(fullV2, {
+      trustedWitnessKeys: { "wk-1": publicKeyPem },
+      requiredWitnessScope: ["process", "filesystem", "network"],
+      now
+    });
+    expect(catEvents.map((e) => e.event_type)).toEqual([
+      "witness.observed",
+      "witness.fs.observed",
+      "witness.net.observed"
+    ]);
+    const fullAllEvents = [makeAcsState("wi-1"), makeValidationPass("wi-1"), catEvents[0]!];
+    const corrFull = correlate(fullAllEvents);
+    const viewFull = {
+      events: corrFull.events,
+      state: fullAllEvents[0]!,
+      status: "succeeded",
+      of: (t: EvidenceEvent["event_type"]) => corrFull.events.filter((e) => e.event_type === t),
+      refs: (...es: Array<EvidenceEvent | undefined>) => es.filter(Boolean).map((e) => e!.evidence_ref)
+    };
+    const resFull = await verifyAssertions(
+      [{ type: "operation_completed" }],
+      viewFull as never,
+      corrFull,
+      [{ source: "acs", status: "ok", detail: "" }],
+      {
+        releaseRoots: [],
+        healthTargets: [],
+        now,
+        requiredWitnessScope: ["process", "filesystem", "network"]
+      }
+    );
+    expect(resFull[0]!.verdict).toBe("PASS");
+
+    // 2. Process-only v1 receipt CANNOT satisfy full-scope policy -> INCONCLUSIVE + WITNESS_SCOPE_INSUFFICIENT
+    const v1ProcessOnly = await signReceipt({}, privateKeyPem);
+    const v1Ev = await witnessReceiptToEvidence(v1ProcessOnly, {
+      trustedWitnessKeys: { "wk-1": publicKeyPem },
+      requiredWitnessScope: ["process", "filesystem", "network"],
+      now
+    });
+    expect(v1Ev.event_type).toBe("witness.incomplete");
+    expect(v1Ev.flags).toContain("witness_scope_insufficient");
+
+    const scopeEvents = [makeAcsState("wi-1"), makeValidationPass("wi-1"), v1Ev];
+    const corrScope = correlate(scopeEvents);
+    const viewScope = {
+      events: corrScope.events,
+      state: scopeEvents[0]!,
+      status: "succeeded",
+      of: (t: EvidenceEvent["event_type"]) => corrScope.events.filter((e) => e.event_type === t),
+      refs: (...es: Array<EvidenceEvent | undefined>) => es.filter(Boolean).map((e) => e!.evidence_ref)
+    };
+    const resScope = await verifyAssertions(
+      [{ type: "operation_completed" }],
+      viewScope as never,
+      corrScope,
+      [{ source: "acs", status: "ok", detail: "" }],
+      {
+        releaseRoots: [],
+        healthTargets: [],
+        now,
+        requiredWitnessScope: ["process", "filesystem", "network"]
+      }
+    );
+    expect(resScope[0]!.verdict).toBe("INCONCLUSIVE");
+    const scopeGaps = buildGapReport(viewScope as never, corrScope, [{ source: "acs", status: "ok", detail: "" }], now);
+    expect(scopeGaps.gaps.some((g) => g.code === "WITNESS_SCOPE_INSUFFICIENT")).toBe(true);
+
+    // 3. Incomplete filesystem category -> INCONCLUSIVE + WITNESS_FILESYSTEM_INCOMPLETE
+    const fsDropV2 = await makeV2Receipt({
+      status: "incomplete",
+      incompleteReasons: ["fs_ringbuf_drops"],
+      droppedEvents: 3,
+      categoryCompleteness: {
+        ...fullV2.categoryCompleteness,
+        filesystem: {
+          ...fullV2.categoryCompleteness.filesystem,
+          status: "incomplete",
+          droppedEvents: 3,
+          incompleteReasons: ["fs_ringbuf_drops"]
+        }
+      }
+    });
+    const fsDropEv = await witnessReceiptToEvidence(fsDropV2, {
+      trustedWitnessKeys: { "wk-1": publicKeyPem },
+      requiredWitnessScope: ["process", "filesystem", "network"],
+      now
+    });
+    expect(fsDropEv.event_type).toBe("witness.incomplete");
+    expect(fsDropEv.flags).toContain("witness_filesystem_incomplete");
+
+    const fsEvents = [makeAcsState("wi-1"), makeValidationPass("wi-1"), fsDropEv];
+    const corrFs = correlate(fsEvents);
+    const viewFs = {
+      events: corrFs.events,
+      state: fsEvents[0]!,
+      status: "succeeded",
+      of: (t: EvidenceEvent["event_type"]) => corrFs.events.filter((e) => e.event_type === t),
+      refs: (...es: Array<EvidenceEvent | undefined>) => es.filter(Boolean).map((e) => e!.evidence_ref)
+    };
+    const fsGaps = buildGapReport(viewFs as never, corrFs, [{ source: "acs", status: "ok", detail: "" }], now);
+    expect(fsGaps.gaps.some((g) => g.code === "WITNESS_FILESYSTEM_INCOMPLETE")).toBe(true);
   });
 });

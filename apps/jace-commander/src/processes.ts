@@ -35,9 +35,13 @@ export interface ProcessExecutionContext {
   attemptId?: string;
   leaseId?: string;
   invocationHash?: string;
+  acsAnchorRef?: string | null;
+  rootPid?: number;
   previousEvidenceHash?: string | null;
+  managed?: boolean;
   witness?: KernelWitnessConfig;
   seenStore?: SeenReceiptStore;
+  onWitnessComplete?: (sessionId: string, outcome: WitnessRunOutcome) => void | Promise<void>;
 }
 
 interface Session {
@@ -48,6 +52,8 @@ interface Session {
   sandboxPid?: number; sandboxStart?: string;
   witnessReceiptPath?: string;
   witnessOutcome?: WitnessRunOutcome;
+  witnessReported?: boolean;
+  witnessReportPromise?: Promise<void>;
 }
 export interface ProcessRegistry {
   start(args: Record<string, unknown>, policy: JcFsPolicy, owner?: string, context?: ProcessExecutionContext): Record<string, unknown>;
@@ -121,10 +127,39 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
   function launch(argv: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number, owner: string | undefined, policy: JcFsPolicy, context?: ProcessExecutionContext): Session {
     if (!policy.workload) throw new IntegrationError('JC_SANDBOX_UNAVAILABLE', 'no workload sandbox is configured; nothing ran');
     assertSandboxReady(policy.workload.policy, policy.workload.homeDir, policy.workload.stateDir);
-    const isolated = policy.workload.policy.isolation === 'bwrap';
-    const sandboxed = sandboxArgv(policy.workload.policy, argv, cwd, isolated ? { infoFd: 3 } : {});
+    const witness = context?.witness;
+    let effectiveSandboxPolicy = policy.workload.policy;
+    if (witness?.enabled) {
+      fs.mkdirSync(witness.receiptDir, { recursive: true, mode: 0o700 });
+      const isAncestorOfWritable = (dir: string): boolean => {
+        const resolved = path.resolve(dir);
+        return policy.workload!.policy.writable.some((w) => {
+          const rw = path.resolve(w);
+          return rw === resolved || rw.startsWith(resolved + path.sep);
+        });
+      };
+      const extraHidden = [
+        witness.receiptDir,
+        ...(witness.signingKeyPath ? [witness.signingKeyPath] : []),
+        ...(witness.signerSocketPath
+          ? [
+              witness.signerSocketPath,
+              ...(!isAncestorOfWritable(path.dirname(witness.signerSocketPath))
+                ? [path.dirname(witness.signerSocketPath)]
+                : []),
+            ]
+          : []),
+        ...(witness.pathHmacKeyFile ? [witness.pathHmacKeyFile] : []),
+      ];
+      effectiveSandboxPolicy = Object.freeze({
+        ...policy.workload.policy,
+        hidden: Object.freeze([...new Set([...policy.workload.policy.hidden, ...extraHidden])]),
+      });
+    }
+    const isolated = effectiveSandboxPolicy.isolation === 'bwrap';
+    const sandboxed = sandboxArgv(effectiveSandboxPolicy, argv, cwd, isolated ? { infoFd: 3 } : {});
     // The sandbox has a private /tmp; never point a workload at a host temp dir.
-    const workloadEnv = policy.workload.policy.isolation === 'bwrap' ? { ...env, TMPDIR: '/tmp' } : env;
+    const workloadEnv = effectiveSandboxPolicy.isolation === 'bwrap' ? { ...env, TMPDIR: '/tmp' } : env;
     if (sessions.size >= MAX_SESSIONS) {
       const finished = [...sessions.values()].find((s) => s.done);
       if (!finished) throw new IntegrationError('too_many_processes','at most 32 managed processes may run at once');
@@ -134,11 +169,9 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
     let launchArgv = sandboxed;
     let witnessReceiptPath: string | undefined;
     let initialWitnessOutcome: WitnessRunOutcome | undefined;
-    const witness = context?.witness;
     if (witness?.enabled) {
       try {
-        assertWitnessBinaryReady(witness);
-        fs.mkdirSync(witness.receiptDir, { recursive: true, mode: 0o700 });
+        assertWitnessBinaryReady(witness, { managed: context?.managed });
         witnessReceiptPath = path.join(witness.receiptDir, `${sessionId}.json`);
         launchArgv = buildWitnessRunArgv(witness, {
           receiptOutPath: witnessReceiptPath,
@@ -146,6 +179,7 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
           attemptId: context?.attemptId,
           leaseId: context?.leaseId,
           invocationHash: context?.invocationHash,
+          acsAnchorRef: context?.acsAnchorRef !== undefined ? context.acsAnchorRef : context?.workItemId,
           previousEvidenceHash: context?.previousEvidenceHash,
         }, sandboxed);
       } catch (error) {
@@ -193,10 +227,19 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
             attemptId: context?.attemptId,
             leaseId: context?.leaseId,
             invocationHash: context?.invocationHash,
+            ...(context?.rootPid !== undefined ? { rootPid: context.rootPid } : {}),
+            ...(s.sandboxPid !== undefined ? { sandboxPid: s.sandboxPid } : {}),
+            ...(context?.acsAnchorRef !== undefined ? { acsAnchorRef: context.acsAnchorRef } : {}),
             previousEvidenceHash: context?.previousEvidenceHash,
           },
           context?.seenStore,
         );
+      }
+      if (s.witnessOutcome && !s.witnessReported && context?.onWitnessComplete) {
+        s.witnessReported = true;
+        s.witnessReportPromise = Promise.resolve(
+          context.onWitnessComplete(s.sessionId, s.witnessOutcome),
+        ).catch(() => {});
       }
       s.done=true;s.exitCode=code;s.signal=signal;clearTimeout(s.timer);
     });
@@ -224,6 +267,7 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
     while (!s.done && s.stdout.end<=a && s.stderr.end<=b && Date.now()<until) {
       await new Promise((resolve)=>setTimeout(resolve,Math.min(10,Math.max(1,until-Date.now()))));
     }
+    if (s.done && s.witnessReportPromise) await s.witnessReportPromise;
     return output(args,owner);
   }
   async function shell(args: Record<string,unknown>,policy: JcFsPolicy,owner: string|undefined,interactive: boolean,context?: ProcessExecutionContext): Promise<Record<string,unknown>> {
@@ -242,6 +286,7 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
     // run_command waits for completion, rather than returning on the first chunk.
     const until=Date.now()+wait;
     while (!s.done && Date.now()<until) await new Promise((resolve)=>setTimeout(resolve,10));
+    if (s.done && s.witnessReportPromise) await s.witnessReportPromise;
     return {...output({sessionId:s.sessionId},owner),cwd,timeoutMs:timeout,pty:interactive || args.pty===true};
   }
   return {
@@ -290,6 +335,7 @@ export function createProcessRegistry(options: { shells?: readonly string[] } = 
       // the grace deadline), so a caller never observes a "killed" process running.
       const until=Date.now()+KILL_GRACE_MS+2000;
       while (!s.done && Date.now()<until) await new Promise((resolve)=>setTimeout(resolve,10));
+      if (s.done && s.witnessReportPromise) await s.witnessReportPromise;
       return {sessionId:s.sessionId,pid:s.pid,signal:'SIGTERM',escalatesAfterMs:KILL_GRACE_MS,exited:s.done,exitSignal:s.signal,
         ...(s.done && s.witnessOutcome ? { witness: s.witnessOutcome } : {}),
         // Diagnostics: the process itself exited, but its output streams were still open.

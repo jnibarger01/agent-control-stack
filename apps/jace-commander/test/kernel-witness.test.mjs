@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 /**
- * TDD regression tests for JC Kernel Witness integration:
- * - Receipt Ed25519 signature, canonical hash, completeness, correlation, and replay protection
+ * TDD regression tests for JC Kernel Witness integration (v1 & v2):
+ * - v1 and v2 receipt Ed25519 signature, domain-separated canonical hash, category digests,
+ *   completeness, scope coverage, correlation, live-mode enforcement, and replay protection
+ * - Signer socket (`--signer-socket`) and `--acs-anchor-ref` wiring; raw key forbidden in live/managed mode
+ * - Sandbox masking of signer sockets, signing keys, and receipt dirs even inside JC_FS_ROOTS
  * - Pre-exec witness wrapping in processes.ts (preserving bwrap --info-fd 3)
  * - Fail-closed behavior on missing witness, incomplete observation, tampered/replayed receipt
- * - Server LoopTrace witness events + ACS POST /black-box/kernel-witness/receipts submission
+ * - Single-emission LoopTrace witness events + ACS POST on process close (async start_process
+ *   and repeated read_process_output) + persistent locked WitnessChainStateStore
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -17,13 +21,16 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import {
   SeenReceiptStore,
+  WitnessChainStateStore,
   assertSigningKeyCustody,
+  assertWitnessBinaryReady,
   buildWitnessRunArgv,
   canonicalWitnessBody,
+  computeV2CategoryDigest,
   verifyKernelWitnessReceipt,
 } from '../dist/kernel-witness.js';
 import { createProcessRegistry } from '../dist/processes.js';
-import { sandboxPolicyFromEnv } from '../dist/sandbox.js';
+import { sandboxArgv, sandboxPolicyFromEnv } from '../dist/sandbox.js';
 import { loadJcConfig } from '../dist/config.js';
 import { createJcServer } from '../dist/server.js';
 import { readTraceFile, verifyChain } from '../dist/looptrace.js';
@@ -36,6 +43,16 @@ const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toStri
 
 function signReceipt(base) {
   const body = canonicalWitnessBody(base);
+  if (base.schemaVersion === 'jc.kernel-witness.receipt.v2') {
+    const evidenceHash = crypto
+      .createHash('sha256')
+      .update(`jc.kernel-witness.receipt.v2:${body}`, 'utf8')
+      .digest('hex');
+    const signature = crypto
+      .sign(null, Buffer.from(`jc.kernel-witness.sig.v2:${evidenceHash}:${body}`, 'utf8'), privateKey)
+      .toString('base64');
+    return { ...base, evidenceHash, signature };
+  }
   const evidenceHash = crypto.createHash('sha256').update(body, 'utf8').digest('hex');
   const signature = crypto.sign(null, Buffer.from(body, 'utf8'), privateKey).toString('base64');
   return { ...base, evidenceHash, signature };
@@ -94,10 +111,170 @@ function makeReceipt(overrides = {}) {
     droppedEvents: 0,
     sequenceGaps: 0,
     previousEvidenceHash: null,
-    acsAnchorRef: null,
+    acsAnchorRef: 'wi-123',
     signingKeyId: 'witness-key-1',
     ...overrides,
   });
+}
+
+function makeReceiptV2(overrides = {}) {
+  const processTree = overrides.processTree ?? [
+    {
+      pid: 101,
+      tgid: 101,
+      ppid: 100,
+      comm: 'sh',
+      uid: 1000,
+      gid: 1000,
+      forkedAtNs: 1000,
+      execedAtNs: 1100,
+      exitedAtNs: 1900,
+      exitCode: 0,
+      children: [],
+    },
+  ];
+  const filesystemEvents = overrides.filesystemEvents ?? [
+    {
+      seq: 2,
+      timestampNs: 1200,
+      cgroupId: 4242,
+      pid: 101,
+      tgid: 101,
+      comm: 'sh',
+      uid: 1000,
+      gid: 1000,
+      op: 'CREATE',
+      phase: 'completed',
+      succeeded: true,
+      resultErrno: 0,
+      bytes: 12,
+      flags: 65,
+      dev: 2049,
+      inode: 99911,
+      mountId: 28,
+      pathDigest: 'hmac-sha256:' + '1'.repeat(64),
+      pathDigestKeyId: 'pathkey:0123456789abcdef',
+      displayPath: null,
+      targetPathDigest: null,
+      targetDisplayPath: null,
+      targetInode: 0,
+    },
+  ];
+  const networkEvents = overrides.networkEvents ?? [
+    {
+      seq: 3,
+      timestampNs: 1300,
+      cgroupId: 4242,
+      pid: 101,
+      tgid: 101,
+      comm: 'sh',
+      sockCookie: 5001,
+      af: 'INET',
+      proto: 'TCP',
+      op: 'CONNECT',
+      phase: 'completed',
+      stateTransition: 'TCP_SYN_SENT->TCP_ESTABLISHED',
+      outcome: 'connected',
+      errnoVal: 0,
+      remoteAddrDigest: 'hmac-sha256:' + '2'.repeat(64),
+      displayRemoteAddr: null,
+      remotePort: 443,
+      localPort: 51234,
+      bytes: 0,
+    },
+  ];
+  const base = {
+    schemaVersion: 'jc.kernel-witness.receipt.v2',
+    observerVersion: '0.2.0',
+    observerMode: 'live',
+    observerId: 'obs-test-v2',
+    workItemId: 'wi-123',
+    attemptId: 'att-123',
+    leaseId: 'lease-123',
+    invocationHash: 'a'.repeat(64),
+    cgroupId: 4242,
+    cgroupPath: '/sys/fs/cgroup/user.slice/jc-test',
+    rootPid: 101,
+    startTimeNs: 1000,
+    endTimeNs: 2000,
+    signedAtUtc: '2026-11-13T23:59:00.000Z',
+    status: 'complete',
+    incompleteReasons: [],
+    events: [
+      {
+        seq: 1,
+        timestampNs: 1100,
+        cgroupId: 4242,
+        eventType: 'EXEC',
+        pid: 101,
+        tgid: 101,
+        ppid: 100,
+        childPid: 0,
+        childTgid: 0,
+        uid: 1000,
+        gid: 1000,
+        exitCode: 0,
+        comm: 'sh',
+      },
+    ],
+    processTree,
+    filesystemEvents,
+    networkEvents,
+    eventCounts: { total: 3, fork: 0, exec: 1, exit: 0, filesystem: 1, network: 1 },
+    observationScope: {
+      policyRequired: ['process', 'filesystem', 'network'],
+      requested: ['process', 'filesystem', 'network'],
+      active: ['process', 'filesystem', 'network'],
+    },
+    categoryCompleteness: {
+      process: {
+        category: 'process',
+        enabled: true,
+        status: 'complete',
+        eventCount: 1,
+        droppedEvents: 0,
+        sequenceGaps: 0,
+        firstSeq: 1,
+        lastSeq: 1,
+        categoryDigestSha256: computeV2CategoryDigest('process', processTree),
+        incompleteReasons: [],
+        unsupportedOperations: [],
+      },
+      filesystem: {
+        category: 'filesystem',
+        enabled: true,
+        status: 'complete',
+        eventCount: 1,
+        droppedEvents: 0,
+        sequenceGaps: 0,
+        firstSeq: 2,
+        lastSeq: 2,
+        categoryDigestSha256: computeV2CategoryDigest('filesystem', filesystemEvents),
+        incompleteReasons: [],
+        unsupportedOperations: [],
+      },
+      network: {
+        category: 'network',
+        enabled: true,
+        status: 'complete',
+        eventCount: 1,
+        droppedEvents: 0,
+        sequenceGaps: 0,
+        firstSeq: 3,
+        lastSeq: 3,
+        categoryDigestSha256: computeV2CategoryDigest('network', networkEvents),
+        incompleteReasons: [],
+        unsupportedOperations: [],
+      },
+    },
+    droppedEvents: 0,
+    sequenceGaps: 0,
+    previousEvidenceHash: null,
+    acsAnchorRef: 'wi-123',
+    signingKeyId: 'witness-key-1',
+    ...overrides,
+  };
+  return signReceipt(base);
 }
 
 let passed = 0;
@@ -108,7 +285,7 @@ async function test(name, fn) {
 }
 
 try {
-  await test('validates complete signed receipt and rejects tampering, bad sig, incomplete, correlation mismatch, and replay', async () => {
+  await test('validates complete signed v1 & v2 receipts and rejects tampering, bad sig, incomplete, non-live mode, category digest mismatch, and replay', async () => {
     const seen = new SeenReceiptStore(path.join(tmp, 'seen-1'));
     const expected = {
       workItemId: 'wi-123',
@@ -153,12 +330,38 @@ try {
     const resCorr = verifyKernelWitnessReceipt(wrongCorr, { publicKeyPem, expected });
     assert.equal(resCorr.valid, false);
     assert.ok(resCorr.reasons.some((r) => r.startsWith('correlation_mismatch')));
+
+    // [P0-05] requireLiveMode rejects synthetic/replay receipts
+    const resNotLive = verifyKernelWitnessReceipt(valid, { publicKeyPem, expected, requireLiveMode: true });
+    assert.equal(resNotLive.valid, false);
+    assert.ok(resNotLive.reasons.includes('observer_mode_not_live'));
+
+    // v2 receipt verification with domain-separated hash/signature and category digests
+    const validV2 = makeReceiptV2();
+    const resV2 = verifyKernelWitnessReceipt(validV2, { publicKeyPem, expected, requireLiveMode: true });
+    assert.equal(resV2.valid, true, JSON.stringify(resV2));
+    assert.equal(resV2.complete, true);
+
+    // v2 category digest mismatch
+    const badFsDigestV2 = makeReceiptV2({
+      categoryCompleteness: {
+        ...validV2.categoryCompleteness,
+        filesystem: {
+          ...validV2.categoryCompleteness.filesystem,
+          categoryDigestSha256: 'f'.repeat(64),
+        },
+      },
+    });
+    const resBadDigest = verifyKernelWitnessReceipt(badFsDigestV2, { publicKeyPem, expected });
+    assert.equal(resBadDigest.valid, false);
+    assert.ok(resBadDigest.reasons.includes('category_digest_mismatch:filesystem'));
   });
 
-  await test('processes.ts wraps bwrap with pre-exec witness binary and preserves --info-fd 3', async () => {
+  await test('processes.ts wraps bwrap with pre-exec witness binary, passes --signer-socket and --acs-anchor-ref, and preserves --info-fd 3', async () => {
     const work = path.join(tmp, 'work');
     const stateDir = path.join(tmp, 'proc-state');
     const receiptDir = path.join(tmp, 'receipts');
+    const signerSock = path.join(tmp, 'signer.sock');
     fs.mkdirSync(work, { recursive: true });
     fs.mkdirSync(stateDir, { recursive: true });
     fs.mkdirSync(receiptDir, { recursive: true });
@@ -167,6 +370,7 @@ try {
     const mockModeFile = path.join(tmp, 'mock-mode.txt');
     const keyFile = path.join(tmp, 'witness-priv.pem');
     fs.writeFileSync(keyFile, privateKeyPem, { mode: 0o600 });
+    fs.writeFileSync(signerSock, keyFile, { mode: 0o600 });
 
     fs.writeFileSync(mockBin, `#!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
@@ -183,10 +387,12 @@ const getOpt = (flag) => {
 };
 const receiptOut = getOpt('--receipt-out');
 const signingKeyPath = getOpt('--signing-key');
+const signerSocketPath = getOpt('--signer-socket');
 const workItemId = getOpt('--work-item-id') ?? '';
 const attemptId = getOpt('--attempt-id') ?? '';
 const leaseId = getOpt('--lease-id') ?? '';
 const invocationHash = getOpt('--invocation-hash') ?? '';
+const acsAnchorRef = getOpt('--acs-anchor-ref') ?? null;
 const previousEvidenceHash = getOpt('--previous-evidence-hash') ?? null;
 const mockMode = fs.existsSync(${JSON.stringify(mockModeFile)}) ? fs.readFileSync(${JSON.stringify(mockModeFile)}, 'utf8').trim() : 'complete';
 
@@ -212,19 +418,71 @@ const base = {
   droppedEvents: 0,
   sequenceGaps: 0,
   previousEvidenceHash,
-  acsAnchorRef: null,
+  acsAnchorRef,
   signingKeyId: 'mock-key-1',
 };
 const sortKeys = (v) => Array.isArray(v) ? v.map(sortKeys) : (v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortKeys(v[k])])) : v);
 const body = JSON.stringify(sortKeys(base));
 const evidenceHash = crypto.createHash('sha256').update(body, 'utf8').digest('hex');
-const key = fs.readFileSync(signingKeyPath, 'utf8');
+const resolvedKeyFile = signerSocketPath ? fs.readFileSync(signerSocketPath, 'utf8').trim() : signingKeyPath;
+const key = fs.readFileSync(resolvedKeyFile, 'utf8');
 const signature = crypto.sign(null, Buffer.from(body, 'utf8'), key).toString('base64');
 const receipt = { ...base, evidenceHash, signature };
 if (mockMode === 'tamper') receipt.cgroupId = 888;
 fs.writeFileSync(receiptOut, JSON.stringify(receipt), { mode: 0o600 });
 process.exit(child.status ?? 1);
 `, { mode: 0o755 });
+
+    // Check buildWitnessRunArgv passes --signer-socket and --acs-anchor-ref
+    const builtArgv = buildWitnessRunArgv(
+      {
+        enabled: true,
+        required: true,
+        mode: 'live',
+        binaryPath: mockBin,
+        signerSocketPath: signerSock,
+        receiptDir,
+      },
+      {
+        receiptOutPath: '/tmp/out.json',
+        workItemId: 'wi-anchor-1',
+        attemptId: 'att-1',
+        leaseId: 'lease-1',
+        invocationHash: 'b'.repeat(64),
+      },
+      ['/usr/bin/bwrap', '--', '/bin/true'],
+    );
+    assert.ok(builtArgv.includes('--signer-socket'));
+    assert.equal(builtArgv[builtArgv.indexOf('--signer-socket') + 1], signerSock);
+    assert.ok(builtArgv.includes('--acs-anchor-ref'));
+    assert.equal(builtArgv[builtArgv.indexOf('--acs-anchor-ref') + 1], 'wi-anchor-1');
+
+    // [P0-01] Raw signingKeyPath is forbidden in live mode or managed mode
+    assert.throws(
+      () => assertWitnessBinaryReady({
+        enabled: true,
+        required: true,
+        mode: 'live',
+        binaryPath: mockBin,
+        signingKeyPath: keyFile,
+        receiptDir,
+      }),
+      (err) => err.code === 'JC_WITNESS_KEY_CUSTODY_INVALID',
+    );
+    assert.throws(
+      () => assertWitnessBinaryReady(
+        {
+          enabled: true,
+          required: true,
+          mode: 'synthetic',
+          binaryPath: mockBin,
+          signingKeyPath: keyFile,
+          receiptDir,
+        },
+        { managed: true },
+      ),
+      (err) => err.code === 'JC_WITNESS_KEY_CUSTODY_INVALID',
+    );
 
     const policy = {
       roots: [work],
@@ -241,7 +499,7 @@ process.exit(child.status ?? 1);
       required: true,
       mode: 'synthetic',
       binaryPath: mockBin,
-      signingKeyPath: keyFile,
+      signerSocketPath: signerSock,
       publicKeyPem,
       signingKeyId: 'mock-key-1',
       receiptDir,
@@ -251,6 +509,7 @@ process.exit(child.status ?? 1);
       attemptId: 'att-proc-1',
       leaseId: 'lease-proc-1',
       invocationHash: 'b'.repeat(64),
+      managed: true,
       witness,
     };
     const out = await registry.run({ command: 'printf WITNESS_OK', cwd: work, waitMs: 10_000 }, policy, 'alice', context);
@@ -259,6 +518,7 @@ process.exit(child.status ?? 1);
     assert.ok(out.witness, 'witness outcome attached');
     assert.equal(out.witness.verification.valid, true);
     assert.equal(out.witness.verification.complete, true);
+    assert.equal(out.witness.receipt.acsAnchorRef, 'wi-proc-1');
 
     // Missing witness binary fails closed when required
     await assert.rejects(
@@ -272,14 +532,14 @@ process.exit(child.status ?? 1);
     );
   });
 
-  await test('server.ts emits witness LoopTrace events, submits receipt to ACS, and fails closed on incomplete/tampered', async () => {
+  await test('server.ts emits witness LoopTrace events once on close (including async start_process and repeated read_process_output), persists chain head, submits receipt to ACS, and fails closed on incomplete/tampered', async () => {
     const srvTmp = path.join(tmp, 'srv');
     const srvWork = path.join(srvTmp, 'work');
     const srvState = path.join(srvTmp, 'state');
     fs.mkdirSync(srvWork, { recursive: true });
     const issuer = makeIssuer();
     const mockBin = path.join(tmp, 'mock-witness.mjs');
-    const keyFile = path.join(tmp, 'witness-priv.pem');
+    const signerSock = path.join(tmp, 'signer.sock');
 
     const submittedReceipts = [];
     const config = loadJcConfig({
@@ -296,7 +556,7 @@ process.exit(child.status ?? 1);
       JC_WITNESS_REQUIRED: '1',
       JC_WITNESS_MODE: 'synthetic',
       JC_WITNESS_BIN: mockBin,
-      JC_WITNESS_SIGNING_KEY: keyFile,
+      JC_WITNESS_SIGNER_SOCKET: signerSock,
       JC_WITNESS_PUBLIC_KEY_PEM: publicKeyPem,
     });
 
@@ -342,18 +602,63 @@ process.exit(child.status ?? 1);
       assert.equal(res.isError, undefined, JSON.stringify(res));
       assert.equal(submittedReceipts.length, 1);
       assert.equal(submittedReceipts[0].body.receipt.workItemId, 'wi-srv-1');
+      assert.equal(submittedReceipts[0].body.receipt.acsAnchorRef, 'wi-srv-1');
       assert.equal(submittedReceipts[0].auth, 'Bearer test-authority-read-token');
+
+      // Verify persistent chain head store was updated
+      const chainStore = new WitnessChainStateStore(srvState);
+      assert.equal(chainStore.getHeadHash(), submittedReceipts[0].body.receipt.evidenceHash);
+
+      // [P1-06] Async start_process + repeated read_process_output emits witness LoopTrace and ACS POST exactly once!
+      const startArgs = { argv: ['/usr/bin/printf', 'ASYNC_OK'], cwd: srvWork };
+      const startCap = issuer.mint('start_process', startArgs, { workItemId: 'wi-srv-2', attemptId: 'att-srv-2', leaseId: 'lease-srv-2' });
+      const startRes = await client.callTool({
+        name: 'start_process',
+        arguments: startArgs,
+        _meta: { gateway: { sub: 'alice', client_id: 'c1' }, acsCapability: startCap },
+      });
+      assert.equal(startRes.isError, undefined, JSON.stringify(startRes));
+      const sessionId = startRes.structuredContent.sessionId;
+      let readRes1;
+      for (let i = 0; i < 50; i += 1) {
+        const pollArgs = { sessionId, waitMs: 200 };
+        readRes1 = await client.callTool({
+          name: 'read_process_output',
+          arguments: pollArgs,
+          _meta: { gateway: { sub: 'alice', client_id: 'c1' }, acsCapability: issuer.mint('read_process_output', pollArgs) },
+        });
+        assert.equal(readRes1.isError, undefined, JSON.stringify(readRes1));
+        if (!readRes1.structuredContent.running) break;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.equal(readRes1.structuredContent.running, false);
+      const readArgs = { sessionId, waitMs: 500 };
+      const readRes2 = await client.callTool({
+        name: 'read_process_output',
+        arguments: readArgs,
+        _meta: { gateway: { sub: 'alice', client_id: 'c1' }, acsCapability: issuer.mint('read_process_output', readArgs) },
+      });
+      assert.equal(readRes2.isError, undefined, JSON.stringify(readRes2));
+      const readRes3 = await client.callTool({
+        name: 'read_process_output',
+        arguments: readArgs,
+        _meta: { gateway: { sub: 'alice', client_id: 'c1' }, acsCapability: issuer.mint('read_process_output', readArgs) },
+      });
+      assert.equal(readRes3.isError, undefined, JSON.stringify(readRes3));
+      // Only 2 total receipts submitted (1 from run_command, 1 from start_process — NOT duplicated by read_process_output!)
+      assert.equal(submittedReceipts.length, 2);
+      assert.equal(submittedReceipts[1].body.receipt.previousEvidenceHash, submittedReceipts[0].body.receipt.evidenceHash);
 
       const traceDir = path.join(srvState, 'traces');
       const files = fs.readdirSync(traceDir).filter((f) => f.endsWith('.jsonl'));
       const events = readTraceFile(path.join(traceDir, files[0])).events;
       assert.equal(verifyChain(events).ok, true);
-      const witnessEv = events.find((e) => e.type === 'witness_observation_recorded');
-      assert.ok(witnessEv, 'witness_observation_recorded emitted');
-      assert.equal(witnessEv.payload.workItemId, 'wi-srv-1');
-      assert.equal(witnessEv.payload.attemptId, 'att-srv-1');
-      assert.equal(witnessEv.payload.leaseId, 'lease-srv-1');
-      assert.equal(witnessEv.payload.invocationHash, cap.payload.invocationHash);
+      const witnessEvents = events.filter((e) => e.type === 'witness_observation_recorded');
+      assert.equal(witnessEvents.length, 2, 'exactly 2 witness_observation_recorded events emitted');
+      assert.equal(witnessEvents[0].payload.workItemId, 'wi-srv-1');
+      assert.equal(witnessEvents[0].payload.attemptId, 'att-srv-1');
+      assert.equal(witnessEvents[0].payload.leaseId, 'lease-srv-1');
+      assert.equal(witnessEvents[0].payload.invocationHash, cap.payload.invocationHash);
 
       // Incomplete observation fails closed when required
       const mockModeFile = path.join(tmp, 'mock-mode.txt');
@@ -384,6 +689,37 @@ process.exit(child.status ?? 1);
     } finally {
       await client.close();
     }
+  });
+
+  await test('sandbox.ts masks witness signer socket, signing key, and receipt dirs even when inside JC_FS_ROOTS', async () => {
+    const sbRoot = path.join(tmp, 'sb-root');
+    const sbState = path.join(sbRoot, 'state');
+    const sbReceipts = path.join(sbRoot, 'witness-receipts');
+    const sbSockDir = path.join(sbRoot, 'signer-dir');
+    const sbSock = path.join(sbSockDir, 'sign.sock');
+    const sbKey = path.join(sbRoot, 'priv.pem');
+    fs.mkdirSync(sbState, { recursive: true });
+    fs.mkdirSync(sbReceipts, { recursive: true });
+    fs.mkdirSync(sbSockDir, { recursive: true });
+    fs.writeFileSync(sbSock, 'sock', { mode: 0o600 });
+    fs.writeFileSync(sbKey, 'key', { mode: 0o600 });
+
+    const policy = sandboxPolicyFromEnv({
+      homeDir: tmp,
+      stateDir: sbState,
+      fsRoots: [sbRoot],
+      fsDeniedRoots: [],
+      managed: true,
+      witness: {
+        signingKeyPath: sbKey,
+        signerSocketPath: sbSock,
+        receiptDir: sbReceipts,
+      },
+    });
+    const argv = sandboxArgv(policy, ['/bin/true'], sbRoot);
+    assert.ok(argv.includes(fs.realpathSync(sbReceipts)));
+    assert.ok(argv.includes(fs.realpathSync(sbSockDir)));
+    assert.ok(argv.includes(fs.realpathSync(sbKey)));
   });
 
   await test('real jc-kernel-witness binary (if built) integrates with processes.ts + bwrap in auto mode without attaching live eBPF', async () => {
@@ -505,6 +841,53 @@ process.exit(child.status ?? 1);
     const resMismatchRoot = verifyKernelWitnessReceipt(withRoot, { publicKeyPem, expected: { rootPid: 202 } });
     assert.equal(resMismatchRoot.valid, false);
     assert.ok(resMismatchRoot.reasons.includes('correlation_mismatch:rootPid'));
+  });
+
+  await test('ops/jc-kernel-witness scripts support --dry-run, staged prefix install, upgrade, rollback, retention, and uninstall', async () => {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const opsDir = path.resolve(here, '..', '..', '..', 'ops', 'jc-kernel-witness');
+    const stagePrefix = path.join(tmp, 'ops-stage');
+
+    const dry = spawnSync(path.join(opsDir, 'install-kernel-witness.sh'), ['--dry-run'], { encoding: 'utf8' });
+    assert.equal(dry.status, 0, dry.stderr);
+    assert.match(dry.stdout, /\[DRY-RUN\]/);
+
+    const inst = spawnSync(
+      path.join(opsDir, 'install-kernel-witness.sh'),
+      ['--prefix', stagePrefix, '--skip-useradd', '--skip-systemd'],
+      { encoding: 'utf8' },
+    );
+    assert.equal(inst.status, 0, inst.stderr);
+    assert.ok(fs.existsSync(path.join(stagePrefix, 'usr/lib/jace-commander/jc-kernel-witness')));
+    assert.ok(fs.existsSync(path.join(stagePrefix, 'usr/lib/jace-commander/witness.bpf.o')));
+    assert.ok(fs.existsSync(path.join(stagePrefix, 'etc/jace-commander/witness-manifest.sha256')));
+    assert.ok(fs.existsSync(path.join(stagePrefix, 'etc/jace-commander/observer.pub.pem')));
+    assert.ok(fs.existsSync(path.join(stagePrefix, 'etc/acs-secrets/witness-path-hmac.key')));
+
+    const upg = spawnSync(path.join(opsDir, 'upgrade-kernel-witness.sh'), ['--prefix', stagePrefix], { encoding: 'utf8' });
+    assert.equal(upg.status, 0, upg.stderr);
+    assert.ok(fs.existsSync(path.join(stagePrefix, 'usr/lib/jace-commander/jc-kernel-witness.prev')));
+
+    const rb = spawnSync(path.join(opsDir, 'rollback-kernel-witness.sh'), ['--prefix', stagePrefix], { encoding: 'utf8' });
+    assert.equal(rb.status, 0, rb.stderr);
+
+    const ret = spawnSync(
+      path.join(opsDir, 'retention-policy.sh'),
+      [
+        '--dry-run',
+        '--worm-dir',
+        path.join(stagePrefix, 'var/lib/acs-core/worm-vault'),
+        '--receipt-scratch-dir',
+        path.join(stagePrefix, 'var/lib/acs-jc/witness-receipts'),
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(ret.status, 0, ret.stderr);
+
+    const uninst = spawnSync(path.join(opsDir, 'uninstall-kernel-witness.sh'), ['--prefix', stagePrefix], { encoding: 'utf8' });
+    assert.equal(uninst.status, 0, uninst.stderr);
+    assert.ok(!fs.existsSync(path.join(stagePrefix, 'usr/lib/jace-commander/jc-kernel-witness')));
+    assert.ok(fs.existsSync(path.join(stagePrefix, 'var/lib/acs-core/acs.sqlite')), 'durable DB preserved on default uninstall');
   });
 
   console.log(`\njace-commander kernel-witness: ${passed} passed`);

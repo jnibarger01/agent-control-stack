@@ -1,6 +1,12 @@
 import { DatabaseSync } from "node:sqlite";
+import {
+  GENESIS_HASH,
+  envelopeForDigest,
+  isJcKernelWitnessReceiptV2,
+  type RecorderEvent
+} from "@agent-control-stack/black-box-recorder";
 import { verifyEvidenceManifestHash, type EvidenceManifest } from "@agent-control-stack/evidence";
-import { auditEventHash } from "@agent-control-stack/shared";
+import { auditEventHash, canonicalJson } from "@agent-control-stack/shared";
 import {
   CANONICAL_TRACE_GENESIS_HASH,
   canonicalTraceEventHash,
@@ -14,6 +20,7 @@ import {
   eventId,
   normalizeTimestamp,
   nanosToIso,
+  sha256Hex,
   stageOf,
   type EvidenceEvent,
   type EventType,
@@ -298,6 +305,32 @@ export class AcsReadStore {
     });
     const status = str(w, "status") ?? "unknown";
 
+    // ---- pre-scan black_box_events for this work item so audit_events does not duplicate them
+    const blackBoxRows = (() => {
+      try {
+        return this.db
+          .prepare(
+            `SELECT * FROM black_box_events WHERE work_item_id = ? OR run_id = ? OR mission_id = ? ORDER BY seq ASC LIMIT 100`
+          )
+          .all(workItemId, workItemId, workItemId) as Row[];
+      } catch {
+        try {
+          return this.db
+            .prepare(
+              `SELECT * FROM black_box_events WHERE run_id = ? OR mission_id = ? ORDER BY seq ASC LIMIT 100`
+            )
+            .all(workItemId, workItemId) as Row[];
+        } catch {
+          return [];
+        }
+      }
+    })();
+    const blackBoxEvidenceHashes = new Set<string>(
+      blackBoxRows
+        .map((r) => str(r, "evidence_hash"))
+        .filter((h): h is string => h !== null)
+    );
+
     // ---- audit events (hash chain verified per row)
     const auditRows = this.all(
       `SELECT sequence, id, name, time_unix_nano, attributes, body, previous_hash, event_hash
@@ -337,6 +370,15 @@ export class AcsReadStore {
       if (chain === "broken") auditBroken += 1;
       const approvalId = strAttr(attrs, "approval.id");
       if (approvalId) auditIdsByApproval.add(approvalId);
+
+      if (
+        (name === "black_box.witness_observed" ||
+          name === "black_box.witness_incomplete") &&
+        strAttr(attrs, "witness.evidence_hash") &&
+        blackBoxEvidenceHashes.has(strAttr(attrs, "witness.evidence_hash")!)
+      ) {
+        continue;
+      }
 
       const mapped = mapAuditName(name, attrs);
       if (!mapped) {
@@ -614,6 +656,156 @@ export class AcsReadStore {
       });
     }
 
+    // ---- durable black_box_events (kernel witness observations)
+    for (const r of blackBoxRows) {
+      const seq = num(r, "seq") ?? 0;
+      const evObj = parseJson(r.event_json) as RecorderEvent | null;
+      const receiptObj = parseJson(r.receipt_json);
+      const isV2 = isJcKernelWitnessReceiptV2(receiptObj);
+      let selfOk = false;
+      let linkOk = false;
+      if (evObj && typeof evObj === "object" && evObj.evidence) {
+        try {
+          const payloadSha = sha256Hex(envelopeForDigest(evObj));
+          const expectedEventHash = sha256Hex(
+            canonicalJson({
+              seq,
+              previousHash: String(r.previous_hash),
+              eventId: String(r.event_id),
+              payloadSha256: payloadSha
+            })
+          );
+          selfOk =
+            payloadSha === r.payload_sha256 &&
+            expectedEventHash === r.event_hash;
+          if (seq === 1) {
+            linkOk = r.previous_hash === GENESIS_HASH;
+          } else if (seq > 1) {
+            const pred = this.probe(
+              "SELECT event_hash FROM black_box_events WHERE seq = ?",
+              seq - 1
+            );
+            linkOk = Boolean(pred && pred.event_hash === r.previous_hash);
+          }
+        } catch {
+          selfOk = false;
+        }
+      }
+      const meta = obj(evObj?.metadata);
+      const activeScope = isV2
+        ? receiptObj.observationScope.active.join(",")
+        : Array.isArray(meta.observationScopeActive)
+          ? (meta.observationScopeActive as unknown[]).map(String).join(",")
+          : "process";
+      const requiredScope = isV2
+        ? receiptObj.observationScope.policyRequired.join(",")
+        : Array.isArray(meta.observationScopeRequired)
+          ? (meta.observationScopeRequired as unknown[]).map(String).join(",")
+          : "process";
+      const processStatus = isV2
+        ? receiptObj.categoryCompleteness.process.status
+        : str(meta, "processCategoryStatus") ??
+          (str(meta, "status") === "complete" ? "complete" : "incomplete");
+      const fsStatus = isV2
+        ? receiptObj.categoryCompleteness.filesystem.status
+        : str(meta, "filesystemCategoryStatus") ?? "unsupported";
+      const netStatus = isV2
+        ? receiptObj.categoryCompleteness.network.status
+        : str(meta, "networkCategoryStatus") ?? "unsupported";
+
+      const reqCats = requiredScope.split(",").filter(Boolean);
+      const actCats = activeScope.split(",").filter(Boolean);
+      const scopeInsufficient = reqCats.some((c) => !actCats.includes(c));
+      const fsIncomplete =
+        (reqCats.includes("filesystem") || actCats.includes("filesystem")) &&
+        fsStatus !== "complete";
+      const netIncomplete =
+        (reqCats.includes("network") || actCats.includes("network")) &&
+        netStatus !== "complete";
+
+      const fullyObserved =
+        selfOk &&
+        linkOk &&
+        r.event_type === "witness.observation.verified" &&
+        r.trust_level === "independently_verified" &&
+        !scopeInsufficient &&
+        !fsIncomplete &&
+        !netIncomplete;
+
+      const flags: string[] = [];
+      if (!fullyObserved) flags.push("witness_incomplete");
+      if (!selfOk || !linkOk) flags.push("witness_forged_or_tampered");
+      if (scopeInsufficient) flags.push("witness_scope_insufficient");
+      if (fsIncomplete) flags.push("witness_filesystem_incomplete");
+      if (netIncomplete) flags.push("witness_network_incomplete");
+
+      const attemptId = str(r, "attempt_id") ?? str(meta, "attemptId");
+      const leaseId = str(r, "lease_id") ?? str(meta, "leaseId");
+
+      drafts.push({
+        type: fullyObserved ? "witness.observed" : "witness.incomplete",
+        table: "black_box_events",
+        nativeId: String(r.event_id),
+        ts:
+          normalizeTimestamp(evObj?.sourceTimestamp) ??
+          normalizeTimestamp(r.ingested_at),
+        trust: fullyObserved ? "observed" : "asserted",
+        basis: fullyObserved
+          ? "jc_kernel_witness_ed25519_anchored"
+          : "jc_kernel_witness_incomplete_or_unanchored",
+        status: fullyObserved ? "observed" : str(meta, "status") ?? "incomplete",
+        hashVerified: selfOk,
+        chain: selfOk && linkOk ? "verified" : "broken",
+        facts: {
+          witness_valid: selfOk && linkOk,
+          witness_observed: fullyObserved,
+          witness_schema_version:
+            str(r, "receipt_schema") ??
+            str(meta, "witnessSchemaVersion") ??
+            "jc.kernel-witness.receipt.v1",
+          witness_mode: str(meta, "observerMode"),
+          witness_status: str(meta, "status"),
+          witness_attempt_id: attemptId,
+          witness_lease_id: leaseId,
+          witness_invocation_hash:
+            str(r, "invocation_hash") ?? str(meta, "invocationHash"),
+          witness_evidence_hash: str(r, "evidence_hash"),
+          witness_cgroup_id: num(meta, "cgroupId"),
+          witness_dropped_events: num(meta, "droppedEvents") ?? 0,
+          witness_sequence_gaps: num(meta, "sequenceGaps") ?? 0,
+          witness_root_exit_code: num(meta, "rootExitCode"),
+          witness_scope_active: activeScope,
+          witness_scope_required: requiredScope,
+          witness_process_status: processStatus,
+          witness_fs_status: fsStatus,
+          witness_net_status: netStatus,
+          witness_fs_events: isV2
+            ? receiptObj.filesystemEvents.length
+            : num(meta, "filesystemEventCount") ?? 0,
+          witness_net_events: isV2
+            ? receiptObj.networkEvents.length
+            : num(meta, "networkEventCount") ?? 0,
+          witness_fs_dropped: isV2
+            ? receiptObj.categoryCompleteness.filesystem.droppedEvents
+            : num(meta, "filesystemDroppedEvents") ?? 0,
+          witness_net_dropped: isV2
+            ? receiptObj.categoryCompleteness.network.droppedEvents
+            : num(meta, "networkDroppedEvents") ?? 0
+        },
+        refs: {
+          attempt_id: attemptId,
+          lease_id: leaseId
+        },
+        flags,
+        raw: {
+          seq,
+          id: r.event_id,
+          eh: r.evidence_hash,
+          h: r.event_hash
+        }
+      });
+    }
+
     // ---- trace projection integrity + producer release identity
     const outbox = this.all(
       "SELECT event_id, seq, canonical_json FROM trace_outbox WHERE work_item_id = ? ORDER BY seq ASC LIMIT ?",
@@ -866,6 +1058,20 @@ function mapAuditName(name: string, attrs: Record<string, unknown>): MappedAudit
     case "execution.completed":
     case "execution.result_persisted":
       return { type: "result.reported", trust: "asserted", basis: "worker_reported_result", status: strAttr(attrs, "execution.outcome") ?? "reported" };
+    case "black_box.witness_observed":
+      return {
+        type: "witness.observed",
+        trust: "observed",
+        basis: "jc_kernel_witness_ed25519_anchored",
+        status: "observed"
+      };
+    case "black_box.witness_incomplete":
+      return {
+        type: "witness.incomplete",
+        trust: "asserted",
+        basis: "jc_kernel_witness_incomplete_or_unanchored",
+        status: "incomplete"
+      };
     default:
       return null;
   }

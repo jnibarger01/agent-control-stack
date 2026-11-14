@@ -96,6 +96,8 @@ export interface VerifyEnv {
   healthTargets: HealthTarget[];
   fetchImpl?: FetchLike | undefined;
   now: Date;
+  requireWitnessObservation?: boolean;
+  requiredWitnessScope?: readonly ("process" | "filesystem" | "network")[];
 }
 
 const refs = (...es: Array<EvidenceEvent | undefined>): string[] =>
@@ -127,7 +129,7 @@ export async function verifyAssertions(
         continue;
       }
       const r = await evaluate(a, v, c, reports, env);
-      const unproven = r.verdict === "PASS" ? completenessUnproven(a, v) : { reasons: [], basis: [] };
+      const unproven = r.verdict === "PASS" ? completenessUnproven(a, v, env) : { reasons: [], basis: [] };
       out.push(
         unproven.reasons.length > 0
           ? result(a.type, "INCONCLUSIVE", `completeness unproven: ${unproven.reasons.join("; ")} (would otherwise be PASS: ${r.reason})`.slice(0, 1000), [...r.evidence_refs, ...refs(...unproven.basis)], "none")
@@ -189,7 +191,7 @@ function integrityViolations(v: View): EvidenceEvent[] {
  * JC file is indistinguishable from a complete one). Absence of contradicting evidence is then not proof, so a PASS
  * is downgraded to INCONCLUSIVE.
  */
-function completenessUnproven(a: Assertion, v: View): { reasons: string[]; basis: EvidenceEvent[] } {
+function completenessUnproven(a: Assertion, v: View, env?: VerifyEnv): { reasons: string[]; basis: EvidenceEvent[] } {
   const reasons: string[] = [];
   const basis: EvidenceEvent[] = [];
   if (a.type === "service_healthy" || (a.type === "release_matches" && a.scope === "installed")) return { reasons, basis };
@@ -203,10 +205,49 @@ function completenessUnproven(a: Assertion, v: View): { reasons: string[]; basis
     reasons.push("Jace Commander trace sessions in the configured roots carry no head anchor (no trace seal), so a truncated JC trace that hid a conflicting outcome cannot be ruled out");
     basis.push(...jc);
   }
-  const incompleteWitness = v.of("witness.incomplete");
-  if (incompleteWitness.length > 0 && a.type === "operation_completed") {
-    reasons.push("JC Kernel Witness observation is incomplete, unanchored, or unverified; execution completeness is unproven");
-    basis.push(...incompleteWitness);
+  if (a.type === "operation_completed") {
+    const incompleteWitness = v.of("witness.incomplete");
+    if (incompleteWitness.length > 0) {
+      reasons.push("JC Kernel Witness observation is incomplete, unanchored, or unverified; execution completeness is unproven");
+      basis.push(...incompleteWitness);
+    }
+    const observedWitness = v.of("witness.observed");
+    const flaggedWitness = observedWitness.filter(
+      (e) =>
+        e.flags.includes("witness_scope_insufficient") ||
+        e.flags.includes("witness_filesystem_incomplete") ||
+        e.flags.includes("witness_network_incomplete")
+    );
+    if (flaggedWitness.length > 0) {
+      reasons.push("JC Kernel Witness observation has insufficient scope coverage or incomplete category completeness");
+      basis.push(...flaggedWitness);
+    }
+
+    const reqScope = env?.requiredWitnessScope;
+    const requireWitness = Boolean(env?.requireWitnessObservation || (reqScope && reqScope.length > 0));
+    if (requireWitness && observedWitness.length === 0) {
+      reasons.push("JC Kernel Witness observation is required by policy, but no verified witness.observed record exists for this work item");
+      if (v.state) basis.push(v.state);
+    }
+    if (reqScope && reqScope.length > 0 && observedWitness.length > 0) {
+      const scopeFailing = observedWitness.filter((e) => {
+        const active =
+          typeof e.facts.witness_scope_active === "string"
+            ? e.facts.witness_scope_active.split(",").filter(Boolean)
+            : ["process"];
+        if (reqScope.some((cat) => !active.includes(cat))) return true;
+        if (reqScope.includes("process") && e.facts.witness_process_status && e.facts.witness_process_status !== "complete") return true;
+        if (reqScope.includes("filesystem") && e.facts.witness_fs_status !== "complete") return true;
+        if (reqScope.includes("network") && e.facts.witness_net_status !== "complete") return true;
+        return false;
+      });
+      if (scopeFailing.length > 0) {
+        reasons.push(
+          `JC Kernel Witness scope coverage does not satisfy required policy categories [${reqScope.join(", ")}] (process-only or partial-category observation cannot satisfy full-scope policy)`
+        );
+        basis.push(...scopeFailing);
+      }
+    }
   }
   return { reasons, basis };
 }
@@ -236,14 +277,27 @@ function operationCompleted(v: View, c: Correlated, reports: SourceReport[], now
   const validations = v.of("observation.validation_run");
   const decisions = v.of("verification.decided");
   const results = v.of("result.reported");
+  const observedWitness = v.of("witness.observed");
 
   const rejected = decisions.filter((e) => e.decision === "attempt_rejected");
   const failedValidation = validations.filter((e) => e.facts.passed === false);
+  const failedWitnessExit = observedWitness.filter(
+    (e) =>
+      isTrusted(e.integrity.trust) &&
+      typeof e.facts.witness_root_exit_code === "number" &&
+      e.facts.witness_root_exit_code !== 0
+  );
   if (NEGATIVE_STATUS.has(status)) {
     return result(T, "FAIL", `authoritative work item state is '${status}'`, refs(state), "authoritative");
   }
-  if (rejected.length > 0 || failedValidation.length > 0) {
-    return result(T, "FAIL", "an independent observation contradicts completion (rejected verification decision or failed validation run)", refs(state, ...rejected, ...failedValidation), "observed");
+  if (rejected.length > 0 || failedValidation.length > 0 || failedWitnessExit.length > 0) {
+    return result(
+      T,
+      "FAIL",
+      "an independent observation contradicts completion (rejected verification decision, failed validation run, or non-zero kernel witness process exit)",
+      refs(state, ...rejected, ...failedValidation, ...failedWitnessExit),
+      "observed"
+    );
   }
   const reportedNegative = results.filter((e) => typeof e.facts.outcome === "string" && ["failed", "cancelled", "blocked"].includes(e.facts.outcome as string));
   if (status === "succeeded" && reportedNegative.length > 0) {

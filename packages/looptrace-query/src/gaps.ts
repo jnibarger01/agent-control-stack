@@ -560,28 +560,105 @@ export function analyzeJc(v: View): Gap[] {
   return gaps;
 }
 
-export function analyzeWitness(v: View): Gap[] {
+export function analyzeWitness(
+  v: View,
+  requiredWitnessScope?: readonly ("process" | "filesystem" | "network")[]
+): Gap[] {
   const gaps: Gap[] = [];
   const incomplete = v.of("witness.incomplete");
-  const forged = incomplete.filter((e) => e.flags.includes("witness_forged_or_tampered"));
+  const observed = v.of("witness.observed");
+  const allWitness = [...observed, ...incomplete];
+
+  const forged = incomplete.filter((e) =>
+    e.flags.includes("witness_forged_or_tampered")
+  );
   if (forged.length > 0) {
     gaps.push({
       code: "WITNESS_PROVENANCE_INVALID",
       severity: "high",
       affected_stage: "integrity",
-      description: "A JC Kernel Witness receipt failed Ed25519 signature, canonical hash, chain, or replay verification.",
-      required_evidence: "a valid, un-tampered, Ed25519-signed jc.kernel-witness.receipt.v1 receipt",
+      description:
+        "A JC Kernel Witness receipt failed Ed25519 signature, canonical hash, chain, or replay verification.",
+      required_evidence:
+        "a valid, un-tampered, Ed25519-signed jc.kernel-witness.receipt.v1 or v2 receipt",
       evidence_refs: v.refs(...forged)
     });
   }
-  const unverified = incomplete.filter((e) => !e.flags.includes("witness_forged_or_tampered"));
+
+  const scopeInsufficient = allWitness.filter((e) => {
+    if (e.flags.includes("witness_scope_insufficient")) return true;
+    if (!requiredWitnessScope || requiredWitnessScope.length === 0) return false;
+    const active =
+      typeof e.facts.witness_scope_active === "string"
+        ? e.facts.witness_scope_active.split(",").filter(Boolean)
+        : ["process"];
+    return requiredWitnessScope.some((cat) => !active.includes(cat));
+  });
+  if (scopeInsufficient.length > 0) {
+    gaps.push({
+      code: "WITNESS_SCOPE_INSUFFICIENT",
+      severity: "high",
+      affected_stage: "observation",
+      description:
+        "A JC Kernel Witness receipt has narrower observation scope than required by policy (for example, process-only when filesystem or network observation is required).",
+      required_evidence:
+        "a jc.kernel-witness.receipt.v2 receipt whose active observationScope covers all policy-required categories",
+      evidence_refs: v.refs(...scopeInsufficient)
+    });
+  }
+
+  const fsIncomplete = allWitness.filter((e) => {
+    if (e.flags.includes("witness_filesystem_incomplete")) return true;
+    if (requiredWitnessScope?.includes("filesystem")) {
+      return e.facts.witness_fs_status !== "complete";
+    }
+    return false;
+  });
+  if (fsIncomplete.length > 0) {
+    gaps.push({
+      code: "WITNESS_FILESYSTEM_INCOMPLETE",
+      severity: "high",
+      affected_stage: "observation",
+      description:
+        "JC Kernel Witness filesystem category observation is incomplete, unsupported, or suffered ring-buffer drops.",
+      required_evidence:
+        "a jc.kernel-witness.receipt.v2 receipt with categoryCompleteness.filesystem.status === 'complete' and zero drops/gaps",
+      evidence_refs: v.refs(...fsIncomplete)
+    });
+  }
+
+  const netIncomplete = allWitness.filter((e) => {
+    if (e.flags.includes("witness_network_incomplete")) return true;
+    if (requiredWitnessScope?.includes("network")) {
+      return e.facts.witness_net_status !== "complete";
+    }
+    return false;
+  });
+  if (netIncomplete.length > 0) {
+    gaps.push({
+      code: "WITNESS_NETWORK_INCOMPLETE",
+      severity: "high",
+      affected_stage: "observation",
+      description:
+        "JC Kernel Witness network category observation is incomplete, unsupported, or suffered ring-buffer drops.",
+      required_evidence:
+        "a jc.kernel-witness.receipt.v2 receipt with categoryCompleteness.network.status === 'complete' and zero drops/gaps",
+      evidence_refs: v.refs(...netIncomplete)
+    });
+  }
+
+  const unverified = incomplete.filter(
+    (e) => !e.flags.includes("witness_forged_or_tampered")
+  );
   if (unverified.length > 0) {
     gaps.push({
       code: "WITNESS_OBSERVATION_INCOMPLETE",
       severity: "medium",
       affected_stage: "observation",
-      description: "A JC Kernel Witness observation is incomplete, unanchored, or mismatched with ACS correlation IDs and cannot be promoted to observed.",
-      required_evidence: "a complete, ACS-anchored kernel witness receipt with matching attemptId and leaseId",
+      description:
+        "A JC Kernel Witness observation is incomplete, unanchored, or mismatched with ACS correlation IDs and cannot be promoted to observed.",
+      required_evidence:
+        "a complete, ACS-anchored kernel witness receipt with matching attemptId and leaseId",
       evidence_refs: v.refs(...unverified)
     });
   }
@@ -664,8 +741,20 @@ export function completenessOf(gaps: Gap[], eventCount: number, reports: SourceR
   return material.length === 0 ? "complete" : "partial";
 }
 
-export function buildGapReport(v: View, c: Correlated, reports: SourceReport[], now: Date): GapReport {
-  const gaps = [...analyzeWorkItem(v, now), ...analyzeJc(v), ...analyzeWitness(v), ...analyzeCorrelation(c, v), ...sourceGaps(reports)].sort(
+export function buildGapReport(
+  v: View,
+  c: Correlated,
+  reports: SourceReport[],
+  now: Date,
+  requiredWitnessScope?: readonly ("process" | "filesystem" | "network")[]
+): GapReport {
+  const gaps = [
+    ...analyzeWorkItem(v, now),
+    ...analyzeJc(v),
+    ...analyzeWitness(v, requiredWitnessScope),
+    ...analyzeCorrelation(c, v),
+    ...sourceGaps(reports)
+  ].sort(
     (a, b) => SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] || a.code.localeCompare(b.code)
   );
   const observed = observedStages(v);

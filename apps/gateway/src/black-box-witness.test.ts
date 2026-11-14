@@ -4,12 +4,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
+  ImmutableFsWormSink,
   canonicalJson,
+  computeV2CategoryDigests,
+  computeWitnessEvidenceHash,
   sha256Hex,
-  type JcKernelWitnessReceiptV1
+  witnessCanonicalBody,
+  witnessSigningPayload,
+  type JcKernelWitnessReceiptV1,
+  type JcKernelWitnessReceiptV2
 } from "@agent-control-stack/black-box-recorder";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { afterEach, describe, expect, it } from "vitest";
+import type { FaultBoundary } from "./black-box-durable.js";
 import { buildGateway } from "./server.js";
 
 function makeEd25519Keys() {
@@ -266,6 +273,14 @@ describe("Gateway Black Box & Kernel Witness ingestion", () => {
             actorId: "viewer",
             roles: ["operator"],
             scopes: ["acs:read"]
+          },
+          {
+            id: "observer-admin",
+            token: "admin-token",
+            actor: "user",
+            actorId: "sec-admin",
+            roles: ["operator"],
+            scopes: ["acs:read", "acs:write", "acs:observers:admin"]
           }
         ]
       },
@@ -297,24 +312,32 @@ describe("Gateway Black Box & Kernel Witness ingestion", () => {
     });
     expect(replayAfterRestart.statusCode).toBe(409);
 
-    // Observer key lifecycle: custody rejection + register + rotate + revoke
+    // Observer key lifecycle: [P1-01] service writer-token (without acs:observers:admin) is rejected with 403
     const dyn1 = makeEd25519Keys();
     const dyn2 = makeEd25519Keys();
+
+    const forbiddenWriterReg = await app2.inject({
+      method: "POST",
+      url: "/black-box/observers/register",
+      headers: { authorization: "Bearer writer-token" },
+      payload: { keyId: "wk-dyn-1", observerId: "obs-dyn", publicKeyPem: dyn1.publicKeyPem }
+    });
+    expect(forbiddenWriterReg.statusCode).toBe(403);
 
     // Private key custody check rejects private key PEM
     const privReg = await app2.inject({
       method: "POST",
       url: "/black-box/observers/register",
-      headers: { authorization: "Bearer writer-token" },
+      headers: { authorization: "Bearer admin-token" },
       payload: { keyId: "wk-dyn-1", observerId: "obs-dyn", publicKeyPem: dyn1.privateKeyPem }
     });
     expect(privReg.statusCode).toBe(422);
 
-    // Register wk-dyn-1
+    // Register wk-dyn-1 with admin-token
     const regRes = await app2.inject({
       method: "POST",
       url: "/black-box/observers/register",
-      headers: { authorization: "Bearer writer-token" },
+      headers: { authorization: "Bearer admin-token" },
       payload: { keyId: "wk-dyn-1", observerId: "obs-dyn", publicKeyPem: dyn1.publicKeyPem }
     });
     expect(regRes.statusCode).toBe(201);
@@ -356,7 +379,7 @@ describe("Gateway Black Box & Kernel Witness ingestion", () => {
     const rotRes = await app2.inject({
       method: "POST",
       url: "/black-box/observers/rotate",
-      headers: { authorization: "Bearer writer-token" },
+      headers: { authorization: "Bearer admin-token" },
       payload: { oldKeyId: "wk-dyn-1", newKeyId: "wk-dyn-2", newPublicKeyPem: dyn2.publicKeyPem }
     });
     expect(rotRes.statusCode).toBe(200);
@@ -383,7 +406,7 @@ describe("Gateway Black Box & Kernel Witness ingestion", () => {
     const revRes = await app2.inject({
       method: "POST",
       url: "/black-box/observers/revoke",
-      headers: { authorization: "Bearer writer-token" },
+      headers: { authorization: "Bearer admin-token" },
       payload: { keyId: "wk-dyn-2", reason: "decommissioned" }
     });
     expect(revRes.statusCode).toBe(200);
@@ -406,5 +429,438 @@ describe("Gateway Black Box & Kernel Witness ingestion", () => {
     expect(revokedIngest.statusCode).toBe(422);
 
     await app2.close();
+  });
+
+  it("enforces [P0-02] execution binding, [P0-05] requireLiveMode=true default, [P0-03] 10-boundary crash durability + Idempotency-Key, [P0-04] WORM reconstruction after DB loss, and Phase 6 v2 ingestion", async () => {
+    directory = mkdtempSync(join(tmpdir(), "acs-gw-v2-"));
+    const dbPath = join(directory, "control.db");
+    const wormDir = join(directory, "worm");
+    const store = new SqliteWorkItemStore(dbPath);
+    store.registerActor({ id: "user", actorType: "HUMAN", displayName: "user", externalRef: "local_bearer:local-dev" });
+    const workItem = store.create({
+      title: "V2 witness test",
+      requester: "user",
+      requesterSubject: "user",
+      intent: "test"
+    });
+    const otherWorkItem = store.create({
+      title: "Other work item",
+      requester: "user",
+      requesterSubject: "user",
+      intent: "other"
+    });
+    const workItemId = workItem.id;
+    const otherWorkItemId = otherWorkItem.id;
+    store.close();
+
+    const { publicKeyPem, privateKeyPem } = makeEd25519Keys();
+    const wormSink = new ImmutableFsWormSink({
+      rootDir: wormDir
+    });
+
+    let activeBoundary: FaultBoundary | null = null;
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      auth: {
+        token: "writer-token",
+        actor: "jc-bridge",
+        credentials: [
+          {
+            id: "writer",
+            token: "writer-token",
+            actor: "service",
+            actorId: "jc-bridge",
+            roles: ["service"],
+            scopes: ["acs:read", "acs:write"]
+          },
+          {
+            id: "admin",
+            token: "admin-token",
+            actor: "user",
+            actorId: "sec-admin",
+            roles: ["operator"],
+            scopes: ["acs:read", "acs:write", "acs:observers:admin"]
+          }
+        ]
+      },
+      blackBox: {
+        enabled: true,
+        trustedWitnessKeys: { "wk-gw-1": publicKeyPem },
+        wormSink,
+        faultInjector: (b) => {
+          if (activeBoundary === b) {
+            throw new Error(`injected_fault_${b}`);
+          }
+        }
+      }
+    });
+
+    // 1. [P0-05] requireLiveMode defaults to true: synthetic receipt is NEVER promoted to independently_verified
+    const syntheticReceipt = await signReceipt(
+      {
+        workItemId,
+        observerMode: "synthetic",
+        acsAnchorRef: `acs:work_item:${workItemId}`
+      },
+      privateKeyPem
+    );
+    const synRes = await app.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/receipts",
+      headers: { authorization: "Bearer writer-token" },
+      payload: { receipt: syntheticReceipt }
+    });
+    expect(synRes.statusCode).toBe(201);
+    expect((synRes.json() as { observed: boolean; trustLevel: string }).observed).toBe(false);
+    expect((synRes.json() as { trustLevel: string }).trustLevel).toBe("untrusted_claim");
+
+    // 2. [P0-02] Forged acsAnchorRef pointing at otherWorkItemId is downgraded to untrusted_claim
+    const wrongAnchorReceipt = await signReceipt(
+      {
+        workItemId,
+        acsAnchorRef: `acs:work_item:${otherWorkItemId}`,
+        previousEvidenceHash: syntheticReceipt.evidenceHash
+      },
+      privateKeyPem
+    );
+    const wrongAnchorRes = await app.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/receipts",
+      headers: { authorization: "Bearer writer-token" },
+      payload: { receipt: wrongAnchorReceipt }
+    });
+    expect(wrongAnchorRes.statusCode).toBe(201);
+    expect((wrongAnchorRes.json() as { observed: boolean; trustLevel: string }).observed).toBe(false);
+    expect((wrongAnchorRes.json() as { trustLevel: string }).trustLevel).toBe("untrusted_claim");
+
+    // 3. [P0-03] Fault injection across pre-commit boundaries B1..B6 leaves zero partial state
+    const validV1Receipt = await signReceipt(
+      {
+        workItemId,
+        attemptId: "att-durable-1",
+        acsAnchorRef: `acs:work_item:${workItemId}`,
+        previousEvidenceHash: wrongAnchorReceipt.evidenceHash
+      },
+      privateKeyPem
+    );
+    for (const boundary of [
+      "B1_BEFORE_VERIFY",
+      "B2_AFTER_VERIFY_BEFORE_TX",
+      "B3_INSIDE_TX_AFTER_AUDIT_INSERT",
+      "B4_INSIDE_TX_AFTER_EVENT_INSERT",
+      "B5_INSIDE_TX_AFTER_CHAIN_STATE_UPDATE",
+      "B6_INSIDE_TX_BEFORE_COMMIT"
+    ] as const) {
+      activeBoundary = boundary;
+      const failRes = await app.inject({
+        method: "POST",
+        url: "/black-box/kernel-witness/receipts",
+        headers: {
+          authorization: "Bearer writer-token",
+          "idempotency-key": "idem-durable-1"
+        },
+        payload: { receipt: validV1Receipt }
+      });
+      expect(failRes.statusCode).toBe(500);
+    }
+    activeBoundary = null;
+
+    // Retry with same Idempotency-Key after B1..B6 rollbacks succeeds with 201 Created!
+    const retryAfterRollback = await app.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/receipts",
+      headers: {
+        authorization: "Bearer writer-token",
+        "idempotency-key": "idem-durable-1"
+      },
+      payload: { receipt: validV1Receipt }
+    });
+    expect(retryAfterRollback.statusCode).toBe(201);
+    const createdBody = retryAfterRollback.json() as {
+      status: string;
+      observed: boolean;
+      eventId: string;
+      worm: { status: string };
+    };
+    expect(createdBody.status).toBe("created");
+    expect(createdBody.observed).toBe(true);
+    expect(createdBody.worm.status).toBe("anchored");
+
+    // Subsequent retry with same Idempotency-Key returns 200 duplicate (not 409!)
+    const idemDuplicate = await app.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/receipts",
+      headers: {
+        authorization: "Bearer writer-token",
+        "idempotency-key": "idem-durable-1"
+      },
+      payload: { receipt: validV1Receipt }
+    });
+    expect(idemDuplicate.statusCode).toBe(200);
+    expect((idemDuplicate.json() as { status: string }).status).toBe("duplicate");
+
+    // 4. [P0-03] Boundary B8..B10 (post-commit WORM outbox failure) commits locally and flushes via /worm-flush
+    const processTree = [
+      {
+        pid: 7001,
+        tgid: 7001,
+        ppid: 7000,
+        comm: "python3",
+        uid: 1000,
+        gid: 1000,
+        forkedAtNs: 0,
+        execedAtNs: 1100,
+        exitedAtNs: 1900,
+        exitCode: 0,
+        children: []
+      }
+    ];
+    const filesystemEvents = [
+      {
+        seq: 1,
+        timestampNs: 1200,
+        cgroupId: 5555,
+        pid: 7001,
+        tgid: 7001,
+        comm: "python3",
+        uid: 1000,
+        gid: 1000,
+        op: "CREATE" as const,
+        phase: "completed" as const,
+        succeeded: true,
+        resultErrno: 0,
+        bytes: 64,
+        flags: 1,
+        dev: 1,
+        inode: 10,
+        mountId: 5,
+        pathDigest: await sha256Hex("/workspace/result.json"),
+        pathDigestKeyId: "hmac-1",
+        displayPath: "/workspace/result.json",
+        targetPathDigest: null,
+        targetDisplayPath: null,
+        targetInode: 0
+      }
+    ];
+    const networkEvents = [
+      {
+        seq: 1,
+        timestampNs: 1300,
+        cgroupId: 5555,
+        pid: 7001,
+        tgid: 7001,
+        comm: "python3",
+        sockCookie: 12,
+        af: "INET" as const,
+        proto: "TCP" as const,
+        op: "CONNECT" as const,
+        phase: "completed" as const,
+        stateTransition: "SYN_SENT->ESTABLISHED",
+        outcome: "connected" as const,
+        errnoVal: 0,
+        remoteAddrDigest: await sha256Hex("1.1.1.1"),
+        displayRemoteAddr: "1.1.1.1",
+        remotePort: 443,
+        localPort: 40000,
+        bytes: 0
+      }
+    ];
+    const digests = await computeV2CategoryDigests({
+      processTree,
+      filesystemEvents,
+      networkEvents
+    });
+    const v2Body: Omit<JcKernelWitnessReceiptV2, "evidenceHash" | "signature"> = {
+      schemaVersion: "jc.kernel-witness.receipt.v2",
+      observerVersion: "0.2.0",
+      observerMode: "live",
+      observerId: "witness-gw-1",
+      workItemId,
+      attemptId: "att-v2-gw",
+      leaseId: "lease-v2-gw",
+      invocationHash: "c".repeat(64),
+      cgroupId: 5555,
+      cgroupPath: "/sys/fs/cgroup/jc-wi-gw-1",
+      rootPid: 7001,
+      startTimeNs: 1000,
+      endTimeNs: 2000,
+      signedAtUtc: "2026-11-13T00:00:10.000Z",
+      status: "complete",
+      incompleteReasons: [],
+      observationScope: {
+        policyRequired: ["process", "filesystem", "network"],
+        requested: ["process", "filesystem", "network"],
+        active: ["process", "filesystem", "network"]
+      },
+      categoryCompleteness: {
+        process: {
+          category: "process",
+          enabled: true,
+          status: "complete",
+          eventCount: 1,
+          droppedEvents: 0,
+          sequenceGaps: 0,
+          firstSeq: 1,
+          lastSeq: 1,
+          categoryDigestSha256: digests.process,
+          incompleteReasons: [],
+          unsupportedOperations: []
+        },
+        filesystem: {
+          category: "filesystem",
+          enabled: true,
+          status: "complete",
+          eventCount: 1,
+          droppedEvents: 0,
+          sequenceGaps: 0,
+          firstSeq: 1,
+          lastSeq: 1,
+          categoryDigestSha256: digests.filesystem,
+          incompleteReasons: [],
+          unsupportedOperations: []
+        },
+        network: {
+          category: "network",
+          enabled: true,
+          status: "complete",
+          eventCount: 1,
+          droppedEvents: 0,
+          sequenceGaps: 0,
+          firstSeq: 1,
+          lastSeq: 1,
+          categoryDigestSha256: digests.network,
+          incompleteReasons: [],
+          unsupportedOperations: []
+        }
+      },
+      events: [],
+      processTree,
+      filesystemEvents,
+      networkEvents,
+      eventCounts: {
+        total: 3,
+        fork: 0,
+        exec: 1,
+        exit: 0,
+        filesystem: 1,
+        network: 1
+      },
+      droppedEvents: 0,
+      sequenceGaps: 0,
+      previousEvidenceHash: validV1Receipt.evidenceHash,
+      acsAnchorRef: `acs:work_item:${workItemId}`,
+      signingKeyId: "wk-gw-1"
+    };
+    const v2Canonical = witnessCanonicalBody(v2Body);
+    const v2EvidenceHash = await computeWitnessEvidenceHash(v2Body);
+    const v2SigPayload = witnessSigningPayload({ ...v2Body, evidenceHash: v2EvidenceHash }, v2Canonical);
+    const v2Receipt: JcKernelWitnessReceiptV2 = {
+      ...v2Body,
+      evidenceHash: v2EvidenceHash,
+      signature: sign(null, Buffer.from(v2SigPayload, "utf8"), privateKeyPem).toString("base64")
+    };
+
+    // Inject B8_BEFORE_WORM_OUTBOX_SEND fault during WORM outbox flush -> local SQLite commit still succeeds (201) with worm.status = "pending"
+    activeBoundary = "B8_BEFORE_WORM_OUTBOX_SEND";
+    const v2Res = await app.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/receipts",
+      headers: {
+        authorization: "Bearer writer-token",
+        "idempotency-key": "idem-v2-gw"
+      },
+      payload: { receipt: v2Receipt }
+    });
+    expect(v2Res.statusCode).toBe(201);
+    expect((v2Res.json() as { observed: boolean; worm: { status: string } }).observed).toBe(true);
+    expect((v2Res.json() as { worm: { status: string } }).worm.status).toBe("pending");
+
+    activeBoundary = null;
+    const flushRes = await app.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/worm-flush",
+      headers: { authorization: "Bearer writer-token" }
+    });
+    expect(flushRes.statusCode).toBe(200);
+    expect((flushRes.json() as { anchored: number; pending: number }).anchored).toBe(1);
+    expect((flushRes.json() as { pending: number }).pending).toBe(0);
+
+    // Check WORM status endpoint
+    const wormStatusRes = await app.inject({
+      method: "GET",
+      url: "/black-box/kernel-witness/worm-status",
+      headers: { authorization: "Bearer writer-token" }
+    });
+    expect(wormStatusRes.statusCode).toBe(200);
+    const wormStatusJson = wormStatusRes.json() as {
+      outbox: { anchored: number; pending: number };
+      sinkReport: { valid: boolean; receiptCount: number; headSeq: number };
+    };
+    expect(wormStatusJson.outbox.anchored).toBe(4);
+    expect(wormStatusJson.outbox.pending).toBe(0);
+    expect(wormStatusJson.sinkReport.valid).toBe(true);
+    expect(wormStatusJson.sinkReport.receiptCount).toBe(4);
+    expect(wormStatusJson.sinkReport.headSeq).toBe(4);
+
+    await app.close();
+
+    // 5. [P0-04] Simulate total local SQLite DB loss and reconstruct from WORM sink
+    const freshDbPath = join(directory, "reconstructed.db");
+    const appReconstruct = buildGateway({
+      dbPath: freshDbPath,
+      logger: false,
+      auth: {
+        token: "admin-token",
+        actor: "sec-admin",
+        credentials: [
+          {
+            id: "admin",
+            token: "admin-token",
+            actor: "user",
+            actorId: "sec-admin",
+            roles: ["operator"],
+            scopes: ["acs:read", "acs:write", "acs:observers:admin"]
+          }
+        ]
+      },
+      blackBox: {
+        enabled: true,
+        trustedWitnessKeys: { "wk-gw-1": publicKeyPem },
+        wormSink
+      }
+    });
+
+    const reconRes = await appReconstruct.inject({
+      method: "POST",
+      url: "/black-box/kernel-witness/reconstruct",
+      headers: { authorization: "Bearer admin-token" }
+    });
+    expect(reconRes.statusCode).toBe(200);
+    const reconJson = reconRes.json() as {
+      reconstructedCount: number;
+      headSeq: number;
+      headHash: string;
+    };
+    expect(reconJson.reconstructedCount).toBe(4);
+    expect(reconJson.headSeq).toBe(4);
+    expect(reconJson.headHash).toMatch(/^[a-f0-9]{64}$/);
+
+    // Verify mission black-box timeline is intact on the reconstructed DB
+    const bbRecon = await appReconstruct.inject({
+      method: "GET",
+      url: `/coding-missions/${workItemId}/black-box`,
+      headers: { authorization: "Bearer admin-token" }
+    });
+    expect(bbRecon.statusCode).toBe(200);
+    const bbReconJson = bbRecon.json() as {
+      chain: { valid: boolean; eventCount: number };
+      events: Array<{ evidence: { seq: number } }>;
+    };
+    expect(bbReconJson.chain.valid).toBe(true);
+    expect(bbReconJson.chain.eventCount).toBe(4);
+    expect(bbReconJson.events).toHaveLength(4);
+
+    await appReconstruct.close();
   });
 });
