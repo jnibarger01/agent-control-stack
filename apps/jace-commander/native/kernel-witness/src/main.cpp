@@ -4,6 +4,7 @@
 #include "witness/observer.hpp"
 #include "witness/process_tree.hpp"
 #include "witness/receipt.hpp"
+#include "witness/signer.hpp"
 
 #include <csignal>
 #include <cstdlib>
@@ -56,6 +57,12 @@ std::string default_bpf_obj_path(const char* argv0) {
     return "witness.bpf.o";
 }
 
+std::string normalize_schema_version(const std::string& ver) {
+    if (ver == "v1" || ver == kReceiptSchemaVersionV1) return kReceiptSchemaVersionV1;
+    if (ver == "v2" || ver == kReceiptSchemaVersionV2 || ver.empty()) return kReceiptSchemaVersionV2;
+    throw std::runtime_error("invalid schema version: " + ver);
+}
+
 void print_usage() {
     std::cerr <<
         "Usage:\n"
@@ -63,7 +70,9 @@ void print_usage() {
         "  jc-kernel-witness replay --events-in <jsonl> --receipt-out <path> [options]\n"
         "  jc-kernel-witness verify --receipt <path> --public-key <pem> [options]\n"
         "  jc-kernel-witness check-bpf [--bpf-obj <path>]\n"
-        "  jc-kernel-witness keygen --private-out <path> --public-out <path>\n";
+        "  jc-kernel-witness keygen --private-out <path> --public-out <path>\n"
+        "  jc-kernel-witness signerd --socket <path> --private-key <path> [options]\n"
+        "  jc-kernel-witness key-admin <register|rotate|retire|revoke> --manifest <path> [options]\n";
 }
 
 int cmd_keygen(int argc, char** argv) {
@@ -122,20 +131,24 @@ int cmd_verify(int argc, char** argv) {
         std::string arg = argv[i];
         if (arg == "--receipt" && i + 1 < argc) receipt_path = argv[++i];
         else if (arg == "--public-key" && i + 1 < argc) pub_key_path = argv[++i];
+        else if (arg == "--key-manifest" && i + 1 < argc) opts.key_manifest_path = argv[++i];
         else if (arg == "--work-item-id" && i + 1 < argc) opts.work_item_id = argv[++i];
         else if (arg == "--attempt-id" && i + 1 < argc) opts.attempt_id = argv[++i];
         else if (arg == "--lease-id" && i + 1 < argc) opts.lease_id = argv[++i];
         else if (arg == "--invocation-hash" && i + 1 < argc) opts.invocation_hash = argv[++i];
         else if (arg == "--previous-evidence-hash" && i + 1 < argc) opts.previous_evidence_hash = argv[++i];
         else if (arg == "--seen-hashes-file" && i + 1 < argc) opts.seen_hashes_file = argv[++i];
+        else if (arg == "--require-category" && i + 1 < argc) opts.required_categories.emplace_back(argv[++i]);
         else if (arg == "--require-live") opts.require_live = true;
+        else if (arg == "--require-v2") opts.require_v2 = true;
+        else if (arg == "--allow-partial-categories") opts.allow_partial_categories = true;
         else {
             std::cerr << "Unknown or incomplete option: " << arg << "\n";
             return 2;
         }
     }
-    if (receipt_path.empty() || pub_key_path.empty()) {
-        std::cerr << "verify requires --receipt and --public-key\n";
+    if (receipt_path.empty() || (pub_key_path.empty() && opts.key_manifest_path.empty())) {
+        std::cerr << "verify requires --receipt and (--public-key or --key-manifest)\n";
         return 2;
     }
 
@@ -151,6 +164,8 @@ int cmd_verify(int argc, char** argv) {
     JsonObject out;
     out["valid"] = res.valid;
     out["evidenceHash"] = res.evidence_hash;
+    out["schemaVersion"] = res.schema_version;
+    out["signingKeyId"] = res.signing_key_id;
     JsonArray reasons;
     for (const auto& r : res.reasons) reasons.emplace_back(r);
     out["reasons"] = JsonValue(std::move(reasons));
@@ -159,15 +174,17 @@ int cmd_verify(int argc, char** argv) {
 }
 
 int cmd_replay(int argc, char** argv) {
-    std::string events_in, receipt_out, signing_key, signing_key_id;
+    std::string events_in, receipt_out, signing_key, signing_key_id, signer_socket;
     std::string work_item_id, attempt_id, lease_id, invocation_hash;
     std::string observer_id = default_observer_id();
     std::string cgroup_path = "/sys/fs/cgroup/synthetic";
+    std::string schema_ver = kReceiptSchemaVersionV2;
     uint64_t cgroup_id = 1;
     uint64_t dropped_events = 0;
     uint32_t root_pid = 0;
     std::optional<std::string> prev_hash, anchor_ref;
     bool ephemeral_key = false;
+    ReconstructionOptions recon_opts;
 
     for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];
@@ -175,7 +192,14 @@ int cmd_replay(int argc, char** argv) {
         else if (arg == "--receipt-out" && i + 1 < argc) receipt_out = argv[++i];
         else if (arg == "--signing-key" && i + 1 < argc) signing_key = argv[++i];
         else if (arg == "--signing-key-id" && i + 1 < argc) signing_key_id = argv[++i];
+        else if (arg == "--signer-socket" && i + 1 < argc) signer_socket = argv[++i];
         else if (arg == "--ephemeral-key") ephemeral_key = true;
+        else if (arg == "--schema-version" && i + 1 < argc) schema_ver = normalize_schema_version(argv[++i]);
+        else if (arg == "--path-hmac-key" && i + 1 < argc) recon_opts.hmac_key = argv[++i];
+        else if (arg == "--include-display-paths") {
+            recon_opts.include_display_paths = true;
+            recon_opts.include_display_remote_addrs = true;
+        }
         else if (arg == "--work-item-id" && i + 1 < argc) work_item_id = argv[++i];
         else if (arg == "--attempt-id" && i + 1 < argc) attempt_id = argv[++i];
         else if (arg == "--lease-id" && i + 1 < argc) lease_id = argv[++i];
@@ -199,23 +223,26 @@ int cmd_replay(int argc, char** argv) {
     }
 
     bool key_is_path = true;
-    if (signing_key.empty()) {
-        if (const char* env_key = std::getenv("JC_WITNESS_SIGNING_KEY"); env_key && *env_key) {
+    if (signer_socket.empty() && signing_key.empty()) {
+        if (const char* env_sock = std::getenv("JC_WITNESS_SIGNER_SOCKET"); env_sock && *env_sock) {
+            signer_socket = env_sock;
+        } else if (const char* env_key = std::getenv("JC_WITNESS_SIGNING_KEY"); env_key && *env_key) {
             signing_key = env_key;
         } else if (ephemeral_key) {
             signing_key = generate_ephemeral_ed25519_keypair_pem().first;
             key_is_path = false;
         } else {
-            std::cerr << "replay requires --signing-key, JC_WITNESS_SIGNING_KEY, or --ephemeral-key\n";
+            std::cerr << "replay requires --signer-socket, --signing-key, JC_WITNESS_SIGNING_KEY, or --ephemeral-key\n";
             return 2;
         }
     }
 
     std::vector<std::string> parse_errors;
     auto raw_events = parse_events_jsonl(read_text_file(events_in), parse_errors);
-    auto recon = reconstruct_process_tree(raw_events, cgroup_id, root_pid);
+    auto recon = reconstruct_process_tree(raw_events, cgroup_id, root_pid, recon_opts);
 
     ObservationReceipt receipt;
+    receipt.schema_version = schema_ver;
     receipt.observer_mode = "replay";
     receipt.observer_id = observer_id;
     receipt.work_item_id = work_item_id;
@@ -229,6 +256,9 @@ int cmd_replay(int argc, char** argv) {
     receipt.end_time_ns = recon.end_time_ns;
     receipt.events = std::move(recon.events);
     receipt.process_tree = std::move(recon.process_tree);
+    receipt.filesystem_events = std::move(recon.filesystem_events);
+    receipt.network_events = std::move(recon.network_events);
+    receipt.category_completeness = std::move(recon.category_completeness);
     receipt.event_counts = recon.counts;
     receipt.dropped_events = dropped_events;
     receipt.sequence_gaps = recon.sequence_gaps;
@@ -238,10 +268,18 @@ int cmd_replay(int argc, char** argv) {
 
     for (const auto& e : parse_errors) receipt.incomplete_reasons.push_back(e);
     for (const auto& a : recon.anomalies) receipt.incomplete_reasons.push_back(a);
-    if (dropped_events > 0) receipt.incomplete_reasons.push_back("ringbuf_overflow_dropped_events");
+    if (dropped_events > 0) {
+        receipt.incomplete_reasons.push_back("ringbuf_overflow_dropped_events");
+        receipt.category_completeness.process.dropped_events = dropped_events;
+        receipt.category_completeness.process.status = "incomplete";
+    }
 
     receipt.status = receipt.incomplete_reasons.empty() ? "complete" : "incomplete";
-    finalize_and_sign_receipt(receipt, signing_key, key_is_path);
+    if (!signer_socket.empty()) {
+        sign_receipt_via_socket(receipt, signer_socket);
+    } else {
+        finalize_and_sign_receipt(receipt, signing_key, key_is_path);
+    }
     write_text_file(receipt_out, serialize_canonical_json(receipt_to_json(receipt)) + "\n");
     return 0;
 }
@@ -251,12 +289,23 @@ int cmd_run(int argc, char** argv) {
     if (const char* env_mode = std::getenv("JC_WITNESS_MODE"); env_mode && *env_mode) {
         mode = env_mode;
     }
-    std::string receipt_out, signing_key, signing_key_id, cgroup_root, events_in;
+    std::string receipt_out, signing_key, signing_key_id, signer_socket, cgroup_root, events_in;
     std::string bpf_obj = default_bpf_obj_path(argv[0]);
     std::string work_item_id, attempt_id, lease_id, invocation_hash;
     std::string observer_id = default_observer_id();
+    std::string schema_ver = kReceiptSchemaVersionV2;
     std::optional<std::string> prev_hash, anchor_ref;
     bool ephemeral_key = false;
+    bool allow_synthetic_for_tests = false;
+    ReconstructionOptions recon_opts;
+
+    if (const char* env_hmac = std::getenv("JC_WITNESS_PATH_HMAC_KEY"); env_hmac && *env_hmac) {
+        recon_opts.hmac_key = env_hmac;
+    }
+    if (const char* env_disp = std::getenv("JC_WITNESS_INCLUDE_DISPLAY_PATHS"); env_disp && std::string(env_disp) == "1") {
+        recon_opts.include_display_paths = true;
+        recon_opts.include_display_remote_addrs = true;
+    }
 
     int cmd_idx = -1;
     for (int i = 2; i < argc; ++i) {
@@ -269,7 +318,15 @@ int cmd_run(int argc, char** argv) {
         else if (arg == "--receipt-out" && i + 1 < argc) receipt_out = argv[++i];
         else if (arg == "--signing-key" && i + 1 < argc) signing_key = argv[++i];
         else if (arg == "--signing-key-id" && i + 1 < argc) signing_key_id = argv[++i];
+        else if (arg == "--signer-socket" && i + 1 < argc) signer_socket = argv[++i];
         else if (arg == "--ephemeral-key") ephemeral_key = true;
+        else if (arg == "--allow-synthetic-for-tests") allow_synthetic_for_tests = true;
+        else if (arg == "--schema-version" && i + 1 < argc) schema_ver = normalize_schema_version(argv[++i]);
+        else if (arg == "--path-hmac-key" && i + 1 < argc) recon_opts.hmac_key = argv[++i];
+        else if (arg == "--include-display-paths") {
+            recon_opts.include_display_paths = true;
+            recon_opts.include_display_remote_addrs = true;
+        }
         else if (arg == "--cgroup-root" && i + 1 < argc) cgroup_root = argv[++i];
         else if (arg == "--bpf-obj" && i + 1 < argc) bpf_obj = argv[++i];
         else if (arg == "--events-in" && i + 1 < argc) events_in = argv[++i];
@@ -296,17 +353,37 @@ int cmd_run(int argc, char** argv) {
     }
 
     bool key_is_path = true;
-    if (signing_key.empty()) {
+    bool key_from_env = false;
+    if (signer_socket.empty()) {
+        if (const char* env_sock = std::getenv("JC_WITNESS_SIGNER_SOCKET"); env_sock && *env_sock) {
+            signer_socket = env_sock;
+        }
+    }
+    if (signer_socket.empty() && signing_key.empty()) {
         if (const char* env_key = std::getenv("JC_WITNESS_SIGNING_KEY"); env_key && *env_key) {
             signing_key = env_key;
+            key_from_env = true;
         } else if (ephemeral_key) {
             signing_key = generate_ephemeral_ed25519_keypair_pem().first;
             key_is_path = false;
         } else {
-            std::cerr << "run requires --signing-key, JC_WITNESS_SIGNING_KEY, or --ephemeral-key\n";
+            std::cerr << "run requires --signer-socket, --signing-key, JC_WITNESS_SIGNING_KEY, or --ephemeral-key\n";
             return 2;
         }
     }
+
+    if (mode == "synthetic" && key_from_env && !allow_synthetic_for_tests) {
+        std::cerr << "jc-kernel-witness fail-closed: refusing to sign synthetic mode receipt with JC_WITNESS_SIGNING_KEY\n";
+        return 73;
+    }
+
+    auto sign_receipt = [&](ObservationReceipt& r) {
+        if (!signer_socket.empty()) {
+            sign_receipt_via_socket(r, signer_socket);
+        } else {
+            finalize_and_sign_receipt(r, signing_key, key_is_path);
+        }
+    };
 
     // Phase 1: Pre-exec cgroup v2 isolation (fail closed if it cannot be established)
     CgroupLeaf leaf;
@@ -319,6 +396,7 @@ int cmd_run(int argc, char** argv) {
     }
 
     ObservationReceipt receipt;
+    receipt.schema_version = schema_ver;
     receipt.observer_mode = mode;
     receipt.observer_id = observer_id;
     receipt.work_item_id = work_item_id;
@@ -338,7 +416,7 @@ int cmd_run(int argc, char** argv) {
         live_obs = std::make_unique<LiveBpfObserver>(LiveObserverConfig{
             .bpf_obj_path = bpf_obj,
             .cgroup_id = leaf.cgroup_id,
-            .invocation_tag = 1,
+            .invocation_tag = leaf.cgroup_id,
         });
         std::string obs_err;
         if (live_obs->start(obs_err)) {
@@ -350,7 +428,7 @@ int cmd_run(int argc, char** argv) {
                 cleanup_witness_cgroup_leaf(leaf);
                 receipt.status = "failed";
                 receipt.incomplete_reasons.push_back("unsupported_kernel_or_missing_permissions: " + obs_err);
-                if (!receipt_out.empty()) {
+                if (!receipt_out.empty() && signer_socket.empty()) {
                     finalize_and_sign_receipt(receipt, signing_key, key_is_path);
                     write_text_file(receipt_out, serialize_canonical_json(receipt_to_json(receipt)) + "\n");
                 }
@@ -365,7 +443,6 @@ int cmd_run(int argc, char** argv) {
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
 
-    // Launch target command directly into the cgroup v2 leaf via clone3(CLONE_INTO_CGROUP)
     std::vector<char*> child_argv;
     for (int i = cmd_idx; i < argc; ++i) {
         child_argv.push_back(argv[i]);
@@ -375,6 +452,9 @@ int cmd_run(int argc, char** argv) {
     pid_t child_pid = -1;
     try {
         child_pid = clone_into_cgroup(leaf.dir_fd, [&]() -> int {
+            unsetenv("JC_WITNESS_SIGNING_KEY");
+            unsetenv("JC_WITNESS_SIGNER_SOCKET");
+            unsetenv("JC_WITNESS_PATH_HMAC_KEY");
             execvp(child_argv[0], child_argv.data());
             return 127;
         });
@@ -415,16 +495,26 @@ int cmd_run(int argc, char** argv) {
         }
     }
 
+    // Kill any remaining background grandchildren inside the cgroup BEFORE detaching eBPF
+    // so their sched_process_exit events are captured in the receipt!
+    terminate_witness_cgroup_processes(leaf);
+
     std::vector<ObservedEvent> raw_events;
     uint64_t dropped_events = 0;
+    LiveObserverStats obs_stats{};
     if (ebpf_active && live_obs) {
+        live_obs->poll(15);
         live_obs->stop_and_drain(dropped_events);
         raw_events = live_obs->events();
+        obs_stats = live_obs->stats();
         if (live_obs->ringbuf_error()) {
             receipt.incomplete_reasons.push_back("ringbuf_poll_error");
         }
         if (dropped_events > 0) {
             receipt.incomplete_reasons.push_back("ringbuf_overflow_dropped_events");
+        }
+        for (const auto& warn : live_obs->attach_warnings()) {
+            receipt.incomplete_reasons.push_back(warn);
         }
     } else if (mode == "synthetic" && !events_in.empty()) {
         std::vector<std::string> parse_errors;
@@ -432,25 +522,41 @@ int cmd_run(int argc, char** argv) {
         for (const auto& e : parse_errors) receipt.incomplete_reasons.push_back(e);
     }
 
-    // Clean up ONLY the cgroup leaf created by the witness AFTER processes exit
     if (!cleanup_witness_cgroup_leaf(leaf)) {
         receipt.incomplete_reasons.push_back("cgroup_cleanup_failed");
     }
 
-    auto recon = reconstruct_process_tree(raw_events, leaf.cgroup_id, receipt.root_pid);
+    auto recon = reconstruct_process_tree(raw_events, leaf.cgroup_id, receipt.root_pid, recon_opts);
     receipt.start_time_ns = recon.start_time_ns;
     receipt.end_time_ns = recon.end_time_ns;
     receipt.events = std::move(recon.events);
     receipt.process_tree = std::move(recon.process_tree);
+    receipt.filesystem_events = std::move(recon.filesystem_events);
+    receipt.network_events = std::move(recon.network_events);
+    receipt.category_completeness = std::move(recon.category_completeness);
     receipt.event_counts = recon.counts;
     receipt.dropped_events = dropped_events;
     receipt.sequence_gaps = recon.sequence_gaps;
+
+    if (obs_stats.process_drops > 0) {
+        receipt.category_completeness.process.dropped_events = obs_stats.process_drops;
+        receipt.category_completeness.process.status = "incomplete";
+    }
+    if (obs_stats.fs_drops > 0) {
+        receipt.category_completeness.filesystem.dropped_events = obs_stats.fs_drops;
+        receipt.category_completeness.filesystem.status = "incomplete";
+    }
+    if (obs_stats.net_drops > 0) {
+        receipt.category_completeness.network.dropped_events = obs_stats.net_drops;
+        receipt.category_completeness.network.status = "incomplete";
+    }
+
     for (const auto& a : recon.anomalies) {
         receipt.incomplete_reasons.push_back(a);
     }
 
     receipt.status = receipt.incomplete_reasons.empty() ? "complete" : "incomplete";
-    finalize_and_sign_receipt(receipt, signing_key, key_is_path);
+    sign_receipt(receipt);
 
     if (!receipt_out.empty()) {
         write_text_file(receipt_out, serialize_canonical_json(receipt_to_json(receipt)) + "\n");
@@ -468,6 +574,8 @@ int main(int argc, char** argv) {
     std::string sub = argv[1];
     try {
         if (sub == "keygen") return cmd_keygen(argc, argv);
+        if (sub == "key-admin") return run_key_admin_cli(argc, argv, 2);
+        if (sub == "signerd") return run_signerd_cli(argc, argv, 2);
         if (sub == "check-bpf") return cmd_check_bpf(argc, argv);
         if (sub == "verify") return cmd_verify(argc, argv);
         if (sub == "replay") return cmd_replay(argc, argv);
