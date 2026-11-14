@@ -1,16 +1,20 @@
+import { sha256Hex } from "./canonical.js";
 import { importTrustedKey } from "./provenance.js";
 
-export type ObserverKeyStatus = "active" | "rotated" | "revoked";
+export type ObserverKeyStatus = "active" | "rotated" | "retired" | "revoked";
 
 export type ObserverKeyRecord = {
   keyId: string;
   observerId: string;
   publicKeyPem: string;
+  publicKeyFingerprintSha256?: string | null;
   status: ObserverKeyStatus;
   registeredAt: string;
   registeredBy: string;
   rotatedAt: string | null;
   rotatedToKeyId: string | null;
+  retiredAt?: string | null;
+  retiredBy?: string | null;
   revokedAt: string | null;
   revokedBy: string | null;
   revocationReason: string | null;
@@ -23,6 +27,18 @@ export type KeyEvaluationResult =
 
 const PRIVATE_KEY_MARKER_RE = /BEGIN\s+(?:[A-Z0-9]+\s+)?PRIVATE\s+KEY/i;
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const SHA256_HEX_RE = /^[a-f0-9]{64}$/u;
+
+export async function computeSpkiFingerprintSha256(publicKeyPem: string): Promise<string> {
+  const b64 = publicKeyPem
+    .replace(/-----BEGIN PUBLIC KEY-----/g, "")
+    .replace(/-----END PUBLIC KEY-----/g, "")
+    .replace(/\s+/g, "");
+  const binary = atob(b64);
+  const derBytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+  const digest = await crypto.subtle.digest("SHA-256", derBytes as BufferSource);
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 export async function validatePublicKeyCustody(publicKeyPem: string): Promise<CryptoKey> {
   if (typeof publicKeyPem !== "string" || publicKeyPem.trim().length === 0) {
@@ -43,7 +59,15 @@ export class ObserverKeyRegistry {
 
   constructor(initial: readonly ObserverKeyRecord[] = []) {
     for (const rec of initial) {
-      this.#records.set(rec.keyId, Object.freeze({ ...rec }));
+      this.#records.set(
+        rec.keyId,
+        Object.freeze({
+          ...rec,
+          publicKeyFingerprintSha256: rec.publicKeyFingerprintSha256 ?? null,
+          retiredAt: rec.retiredAt ?? null,
+          retiredBy: rec.retiredBy ?? null
+        })
+      );
     }
   }
 
@@ -59,6 +83,7 @@ export class ObserverKeyRegistry {
     keyId: string;
     observerId: string;
     publicKeyPem: string;
+    expectedFingerprintSha256?: string;
     registeredAt?: string;
     registeredBy?: string;
     auditEventId?: string | null;
@@ -69,15 +94,24 @@ export class ObserverKeyRegistry {
       throw new Error(`observer key '${input.keyId}' is already registered`);
     }
     await validatePublicKeyCustody(input.publicKeyPem);
+    const fingerprint = await computeSpkiFingerprintSha256(input.publicKeyPem);
+    if (input.expectedFingerprintSha256 !== undefined) {
+      if (!SHA256_HEX_RE.test(input.expectedFingerprintSha256) || input.expectedFingerprintSha256 !== fingerprint) {
+        throw new Error(`publicKeyPem SPKI fingerprint mismatch for key '${input.keyId}'`);
+      }
+    }
     const record: ObserverKeyRecord = Object.freeze({
       keyId: input.keyId,
       observerId: input.observerId,
       publicKeyPem: input.publicKeyPem,
+      publicKeyFingerprintSha256: fingerprint,
       status: "active",
       registeredAt: input.registeredAt ?? new Date().toISOString(),
       registeredBy: input.registeredBy ?? "system",
       rotatedAt: null,
       rotatedToKeyId: null,
+      retiredAt: null,
+      retiredBy: null,
       revokedAt: null,
       revokedBy: null,
       revocationReason: null,
@@ -91,6 +125,7 @@ export class ObserverKeyRegistry {
     oldKeyId: string;
     newKeyId: string;
     newPublicKeyPem: string;
+    expectedNewFingerprintSha256?: string;
     observerId?: string;
     rotatedAt?: string;
     rotatedBy?: string;
@@ -108,6 +143,15 @@ export class ObserverKeyRegistry {
     const observerId = input.observerId ?? existing.observerId;
     if (!ID_RE.test(observerId)) throw new Error("invalid observerId");
     await validatePublicKeyCustody(input.newPublicKeyPem);
+    const newFingerprint = await computeSpkiFingerprintSha256(input.newPublicKeyPem);
+    if (input.expectedNewFingerprintSha256 !== undefined) {
+      if (!SHA256_HEX_RE.test(input.expectedNewFingerprintSha256) || input.expectedNewFingerprintSha256 !== newFingerprint) {
+        throw new Error(`newPublicKeyPem SPKI fingerprint mismatch for key '${input.newKeyId}'`);
+      }
+    }
+    if (existing.publicKeyPem === input.newPublicKeyPem || existing.publicKeyFingerprintSha256 === newFingerprint) {
+      throw new Error("newPublicKeyPem must differ from the old key material on rotation");
+    }
 
     const now = input.rotatedAt ?? new Date().toISOString();
     const actor = input.rotatedBy ?? "system";
@@ -121,11 +165,14 @@ export class ObserverKeyRegistry {
       keyId: input.newKeyId,
       observerId,
       publicKeyPem: input.newPublicKeyPem,
+      publicKeyFingerprintSha256: newFingerprint,
       status: "active",
       registeredAt: now,
       registeredBy: actor,
       rotatedAt: null,
       rotatedToKeyId: null,
+      retiredAt: null,
+      retiredBy: null,
       revokedAt: null,
       revokedBy: null,
       revocationReason: null,
@@ -134,6 +181,28 @@ export class ObserverKeyRegistry {
     this.#records.set(oldRecord.keyId, oldRecord);
     this.#records.set(newRecord.keyId, newRecord);
     return { oldRecord, newRecord };
+  }
+
+  retireKey(input: {
+    keyId: string;
+    retiredAt?: string;
+    retiredBy?: string;
+  }): ObserverKeyRecord {
+    const existing = this.#records.get(input.keyId);
+    if (!existing) throw new Error(`observer key '${input.keyId}' does not exist`);
+    if (existing.status === "revoked") {
+      throw new Error(`cannot retire revoked observer key '${input.keyId}'`);
+    }
+    if (existing.status === "retired") return existing;
+    const now = input.retiredAt ?? new Date().toISOString();
+    const updated: ObserverKeyRecord = Object.freeze({
+      ...existing,
+      status: "retired",
+      retiredAt: now,
+      retiredBy: input.retiredBy ?? "system"
+    });
+    this.#records.set(updated.keyId, updated);
+    return updated;
   }
 
   revokeKey(input: {
@@ -175,11 +244,21 @@ export class ObserverKeyRegistry {
         record: rec
       };
     }
+    if (rec.status === "retired") {
+      return {
+        allowed: false,
+        status: "retired",
+        reason: `signingKeyId '${keyId}' has been retired and is no longer valid for receipt verification`,
+        record: rec
+      };
+    }
     if (rec.status === "rotated") {
       if (options.allowRotatedHistorical && rec.rotatedAt && options.receiptTimestampIso) {
         const receiptMs = Date.parse(options.receiptTimestampIso);
         const rotatedMs = Date.parse(rec.rotatedAt);
-        if (!Number.isNaN(receiptMs) && !Number.isNaN(rotatedMs) && receiptMs < rotatedMs) {
+        const registeredMs = Date.parse(rec.registeredAt);
+        const afterRegistration = Number.isNaN(registeredMs) || receiptMs >= registeredMs;
+        if (!Number.isNaN(receiptMs) && !Number.isNaN(rotatedMs) && afterRegistration && receiptMs < rotatedMs) {
           return { allowed: true, status: "rotated", record: rec };
         }
       }
@@ -193,3 +272,5 @@ export class ObserverKeyRegistry {
     return { allowed: true, status: "active", record: rec };
   }
 }
+
+export { sha256Hex };

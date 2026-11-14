@@ -155,7 +155,12 @@ const migrationFiles = [
   { version: 76, name: "jace_commander_native_tools", filename: "076_jace_commander_native_tools.sql" },
   { version: 77, name: "jace_mem_capability_issuances", filename: "077_jace_mem_capability_issuances.sql" },
   { version: 78, name: "jc_native_gui_tools", filename: "078_jc_native_gui_tools.sql" },
-  { version: 79, name: "black_box_durable", filename: "079_black_box_durable.sql" }
+  { version: 79, name: "black_box_durable", filename: "079_black_box_durable.sql" },
+  {
+    version: 80,
+    name: "black_box_transactional_worm_v2",
+    filename: "080_black_box_transactional_worm_v2.sql"
+  }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {

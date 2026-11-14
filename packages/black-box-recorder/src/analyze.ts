@@ -328,6 +328,46 @@ function rulesForRun(
     );
   }
 
+  const incompleteWitness = events.filter(
+    (event) => event.eventType === "witness.observation.incomplete",
+  );
+  if (incompleteWitness.length > 0) {
+    findings.push(
+      finding(
+        "abbr.witness-observation-incomplete",
+        1,
+        "high",
+        "evidence",
+        runId,
+        "Kernel witness receipt reported incomplete observation coverage (dropped events, missing exit, or insufficient scope).",
+        incompleteWitness.map((event) => event.eventId),
+        detectedAt,
+      ),
+    );
+  }
+
+  const exitMismatchWitness = events.filter(
+    (event) =>
+      event.eventType === "witness.observation.verified" &&
+      event.trustLevel === "independently_verified" &&
+      typeof event.metadata.rootExitCode === "number" &&
+      event.metadata.rootExitCode !== 0,
+  );
+  if (exitMismatchWitness.length > 0 && events.some(isSuccessClaim)) {
+    findings.push(
+      finding(
+        "abbr.witness-exit-mismatch",
+        1,
+        "high",
+        "evidence",
+        runId,
+        "Independently verified kernel witness recorded a non-zero root process exit code while the run contains a success claim.",
+        exitMismatchWitness.map((event) => event.eventId),
+        detectedAt,
+      ),
+    );
+  }
+
   return findings;
 }
 
@@ -615,11 +655,36 @@ function verificationEvidence(events: RecorderEvent[], coverage: string, store: 
       passes.set(id, event);
     }
   }
+  const witnessFailure = events.find(
+    (event) =>
+      event.eventType === "witness.observation.verified" &&
+      event.trustLevel === "independently_verified" &&
+      !store.hasConflict(event.eventId) &&
+      typeof event.metadata.rootExitCode === "number" &&
+      event.metadata.rootExitCode !== 0 &&
+      events.some(isSuccessClaim),
+  );
+  if (witnessFailure) {
+    return { state: "failed", evidenceEventId: witnessFailure.eventId };
+  }
   const conflictedExecution = [...executed.keys()].some((id) => store.hasConflict(id));
   if (!conflictedExecution && successes.length > 0 && successes.every((event) => passes.has(event.eventId))) {
     return { state: "verified", evidenceEventId: passes.values().next().value?.eventId ?? null };
   }
+  const incompleteWitness = events.find((event) => event.eventType === "witness.observation.incomplete");
+  if (incompleteWitness) {
+    return { state: "unverified", evidenceEventId: incompleteWitness.eventId };
+  }
   if (events.some(isSuccessClaim)) return { state: "unverified", evidenceEventId: null };
+  const verifiedWitness = events.find(
+    (event) =>
+      event.eventType === "witness.observation.verified" &&
+      event.trustLevel === "independently_verified" &&
+      !store.hasConflict(event.eventId),
+  );
+  if (verifiedWitness && events.every((event) => event.source.component === "jc-kernel-witness")) {
+    return { state: "verified", evidenceEventId: verifiedWitness.eventId };
+  }
   return { state: coverage === "list-projection" ? "not_loaded" : "unknown", evidenceEventId: null };
 }
 

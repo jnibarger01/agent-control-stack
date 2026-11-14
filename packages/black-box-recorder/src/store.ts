@@ -31,6 +31,26 @@ export async function computeEventHash(
   return sha256Hex(canonicalJson({ seq, previousHash, eventId, payloadSha256 }));
 }
 
+export async function computeRecorderFingerprint(
+  domain: "identity" | "payload",
+  content: string
+): Promise<string> {
+  return sha256Hex(`abbr.fingerprint.v1:${domain}:${content}`);
+}
+
+export type PreparedRecorderDraft = {
+  readonly partial: Omit<RecorderEvent, "evidence"> & {
+    readonly evidence: {
+      readonly sourceRecordRef: string | null;
+      readonly integrityStatus: RecorderEvent["evidence"]["integrityStatus"];
+    };
+  };
+  readonly payloadSha256: string;
+  readonly producerKey: string;
+  readonly fingerprint: string;
+  readonly evidenceHashClaim: string | null;
+};
+
 export async function verifyRecorderChain(events: readonly RecorderEvent[]): Promise<ChainVerification> {
   const findings: ChainFinding[] = [];
   let expectedSeq = 1;
@@ -171,7 +191,6 @@ export class RecorderStore {
   #seq = 0;
   #headHash = GENESIS_HASH;
   #commitQueue: Promise<void> = Promise.resolve();
-  #fingerprintKey?: Promise<CryptoKey>;
   readonly #enabled: boolean;
   readonly #maxEvents: number;
   readonly #grantTrust: NonNullable<RecorderStoreOptions["grantTrust"]>;
@@ -217,7 +236,11 @@ export class RecorderStore {
       producerKey: string;
       fingerprint: string;
       evidenceHash?: string | null;
-    }>
+    }>,
+    expectedChainState?: {
+      seq: number;
+      headHash: string;
+    }
   ): Promise<ChainVerification> {
     if (this.#events.size > 0) {
       throw new Error("cannot hydrate non-empty RecorderStore");
@@ -226,6 +249,16 @@ export class RecorderStore {
     const verification = await verifyRecorderChain(events);
     if (!verification.valid) {
       throw new Error(`durable black-box chain verification failed: ${verification.findings.map((f) => f.detail).join("; ")}`);
+    }
+    if (expectedChainState) {
+      if (
+        verification.eventCount !== expectedChainState.seq ||
+        verification.headHash !== expectedChainState.headHash
+      ) {
+        throw new Error(
+          `black_box_chain_state_mismatch: expected seq=${expectedChainState.seq} headHash=${expectedChainState.headHash}, got seq=${verification.eventCount} headHash=${verification.headHash}`
+        );
+      }
     }
     for (const entry of entries) {
       const ev = deepFreeze(structuredClone(entry.event));
@@ -240,6 +273,48 @@ export class RecorderStore {
       this.#headHash = ev.evidence.eventHash;
     }
     return verification;
+  }
+
+  /**
+   * Synchronizes an event that has already been atomically committed to durable storage
+   * into the in-memory store without advancing ahead of SQLite.
+   */
+  syncCommittedEvent(entry: {
+    event: RecorderEvent;
+    producerKey: string;
+    fingerprint: string;
+    evidenceHash?: string | null;
+  }): RecorderEvent {
+    const existingId = this.#byProducer.get(entry.producerKey);
+    if (existingId) {
+      const existing = this.#events.get(existingId);
+      if (existing) return existing;
+    }
+    const ev = deepFreeze(structuredClone(entry.event));
+    this.#events.set(ev.eventId, ev);
+    this.#byProducer.set(entry.producerKey, ev.eventId);
+    this.#producerKeyByEventId.set(ev.eventId, entry.producerKey);
+    this.#fingerprints.set(ev.eventId, entry.fingerprint);
+    if (entry.evidenceHash && /^[a-f0-9]{64}$/u.test(entry.evidenceHash)) {
+      this.#seenEvidenceHashes.add(entry.evidenceHash);
+    }
+    if (ev.evidence.seq > this.#seq) {
+      this.#seq = ev.evidence.seq;
+      this.#headHash = ev.evidence.eventHash;
+    }
+    return ev;
+  }
+
+  recordConflict(conflict: {
+    producerKey: string;
+    existingEventId: string;
+    rejectedSha256: string;
+    ingestedAt: string;
+  }): void {
+    this.#conflictedAt.set(conflict.existingEventId, conflict.ingestedAt);
+    if (this.#conflicts.length < this.#maxEvents) {
+      this.#conflicts.push(Object.freeze({ ...conflict }));
+    }
   }
 
   annotationFor(runId: string): RunAnnotation | undefined { return this.#annotations.get(runId); }
@@ -321,8 +396,14 @@ export class RecorderStore {
     return this.#ingestInternal(input, false);
   }
 
-  async #ingestInternal(input: IngestDraft, verifiedWitnessGrant: boolean): Promise<IngestResult> {
-    if (!this.#enabled) return { status: "disabled", reason: "ABBR_ENABLED is not set to 1" };
+  async prepareDraft(
+    input: IngestDraft,
+    verifiedWitnessGrant = false
+  ): Promise<
+    | { ok: true; prepared: PreparedRecorderDraft }
+    | { ok: false; status: "disabled" | "rejected"; reason: string }
+  > {
+    if (!this.#enabled) return { ok: false, status: "disabled", reason: "ABBR_ENABLED is not set to 1" };
     let draft: IngestDraft;
     let producerPayload: string;
     try {
@@ -331,21 +412,21 @@ export class RecorderStore {
       draft = deepFreeze(structuredClone(input));
       if (![draft.component, draft.producerEventId, draft.eventType, draft.ingestedAt]
         .every((field) => typeof field === "string" && field.length > 0)) {
-        return { status: "rejected", reason: "record is missing a required identity, type or time" };
+        return { ok: false, status: "rejected", reason: "record is missing a required identity, type or time" };
       }
       const optionalFields = [draft.instanceId, draft.releaseId, draft.identityRef, draft.runId,
         draft.missionId, draft.correlationId, draft.parentEventId, draft.sourceTimestamp, draft.sourceRecordRef];
       if (!optionalFields.every((field) => field == null || typeof field === "string")) {
-        return { status: "rejected", reason: "record contains an invalid identity, reference or timestamp" };
+        return { ok: false, status: "rejected", reason: "record contains an invalid identity, reference or timestamp" };
       }
       if (!UNGRANTED.has(draft.trustLevel) && draft.trustLevel !== "unknown" && draft.trustLevel !== "untrusted_claim") {
-        return { status: "rejected", reason: "record contains an unknown trust level" };
+        return { ok: false, status: "rejected", reason: "record contains an unknown trust level" };
       }
       const fields = signedPayload(draft);
       delete fields.ingestedAt;
       producerPayload = canonicalJson(fields);
     } catch {
-      return { status: "rejected", reason: "record payload cannot be encoded as canonical JSON" };
+      return { ok: false, status: "rejected", reason: "record payload cannot be encoded as canonical JSON" };
     }
     // Every stored string passes through the same redaction, including identity and reference fields.
     const metadata = redact(draft.metadata ?? {}) as Record<string, unknown>;
@@ -399,6 +480,25 @@ export class RecorderStore {
       typeof metadata.evidenceHash === "string" && /^[a-f0-9]{64}$/u.test(metadata.evidenceHash)
         ? metadata.evidenceHash
         : null;
+
+    return {
+      ok: true,
+      prepared: {
+        partial,
+        payloadSha256,
+        producerKey,
+        fingerprint,
+        evidenceHashClaim
+      }
+    };
+  }
+
+  async #ingestInternal(input: IngestDraft, verifiedWitnessGrant: boolean): Promise<IngestResult> {
+    const prep = await this.prepareDraft(input, verifiedWitnessGrant);
+    if (!prep.ok) {
+      return { status: prep.status, reason: prep.reason };
+    }
+    const { partial, payloadSha256, producerKey, fingerprint, evidenceHashClaim } = prep.prepared;
 
     let result!: IngestResult;
     const runCommit = async (): Promise<void> => {
@@ -465,10 +565,7 @@ export class RecorderStore {
   }
 
   async #fingerprint(domain: "identity" | "payload", content: string): Promise<string> {
-    this.#fingerprintKey ??= crypto.subtle.generateKey({ name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-    const data = new TextEncoder().encode(`${domain}\0${content}`);
-    const digest = await crypto.subtle.sign("HMAC", await this.#fingerprintKey, data);
-    return btoa(String.fromCharCode(...new Uint8Array(digest)));
+    return computeRecorderFingerprint(domain, content);
   }
 }
 
