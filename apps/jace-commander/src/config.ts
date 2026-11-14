@@ -136,7 +136,8 @@ export function loadJcConfig(env: NodeJS.ProcessEnv = process.env): JcConfig {
     sandboxEnv: Object.freeze(Object.fromEntries([
       'JC_WORKLOAD_ISOLATION', 'JC_WORKLOAD_NETWORK', 'JC_SANDBOX_HIDE', 'JC_SANDBOX_READONLY',
       'JC_SANDBOX_WRITABLE', 'JC_BWRAP_PATH', 'JC_ALLOW_UNISOLATED_WORKLOADS', 'XDG_RUNTIME_DIR',
-      'JC_WITNESS_SIGNING_KEY', 'JC_WITNESS_RECEIPT_DIR',
+      'JC_WITNESS_SIGNING_KEY', 'JC_WITNESS_SIGNER_SOCKET', 'JC_WITNESS_RECEIPT_DIR',
+      'JC_WITNESS_PATH_HMAC_KEY_FILE',
     ].map((name) => [name, env[name] ?? (name === 'XDG_RUNTIME_DIR' ? process.env.XDG_RUNTIME_DIR : undefined)]))),
     witness: kernelWitnessConfigFromEnv(stateDir, env),
     mirrorMaxPending: boundedInt(env.JC_ACS_MIRROR_MAX_PENDING, 5000, 10, 1_000_000, 'JC_ACS_MIRROR_MAX_PENDING'),

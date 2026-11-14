@@ -21,6 +21,8 @@ CgroupLeaf create_witness_cgroup_leaf(const std::string& root_path, const std::s
 
 pid_t clone_into_cgroup(int cgroup_dir_fd, const std::function<int()>& child_fn);
 
+void terminate_witness_cgroup_processes(const CgroupLeaf& leaf);
+
 bool cleanup_witness_cgroup_leaf(CgroupLeaf& leaf);
 
 } // namespace jc::witness

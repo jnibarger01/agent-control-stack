@@ -116,6 +116,47 @@ export function requireMutationActor(
 
 export const MIN_ADMIN_MODE_REASON_LENGTH = 8;
 export const EXECUTION_MODE_ADMIN_SCOPE = "acs:execution-mode:admin";
+export const OBSERVER_KEY_ADMIN_SCOPE = "acs:observers:admin";
+
+/**
+ * Observer key lifecycle endpoints (register, rotate, retire, revoke) govern
+ * root-of-trust public keys for kernel witness verification. A plain acs:write
+ * service token (such as the witness daemon itself) must never be able to
+ * register or rotate its own signing keys.
+ */
+export function requireObserverKeyAdminActor(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  auth: GatewayAuthOptions | undefined
+): string | undefined {
+  if (!auth) {
+    reply.code(503).send({ error: "mutation auth is not configured" });
+    return undefined;
+  }
+  const credential = gatewayCredentialForRequest(request, auth);
+  if (!credential) {
+    reply.code(401).send({ error: "unauthorized" });
+    return undefined;
+  }
+  if (!credential.roles.includes("operator")) {
+    reply.code(403).send({
+      error: "operator role is required to administer observer keys",
+      code: "insufficient_gateway_role"
+    });
+    return undefined;
+  }
+  if (
+    !credential.scopes.includes(OBSERVER_KEY_ADMIN_SCOPE) &&
+    !credential.scopes.includes(EXECUTION_MODE_ADMIN_SCOPE)
+  ) {
+    reply.code(403).send({
+      error: `${OBSERVER_KEY_ADMIN_SCOPE} scope is required to administer observer keys`,
+      code: "insufficient_gateway_scope"
+    });
+    return undefined;
+  }
+  return mutationActorForCredential(credential);
+}
 
 /**
  * Enabling admin mode removes human approval from future work. acs:approve only covers
@@ -268,7 +309,9 @@ export function matchGatewayCredential(
         "acs:approve",
         "acs:worker",
         // The legacy single token is a human operator only when its actor is "user".
-        ...(auth.actor === "user" ? [EXECUTION_MODE_ADMIN_SCOPE] : []),
+        ...(auth.actor === "user"
+          ? [EXECUTION_MODE_ADMIN_SCOPE, OBSERVER_KEY_ADMIN_SCOPE]
+          : []),
         ...MCP_SCOPES
       ]
     };

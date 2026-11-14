@@ -3,15 +3,23 @@
 #include <openssl/bio.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 
 #include <array>
+#include <chrono>
 #include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <fcntl.h>
 #include <fstream>
+#include <iomanip>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace jc::witness {
 
@@ -69,6 +77,17 @@ std::string key_id_from_evp_pkey(EVP_PKEY* pkey) {
     return "ed25519:" + hex.substr(0, 16);
 }
 
+std::string bytes_to_hex(const unsigned char* data, size_t len) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(len * 2);
+    for (size_t i = 0; i < len; ++i) {
+        out.push_back(kHex[(data[i] >> 4) & 0xF]);
+        out.push_back(kHex[data[i] & 0xF]);
+    }
+    return out;
+}
+
 } // namespace
 
 std::string sha256_hex(std::string_view data) {
@@ -85,14 +104,24 @@ std::string sha256_hex(std::string_view data) {
     if (EVP_DigestFinal_ex(ctx.get(), digest.data(), &len) != 1) {
         throw std::runtime_error("EVP_DigestFinal_ex failed");
     }
-    static constexpr char kHex[] = "0123456789abcdef";
-    std::string out;
-    out.reserve(len * 2);
-    for (unsigned int i = 0; i < len; ++i) {
-        out.push_back(kHex[(digest[i] >> 4) & 0xF]);
-        out.push_back(kHex[digest[i] & 0xF]);
+    return bytes_to_hex(digest.data(), len);
+}
+
+std::string hmac_sha256_hex(std::string_view key, std::string_view data) {
+    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+    unsigned int len = 0;
+    const unsigned char* res = HMAC(
+        EVP_sha256(),
+        key.data(),
+        static_cast<int>(key.size()),
+        reinterpret_cast<const unsigned char*>(data.data()),
+        data.size(),
+        digest.data(),
+        &len);
+    if (!res || len == 0) {
+        throw std::runtime_error("HMAC-SHA256 computation failed");
     }
-    return out;
+    return bytes_to_hex(digest.data(), len);
 }
 
 std::string base64_encode(const std::vector<uint8_t>& data) {
@@ -185,9 +214,24 @@ std::pair<std::string, std::string> generate_ephemeral_ed25519_keypair_pem() {
 void generate_ed25519_keypair_pem(const std::string& private_pem_path, const std::string& public_pem_path) {
     auto [priv_pem, pub_pem] = generate_ephemeral_ed25519_keypair_pem();
     {
-        std::ofstream ofs(private_pem_path, std::ios::binary | std::ios::trunc);
-        if (!ofs) throw std::runtime_error("failed to write private key: " + private_pem_path);
-        ofs << priv_pem;
+        int fd = open(private_pem_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        if (fd < 0) {
+            throw std::runtime_error("failed to create private key: " + private_pem_path);
+        }
+        if (fchmod(fd, 0600) != 0) {
+            close(fd);
+            throw std::runtime_error("failed to chmod 0600 private key: " + private_pem_path);
+        }
+        size_t total = 0;
+        while (total < priv_pem.size()) {
+            ssize_t n = write(fd, priv_pem.data() + total, priv_pem.size() - total);
+            if (n <= 0) {
+                close(fd);
+                throw std::runtime_error("failed to write private key: " + private_pem_path);
+            }
+            total += static_cast<size_t>(n);
+        }
+        close(fd);
     }
     {
         std::ofstream ofs(public_pem_path, std::ios::binary | std::ios::trunc);
@@ -251,6 +295,129 @@ std::string derive_key_id_from_public_pem(const std::string& public_pem_or_path,
 std::string derive_key_id_from_private_pem(const std::string& private_pem_or_path, bool is_path) {
     EvpPkeyPtr pkey = load_private_key(private_pem_or_path, is_path);
     return key_id_from_evp_pkey(pkey.get());
+}
+
+std::string derive_public_pem_from_private_pem(const std::string& private_pem_or_path, bool is_path) {
+    EvpPkeyPtr pkey = load_private_key(private_pem_or_path, is_path);
+    BioPtr pub_bio(BIO_new(BIO_s_mem()));
+    if (!pub_bio) throw std::runtime_error("BIO_new failed");
+    if (PEM_write_bio_PUBKEY(pub_bio.get(), pkey.get()) != 1) {
+        throw std::runtime_error("PEM_write_bio_PUBKEY failed");
+    }
+    BUF_MEM* pub_mem = nullptr;
+    BIO_get_mem_ptr(pub_bio.get(), &pub_mem);
+    return std::string(pub_mem->data, pub_mem->length);
+}
+
+std::string sanitize_utf8(std::string_view input, size_t max_bytes) {
+    std::string out;
+    out.reserve(input.size());
+    size_t i = 0;
+    const size_t n = input.size();
+    while (i < n) {
+        unsigned char c0 = static_cast<unsigned char>(input[i]);
+        if (c0 == '\0') break;
+        size_t seq_len = 0;
+        if (c0 < 0x80) {
+            seq_len = 1;
+        } else if ((c0 & 0xE0) == 0xC0) {
+            if (i + 1 < n) {
+                unsigned char c1 = static_cast<unsigned char>(input[i + 1]);
+                uint32_t cp = ((c0 & 0x1Fu) << 6) | (c1 & 0x3Fu);
+                if ((c1 & 0xC0) == 0x80 && cp >= 0x80) seq_len = 2;
+            }
+        } else if ((c0 & 0xF0) == 0xE0) {
+            if (i + 2 < n) {
+                unsigned char c1 = static_cast<unsigned char>(input[i + 1]);
+                unsigned char c2 = static_cast<unsigned char>(input[i + 2]);
+                uint32_t cp = ((c0 & 0x0Fu) << 12) | ((c1 & 0x3Fu) << 6) | (c2 & 0x3Fu);
+                if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80 && cp >= 0x800 && (cp < 0xD800 || cp > 0xDFFF)) {
+                    seq_len = 3;
+                }
+            }
+        } else if ((c0 & 0xF8) == 0xF0) {
+            if (i + 3 < n) {
+                unsigned char c1 = static_cast<unsigned char>(input[i + 1]);
+                unsigned char c2 = static_cast<unsigned char>(input[i + 2]);
+                unsigned char c3 = static_cast<unsigned char>(input[i + 3]);
+                uint32_t cp = ((c0 & 0x07u) << 18) | ((c1 & 0x3Fu) << 12) | ((c2 & 0x3Fu) << 6) | (c3 & 0x3Fu);
+                if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80 && (c3 & 0xC0) == 0x80 && cp >= 0x10000 && cp <= 0x10FFFF) {
+                    seq_len = 4;
+                }
+            }
+        }
+
+        if (seq_len > 0) {
+            if (max_bytes > 0 && out.size() + seq_len > max_bytes) break;
+            out.append(input.data() + i, seq_len);
+            i += seq_len;
+        } else {
+            if (max_bytes > 0 && out.size() + 1 > max_bytes) break;
+            out.push_back('?');
+            ++i;
+        }
+    }
+    return out;
+}
+
+std::string current_utc_iso8601() {
+    auto now = std::chrono::system_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    std::time_t secs = static_cast<std::time_t>(ms / 1000);
+    int rem_ms = static_cast<int>(ms % 1000);
+    if (rem_ms < 0) rem_ms += 1000;
+    struct tm tm_utc{};
+    gmtime_r(&secs, &tm_utc);
+    char buf[64]{};
+    std::snprintf(
+        buf, sizeof(buf),
+        "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+        tm_utc.tm_year + 1900,
+        tm_utc.tm_mon + 1,
+        tm_utc.tm_mday,
+        tm_utc.tm_hour,
+        tm_utc.tm_min,
+        tm_utc.tm_sec,
+        rem_ms);
+    return std::string(buf);
+}
+
+std::optional<int64_t> parse_utc_iso8601_epoch_ms(std::string_view iso) {
+    if (iso.size() < 20 || iso.back() != 'Z') return std::nullopt;
+    int year = 0, mon = 0, day = 0, hour = 0, min = 0, sec = 0, ms = 0;
+    std::string s(iso);
+    int matched = std::sscanf(
+        s.c_str(), "%04d-%02d-%02dT%02d:%02d:%02d.%dZ",
+        &year, &mon, &day, &hour, &min, &sec, &ms);
+    if (matched < 6) return std::nullopt;
+    if (matched == 6) {
+        if (std::sscanf(s.c_str(), "%04d-%02d-%02dT%02d:%02d:%02dZ", &year, &mon, &day, &hour, &min, &sec) != 6) {
+            return std::nullopt;
+        }
+        ms = 0;
+    } else {
+        auto dot = s.find('.');
+        auto z = s.find('Z', dot);
+        if (dot != std::string::npos && z != std::string::npos) {
+            size_t digits = z - dot - 1;
+            if (digits == 1) ms *= 100;
+            else if (digits == 2) ms *= 10;
+            else if (digits > 3) {
+                while (digits > 3) { ms /= 10; --digits; }
+            }
+        }
+    }
+
+    struct tm tm_utc{};
+    tm_utc.tm_year = year - 1900;
+    tm_utc.tm_mon = mon - 1;
+    tm_utc.tm_mday = day;
+    tm_utc.tm_hour = hour;
+    tm_utc.tm_min = min;
+    tm_utc.tm_sec = sec;
+    time_t epoch_sec = timegm(&tm_utc);
+    if (epoch_sec == static_cast<time_t>(-1)) return std::nullopt;
+    return static_cast<int64_t>(epoch_sec) * 1000 + static_cast<int64_t>(ms);
 }
 
 } // namespace jc::witness

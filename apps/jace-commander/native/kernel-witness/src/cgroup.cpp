@@ -4,6 +4,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fcntl.h>
 #include <fstream>
 #include <linux/magic.h>
@@ -56,6 +57,54 @@ bool can_create_child_cgroup(const std::string& dir) {
         return true;
     }
     return false;
+}
+
+void write_cgroup_kill(const std::string& dir_path) {
+    std::string kill_path = dir_path + "/cgroup.kill";
+    int kfd = open(kill_path.c_str(), O_WRONLY | O_CLOEXEC);
+    if (kfd >= 0) {
+        const char one = '1';
+        [[maybe_unused]] ssize_t ignored = write(kfd, &one, 1);
+        close(kfd);
+    }
+}
+
+bool cgroup_populated(const std::string& dir_path) {
+    std::ifstream ev(dir_path + "/cgroup.events");
+    if (ev) {
+        std::string line;
+        while (std::getline(ev, line)) {
+            if (line.rfind("populated ", 0) == 0) {
+                return line.find("populated 0") == std::string::npos;
+            }
+        }
+    }
+    std::ifstream procs(dir_path + "/cgroup.procs");
+    if (procs) {
+        std::string pid_line;
+        if (std::getline(procs, pid_line) && !pid_line.empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void remove_child_cgroups_bottom_up(const std::string& dir_path) {
+    std::error_code ec;
+    std::vector<std::string> subdirs;
+    for (const auto& entry : std::filesystem::directory_iterator(dir_path, ec)) {
+        if (!ec && entry.is_directory(ec)) {
+            subdirs.push_back(entry.path().string());
+        }
+    }
+    for (const auto& sub : subdirs) {
+        remove_child_cgroups_bottom_up(sub);
+        write_cgroup_kill(sub);
+        for (int i = 0; i < 10; ++i) {
+            if (rmdir(sub.c_str()) == 0 || errno == ENOENT) break;
+            usleep(2000);
+        }
+    }
 }
 
 } // namespace
@@ -173,6 +222,20 @@ pid_t clone_into_cgroup(int cgroup_dir_fd, const std::function<int()>& child_fn)
     return static_cast<pid_t>(rc);
 }
 
+void terminate_witness_cgroup_processes(const CgroupLeaf& leaf) {
+    if (!leaf.created_by_witness || leaf.path.empty()) {
+        return;
+    }
+    write_cgroup_kill(leaf.path);
+    for (int attempt = 0; attempt < 25; ++attempt) {
+        if (!cgroup_populated(leaf.path)) {
+            break;
+        }
+        write_cgroup_kill(leaf.path);
+        usleep(4000);
+    }
+}
+
 bool cleanup_witness_cgroup_leaf(CgroupLeaf& leaf) {
     if (!leaf.created_by_witness || leaf.path.empty()) {
         return true;
@@ -182,17 +245,10 @@ bool cleanup_witness_cgroup_leaf(CgroupLeaf& leaf) {
         leaf.dir_fd = -1;
     }
 
-    // Attempt to kill any stragglers inside the cgroup before rmdir
-    std::string kill_path = leaf.path + "/cgroup.kill";
-    int kfd = open(kill_path.c_str(), O_WRONLY | O_CLOEXEC);
-    if (kfd >= 0) {
-        const char one = '1';
-        [[maybe_unused]] ssize_t ignored = write(kfd, &one, 1);
-        close(kfd);
-    }
+    terminate_witness_cgroup_processes(leaf);
+    remove_child_cgroups_bottom_up(leaf.path);
 
-    // Retry rmdir briefly in case kernel is still draining exiting tasks
-    for (int attempt = 0; attempt < 20; ++attempt) {
+    for (int attempt = 0; attempt < 25; ++attempt) {
         if (rmdir(leaf.path.c_str()) == 0 || errno == ENOENT) {
             leaf.cleaned_up = true;
             return true;
@@ -200,6 +256,8 @@ bool cleanup_witness_cgroup_leaf(CgroupLeaf& leaf) {
         if (errno != EBUSY) {
             break;
         }
+        write_cgroup_kill(leaf.path);
+        remove_child_cgroups_bottom_up(leaf.path);
         usleep(5000);
     }
     leaf.cleaned_up = false;

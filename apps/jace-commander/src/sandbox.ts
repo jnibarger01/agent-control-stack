@@ -62,7 +62,17 @@ const CODE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const RUNTIME_DEPENDENCIES = ['@modelcontextprotocol/sdk', '@simplewebauthn/server', 'isbinaryfile', 'pizzip', 'unpdf'];
 
 /** Persistence/escape vectors: masked even if they exist outside $HOME. */
-const SYSTEM_HIDDEN = ['/run/dbus', '/run/docker.sock', '/var/run/docker.sock', '/run/containerd', '/run/podman', '/etc/jace-commander'];
+const SYSTEM_HIDDEN = [
+  '/run/dbus',
+  '/run/docker.sock',
+  '/var/run/docker.sock',
+  '/run/containerd',
+  '/run/podman',
+  '/etc/jace-commander',
+  '/run/jc-witness-signer',
+  '/var/lib/jace-commander/witness-signer',
+  '/run/jace-commander/witness',
+];
 
 function splitList(raw: string | undefined): string[] {
   if (!raw) return [];
@@ -154,6 +164,12 @@ export interface SandboxConfigInput {
   fsRoots: readonly string[];
   fsDeniedRoots: readonly string[];
   managed: boolean;
+  witness?: {
+    signingKeyPath?: string;
+    signerSocketPath?: string;
+    receiptDir?: string;
+    pathHmacKeyFile?: string;
+  };
 }
 
 export function sandboxPolicyFromEnv(input: SandboxConfigInput, env: NodeJS.ProcessEnv = process.env): SandboxPolicy {
@@ -167,8 +183,38 @@ export function sandboxPolicyFromEnv(input: SandboxConfigInput, env: NodeJS.Proc
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
   const runtimeDir = env.XDG_RUNTIME_DIR ?? (uid !== undefined ? `/run/user/${uid}` : undefined);
   const repo = monorepoRoot();
+  const signerSocketPath = env.JC_WITNESS_SIGNER_SOCKET
+    ? path.resolve(env.JC_WITNESS_SIGNER_SOCKET)
+    : input.witness?.signerSocketPath
+      ? path.resolve(input.witness.signerSocketPath)
+      : undefined;
+  const signingKeyPath = env.JC_WITNESS_SIGNING_KEY
+    ? path.resolve(env.JC_WITNESS_SIGNING_KEY)
+    : input.witness?.signingKeyPath
+      ? path.resolve(input.witness.signingKeyPath)
+      : undefined;
+  const receiptDir = env.JC_WITNESS_RECEIPT_DIR
+    ? path.resolve(env.JC_WITNESS_RECEIPT_DIR)
+    : input.witness?.receiptDir
+      ? path.resolve(input.witness.receiptDir)
+      : path.join(input.stateDir, 'witness-receipts');
+  const pathHmacKeyFile = env.JC_WITNESS_PATH_HMAC_KEY_FILE
+    ? path.resolve(env.JC_WITNESS_PATH_HMAC_KEY_FILE)
+    : input.witness?.pathHmacKeyFile
+      ? path.resolve(input.witness.pathHmacKeyFile)
+      : undefined;
+  const writableRoots = [...input.fsRoots, ...splitList(env.JC_SANDBOX_WRITABLE)];
+  const isAncestorOfWritable = (dir: string): boolean => {
+    const resolved = path.resolve(dir);
+    return writableRoots.some((w) => {
+      const rw = path.resolve(w);
+      return rw === resolved || rw.startsWith(resolved + path.sep);
+    });
+  };
   const hidden = [
     input.stateDir,
+    path.join(input.stateDir, 'witness-receipts'),
+    path.join(input.stateDir, 'witness-seen'),
     ...HOME_HIDDEN.map((relative) => path.join(input.homeDir, relative)),
     ...SYSTEM_HIDDEN,
     ...(runtimeDir ? [runtimeDir] : []),
@@ -177,8 +223,15 @@ export function sandboxPolicyFromEnv(input: SandboxConfigInput, env: NodeJS.Proc
     // checkout reachable from the filesystem roots.
     ...[...new Set([...(repo ? [repo] : []), ...acsCheckoutsUnder(input.fsRoots)])]
       .flatMap((checkout) => [path.join(checkout, 'storage'), path.join(checkout, '.env'), path.join(checkout, 'acs.config.yaml')]),
-    ...(env.JC_WITNESS_SIGNING_KEY ? [path.resolve(env.JC_WITNESS_SIGNING_KEY)] : []),
-    ...(env.JC_WITNESS_RECEIPT_DIR ? [path.resolve(env.JC_WITNESS_RECEIPT_DIR)] : []),
+    ...(signingKeyPath ? [signingKeyPath] : []),
+    ...(signerSocketPath
+      ? [
+          signerSocketPath,
+          ...(!isAncestorOfWritable(path.dirname(signerSocketPath)) ? [path.dirname(signerSocketPath)] : []),
+        ]
+      : []),
+    ...(receiptDir ? [receiptDir] : []),
+    ...(pathHmacKeyFile ? [pathHmacKeyFile] : []),
     ...splitList(env.JC_SANDBOX_HIDE),
   ];
   const readOnly = [

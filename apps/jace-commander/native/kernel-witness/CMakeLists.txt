@@ -53,6 +53,7 @@ add_library(jc_witness_core STATIC
     src/cgroup.cpp
     src/process_tree.cpp
     src/receipt.cpp
+    src/signer.cpp
     src/observer.cpp
 )
 
@@ -71,6 +72,10 @@ add_executable(jc-kernel-witness src/main.cpp)
 add_dependencies(jc-kernel-witness witness_bpf_obj)
 target_link_libraries(jc-kernel-witness PRIVATE jc_witness_core)
 target_compile_options(jc-kernel-witness PRIVATE -Wall -Wextra -Wpedantic)
+
+add_executable(jc-witness-signerd src/signerd_main.cpp)
+target_link_libraries(jc-witness-signerd PRIVATE jc_witness_core)
+target_compile_options(jc-witness-signerd PRIVATE -Wall -Wextra -Wpedantic)
 
 enable_testing()
 add_executable(jc_witness_tests tests/test_witness.cpp)
