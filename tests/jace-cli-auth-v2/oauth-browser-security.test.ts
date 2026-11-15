@@ -350,7 +350,7 @@ describe("Suite A: Browser OAuth 2.1, PKCE S256, state/iss, RFC 8252 loopback, a
     expect(wrongLaneRes.status).toBe(401);
 
     // Presenting /jc/mcp token to ACS gateway MUST fail with 401
-    const acsWithJcToken = await fetch(`${acs.url}/api/work-items`, {
+    const acsWithJcToken = await fetch(`${acs.url}/work-items`, {
       headers: { authorization: `Bearer ${jcTokens.accessToken}` }
     });
     expect(acsWithJcToken.status).toBe(401);

@@ -309,6 +309,8 @@ describe("Suite E: File permissions (0700/0600), symlink safety, encrypted fallb
       JC_MCP_TOKEN: fakeLegacySecret,
       DBUS_SESSION_BUS_ADDRESS: ""
     });
+    expect(statusRes.status).toBe(0);
+    expect(JSON.parse(statusRes.stdout)).toMatchObject({ connected: true, auth_mode: "legacy-bearer-env" });
     assertNoSecretsInText(statusRes.stdout + statusRes.stderr, [fakeLegacySecret], "jace auth status");
 
     const logoutRes = runJcCli(["auth", "logout"], {
@@ -318,6 +320,7 @@ describe("Suite E: File permissions (0700/0600), symlink safety, encrypted fallb
       JC_MCP_TOKEN: fakeLegacySecret,
       DBUS_SESSION_BUS_ADDRESS: ""
     });
+    expect(logoutRes.status).toBe(0);
     assertNoSecretsInText(logoutRes.stdout + logoutRes.stderr, [fakeLegacySecret], "jace auth logout");
   });
 });

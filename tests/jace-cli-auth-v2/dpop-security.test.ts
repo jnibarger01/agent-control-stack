@@ -33,25 +33,6 @@ describe("Suite C: RFC 9449 DPoP issuance, ath/htm/htu/iat/jti/nonce checks, res
     return acs;
   }
 
-  async function getNonce(gw: BootedJcGateway, path: string, method = "POST"): Promise<string> {
-    const res = await fetch(`${gw.baseUrl}${path}`, { method });
-    const nonce = res.headers.get("dpop-nonce");
-    if (!nonce) {
-      // Fallback probe with DPoP without nonce
-      const key = generateEd25519DpopKey();
-      const probe = await fetch(`${gw.baseUrl}${path}`, {
-        method,
-        headers: {
-          DPoP: signDpopProof({ key, htm: method, htu: `${gw.publicOrigin}${path}` })
-        }
-      });
-      const probeNonce = probe.headers.get("dpop-nonce");
-      if (!probeNonce) throw new Error(`Expected DPoP-Nonce header from ${path}`);
-      return probeNonce;
-    }
-    return nonce;
-  }
-
   it("SEC-11: DPoP issuance & verification succeeds for EdDSA and ES256 on /jc/mcp and ACS", async () => {
     const gw = await startJc();
     const acs = await startAcs();
@@ -71,13 +52,13 @@ describe("Suite C: RFC 9449 DPoP issuance, ath/htm/htu/iat/jti/nonce checks, res
     // EdDSA on ACS protected endpoint
     const acsKey = generateEd25519DpopKey();
     const acsDev = await authenticateAcsDevice(acs, acsKey);
-    const acsRes = await fetch(`${acs.url}/api/work-items`, {
+    const acsRes = await fetch(`${acs.url}/work-items`, {
       headers: {
         authorization: `DPoP ${acsDev.accessToken}`,
         DPoP: signDpopProof({
           key: acsKey,
           htm: "GET",
-          htu: `${acs.publicOrigin}/api/work-items`,
+          htu: `${acs.publicOrigin}/work-items`,
           accessToken: acsDev.accessToken
         })
       }
@@ -111,13 +92,13 @@ describe("Suite C: RFC 9449 DPoP issuance, ath/htm/htu/iat/jti/nonce checks, res
     }
 
     const acsDev = await authenticateAcsDevice(acs, key);
-    const acsBadAth = await fetch(`${acs.url}/api/work-items`, {
+    const acsBadAth = await fetch(`${acs.url}/work-items`, {
       headers: {
         authorization: `DPoP ${acsDev.accessToken}`,
         DPoP: signDpopProof({
           key,
           htm: "GET",
-          htu: `${acs.publicOrigin}/api/work-items`,
+          htu: `${acs.publicOrigin}/work-items`,
           ath: sha256B64u("other-token")
         })
       }
@@ -188,13 +169,13 @@ describe("Suite C: RFC 9449 DPoP issuance, ath/htm/htu/iat/jti/nonce checks, res
 
     // ACS gateway MUST also ignore spoofed Host / X-Forwarded-Host / X-Forwarded-Proto
     const acsDev = await authenticateAcsDevice(acs, key);
-    const spoofedAcs = await fetch(`${acs.url}/api/work-items`, {
+    const spoofedAcs = await fetch(`${acs.url}/work-items`, {
       headers: {
         authorization: `DPoP ${acsDev.accessToken}`,
         DPoP: signDpopProof({
           key,
           htm: "GET",
-          htu: "https://attacker.evil.test/api/work-items",
+          htu: "https://attacker.evil.test/work-items",
           accessToken: acsDev.accessToken
         }),
         host: "attacker.evil.test",
@@ -272,15 +253,15 @@ describe("Suite C: RFC 9449 DPoP issuance, ath/htm/htu/iat/jti/nonce checks, res
     const acsProof = signDpopProof({
       key,
       htm: "GET",
-      htu: `${acs.publicOrigin}/api/work-items`,
+      htu: `${acs.publicOrigin}/work-items`,
       accessToken: acsDev.accessToken,
       jti: "acs-fixed-jti-replay-0001"
     });
-    const acsFirst = await fetch(`${acs.url}/api/work-items`, {
+    const acsFirst = await fetch(`${acs.url}/work-items`, {
       headers: { authorization: `DPoP ${acsDev.accessToken}`, DPoP: acsProof }
     });
     expect(acsFirst.status).toBe(200);
-    const acsReplay = await fetch(`${acs.url}/api/work-items`, {
+    const acsReplay = await fetch(`${acs.url}/work-items`, {
       headers: { authorization: `DPoP ${acsDev.accessToken}`, DPoP: acsProof }
     });
     expect(acsReplay.status).toBe(401);
@@ -328,17 +309,17 @@ describe("Suite C: RFC 9449 DPoP issuance, ath/htm/htu/iat/jti/nonce checks, res
     const acsProof = signDpopProof({
       key,
       htm: "GET",
-      htu: `${acs.publicOrigin}/api/work-items`,
+      htu: `${acs.publicOrigin}/work-items`,
       accessToken: acsDev.accessToken,
       jti: "restart-persistent-jti-acs-0001"
     });
-    const acsFirst = await fetch(`${acs.url}/api/work-items`, {
+    const acsFirst = await fetch(`${acs.url}/work-items`, {
       headers: { authorization: `DPoP ${acsDev.accessToken}`, DPoP: acsProof }
     });
     expect(acsFirst.status).toBe(200);
 
     await acs.restart();
-    const acsAfterRestart = await fetch(`${acs.url}/api/work-items`, {
+    const acsAfterRestart = await fetch(`${acs.url}/work-items`, {
       headers: { authorization: `DPoP ${acsDev.accessToken}`, DPoP: acsProof }
     });
     expect(acsAfterRestart.status).toBe(401);
@@ -388,6 +369,8 @@ describe("Suite C: RFC 9449 DPoP issuance, ath/htm/htu/iat/jti/nonce checks, res
       body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })
     });
     expect(badNonceRes.status).toBe(401);
+    expect(badNonceRes.headers.get("www-authenticate")).toContain("use_dpop_nonce");
+    expect(badNonceRes.headers.get("dpop-nonce")).toBeTruthy();
 
     // 3. Retrying with the server-issued DPoP-Nonce succeeds (note: stub upstream was never touched on rejected calls)
     expect(gw.jcStub.receivedCalls.filter((c) => c.path === "/mcp")).toHaveLength(0);
@@ -408,8 +391,27 @@ describe("Suite C: RFC 9449 DPoP issuance, ath/htm/htu/iat/jti/nonce checks, res
       body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/list", params: {} })
     });
     expect(okRes.status).toBe(200);
-    // Ensure a valid nonce was also usable via getNonce helper
-    expect(await getNonce(gw, "/jc/mcp", "POST")).toBeTruthy();
+    const nextNonce = okRes.headers.get("dpop-nonce");
+    expect(nextNonce).toBeTruthy();
+
+    // 4. Subsequent request using the rotated DPoP-Nonce from the 200 response also succeeds
+    const followUpProof = signDpopProof({
+      key,
+      htm: "POST",
+      htu: `${gw.publicOrigin}/jc/mcp`,
+      accessToken,
+      nonce: nextNonce!
+    });
+    const followUpRes = await fetch(`${gw.baseUrl}/jc/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `DPoP ${accessToken}`,
+        DPoP: followUpProof
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/list", params: {} })
+    });
+    expect(followUpRes.status).toBe(200);
   });
 
   it("SEC-19: rejects stolen DPoP access token replayed with an attacker's keypair", async () => {
@@ -423,13 +425,13 @@ describe("Suite C: RFC 9449 DPoP issuance, ath/htm/htu/iat/jti/nonce checks, res
     expect(stolenJcRes.status).toBe(401);
 
     const acsDev = await authenticateAcsDevice(acs, victimKey);
-    const stolenAcsRes = await fetch(`${acs.url}/api/work-items`, {
+    const stolenAcsRes = await fetch(`${acs.url}/work-items`, {
       headers: {
         authorization: `DPoP ${acsDev.accessToken}`,
         DPoP: signDpopProof({
           key: attackerKey,
           htm: "GET",
-          htu: `${acs.publicOrigin}/api/work-items`,
+          htu: `${acs.publicOrigin}/work-items`,
           accessToken: acsDev.accessToken
         })
       }
@@ -470,7 +472,7 @@ describe("Suite C: RFC 9449 DPoP issuance, ath/htm/htu/iat/jti/nonce checks, res
 
     // ACS device token sent as Bearer MUST fail closed
     const acsDev = await authenticateAcsDevice(acs, key);
-    const acsBearer = await fetch(`${acs.url}/api/work-items`, {
+    const acsBearer = await fetch(`${acs.url}/work-items`, {
       headers: { authorization: `Bearer ${acsDev.accessToken}` }
     });
     expect(acsBearer.status).toBe(401);

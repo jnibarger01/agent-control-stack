@@ -396,13 +396,13 @@ describe("Suite B: Headless RFC 8628 device flow, device-key registration, and d
     });
     expect(revokeAcs.status).toBe(200);
 
-    const acsAfterRevoke = await fetch(`${acs.url}/api/work-items`, {
+    const acsAfterRevoke = await fetch(`${acs.url}/work-items`, {
       headers: {
         authorization: `DPoP ${acsDevice.accessToken}`,
         DPoP: signDpopProof({
           key: acsKey,
           htm: "GET",
-          htu: `${acs.publicOrigin}/api/work-items`,
+          htu: `${acs.publicOrigin}/work-items`,
           accessToken: acsDevice.accessToken
         })
       }
