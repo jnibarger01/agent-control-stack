@@ -920,7 +920,13 @@ function handleDeviceDecision(req, res, body) {
   if (!passOk) return send(res, 401, denyPage('Invalid consent passphrase.'), { 'Content-Type': 'text/html; charset=utf-8' });
   const userCode = normalizeUserCode(params.user_code || '');
   if (!userCode) return send(res, 400, denyPage('Missing user code.'), { 'Content-Type': 'text/html; charset=utf-8' });
-  const decision = params.decision === 'deny' ? 'deny' : 'approve';
+  if (params.decision && params.action && params.decision !== params.action) {
+    return send(res, 400, denyPage('Conflicting decision parameters.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  }
+  const decision = params.decision ?? params.action;
+  if (decision !== 'approve' && decision !== 'deny') {
+    return send(res, 400, denyPage('Invalid decision; expected approve or deny.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  }
   const result = gatewayStore.decideDeviceCode({ userCode, decision, sub: 'jacen', nowSec: now() });
   if (!result.ok) return send(res, 400, denyPage('Unknown, expired, or already used device code.'), { 'Content-Type': 'text/html; charset=utf-8' });
   const msg = result.status === 'denied'
@@ -989,14 +995,18 @@ function authenticateRequest(
     if (authResult.clientId && authResult.reason === 'expired') {
       reportAuth(laneName, { clientId: authResult.clientId, subject: authResult.subject }, 'token_rejected', authResult.reason);
     }
-    if (authResult.scheme === 'dpop' || (requireDpop && authResult.reason === 'missing')) {
+    const hasDpopHeader = typeof req.headers['dpop'] === 'string' && req.headers['dpop'].trim().length > 0;
+    if (authResult.scheme === 'dpop' || hasDpopHeader || (requireDpop && authResult.reason === 'missing')) {
       send(res, 401, { error: 'unauthorized' }, {
         'WWW-Authenticate': dpopChallenge(dpopBaseChallenge, authResult.reason),
         'DPoP-Nonce': dpopNonces.issue(now()),
       });
       return null;
     }
-    send(res, 401, { error: 'unauthorized' }, { 'WWW-Authenticate': bearerChallenge(baseChallenge, authResult.reason) });
+    send(res, 401, { error: 'unauthorized' }, {
+      'WWW-Authenticate': bearerChallenge(baseChallenge, authResult.reason),
+      ...(DPOP_NONCE_REQUIRED ? { 'DPoP-Nonce': dpopNonces.issue(now()) } : {}),
+    });
     return null;
   }
 

@@ -327,6 +327,15 @@ test('jace-commander-cli policy enforces loopback, state, S256, jc lane, dpop_jk
     assert.equal(bearerAttempt.status, 401);
     assert.match(bearerAttempt.headers.get('www-authenticate'), /^DPoP /);
 
+    // Unauthenticated probe carrying a DPoP header returns DPoP-Nonce + DPoP challenge
+    const dpopProbe = await fetch(`${gw.base}/jc/mcp`, {
+      method: 'POST',
+      headers: { DPoP: makeDpopProof(kp, { htm: 'POST', htu: JC_RESOURCE }) },
+    });
+    assert.equal(dpopProbe.status, 401);
+    assert.ok(dpopProbe.headers.get('dpop-nonce'));
+    assert.match(dpopProbe.headers.get('www-authenticate'), /^DPoP /);
+
     // Proof signed for spoofed Host header must be rejected
     const spoofedProof = makeDpopProof(kp, { htm: 'POST', htu: 'https://evil.test/jc/mcp', accessToken: tok.access_token, nonce });
     const spoofedRes = await fetch(`${gw.base}/jc/mcp`, {
@@ -483,13 +492,28 @@ test('RFC 8628 headless device flow + /jc/devices listing and per-device revocat
     assert.equal(sd2Body.error, 'slow_down');
     assert.equal(sd2Body.interval, 6);
 
-    // Deny dcDeny on /jc/device -> access_denied
+    // Deny dcDeny on /jc/device -> immediate poll returns access_denied even after slow_down
     const denySubmit = await fetch(`${gw.base}/jc/device`, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ user_code: dcDeny.user_code, passphrase: PASS, decision: 'deny' }).toString(),
+      body: new URLSearchParams({ user_code: dcDeny.user_code, passphrase: PASS, action: 'deny' }).toString(),
     });
     assert.equal(denySubmit.status, 200);
+    const deniedPoll = await dpopTokenPost(gw.base, '/jc/oauth/token', kp1, {
+      grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+      device_code: dcDeny.device_code,
+      client_id: 'jace-commander-cli',
+    }, sd2.nextNonce);
+    assert.equal(deniedPoll.res.status, 400);
+    assert.equal((await deniedPoll.res.json()).error, 'access_denied');
+
+    // Invalid/missing decision on /jc/device must fail closed (400), never approve
+    const invalidDecision = await fetch(`${gw.base}/jc/device`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ user_code: dc.user_code, passphrase: PASS, action: 'bogus' }).toString(),
+    });
+    assert.equal(invalidDecision.status, 400);
 
     // Wrong passphrase on /jc/device -> 401
     const badApprove = await fetch(`${gw.base}/jc/device`, {

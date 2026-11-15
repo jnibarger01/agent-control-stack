@@ -536,8 +536,12 @@ export function createGatewayStore(dbPath, { signingKey = '', recoveryKey = '' }
       if (row.client_id !== clientId) return { ok: false, error: 'invalid_grant' };
       if (row.status === 'consumed') return { ok: false, error: 'invalid_grant' };
       if (row.expires_at < nowSec) return { ok: false, error: 'expired_token' };
+      if (row.status === 'denied') {
+        db.prepare("UPDATE jc_device_codes SET status = 'consumed' WHERE device_code_hash = ?").run(hash);
+        return { ok: false, error: 'access_denied' };
+      }
 
-      if (row.last_poll_ms > 0 && nowMs - row.last_poll_ms < row.interval_s * 1000) {
+      if (row.status === 'pending' && row.last_poll_ms > 0 && nowMs - row.last_poll_ms < row.interval_s * 1000) {
         const nextInterval = row.interval_s + 5;
         db.prepare('UPDATE jc_device_codes SET interval_s = ?, last_poll_ms = ? WHERE device_code_hash = ?').run(
           nextInterval,
@@ -549,10 +553,6 @@ export function createGatewayStore(dbPath, { signingKey = '', recoveryKey = '' }
 
       db.prepare('UPDATE jc_device_codes SET last_poll_ms = ? WHERE device_code_hash = ?').run(nowMs, hash);
 
-      if (row.status === 'denied') {
-        db.prepare("UPDATE jc_device_codes SET status = 'consumed' WHERE device_code_hash = ?").run(hash);
-        return { ok: false, error: 'access_denied' };
-      }
       if (row.status === 'pending') {
         return { ok: false, error: 'authorization_pending' };
       }
