@@ -51,6 +51,7 @@ export async function runAuthCommand(
         const useDevice = rest.includes('--device') || rest.includes('--no-browser');
         const label = flagValue(rest, '--label');
         const scope = flagValue(rest, '--scope');
+        const promptOut = out.json ? out.stderr : out.stdout;
         const stored = useDevice
           ? await connectDevice({
               mcpUrl,
@@ -60,10 +61,10 @@ export async function runAuthCommand(
               ...(label ? { label } : {}),
               ...(scope ? { scope } : {}),
               onPrompt: ({ userCode, verificationUriComplete, expiresIn }) => {
-                out.stderr('Approve this device in your browser:');
-                out.stderr(`  ${verificationUriComplete}`);
-                out.stderr(`  code: ${userCode}   (expires in ${Math.round(expiresIn / 60)} min)`);
-                out.stderr('Waiting for approval...');
+                promptOut('Approve this device in your browser:');
+                promptOut(`  ${verificationUriComplete}`);
+                promptOut(`  code: ${userCode}   (expires in ${Math.round(expiresIn / 60)} min)`);
+                promptOut('Waiting for approval...');
               },
             })
           : await connect({
@@ -74,9 +75,9 @@ export async function runAuthCommand(
               ...(label ? { label } : {}),
               ...(scope ? { scope } : {}),
               onAuthorizeUrl: (authorizeUrl) => {
-                out.stderr('Open this URL in a browser on this machine and approve with the gateway consent passphrase:');
-                out.stderr(`  ${authorizeUrl}`);
-                out.stderr('Waiting for approval...');
+                promptOut('Open this URL in a browser on this machine and approve with the gateway consent passphrase:');
+                promptOut(`  ${authorizeUrl}`);
+                promptOut('Waiting for approval...');
               },
             });
         const payload = {
