@@ -34,9 +34,9 @@ This runbook covers migrating `/jc` edge OAuth (`apps/dc-mcp-gateway`), `jace-co
 
 1. **Provision required recovery key:**
    - Generate a dedicated 32-byte key (`openssl rand -base64 32`) and set `ACS_DEVICE_REFRESH_RECOVERY_KEY` (plus optional `ACS_DEVICE_REFRESH_RECOVERY_KEY_ID`). Do **not** reuse `ACS_GATEWAY_TOKEN`. Without this key, `grant_type=refresh_token` fails closed (`503 recovery_unavailable`).
-   - Set `ACS_PUBLIC_ORIGIN` so DPoP `htu` validation uses the configured external origin rather than `Host` headers.
+   - Set `ACS_PUBLIC_ORIGIN` (or `ACS_PUBLIC_URL`) so DPoP `htu` validation uses the configured external origin rather than `Host` headers, and set `ACS_DPOP_NONCE_REQUIRED=1` + `ACS_DPOP_NONCE_SECRET` if strict server-issued nonces are required on ACS device endpoints.
 2. **Run ACS migrations & start gateway:**
-   - Startup (`applyControlPlaneMigrations`) applies `storage/migrations/079_device_auth_refresh_recovery.sql` and the DPoP `jti` replay migration additively.
+   - Startup (`applyControlPlaneMigrations`) applies `storage/migrations/079_device_auth_refresh_recovery.sql` and `storage/migrations/080_device_auth_dpop.sql` additively.
    - Existing ACS devices without DPoP refresh/access re-enroll or re-login with `acs auth login` / updated `jace-commander` `device-login`.
 
 ## 4. CLI Migration (`apps/jace-commander`)
@@ -66,7 +66,7 @@ This runbook covers migrating `/jc` edge OAuth (`apps/dc-mcp-gateway`), `jace-co
 
 ## 5. Verification Checklist
 
-- `jace auth status --json` shows `auth_mode: "dpop"`, `device_id`, `jkt`, `issuer`, `audience`, and `storage_backend` (`secret-service`, `kwallet`, `keychain`, `windows-credential-manager`, or `encrypted-file`), with zero raw tokens or private keys printed.
+- `jace auth status --json` shows `auth_mode: "dpop"`, `device_id`, `jkt`, `issuer`, `audience`, and `storage_backend` (`linux-secret-service`, `linux-kwallet`, `macos-keychain`, `windows-dpapi`, or `encrypted-file`), with zero raw tokens or private keys printed.
 - `jace auth refresh` succeeds and preserves the same `device_id` and `jkt`.
 - `jace auth devices --json` lists active devices; `jace auth revoke <device-id>` revokes the device immediately and subsequent requests fail closed.
 - ChatGPT and Claude custom connectors continue passing `/mcp` and `/jc/mcp` calls.

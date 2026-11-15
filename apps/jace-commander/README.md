@@ -79,11 +79,11 @@ jace auth revoke <device-id>
 
 ### Credential storage, locking, and crash recovery
 
-- **OS keyrings (`SecretStore`):**
-  - Linux: `SecretServiceStore` (`secret-tool`, with `kwallet-query` fallback).
-  - macOS: `KeychainStore` (`security`).
-  - Windows: `WindowsCredentialStore` (PowerShell DPAPI / Credential Manager).
-- **Headless encrypted fallback (`EncryptedFileStore`):** When no OS keyring is available (CI, containers, SSH without D-Bus), secrets are encrypted with AES-256-GCM (`0700` `JC_STATE_DIR`, `0600` files, `O_EXCL` + `fsync` + `rename`). Key material is kept separate from ciphertext via `JC_KEYRING_PASSPHRASE`, `JC_KEYRING_KEY_FILE`, or an OS-restricted headless key path — never plaintext fallback.
+- **OS keyrings (`SecretStore`, `JC_SECRET_BACKEND=auto|keyring|encrypted|file`):**
+  - Linux: `SecretServiceStore` (`linux-secret-service` via `secret-tool`, with `KWalletStore` `linux-kwallet` via `kwallet-query` fallback).
+  - macOS: `KeychainStore` (`macos-keychain` via `security`).
+  - Windows: `WindowsCredentialStore` (`windows-dpapi` via PowerShell DPAPI).
+- **Headless encrypted fallback (`EncryptedFileStore` / `encrypted-file`):** When no OS keyring is available (CI, containers, SSH without D-Bus), secrets are encrypted with AES-256-GCM (`0700` `JC_STATE_DIR`, `0600` files, `O_EXCL` + `fsync` + `rename`). Key material is kept separate from ciphertext via `JC_KEYRING_PASSPHRASE`, `JC_KEYRING_KEY_FILE`, or an OS-restricted headless key path — never plaintext fallback.
 - **Cross-process safety:** `<stateDir>/auth.lock` (`O_CREAT | O_EXCL` + `linkSync`) and a `0600` pre-send `pending-refresh.json` journal (`refresh_request_id`) serialize concurrent CLI refreshes and recover cleanly if a process crashes mid-rotation.
 - **Migration & rollback:** See [docs/runbooks/jace-cli-auth-v2-migration.md](../../docs/runbooks/jace-cli-auth-v2-migration.md).
 
