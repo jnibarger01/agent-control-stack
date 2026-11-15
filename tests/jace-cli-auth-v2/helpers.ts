@@ -337,11 +337,11 @@ export async function bootJcGateway(config: JcGatewayConfig = {}): Promise<Boote
   const dataDir = join(dir, "data");
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 
-  const port = await reserveEphemeralPort();
-  const publicOrigin = (config.publicOrigin ?? `http://127.0.0.1:${port}`).replace(/\/$/, "");
-  const jcIssuer = `${publicOrigin}/jc`;
-  const jcResource = `${publicOrigin}/jc/mcp`;
-  const dcResource = `${publicOrigin}/mcp`;
+  let port = await reserveEphemeralPort();
+  let publicOrigin = (config.publicOrigin ?? `http://127.0.0.1:${port}`).replace(/\/$/, "");
+  let jcIssuer = `${publicOrigin}/jc`;
+  let jcResource = `${publicOrigin}/jc/mcp`;
+  let dcResource = `${publicOrigin}/mcp`;
   const consentPassphrase = config.consentPassphrase ?? `consent-${randomBytes(8).toString("hex")}`;
   const signingKey = config.signingKey ?? randomBytes(32).toString("hex");
   const recoveryKey = config.recoveryKey ?? randomBytes(32).toString("base64");
@@ -362,56 +362,79 @@ export async function bootJcGateway(config: JcGatewayConfig = {}): Promise<Boote
   let child: ChildProcess | undefined;
   let logs = "";
 
-  const startChild = async (): Promise<void> => {
-    const env: NodeJS.ProcessEnv = {
-      PATH: process.env.PATH,
-      GATEWAY_PORT: String(port),
-      PUBLIC_ORIGIN: publicOrigin,
-      RESOURCE: dcResource,
-      ISSUER: publicOrigin,
-      JC_ENABLED: "1",
-      JC_ISSUER: jcIssuer,
-      JC_RESOURCE: jcResource,
-      UPSTREAM: `http://127.0.0.1:${dcStub.port}`,
-      JC_UPSTREAM: `http://127.0.0.1:${jcStub.port}`,
-      ACS_GATEWAY_URL: `http://127.0.0.1:${acsStub.port}`,
-      ACS_JC_GATEWAY_TOKEN: "jc-bridge-test-token",
-      ACS_MANAGED_MODE: "0",
-      JC_PRESET: "local",
-      GATEWAY_EXECUTION_TOKEN: "gw-exec-test-token",
-      CONSENT_PASSPHRASE: consentPassphrase,
-      SIGNING_KEY: signingKey,
-      JC_REFRESH_RECOVERY_KEY: recoveryKey,
-      DATA_DIR: dataDir,
-      DPOP_NONCE_REQUIRED: config.dpopNonceRequired === false ? "0" : "1",
-      EDGE_TEST_MODE: "1",
-      EDGE_TEST_ACCESS_TTL_S: String(config.accessTtlSeconds ?? 600),
-      EDGE_TEST_REFRESH_TTL_S: String(config.refreshTtlSeconds ?? 86400),
-      ...(config.extraEnv ?? {})
-    };
-    const proc = spawn(process.execPath, [DC_GATEWAY_ENTRY], {
-      cwd: resolve(REPO_ROOT, "apps/dc-mcp-gateway"),
-      env,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    child = proc;
-    proc.stdout?.on("data", (d: Buffer) => {
-      logs += d.toString("utf8");
-    });
-    proc.stderr?.on("data", (d: Buffer) => {
-      logs += d.toString("utf8");
-    });
-    let ready = false;
-    for (let i = 0; i < 60 && !ready; i++) {
-      if (proc.exitCode !== null) break;
-      try {
-        const res = await fetch(`http://127.0.0.1:${port}/healthz`);
-        ready = res.ok;
-      } catch {
-        await new Promise((r) => setTimeout(r, 75));
+  const startChild = async (allowReallocatePort: boolean): Promise<void> => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      publicOrigin = (config.publicOrigin ?? `http://127.0.0.1:${port}`).replace(/\/$/, "");
+      jcIssuer = `${publicOrigin}/jc`;
+      jcResource = `${publicOrigin}/jc/mcp`;
+      dcResource = `${publicOrigin}/mcp`;
+      let attemptLogs = "";
+      const env: NodeJS.ProcessEnv = {
+        PATH: process.env.PATH,
+        GATEWAY_PORT: String(port),
+        PUBLIC_ORIGIN: publicOrigin,
+        RESOURCE: dcResource,
+        ISSUER: publicOrigin,
+        JC_ENABLED: "1",
+        JC_ISSUER: jcIssuer,
+        JC_RESOURCE: jcResource,
+        UPSTREAM: `http://127.0.0.1:${dcStub.port}`,
+        JC_UPSTREAM: `http://127.0.0.1:${jcStub.port}`,
+        ACS_GATEWAY_URL: `http://127.0.0.1:${acsStub.port}`,
+        ACS_JC_GATEWAY_TOKEN: "jc-bridge-test-token",
+        ACS_MANAGED_MODE: "0",
+        JC_PRESET: "local",
+        GATEWAY_EXECUTION_TOKEN: "gw-exec-test-token",
+        CONSENT_PASSPHRASE: consentPassphrase,
+        SIGNING_KEY: signingKey,
+        JC_REFRESH_RECOVERY_KEY: recoveryKey,
+        DATA_DIR: dataDir,
+        DPOP_NONCE_REQUIRED: config.dpopNonceRequired === false ? "0" : "1",
+        EDGE_TEST_MODE: "1",
+        EDGE_TEST_ACCESS_TTL_S: String(config.accessTtlSeconds ?? 600),
+        EDGE_TEST_REFRESH_TTL_S: String(config.refreshTtlSeconds ?? 86400),
+        ...(config.extraEnv ?? {})
+      };
+      const proc = spawn(process.execPath, [DC_GATEWAY_ENTRY], {
+        cwd: resolve(REPO_ROOT, "apps/dc-mcp-gateway"),
+        env,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      child = proc;
+      proc.stdout?.on("data", (d: Buffer) => {
+        const chunk = d.toString("utf8");
+        attemptLogs += chunk;
+        logs += chunk;
+      });
+      proc.stderr?.on("data", (d: Buffer) => {
+        const chunk = d.toString("utf8");
+        attemptLogs += chunk;
+        logs += chunk;
+      });
+      let ready = false;
+      for (let i = 0; i < 60 && !ready; i++) {
+        if (proc.exitCode !== null) break;
+        try {
+          const res = await fetch(`http://127.0.0.1:${port}/healthz`);
+          ready = res.ok;
+        } catch {
+          await new Promise((r) => setTimeout(r, 75));
+        }
       }
-    }
-    if (!ready) {
+      if (ready) {
+        return;
+      }
+      if (proc.exitCode === null) {
+        proc.kill("SIGKILL");
+      }
+      if (attempt < 4 && attemptLogs.includes("EADDRINUSE")) {
+        if (allowReallocatePort) {
+          port = await reserveEphemeralPort();
+        } else {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        continue;
+      }
       throw new Error(`dc-mcp-gateway failed to start on port ${port}: ${logs}`);
     }
   };
@@ -432,7 +455,7 @@ export async function bootJcGateway(config: JcGatewayConfig = {}): Promise<Boote
     child = undefined;
   };
 
-  await startChild();
+  await startChild(true);
   const baseUrl = `http://127.0.0.1:${port}`;
 
   return {
@@ -450,7 +473,7 @@ export async function bootJcGateway(config: JcGatewayConfig = {}): Promise<Boote
     output: () => logs,
     restart: async () => {
       await stopChild();
-      await startChild();
+      await startChild(false);
     },
     close: async () => {
       await stopChild();
