@@ -19,7 +19,7 @@ describe("Scenario C: device revocation hardening", () => {
     }
   });
 
-  it("enforces immediate revocation across access tokens, current+previous refresh tokens, restarts, re-registration, and unauthorized callers", async () => {
+  it("enforces immediate revocation across access tokens, current+previous refresh tokens, restarts, re-registration, and unauthorized/cross-device callers; allows owner self-service revoke without operator privileges", async () => {
     const env = createTempEnv();
     cleanups.push(env.cleanup);
 
@@ -32,6 +32,12 @@ describe("Scenario C: device revocation hardening", () => {
     const auth = await authenticateDevice({
       gatewayUrl: gw1.url,
       credentialsPath: env.credentialsPath,
+      scopes: ["acs:device", "acs:work:read"]
+    });
+    const other = await authenticateDevice({
+      gatewayUrl: gw1.url,
+      credentialsPath: env.credentialsPath,
+      deviceName: "other-device",
       scopes: ["acs:device", "acs:work:read"]
     });
 
@@ -75,11 +81,25 @@ describe("Scenario C: device revocation hardening", () => {
     expect(refreshRes1.status).toBe(200);
     const rotated = (await refreshRes1.json()) as { access_token: string; refresh_token: string };
 
-    // Unauthorized caller cannot revoke (no token -> 401; device token -> 403).
+    // Unauthorized caller cannot revoke (no token -> 401).
     const unauthRevoke = await fetch(`${gw1.url}/devices/${auth.deviceId}/revoke`, { method: "POST" });
     expect(unauthRevoke.status).toBe(401);
 
-    const deviceRevoke = await fetch(`${gw1.url}/devices/${auth.deviceId}/revoke`, {
+    // Negative: an ordinary authenticated device must never revoke another device's registration.
+    const crossDeviceRevoke = await fetch(`${gw1.url}/devices/${auth.deviceId}/revoke`, {
+      method: "POST",
+      headers: dpopHeaders({
+        accessToken: other.accessToken,
+        devicePublicKeyPem: other.credentials.devicePublicKeyPem,
+        devicePrivateKeyPem: other.credentials.devicePrivateKeyPem,
+        method: "POST",
+        url: `${gw1.url}/devices/${auth.deviceId}/revoke`
+      })
+    });
+    expect(crossDeviceRevoke.status).toBe(403);
+
+    // Positive: ordinary authenticated user/device can revoke their own device without operator privileges.
+    const selfRevoke = await fetch(`${gw1.url}/devices/${auth.deviceId}/revoke`, {
       method: "POST",
       headers: dpopHeaders({
         accessToken: rotated.access_token,
@@ -89,14 +109,7 @@ describe("Scenario C: device revocation hardening", () => {
         url: `${gw1.url}/devices/${auth.deviceId}/revoke`
       })
     });
-    expect(deviceRevoke.status).toBe(403);
-
-    // Authorized operator revokes device.
-    const opRevoke = await fetch(`${gw1.url}/devices/${auth.deviceId}/revoke`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${OPERATOR_TOKEN}` }
-    });
-    expect(opRevoke.status).toBe(200);
+    expect(selfRevoke.status).toBe(200);
 
     // Direct database assertions: all token hashes, expiries, and recovery envelopes are cleared.
     const revokedRow = inspectDeviceRow(env.dbPath, auth.deviceId);
@@ -219,19 +232,19 @@ describe("Scenario C: device revocation hardening", () => {
         scope: "acs:device"
       }).toString()
     });
-    if (reCodeRes.ok) {
-      const reCode = (await reCodeRes.json()) as { user_code: string };
-      const reApprove = await fetch(`${gw2.url}/device/verify`, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${OPERATOR_TOKEN}`,
-          "content-type": "application/json"
-        },
-        body: JSON.stringify({ user_code: reCode.user_code, action: "approve" })
-      });
-      expect(reApprove.ok).toBe(false);
-    } else {
-      expect(reCodeRes.status).toBe(400);
-    }
+    expect(reCodeRes.status).toBe(200);
+    const reCode = (await reCodeRes.json()) as { device_code: string; user_code: string };
+
+    const reApproveRes = await fetch(`${gw2.url}/device/verify`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${OPERATOR_TOKEN}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ user_code: reCode.user_code, action: "approve" })
+    });
+    // A revoked device binding must not be re-activatable via the same public key.
+    expect([403, 409]).toContain(reApproveRes.status);
   });
+
 });

@@ -732,10 +732,11 @@ describe("device authorization HTTP surface", () => {
     }
   });
 
-  it("POST /devices/:id/revoke requires operator authorization, rejects device tokens, and immediately invalidates access and refresh tokens", async () => {
+  it("POST /devices/:id/revoke: operator can revoke any device, an ordinary authenticated device can revoke only its own device, and revocation immediately invalidates access and refresh tokens", async () => {
     const app = await buildTestApp();
     try {
-      const issueResponse = await app.inject({
+      // Device A (self-service revocation path)
+      const issueA = await app.inject({
         method: "POST",
         url: "/oauth/device/code",
         headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -743,94 +744,139 @@ describe("device authorization HTTP surface", () => {
           client_id: "acs-cli",
           scope: "acs:device acs:work:create acs:work:read",
           device_public_key: devicePublicKeyPem,
-          device_name: "laptop"
+          device_name: "laptop-a"
         })
       });
-      const { device_code: deviceCode, user_code: userCode } = issueResponse.json();
+      const { device_code: deviceCodeA, user_code: userCodeA } = issueA.json();
       await app.inject({
         method: "POST",
         url: "/device/verify",
         headers: { authorization: `Bearer ${testAuth.token}` },
-        payload: { user_code: userCode, action: "approve" }
+        payload: { user_code: userCodeA, action: "approve" }
       });
-      const tokenResponse = await app.inject({
+      const tokenA = await app.inject({
         method: "POST",
         url: "/oauth/token",
         headers: { "content-type": "application/x-www-form-urlencoded" },
         payload: form({
           grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-          device_code: deviceCode,
-          device_signature: deviceProof(deviceCode),
+          device_code: deviceCodeA,
+          device_signature: deviceProof(deviceCodeA),
           client_id: "acs-cli"
         })
       });
-      const initial = tokenResponse.json();
+      const initialA = tokenA.json();
 
-      // Device access token works on authenticated read path with valid DPoP proof before revocation
+      // Device B (separate device, same principal; used for cross-device negative and operator revoke)
+      const pairB = generateKeyPairSync("ed25519");
+      const pemB = pairB.publicKey.export({ type: "spki", format: "pem" }).toString();
+      const proofB = (code: string) =>
+        sign(null, Buffer.from(`acs-device-code-proof-v1\n${code}`, "utf8"), pairB.privateKey).toString("base64url");
+      const dpopB = (input: { htm: string; htu: string; accessToken?: string }) => {
+        const jwkB = pairB.publicKey.export({ format: "jwk" }) as { kty: string; crv: string; x: string };
+        return signDpopProof({ ...input, privateKey: pairB.privateKey, publicJwk: jwkB });
+      };
+
+      const issueB = await app.inject({
+        method: "POST",
+        url: "/oauth/device/code",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({
+          client_id: "acs-cli",
+          scope: "acs:device acs:work:read",
+          device_public_key: pemB,
+          device_name: "laptop-b"
+        })
+      });
+      const { device_code: deviceCodeB, user_code: userCodeB } = issueB.json();
+      await app.inject({
+        method: "POST",
+        url: "/device/verify",
+        headers: { authorization: `Bearer ${testAuth.token}` },
+        payload: { user_code: userCodeB, action: "approve" }
+      });
+      const tokenB = await app.inject({
+        method: "POST",
+        url: "/oauth/token",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({
+          grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+          device_code: deviceCodeB,
+          device_signature: proofB(deviceCodeB),
+          client_id: "acs-cli"
+        })
+      });
+      const initialB = tokenB.json();
+
+      // Device access token works with valid DPoP before revocation; bearer downgrade fails closed.
       const beforeRevoke = await app.inject({
         method: "GET",
         url: "/work-items",
         headers: {
-          authorization: `DPoP ${initial.access_token}`,
-          dpop: signDpopProof({
-            htm: "GET",
-            htu: "http://127.0.0.1/work-items",
-            accessToken: initial.access_token
-          })
+          authorization: `DPoP ${initialA.access_token}`,
+          dpop: signDpopProof({ htm: "GET", htu: "http://127.0.0.1/work-items", accessToken: initialA.access_token })
         }
       });
       expect(beforeRevoke.statusCode).toBe(200);
-
-      // Plain Bearer downgrade with a device access token MUST fail closed (401)
       const bearerDowngrade = await app.inject({
         method: "GET",
         url: "/work-items",
-        headers: { authorization: `Bearer ${initial.access_token}` }
+        headers: { authorization: `Bearer ${initialA.access_token}` }
       });
       expect(bearerDowngrade.statusCode).toBe(401);
       expect(bearerDowngrade.headers["www-authenticate"]).toContain("DPoP");
 
-      // Device token itself CANNOT call POST /devices/:id/revoke (even with DPoP + acs:work:create)
-      const selfRevoke = await app.inject({
+      // Negative: an ordinary authenticated device must never revoke another device (cross-device),
+      // even within the same principal and even when authenticating correctly with DPoP.
+      const crossDeviceRevoke = await app.inject({
         method: "POST",
-        url: `/devices/${initial.device_id}/revoke`,
+        url: `/devices/${initialA.device_id}/revoke`,
         headers: {
-          authorization: `DPoP ${initial.access_token}`,
-          dpop: signDpopProof({
+          authorization: `DPoP ${initialB.access_token}`,
+          dpop: dpopB({
             htm: "POST",
-            htu: `http://127.0.0.1/devices/${initial.device_id}/revoke`,
-            accessToken: initial.access_token
+            htu: `http://127.0.0.1/devices/${initialA.device_id}/revoke`,
+            accessToken: initialB.access_token
           })
         }
       });
-      expect(selfRevoke.statusCode).toBe(403);
+      expect(crossDeviceRevoke.statusCode).toBe(403);
 
-      // Operator CAN revoke
-      const opRevoke = await app.inject({
+      // Positive: ordinary authenticated user/device can revoke their own device without operator privileges.
+      const selfRevoke = await app.inject({
         method: "POST",
-        url: `/devices/${initial.device_id}/revoke`,
-        headers: { authorization: `Bearer ${testAuth.token}` }
+        url: `/devices/${initialA.device_id}/revoke`,
+        headers: {
+          authorization: `DPoP ${initialA.access_token}`,
+          dpop: signDpopProof({
+            htm: "POST",
+            htu: `http://127.0.0.1/devices/${initialA.device_id}/revoke`,
+            accessToken: initialA.access_token
+          })
+        }
       });
-      expect(opRevoke.statusCode).toBe(200);
-      expect(opRevoke.json()).toEqual({ ok: true });
+      expect(selfRevoke.statusCode).toBe(200);
+      expect(selfRevoke.json()).toEqual({ ok: true });
 
-      // Access token fails immediately on authenticated path even with a fresh valid DPoP proof
+      // Self-revoked access token fails immediately on authenticated path even with fresh valid DPoP proof.
       const afterRevoke = await app.inject({
         method: "GET",
         url: "/work-items",
         headers: {
-          authorization: `DPoP ${initial.access_token}`,
-          dpop: signDpopProof({
-            htm: "GET",
-            htu: "http://127.0.0.1/work-items",
-            accessToken: initial.access_token
-          })
+          authorization: `DPoP ${initialA.access_token}`,
+          dpop: signDpopProof({ htm: "GET", htu: "http://127.0.0.1/work-items", accessToken: initialA.access_token })
         }
       });
       expect(afterRevoke.statusCode).toBe(401);
 
-      // Refresh token fails with device_revoked
+      // Refresh token fails with device_revoked after self-service revocation.
       const nowSec = Math.floor(Date.now() / 1000);
+      const refreshProofA = refreshProof({
+        clientId: "acs-cli",
+        deviceId: initialA.device_id,
+        refreshToken: initialA.refresh_token,
+        issuedAt: nowSec
+      });
       const refreshAfterRevoke = await app.inject({
         method: "POST",
         url: "/oauth/token",
@@ -838,15 +884,10 @@ describe("device authorization HTTP surface", () => {
         payload: form({
           grant_type: "refresh_token",
           client_id: "acs-cli",
-          device_id: initial.device_id,
-          refresh_token: initial.refresh_token,
+          device_id: initialA.device_id,
+          refresh_token: initialA.refresh_token,
           proof_issued_at: String(nowSec),
-          refresh_proof: refreshProof({
-            clientId: "acs-cli",
-            deviceId: initial.device_id,
-            refreshToken: initial.refresh_token,
-            issuedAt: nowSec
-          })
+          refresh_proof: refreshProofA
         })
       });
       expect(refreshAfterRevoke.statusCode).toBe(400);
@@ -861,8 +902,8 @@ describe("device authorization HTTP surface", () => {
         payload: form({
           grant_type: "refresh_token",
           client_id: "acs-cli",
-          device_id: initial.device_id,
-          refresh_token: initial.refresh_token,
+          device_id: initialA.device_id,
+          refresh_token: initialA.refresh_token,
           proof_issued_at: String(nowSec),
           refresh_proof: "invalid-proof-signature"
         })
@@ -875,18 +916,24 @@ describe("device authorization HTTP surface", () => {
           grant_type: "refresh_token",
           client_id: "acs-cli",
           device_id: "nonexistent-device-id",
-          refresh_token: initial.refresh_token,
+          refresh_token: initialA.refresh_token,
           proof_issued_at: String(nowSec),
           refresh_proof: "invalid-proof-signature"
         })
       });
       expect(invalidProofRevoked.statusCode).toBe(400);
       expect(invalidProofRevoked.statusCode).toBe(invalidProofNonexistent.statusCode);
-      expect(invalidProofRevoked.json()).toEqual({
-        error: "invalid_grant",
-        acs_reason: "unknown_refresh_token"
-      });
+      expect(invalidProofRevoked.json()).toEqual({ error: "invalid_grant", acs_reason: "unknown_refresh_token" });
       expect(invalidProofRevoked.json()).toEqual(invalidProofNonexistent.json());
+
+      // Operator can still revoke a different device (administrative path remains available).
+      const opRevoke = await app.inject({
+        method: "POST",
+        url: `/devices/${initialB.device_id}/revoke`,
+        headers: { authorization: `Bearer ${testAuth.token}` }
+      });
+      expect(opRevoke.statusCode).toBe(200);
+      expect(opRevoke.json()).toEqual({ ok: true });
     } finally {
       await app.close();
     }

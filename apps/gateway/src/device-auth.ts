@@ -277,21 +277,41 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
     return reply.code(403).send({ error: "forbidden" });
   });
 
-  // Remote device revocation, independent of any CLI-side logout. Operator-only:
-  // requires a human operator credential (never a device, service, or worker token).
+  // Remote device revocation, independent of any CLI-side logout.
+  // Operators may revoke any device. An ordinary authenticated device may revoke only
+  // its own device (self-service) and never another user's/device's registration.
   app.post<{ Params: { id: string } }>("/devices/:id/revoke", async (request, reply) => {
     const credential = gatewayCredentialForRequest(request, options.auth);
     if (!credential) {
       return reply.code(401).send({ error: "unauthorized" });
     }
-    if (!isOperatorRevokeCredential(credential)) {
+    if (isOperatorRevokeCredential(credential)) {
+      const revoked = options.store.revokeDevice(
+        request.params.id,
+        new Date(),
+        credential.actorId || credential.id
+      );
+      if (!revoked) {
+        return reply.code(404).send({ error: "device_not_found" });
+      }
+      return reply.code(200).send({ ok: true });
+    }
+
+    // Narrow owner-scoped self-service: the authenticated device credential may revoke
+    // only the exact device it authenticates as, for the same principal. This does not
+    // grant operator, cross-user, or sibling-device revocation authority.
+    const selfDeviceId = credential.id.startsWith("device:") ? credential.id.slice("device:".length) : undefined;
+    if (!selfDeviceId || !credential.actorId || selfDeviceId !== request.params.id) {
       return reply.code(403).send({ error: "forbidden" });
     }
-    const revoked = options.store.revokeDevice(
-      request.params.id,
-      new Date(),
-      credential.actorId || credential.id
-    );
+    const target = options.store.getDevice(request.params.id);
+    if (!target) {
+      return reply.code(404).send({ error: "device_not_found" });
+    }
+    if (target.principalId !== credential.actorId) {
+      return reply.code(403).send({ error: "forbidden" });
+    }
+    const revoked = options.store.revokeDevice(request.params.id, new Date(), credential.id);
     if (!revoked) {
       return reply.code(404).send({ error: "device_not_found" });
     }
