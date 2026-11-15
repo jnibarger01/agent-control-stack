@@ -29,8 +29,6 @@ import { fileURLToPath } from 'node:url';
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const GATEWAY_DIR = path.join(REPO_ROOT, 'apps/dc-mcp-gateway');
 const JC_CLI_DIST = path.join(REPO_ROOT, 'apps/jace-commander/dist/cli.js');
-const REQUIRE_INTEGRATION = process.env.JCA2_INTEGRATION === '1';
-const REQUIRE_LINUX_KEYRING = process.env.REQUIRE_LINUX_KEYRING === '1';
 
 function hasBinary(name) {
   try {
@@ -82,19 +80,9 @@ function isSecretServiceUnlocked() {
   }
 }
 
-function isV2Integrated() {
-  const gatewayHasDpop = fs.existsSync(path.join(GATEWAY_DIR, 'dpop.js'));
-  const cliDistExists = fs.existsSync(JC_CLI_DIST);
-  if (!gatewayHasDpop || !cliDistExists) return false;
-  try {
-    const helpOut = execFileSync(process.execPath, [JC_CLI_DIST, 'help'], {
-      encoding: 'utf8',
-      timeout: 5000,
-    });
-    return /\bauth\b/.test(helpOut);
-  } catch {
-    return false;
-  }
+function assertV2ArtifactsBuilt() {
+  assert.equal(fs.existsSync(path.join(GATEWAY_DIR, 'dpop.js')), true, 'apps/dc-mcp-gateway/dpop.js must exist');
+  assert.equal(fs.existsSync(JC_CLI_DIST), true, 'apps/jace-commander/dist/cli.js must be built');
 }
 
 async function freePort() {
@@ -229,14 +217,54 @@ function collectFilesRecursive(dir) {
   return out;
 }
 
+function startDeviceLogin(mcpUrl, label, env) {
+  let stdout = '';
+  let stderr = '';
+  const child = spawn(
+    process.execPath,
+    [JC_CLI_DIST, 'auth', 'login', '--device', '--no-browser', '--mcp-url', mcpUrl, '--label', label],
+    { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  const userCodePromise = new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`timed out waiting for user_code; out=${stdout} err=${stderr}`));
+    }, 10_000);
+    const inspect = (chunk, isErr) => {
+      if (isErr) stderr += chunk;
+      else stdout += chunk;
+      if (settled) return;
+      const combined = `${stdout}\n${stderr}`;
+      const match = combined.match(/\b([A-Z0-9]{4}-[A-Z0-9]{4})\b/) || combined.match(/user_code=([A-Za-z0-9_-]+)/);
+      if (match) {
+        settled = true;
+        clearTimeout(timer);
+        resolve(match[1]);
+      }
+    };
+    child.stdout.on('data', (d) => inspect(d.toString('utf8'), false));
+    child.stderr.on('data', (d) => inspect(d.toString('utf8'), true));
+    child.once('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error(`login exited prematurely (${code}); out=${stdout} err=${stderr}`));
+    });
+  });
+  const exitPromise = new Promise((resolve) => child.once('close', resolve));
+  return {
+    userCodePromise,
+    exitPromise,
+    output: () => `${stdout}\n${stderr}`,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // 1. Live Linux Secret Service (`secret-tool`) Verification
 // ---------------------------------------------------------------------------
-test('Linux Secret Service (secret-tool) live store/lookup/clear round-trip', {
-  skip: !REQUIRE_LINUX_KEYRING && (!hasBinary('secret-tool') || !isSecretServiceUnlocked())
-    ? 'unlocked Linux Secret Service (secret-tool + DBUS_SESSION_BUS_ADDRESS) not available'
-    : false,
-}, () => {
+test('Linux Secret Service (secret-tool) live store/lookup/clear round-trip', () => {
   assert.equal(hasBinary('secret-tool'), true, 'secret-tool binary must be installed');
   assert.equal(isSecretServiceUnlocked(), true, 'org.freedesktop.secrets collection must be unlocked');
 
@@ -277,19 +305,12 @@ test('Linux Secret Service (secret-tool) live store/lookup/clear round-trip', {
 });
 
 // ---------------------------------------------------------------------------
-// 2. Full E2E CLI + Gateway Integration Suite (active once Phase 3 integrates)
+// 2. Full E2E CLI + Gateway Integration Suite
 // ---------------------------------------------------------------------------
-const integrated = isV2Integrated();
-const integrationSkip = !REQUIRE_INTEGRATION && !integrated
-  ? 'awaiting Phase 3 integration of gateway + forge (set JCA2_INTEGRATION=1 to require)'
-  : false;
-
-test('E2E: jace auth device login, status, devices, revoke, logout with live Linux SecretServiceStore', {
-  skip: integrationSkip || (!hasBinary('secret-tool') || !isSecretServiceUnlocked()
-    ? 'unlocked Linux Secret Service required for live SecretServiceStore E2E'
-    : false),
-}, async () => {
-  assert.equal(integrated, true, 'V2 CLI and gateway artifacts must be present');
+test('E2E: jace auth device login, status, devices, revoke, logout with live Linux SecretServiceStore', async () => {
+  assertV2ArtifactsBuilt();
+  assert.equal(hasBinary('secret-tool'), true, 'secret-tool binary must be installed');
+  assert.equal(isSecretServiceUnlocked(), true, 'unlocked Linux Secret Service required');
   const gw = await bootGateway();
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jca2-qa-cli-keyring-'), { mode: 0o700 });
   const env = {
@@ -299,39 +320,13 @@ test('E2E: jace auth device login, status, devices, revoke, logout with live Lin
   };
 
   try {
-    // Start `jace auth login --device --no-browser` and approve the printed user_code
-    let loginOut = '';
-    let loginErr = '';
-    const loginProc = spawn(
-      process.execPath,
-      [JC_CLI_DIST, 'auth', 'login', '--device', '--no-browser', '--mcp-url', gw.mcpUrl, '--label', 'qa-linux-e2e'],
-      { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] },
-    );
-
-    const userCode = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`timed out waiting for user_code; out=${loginOut} err=${loginErr}`)), 10_000);
-      const inspect = (chunk, isErr) => {
-        if (isErr) loginErr += chunk;
-        else loginOut += chunk;
-        const combined = `${loginOut}\n${loginErr}`;
-        const codeMatch = combined.match(/\b([A-Z0-9]{4}-[A-Z0-9]{4})\b/) || combined.match(/user_code=([A-Za-z0-9_-]+)/);
-        if (codeMatch) {
-          clearTimeout(timer);
-          resolve(codeMatch[1]);
-        }
-      };
-      loginProc.stdout.on('data', (d) => inspect(d.toString('utf8'), false));
-      loginProc.stderr.on('data', (d) => inspect(d.toString('utf8'), true));
-      loginProc.once('close', (code) => {
-        clearTimeout(timer);
-        reject(new Error(`login exited prematurely (${code}); out=${loginOut} err=${loginErr}`));
-      });
-    });
+    const login = startDeviceLogin(gw.mcpUrl, 'qa-linux-e2e', env);
+    const userCode = await login.userCodePromise;
 
     await approveDeviceCode(gw.origin, userCode, gw.passphrase);
-    const loginExit = await new Promise((resolve) => loginProc.once('close', resolve));
-    assert.equal(loginExit, 0, `login failed: out=${loginOut} err=${loginErr}`);
-    assert.doesNotMatch(loginOut + loginErr, /BEGIN PRIVATE KEY|refresh_token/);
+    const loginExit = await login.exitPromise;
+    assert.equal(loginExit, 0, `login failed: ${login.output()}`);
+    assert.doesNotMatch(login.output(), /BEGIN PRIVATE KEY|refresh_token/);
 
     // Verify status --json (metadata only, zero secrets)
     const statusRes = await runCli(['auth', 'status', '--json'], env);
@@ -366,10 +361,8 @@ test('E2E: jace auth device login, status, devices, revoke, logout with live Lin
   }
 });
 
-test('E2E: Headless EncryptedFileStore fallback without D-Bus enforces 0700/0600 and encrypts secrets', {
-  skip: integrationSkip,
-}, async () => {
-  assert.equal(integrated, true, 'V2 CLI and gateway artifacts must be present');
+test('E2E: Headless EncryptedFileStore fallback without D-Bus enforces 0700/0600 and encrypts secrets', async () => {
+  assertV2ArtifactsBuilt();
   const gw = await bootGateway();
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jca2-qa-cli-headless-'), { mode: 0o700 });
   const keyFile = path.join(os.tmpdir(), `jca2-qa-key-${crypto.randomUUID()}`);
@@ -384,31 +377,12 @@ test('E2E: Headless EncryptedFileStore fallback without D-Bus enforces 0700/0600
   };
 
   try {
-    let loginOut = '';
-    const loginProc = spawn(
-      process.execPath,
-      [JC_CLI_DIST, 'auth', 'login', '--device', '--no-browser', '--mcp-url', gw.mcpUrl, '--label', 'qa-headless'],
-      { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] },
-    );
-    const userCode = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`timed out waiting for user_code; out=${loginOut}`)), 10_000);
-      loginProc.stdout.on('data', (d) => {
-        loginOut += d.toString('utf8');
-        const m = loginOut.match(/\b([A-Z0-9]{4}-[A-Z0-9]{4})\b/) || loginOut.match(/user_code=([A-Za-z0-9_-]+)/);
-        if (m) {
-          clearTimeout(timer);
-          resolve(m[1]);
-        }
-      });
-      loginProc.once('close', (code) => {
-        clearTimeout(timer);
-        reject(new Error(`headless login exited (${code}): ${loginOut}`));
-      });
-    });
+    const login = startDeviceLogin(gw.mcpUrl, 'qa-headless', env);
+    const userCode = await login.userCodePromise;
 
     await approveDeviceCode(gw.origin, userCode, gw.passphrase);
-    const loginExit = await new Promise((resolve) => loginProc.once('close', resolve));
-    assert.equal(loginExit, 0);
+    const loginExit = await login.exitPromise;
+    assert.equal(loginExit, 0, `headless login failed: ${login.output()}`);
 
     const statusRes = await runCli(['auth', 'status', '--json'], env);
     assert.equal(statusRes.code, 0, statusRes.stderr);
@@ -429,10 +403,8 @@ test('E2E: Headless EncryptedFileStore fallback without D-Bus enforces 0700/0600
   }
 });
 
-test('E2E: Cross-process concurrent `jace auth refresh` serializes cleanly without device revocation', {
-  skip: integrationSkip,
-}, async () => {
-  assert.equal(integrated, true, 'V2 CLI and gateway artifacts must be present');
+test('E2E: Cross-process concurrent `jace auth refresh` serializes cleanly without device revocation', async () => {
+  assertV2ArtifactsBuilt();
   const gw = await bootGateway({ EDGE_TEST_ACCESS_TTL_S: '2' });
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jca2-qa-cli-refresh-'), { mode: 0o700 });
   const env = {
@@ -443,31 +415,12 @@ test('E2E: Cross-process concurrent `jace auth refresh` serializes cleanly witho
   };
 
   try {
-    let loginOut = '';
-    const loginProc = spawn(
-      process.execPath,
-      [JC_CLI_DIST, 'auth', 'login', '--device', '--no-browser', '--mcp-url', gw.mcpUrl, '--label', 'qa-refresh'],
-      { env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] },
-    );
-    const userCode = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`timed out waiting for user_code; out=${loginOut}`)), 10_000);
-      loginProc.stdout.on('data', (d) => {
-        loginOut += d.toString('utf8');
-        const m = loginOut.match(/\b([A-Z0-9]{4}-[A-Z0-9]{4})\b/) || loginOut.match(/user_code=([A-Za-z0-9_-]+)/);
-        if (m) {
-          clearTimeout(timer);
-          resolve(m[1]);
-        }
-      });
-      loginProc.once('close', (code) => {
-        clearTimeout(timer);
-        reject(new Error(`login exited (${code}): ${loginOut}`));
-      });
-    });
+    const login = startDeviceLogin(gw.mcpUrl, 'qa-refresh', env);
+    const userCode = await login.userCodePromise;
 
     await approveDeviceCode(gw.origin, userCode, gw.passphrase);
-    const loginExit = await new Promise((resolve) => loginProc.once('close', resolve));
-    assert.equal(loginExit, 0);
+    const loginExit = await login.exitPromise;
+    assert.equal(loginExit, 0, `login failed: ${login.output()}`);
 
     const [r1, r2] = await Promise.all([runCli(['auth', 'refresh'], env), runCli(['auth', 'refresh'], env)]);
     assert.equal(r1.code, 0, `concurrent refresh 1 failed: ${r1.stderr}`);
