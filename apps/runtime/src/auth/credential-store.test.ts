@@ -1,9 +1,10 @@
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   clearSession,
+  CorruptCredentialsError,
   deleteCredentials,
   readCredentials,
   writeCredentials,
@@ -105,5 +106,45 @@ describe("credential-store", () => {
     writeCredentials(file, base);
     deleteCredentials(file);
     expect(existsSync(file)).toBe(false);
+  });
+
+  it("throws CorruptCredentialsError on malformed JSON", () => {
+    const file = path();
+    writeFileSync(file, "{not-valid-json", { mode: 0o600 });
+    expect(() => readCredentials(file)).toThrow(CorruptCredentialsError);
+  });
+
+  it("throws CorruptCredentialsError on schema-invalid credentials", () => {
+    const file = path();
+    writeFileSync(file, JSON.stringify({ v: 1, acsUrl: "" }), { mode: 0o600 });
+    expect(() => readCredentials(file)).toThrow(CorruptCredentialsError);
+  });
+
+  it("leaves no temp files behind after writeCredentials and cleans stale temps on read/write", () => {
+    const file = path();
+    const stale1 = `${file}.tmp-99999-stale1`;
+    const stale2 = `${file}.tmp-99999-stale2`;
+    writeFileSync(stale1, "partial", { mode: 0o600 });
+    writeCredentials(file, base);
+    expect(readdirSync(dir!)).toEqual(["credentials.json"]);
+
+    writeFileSync(stale2, "partial", { mode: 0o600 });
+    expect(readCredentials(file)).toEqual(base);
+    expect(readdirSync(dir!)).toEqual(["credentials.json"]);
+  });
+
+  it("preserves existing credentials and cleans up temp file when atomic rename fails", () => {
+    const file = path();
+    writeCredentials(file, base);
+    const updated = { ...base, deviceName: "updated-workstation" };
+    expect(() =>
+      writeCredentials(file, updated, {
+        renameSyncImpl: () => {
+          throw new Error("simulated rename failure");
+        }
+      })
+    ).toThrow("simulated rename failure");
+    expect(readCredentials(file)).toEqual(base);
+    expect(readdirSync(dir!)).toEqual(["credentials.json"]);
   });
 });

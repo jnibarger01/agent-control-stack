@@ -1,4 +1,4 @@
-import { generateKeyPairSync, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildGateway, type GatewayAuthOptions } from "./server.js";
 
 const testAuth = { token: "operator-token-0123456789abcdef", actor: "user", actorId: "operator-1" } as const;
+const testRecoveryKey = randomBytes(32).toString("base64");
 
 const devicePair = generateKeyPairSync("ed25519");
 const devicePublicKeyPem = devicePair.publicKey.export({ type: "spki", format: "pem" }).toString();
@@ -15,6 +16,22 @@ function deviceProof(deviceCode: string): string {
   return sign(null, Buffer.from(`acs-device-code-proof-v1\n${deviceCode}`, "utf8"), devicePair.privateKey).toString(
     "base64url"
   );
+}
+
+function refreshProof(
+  input: { clientId: string; deviceId: string; refreshToken: string; issuedAt: number },
+  privateKey = devicePair.privateKey
+): string {
+  const tokenSha256 = createHash("sha256").update(input.refreshToken).digest("hex");
+  const message = [
+    "acs-device-refresh-proof-v1",
+    `client_id=${input.clientId}`,
+    `device_id=${input.deviceId}`,
+    `refresh_token_sha256=${tokenSha256}`,
+    "operation=refresh_token",
+    `issued_at=${input.issuedAt}`
+  ].join("\n");
+  return sign(null, Buffer.from(message, "utf8"), privateKey).toString("base64url");
 }
 
 function seedActor(dbPath: string): void {
@@ -41,7 +58,11 @@ describe("device authorization HTTP surface", () => {
   async function buildTestApp(
     rateLimit?: { windowMs: number; maxRequests: number },
     auth: GatewayAuthOptions = testAuth,
-    authLockout?: { windowMs: number; maxFailures: number }
+    authLockout?: { windowMs: number; maxFailures: number },
+    deviceRefreshRecovery: { primaryKeyBase64: string; windowSeconds?: number } | false = {
+      primaryKeyBase64: testRecoveryKey,
+      windowSeconds: 120
+    }
   ) {
     dir = mkdtempSync(join(tmpdir(), "acs-device-http-"));
     const dbPath = join(dir, "control.db");
@@ -50,6 +71,7 @@ describe("device authorization HTTP surface", () => {
       dbPath,
       logger: false,
       auth,
+      deviceRefreshRecovery,
       ...(rateLimit ? { rateLimit } : {}),
       ...(authLockout ? { authLockout } : {})
     });
@@ -463,6 +485,305 @@ describe("device authorization HTTP surface", () => {
         headers: { authorization: `Bearer ${testAuth.token}` }
       });
       expect(verifyPage.body).not.toContain(deviceCode);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("POST /oauth/token grant_type=refresh_token enforces Ed25519 proof, supports idempotent recovery, and returns distinct acs_reason codes", async () => {
+    const app = await buildTestApp();
+    try {
+      const issueResponse = await app.inject({
+        method: "POST",
+        url: "/oauth/device/code",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({ client_id: "acs-cli", device_public_key: devicePublicKeyPem, device_name: "laptop" })
+      });
+      const { device_code: deviceCode, user_code: userCode } = issueResponse.json();
+      await app.inject({
+        method: "POST",
+        url: "/device/verify",
+        headers: { authorization: `Bearer ${testAuth.token}` },
+        payload: { user_code: userCode, action: "approve" }
+      });
+      const tokenResponse = await app.inject({
+        method: "POST",
+        url: "/oauth/token",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({
+          grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+          device_code: deviceCode,
+          device_signature: deviceProof(deviceCode),
+          client_id: "acs-cli"
+        })
+      });
+      const initial = tokenResponse.json();
+
+      // Missing proof -> 400 invalid_request / missing_proof
+      const missingProof = await app.inject({
+        method: "POST",
+        url: "/oauth/token",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({
+          grant_type: "refresh_token",
+          client_id: "acs-cli",
+          refresh_token: initial.refresh_token
+        })
+      });
+      expect(missingProof.statusCode).toBe(400);
+      expect(missingProof.json()).toEqual({ error: "invalid_request", acs_reason: "missing_proof" });
+
+      // Valid proof -> rotates
+      const nowSec = Math.floor(Date.now() / 1000);
+      const refresh1 = await app.inject({
+        method: "POST",
+        url: "/oauth/token",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({
+          grant_type: "refresh_token",
+          client_id: "acs-cli",
+          device_id: initial.device_id,
+          refresh_token: initial.refresh_token,
+          proof_issued_at: String(nowSec),
+          refresh_proof: refreshProof({
+            clientId: "acs-cli",
+            deviceId: initial.device_id,
+            refreshToken: initial.refresh_token,
+            issuedAt: nowSec
+          })
+        })
+      });
+      expect(refresh1.statusCode).toBe(200);
+      const rotated = refresh1.json();
+      expect(rotated.refresh_token).not.toBe(initial.refresh_token);
+
+      // Idempotent retry with predecessor inside window -> same successor
+      const retry = await app.inject({
+        method: "POST",
+        url: "/oauth/token",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({
+          grant_type: "refresh_token",
+          client_id: "acs-cli",
+          device_id: initial.device_id,
+          refresh_token: initial.refresh_token,
+          proof_issued_at: String(nowSec),
+          refresh_proof: refreshProof({
+            clientId: "acs-cli",
+            deviceId: initial.device_id,
+            refreshToken: initial.refresh_token,
+            issuedAt: nowSec
+          })
+        })
+      });
+      expect(retry.statusCode).toBe(200);
+      expect(retry.json()).toEqual(rotated);
+
+      // Unknown refresh token -> unknown_refresh_token
+      const unknown = await app.inject({
+        method: "POST",
+        url: "/oauth/token",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({
+          grant_type: "refresh_token",
+          client_id: "acs-cli",
+          device_id: initial.device_id,
+          refresh_token: "not-a-real-refresh-token",
+          proof_issued_at: String(nowSec),
+          refresh_proof: refreshProof({
+            clientId: "acs-cli",
+            deviceId: initial.device_id,
+            refreshToken: "not-a-real-refresh-token",
+            issuedAt: nowSec
+          })
+        })
+      });
+      expect(unknown.statusCode).toBe(400);
+      expect(unknown.json()).toEqual({ error: "invalid_grant", acs_reason: "unknown_refresh_token" });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("POST /oauth/token grant_type=refresh_token fails closed with 503 recovery_unavailable when recovery key is absent", async () => {
+    const app = await buildTestApp(undefined, testAuth, undefined, false);
+    try {
+      const issueResponse = await app.inject({
+        method: "POST",
+        url: "/oauth/device/code",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({ client_id: "acs-cli", device_public_key: devicePublicKeyPem, device_name: "laptop" })
+      });
+      const { device_code: deviceCode, user_code: userCode } = issueResponse.json();
+      await app.inject({
+        method: "POST",
+        url: "/device/verify",
+        headers: { authorization: `Bearer ${testAuth.token}` },
+        payload: { user_code: userCode, action: "approve" }
+      });
+      const tokenResponse = await app.inject({
+        method: "POST",
+        url: "/oauth/token",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({
+          grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+          device_code: deviceCode,
+          device_signature: deviceProof(deviceCode),
+          client_id: "acs-cli"
+        })
+      });
+      const initial = tokenResponse.json();
+      const nowSec = Math.floor(Date.now() / 1000);
+      const refreshRes = await app.inject({
+        method: "POST",
+        url: "/oauth/token",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({
+          grant_type: "refresh_token",
+          client_id: "acs-cli",
+          device_id: initial.device_id,
+          refresh_token: initial.refresh_token,
+          proof_issued_at: String(nowSec),
+          refresh_proof: refreshProof({
+            clientId: "acs-cli",
+            deviceId: initial.device_id,
+            refreshToken: initial.refresh_token,
+            issuedAt: nowSec
+          })
+        })
+      });
+      expect(refreshRes.statusCode).toBe(503);
+      expect(refreshRes.json()).toEqual({ error: "server_error", acs_reason: "recovery_unavailable" });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("POST /devices/:id/revoke requires operator authorization, rejects device tokens, and immediately invalidates access and refresh tokens", async () => {
+    const app = await buildTestApp();
+    try {
+      const issueResponse = await app.inject({
+        method: "POST",
+        url: "/oauth/device/code",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({
+          client_id: "acs-cli",
+          scope: "acs:device acs:work:create acs:work:read",
+          device_public_key: devicePublicKeyPem,
+          device_name: "laptop"
+        })
+      });
+      const { device_code: deviceCode, user_code: userCode } = issueResponse.json();
+      await app.inject({
+        method: "POST",
+        url: "/device/verify",
+        headers: { authorization: `Bearer ${testAuth.token}` },
+        payload: { user_code: userCode, action: "approve" }
+      });
+      const tokenResponse = await app.inject({
+        method: "POST",
+        url: "/oauth/token",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({
+          grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+          device_code: deviceCode,
+          device_signature: deviceProof(deviceCode),
+          client_id: "acs-cli"
+        })
+      });
+      const initial = tokenResponse.json();
+
+      // Device access token works on authenticated read path before revocation
+      const beforeRevoke = await app.inject({
+        method: "GET",
+        url: "/work-items",
+        headers: { authorization: `Bearer ${initial.access_token}` }
+      });
+      expect(beforeRevoke.statusCode).toBe(200);
+
+      // Device token itself CANNOT call POST /devices/:id/revoke (even with acs:work:create)
+      const selfRevoke = await app.inject({
+        method: "POST",
+        url: `/devices/${initial.device_id}/revoke`,
+        headers: { authorization: `Bearer ${initial.access_token}` }
+      });
+      expect(selfRevoke.statusCode).toBe(403);
+
+      // Operator CAN revoke
+      const opRevoke = await app.inject({
+        method: "POST",
+        url: `/devices/${initial.device_id}/revoke`,
+        headers: { authorization: `Bearer ${testAuth.token}` }
+      });
+      expect(opRevoke.statusCode).toBe(200);
+      expect(opRevoke.json()).toEqual({ ok: true });
+
+      // Access token fails immediately on authenticated path
+      const afterRevoke = await app.inject({
+        method: "GET",
+        url: "/work-items",
+        headers: { authorization: `Bearer ${initial.access_token}` }
+      });
+      expect(afterRevoke.statusCode).toBe(401);
+
+      // Refresh token fails with device_revoked
+      const nowSec = Math.floor(Date.now() / 1000);
+      const refreshAfterRevoke = await app.inject({
+        method: "POST",
+        url: "/oauth/token",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({
+          grant_type: "refresh_token",
+          client_id: "acs-cli",
+          device_id: initial.device_id,
+          refresh_token: initial.refresh_token,
+          proof_issued_at: String(nowSec),
+          refresh_proof: refreshProof({
+            clientId: "acs-cli",
+            deviceId: initial.device_id,
+            refreshToken: initial.refresh_token,
+            issuedAt: nowSec
+          })
+        })
+      });
+      expect(refreshAfterRevoke.statusCode).toBe(400);
+      expect(refreshAfterRevoke.json()).toEqual({ error: "invalid_grant", acs_reason: "device_revoked" });
+
+      // Invalid proof against a revoked device returns the exact same HTTP status and error
+      // payload as a nonexistent device ID (no device-existence / revocation oracle).
+      const invalidProofRevoked = await app.inject({
+        method: "POST",
+        url: "/oauth/token",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({
+          grant_type: "refresh_token",
+          client_id: "acs-cli",
+          device_id: initial.device_id,
+          refresh_token: initial.refresh_token,
+          proof_issued_at: String(nowSec),
+          refresh_proof: "invalid-proof-signature"
+        })
+      });
+      const invalidProofNonexistent = await app.inject({
+        method: "POST",
+        url: "/oauth/token",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({
+          grant_type: "refresh_token",
+          client_id: "acs-cli",
+          device_id: "nonexistent-device-id",
+          refresh_token: initial.refresh_token,
+          proof_issued_at: String(nowSec),
+          refresh_proof: "invalid-proof-signature"
+        })
+      });
+      expect(invalidProofRevoked.statusCode).toBe(400);
+      expect(invalidProofRevoked.statusCode).toBe(invalidProofNonexistent.statusCode);
+      expect(invalidProofRevoked.json()).toEqual({
+        error: "invalid_grant",
+        acs_reason: "unknown_refresh_token"
+      });
+      expect(invalidProofRevoked.json()).toEqual(invalidProofNonexistent.json());
     } finally {
       await app.close();
     }

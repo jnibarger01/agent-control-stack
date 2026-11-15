@@ -224,7 +224,11 @@ import {
   type SandboxReadinessOptions
 } from "./sandbox-readiness.js";
 import { gatewayListenConfig } from "./runtime-config.js";
-import { DeviceAuthStore } from "./device-auth-store.js";
+import {
+  DeviceAuthStore,
+  deviceRefreshRecoveryConfigFromEnv,
+  type DeviceRefreshRecoveryConfig
+} from "./device-auth-store.js";
 import { registerDeviceAuthRoutes } from "./device-auth.js";
 import { createPortfolioClientFromEnv, type PortfolioClient } from "./portfolio-client.js";
 import { verifyChangeSetResult } from "./change-set-verification.js";
@@ -378,6 +382,8 @@ export interface GatewayOptions {
    * authority store.
    */
   readManagedAuthority?: () => ManagedAuthorityObservation;
+  /** Device refresh-token recovery key/window config. Defaults to ACS_DEVICE_REFRESH_RECOVERY_* env; `false` disables (fail-closed 503). */
+  deviceRefreshRecovery?: DeviceRefreshRecoveryConfig | false;
   /** Shared shutdown gate; tests may inject one to assert claim drain behavior. */
   shutdownController?: ShutdownController;
   /** Execution admission controller; tests may inject a deterministic controller. */
@@ -458,7 +464,27 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     ? (jevObservationOptions?.createWorker?.(workItems) ?? new ObservationWorker(workItems))
     : undefined;
   const executionReads = new SqliteExecutionReadStore(dbPath);
-  const deviceAuthStore = new DeviceAuthStore(dbPath);
+  const deviceRefreshRecovery =
+    options.deviceRefreshRecovery === false
+      ? false
+      : (options.deviceRefreshRecovery ?? deviceRefreshRecoveryConfigFromEnv());
+  const deviceAuthStore = new DeviceAuthStore(dbPath, {
+    recovery: deviceRefreshRecovery,
+    onAuditEvent: (event) => {
+      try {
+        workItems.recordSystemEvent({
+          name: event.name,
+          body: event.body,
+          attributes: {
+            ...(event.deviceId ? { "device.id": event.deviceId } : {}),
+            ...(event.principalId ? { "principal.id": event.principalId } : {})
+          }
+        });
+      } catch {
+        // Audit sink failure must not mask the auth response after commit.
+      }
+    }
+  });
   const policy = createPolicyEngine();
   const shutdownController = options.shutdownController ?? new ShutdownController();
   const tools = guardWorkItemClaimTools(createWorkItemTools(workItems, policy), shutdownController);
