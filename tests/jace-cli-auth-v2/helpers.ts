@@ -734,7 +734,7 @@ export async function authenticateAcsDevice(
       client_id: clientId,
       device_public_key: key.publicKeyPem,
       device_name: options.deviceName ?? "scout-test-device",
-      scope: options.scope ?? "acs:device"
+      scope: options.scope ?? "acs:device acs:work:read"
     })
   });
   if (codeRes.status !== 200) {
