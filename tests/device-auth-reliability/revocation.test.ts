@@ -3,6 +3,7 @@ import {
   authenticateDevice,
   countRecoveryEnvelopes,
   createTempEnv,
+  dpopHeaders,
   inspectDeviceRow,
   OPERATOR_TOKEN,
   signRefreshProof,
@@ -34,9 +35,20 @@ describe("Scenario C: device revocation hardening", () => {
       scopes: ["acs:device", "acs:work:read"]
     });
 
-    // Access token works before revocation.
-    const okRes = await fetch(`${gw1.url}/api/actors`, {
+    // Bearer downgrade with a device access token MUST fail closed (401); DPoP succeeds (200).
+    const bearerDowngradeRes = await fetch(`${gw1.url}/api/actors`, {
       headers: { authorization: `Bearer ${auth.accessToken}` }
+    });
+    expect(bearerDowngradeRes.status).toBe(401);
+
+    const okRes = await fetch(`${gw1.url}/api/actors`, {
+      headers: dpopHeaders({
+        accessToken: auth.accessToken,
+        devicePublicKeyPem: auth.credentials.devicePublicKeyPem,
+        devicePrivateKeyPem: auth.credentials.devicePrivateKeyPem,
+        method: "GET",
+        url: `${gw1.url}/api/actors`
+      })
     });
     expect(okRes.status).toBe(200);
 
@@ -69,7 +81,13 @@ describe("Scenario C: device revocation hardening", () => {
 
     const deviceRevoke = await fetch(`${gw1.url}/devices/${auth.deviceId}/revoke`, {
       method: "POST",
-      headers: { authorization: `Bearer ${rotated.access_token}` }
+      headers: dpopHeaders({
+        accessToken: rotated.access_token,
+        devicePublicKeyPem: auth.credentials.devicePublicKeyPem,
+        devicePrivateKeyPem: auth.credentials.devicePrivateKeyPem,
+        method: "POST",
+        url: `${gw1.url}/devices/${auth.deviceId}/revoke`
+      })
     });
     expect(deviceRevoke.status).toBe(403);
 
@@ -92,9 +110,15 @@ describe("Scenario C: device revocation hardening", () => {
     expect(revokedRow?.previous_refresh_token_hash).toBeNull();
     expect(countRecoveryEnvelopes(env.dbPath, auth.deviceId)).toBe(0);
 
-    // Cached unexpired access token fails immediately.
+    // Cached unexpired access token fails immediately even with a valid DPoP proof.
     const revokedAccess = await fetch(`${gw1.url}/api/actors`, {
-      headers: { authorization: `Bearer ${rotated.access_token}` }
+      headers: dpopHeaders({
+        accessToken: rotated.access_token,
+        devicePublicKeyPem: auth.credentials.devicePublicKeyPem,
+        devicePrivateKeyPem: auth.credentials.devicePrivateKeyPem,
+        method: "GET",
+        url: `${gw1.url}/api/actors`
+      })
     });
     expect(revokedAccess.status).toBe(401);
 
@@ -174,7 +198,13 @@ describe("Scenario C: device revocation hardening", () => {
     cleanups.push(() => gw2.stop());
 
     const afterRestartAccess = await fetch(`${gw2.url}/api/actors`, {
-      headers: { authorization: `Bearer ${rotated.access_token}` }
+      headers: dpopHeaders({
+        accessToken: rotated.access_token,
+        devicePublicKeyPem: auth.credentials.devicePublicKeyPem,
+        devicePrivateKeyPem: auth.credentials.devicePrivateKeyPem,
+        method: "GET",
+        url: `${gw2.url}/api/actors`
+      })
     });
     expect(afterRestartAccess.status).toBe(401);
 

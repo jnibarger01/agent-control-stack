@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { createHash, createPrivateKey, generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -319,6 +319,47 @@ export function inspectDeviceRow(
   } finally {
     db.close();
   }
+}
+
+export function dpopHeaders(input: {
+  accessToken: string;
+  devicePublicKeyPem: string;
+  devicePrivateKeyPem: string;
+  method: string;
+  url: string;
+}): { authorization: string; dpop: string } {
+  const pubJwk = createPublicKey(input.devicePublicKeyPem).export({ format: "jwk" }) as {
+    kty: string;
+    crv: string;
+    x: string;
+  };
+  const header = Buffer.from(
+    JSON.stringify({
+      typ: "dpop+jwt",
+      alg: "EdDSA",
+      jwk: { kty: pubJwk.kty, crv: pubJwk.crv, x: pubJwk.x }
+    }),
+    "utf8"
+  ).toString("base64url");
+  const parsed = new URL(input.url);
+  const payload = Buffer.from(
+    JSON.stringify({
+      jti: randomBytes(16).toString("base64url"),
+      htm: input.method.toUpperCase(),
+      htu: `${parsed.origin}${parsed.pathname}`,
+      iat: Math.floor(Date.now() / 1000),
+      ath: createHash("sha256").update(input.accessToken, "ascii").digest("base64url")
+    }),
+    "utf8"
+  ).toString("base64url");
+  const signingInput = `${header}.${payload}`;
+  const sig = sign(null, Buffer.from(signingInput, "utf8"), createPrivateKey(input.devicePrivateKeyPem)).toString(
+    "base64url"
+  );
+  return {
+    authorization: `DPoP ${input.accessToken}`,
+    dpop: `${signingInput}.${sig}`
+  };
 }
 
 export function countRecoveryEnvelopes(dbPath: string, deviceId: string): number {

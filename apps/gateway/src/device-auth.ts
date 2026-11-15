@@ -7,10 +7,11 @@
 import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
-  DEFAULT_DEVICE_AUTH_CLIENT_ID,
+  DEFAULT_ALLOWED_CLIENT_IDS,
   DeviceAuthStore,
   type DeviceAuthorizationSummary
 } from "./device-auth-store.js";
+import { issueDpopNonce, verifyDpopProof } from "./device-dpop.js";
 import type { AuthFailureLockout } from "@agent-control-stack/shared";
 import type { SlidingWindowRateLimiter } from "./rate-limit.js";
 import {
@@ -30,12 +31,15 @@ export interface DeviceAuthRouteOptions {
   onAuthLockout?: (route: "/device/verify") => void;
   allowedClientIds?: readonly string[];
   publicOriginOverride?: string;
+  getTrustedOrigin?: () => string;
+  dpopNonceSecret?: Buffer;
+  dpopNonceRequired?: boolean;
 }
 
 const DEFAULT_REQUESTED_SCOPES = ["acs:device"];
 
 export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAuthRouteOptions): void {
-  const allowedClientIds = options.allowedClientIds ?? [DEFAULT_DEVICE_AUTH_CLIENT_ID];
+  const allowedClientIds = options.allowedClientIds ?? DEFAULT_ALLOWED_CLIENT_IDS;
 
   app.addContentTypeParser("application/x-www-form-urlencoded", { parseAs: "string" }, (_request, body, done) => {
     try {
@@ -62,7 +66,7 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
     if (!result.ok) {
       return reply.code(400).send({ error: result.error });
     }
-    const origin = publicOrigin(request, options.publicOriginOverride);
+    const origin = trustedOrigin(options);
     const verificationUri = `${origin}/device/verify`;
     return reply.code(200).send({
       device_code: result.deviceCode,
@@ -91,16 +95,27 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
       if (!deviceCode || !deviceSignature) {
         return reply.code(400).send({ error: "invalid_request" });
       }
+      const optionalDpop = checkOptionalTokenDpop(request, reply, options);
+      if (optionalDpop === "replied") return;
       const result = options.store.pollToken(deviceCode, clientId, deviceSignature);
       if (result.status === "success") {
+        if (optionalDpop) {
+          if (
+            optionalDpop.jkt !== result.publicKeyJkt ||
+            !options.store.consumeDpopJti(optionalDpop.jkt, optionalDpop.jti, optionalDpop.expiresAtIso)
+          ) {
+            return reply.code(400).send({ error: "invalid_dpop_proof" });
+          }
+        }
         return reply.code(200).send({
           access_token: result.accessToken,
-          token_type: "Bearer",
+          token_type: "DPoP",
           expires_in: result.accessTokenExpiresIn,
           refresh_token: result.refreshToken,
           scope: result.scopes.join(" "),
           device_id: result.deviceId,
-          principal: result.principalId
+          principal: result.principalId,
+          cnf: { jkt: result.publicKeyJkt }
         });
       }
       return reply.code(400).send({ error: result.status });
@@ -114,6 +129,15 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
       const deviceId = boundedStringField(body.device_id, 128);
       const proofIssuedAt = integerField(body.proof_issued_at);
       const refreshProof = boundedStringField(body.refresh_proof, 256);
+      const expectedJkt = deviceId ? options.store.getDevice(deviceId)?.publicKeyJkt : undefined;
+      const optionalDpop = checkOptionalTokenDpop(request, reply, options, expectedJkt);
+      if (optionalDpop === "replied") return;
+      if (
+        optionalDpop &&
+        !options.store.consumeDpopJti(optionalDpop.jkt, optionalDpop.jti, optionalDpop.expiresAtIso)
+      ) {
+        return reply.code(400).send({ error: "invalid_dpop_proof" });
+      }
       const result = options.store.refreshAccessToken({
         clientId,
         refreshToken,
@@ -127,12 +151,13 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
       }
       return reply.code(200).send({
         access_token: result.accessToken,
-        token_type: "Bearer",
+        token_type: "DPoP",
         expires_in: result.accessTokenExpiresIn,
         refresh_token: result.refreshToken,
         scope: result.scopes.join(" "),
         device_id: result.deviceId,
-        principal: result.principalId
+        principal: result.principalId,
+        cnf: { jkt: result.publicKeyJkt }
       });
     }
 
@@ -228,6 +253,30 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
     }
   );
 
+  // List registered devices: operators can query any or filter by principal_id;
+  // DPoP-authenticated active devices can read-only list their own principal's devices.
+  app.get<{ Querystring: { principal_id?: string } }>("/devices", async (request, reply) => {
+    const credential = gatewayCredentialForRequest(request, options.auth);
+    if (!credential) {
+      return reply.code(401).send({ error: "unauthorized" });
+    }
+    const requestedPrincipalId = stringField(request.query?.principal_id);
+    if (isOperatorRevokeCredential(credential)) {
+      const devices = options.store.listDevices(
+        requestedPrincipalId ? { principalId: requestedPrincipalId } : undefined
+      );
+      return reply.code(200).send({ devices });
+    }
+    if (credential.id.startsWith("device:") && credential.actorId) {
+      if (requestedPrincipalId && requestedPrincipalId !== credential.actorId) {
+        return reply.code(403).send({ error: "forbidden" });
+      }
+      const devices = options.store.listDevices({ principalId: credential.actorId });
+      return reply.code(200).send({ devices });
+    }
+    return reply.code(403).send({ error: "forbidden" });
+  });
+
   // Remote device revocation, independent of any CLI-side logout. Operator-only:
   // requires a human operator credential (never a device, service, or worker token).
   app.post<{ Params: { id: string } }>("/devices/:id/revoke", async (request, reply) => {
@@ -313,10 +362,40 @@ function boundedStringField(value: unknown, maxBytes: number): string | undefine
   return field && Buffer.byteLength(field, "utf8") <= maxBytes ? field : undefined;
 }
 
-function publicOrigin(request: FastifyRequest, override: string | undefined): string {
-  if (override) return override.replace(/\/+$/, "");
-  const host = request.headers.host;
-  return host ? `${request.protocol}://${host}` : "http://127.0.0.1";
+function trustedOrigin(
+  options: Pick<DeviceAuthRouteOptions, "publicOriginOverride" | "getTrustedOrigin">
+): string {
+  if (options.publicOriginOverride) return options.publicOriginOverride.replace(/\/+$/, "");
+  if (options.getTrustedOrigin) return options.getTrustedOrigin().replace(/\/+$/, "");
+  return "http://127.0.0.1";
+}
+
+function checkOptionalTokenDpop(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  options: DeviceAuthRouteOptions,
+  expectedJkt?: string
+): { jkt: string; jti: string; expiresAtIso: string } | "replied" | undefined {
+  const rawHeader = request.headers.dpop;
+  if (rawHeader === undefined) return undefined;
+  const proof = Array.isArray(rawHeader) ? undefined : rawHeader.trim() || undefined;
+  const origin = trustedOrigin(options);
+  const result = verifyDpopProof({
+    proof,
+    method: "POST",
+    expectedHtu: `${origin}/oauth/token`,
+    expectedJkt,
+    nonceSecret: options.dpopNonceSecret,
+    nonceRequired: options.dpopNonceRequired
+  });
+  if (!result.ok) {
+    if (result.error === "use_dpop_nonce" && options.dpopNonceSecret) {
+      reply.header("dpop-nonce", issueDpopNonce(options.dpopNonceSecret));
+    }
+    reply.code(400).send({ error: result.error });
+    return "replied";
+  }
+  return { jkt: result.jkt, jti: result.jti, expiresAtIso: result.expiresAtIso };
 }
 
 function renderDeviceVerifyPage(input: {

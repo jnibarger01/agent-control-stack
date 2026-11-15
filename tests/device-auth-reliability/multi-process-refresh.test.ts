@@ -3,6 +3,7 @@ import { readCredentials } from "../../apps/runtime/src/auth/credential-store.js
 import {
   authenticateDevice,
   createTempEnv,
+  dpopHeaders,
   inspectDeviceRow,
   sha256Hex,
   spawnCliRefreshProcess,
@@ -67,9 +68,20 @@ describe("Scenario A: multi-process concurrent refresh", () => {
     expect(sha256Hex(stored!.session!.refreshToken)).toBe(p1.parsed?.refreshTokenHash);
     expect(sha256Hex(stored!.session!.accessToken)).toBe(p1.parsed?.accessTokenHash);
 
-    // New access token works against a real authenticated gateway route.
-    const apiRes = await fetch(`${gateway.url}/api/actors`, {
+    // New access token rejects Bearer downgrade and works with DPoP against a real authenticated gateway route.
+    const bearerRes = await fetch(`${gateway.url}/api/actors`, {
       headers: { authorization: `Bearer ${stored!.session!.accessToken}` }
+    });
+    expect(bearerRes.status).toBe(401);
+
+    const apiRes = await fetch(`${gateway.url}/api/actors`, {
+      headers: dpopHeaders({
+        accessToken: stored!.session!.accessToken,
+        devicePublicKeyPem: stored!.devicePublicKeyPem,
+        devicePrivateKeyPem: stored!.devicePrivateKeyPem,
+        method: "GET",
+        url: `${gateway.url}/api/actors`
+      })
     });
     expect(apiRes.status).toBe(200);
   });

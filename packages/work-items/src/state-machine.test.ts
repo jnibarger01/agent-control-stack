@@ -1011,7 +1011,8 @@ describe("work item state machine", () => {
         { version: 76, name: "jace_commander_native_tools", filename: "076_jace_commander_native_tools.sql" },
         { version: 77, name: "jace_mem_capability_issuances", filename: "077_jace_mem_capability_issuances.sql" },
         { version: 78, name: "jc_native_gui_tools", filename: "078_jc_native_gui_tools.sql" },
-        { version: 79, name: "device_auth_refresh_recovery", filename: "079_device_auth_refresh_recovery.sql" }
+        { version: 79, name: "device_auth_refresh_recovery", filename: "079_device_auth_refresh_recovery.sql" },
+        { version: 80, name: "device_auth_dpop", filename: "080_device_auth_dpop.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])

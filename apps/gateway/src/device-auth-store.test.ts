@@ -747,4 +747,54 @@ describe("DeviceAuthStore", () => {
     });
     expect(recovered).toEqual({ ...r1, recovered: true });
   });
+
+  it("computes RFC 7638 publicKeyJkt, lists multi-device rows per principal, and enforces persistent DPoP jti replay protection", () => {
+    const dirSetup = setup();
+    directory = dirSetup.directory;
+    workItems = dirSetup.workItems;
+    store = dirSetup.store;
+
+    const issuedA = requestCode(store, { clientId: "acs-cli", devicePublicKeyPem: DEVICE_KEY_A, deviceName: "laptop-a" });
+    const issuedB = requestCode(store, { clientId: "jace-commander", devicePublicKeyPem: DEVICE_KEY_B, deviceName: "laptop-b" });
+    if (!issuedA.ok || !issuedB.ok) throw new Error("setup failed");
+    expect(store.approve(issuedA.userCode, "operator-1")).toEqual({ ok: true });
+    expect(store.approve(issuedB.userCode, "operator-1")).toEqual({ ok: true });
+
+    const tokA = store.pollToken(issuedA.deviceCode, "acs-cli", proof(issuedA.deviceCode, DEVICE_PAIR_A.privateKey));
+    const tokB = store.pollToken(issuedB.deviceCode, "jace-commander", proof(issuedB.deviceCode, DEVICE_PAIR_B.privateKey));
+    if (tokA.status !== "success" || tokB.status !== "success") throw new Error("expected success");
+
+    expect(tokA.publicKeyJkt).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(tokB.publicKeyJkt).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(tokA.publicKeyJkt).not.toBe(tokB.publicKeyJkt);
+    expect(tokA.deviceId).not.toBe(tokB.deviceId);
+
+    const listed = store.listDevices({ principalId: "operator-1" });
+    expect(listed.map((d) => d.id).sort()).toEqual([tokA.deviceId, tokB.deviceId].sort());
+    expect(listed.every((d) => d.publicKeyJkt.length === 43)).toBe(true);
+
+    const now = new Date("2026-06-01T12:00:00.000Z");
+    const expiresAt = new Date(now.getTime() + 180_000).toISOString();
+    expect(store.consumeDpopJti(tokA.publicKeyJkt, "jti-0123456789abcdef", expiresAt, now)).toBe(true);
+    // Same (jkt, jti) rejected immediately
+    expect(store.consumeDpopJti(tokA.publicKeyJkt, "jti-0123456789abcdef", expiresAt, now)).toBe(false);
+    // Different jkt with same jti allowed
+    expect(store.consumeDpopJti(tokB.publicKeyJkt, "jti-0123456789abcdef", expiresAt, now)).toBe(true);
+
+    // Reopen store to verify SQLite persistence across restarts
+    store.close();
+    store = new DeviceAuthStore(dirSetup.dbPath, { recovery: makeRecoveryConfig() });
+    expect(store.consumeDpopJti(tokA.publicKeyJkt, "jti-0123456789abcdef", expiresAt, now)).toBe(false);
+
+    // After expiry, old jti is purged and can be accepted again if reused past TTL
+    const afterExpiry = new Date(now.getTime() + 181_000);
+    expect(
+      store.consumeDpopJti(
+        tokA.publicKeyJkt,
+        "jti-0123456789abcdef",
+        new Date(afterExpiry.getTime() + 180_000).toISOString(),
+        afterExpiry
+      )
+    ).toBe(true);
+  });
 });

@@ -17,8 +17,10 @@ import {
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { createId } from "@agent-control-stack/shared";
 import { MCP_SCOPES } from "./auth.js";
+import { computeEd25519JwkThumbprintFromPem } from "./device-dpop.js";
 
 export const DEFAULT_DEVICE_AUTH_CLIENT_ID = "acs-cli";
+export const DEFAULT_ALLOWED_CLIENT_IDS = [DEFAULT_DEVICE_AUTH_CLIENT_ID, "jace-commander"] as const;
 const DEVICE_CODE_TTL_SECONDS = 15 * 60;
 const DEFAULT_POLL_INTERVAL_SECONDS = 5;
 const SLOW_DOWN_INCREMENT_SECONDS = 5;
@@ -66,6 +68,7 @@ export type DeviceTokenPollResult =
       status: "success";
       deviceId: string;
       principalId: string;
+      publicKeyJkt: string;
       scopes: string[];
       accessToken: string;
       accessTokenExpiresIn: number;
@@ -86,7 +89,9 @@ export interface DeviceAuthorizationSummary {
 export interface DeviceRecord {
   id: string;
   principalId: string;
+  clientId: string;
   name: string;
+  publicKeyJkt: string;
   status: "active" | "revoked";
   allowedScopes: string[];
   createdAt: string;
@@ -122,6 +127,7 @@ interface DeviceRow {
   client_id: string;
   name: string;
   public_key_pem: string;
+  public_key_jkt?: string | null;
   allowed_scopes_json: string;
   status: string;
   metadata_json: string;
@@ -152,6 +158,7 @@ interface RecoveryEnvelopeRow {
 export interface DeviceAccessIdentity {
   deviceId: string;
   principalId: string;
+  publicKeyJkt: string;
   scopes: string[];
   expiresAt: string;
 }
@@ -208,6 +215,7 @@ export type RefreshAccessTokenResult =
       recovered: boolean;
       deviceId: string;
       principalId: string;
+      publicKeyJkt: string;
       scopes: string[];
       accessToken: string;
       accessTokenExpiresIn: number;
@@ -286,7 +294,7 @@ export class DeviceAuthStore {
 
   requestDeviceCode(
     input: DeviceCodeRequestInput,
-    allowedClientIds: readonly string[] = [DEFAULT_DEVICE_AUTH_CLIENT_ID]
+    allowedClientIds: readonly string[] = DEFAULT_ALLOWED_CLIENT_IDS
   ): DeviceCodeRequestResult {
     if (!allowedClientIds.includes(input.clientId)) {
       return { ok: false, error: "invalid_client" };
@@ -503,10 +511,12 @@ export class DeviceAuthStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+    const publicKeyJkt = computeEd25519JwkThumbprintFromPem(fresh.device_public_key_pem);
     return {
       status: "success",
       deviceId: fresh.device_id!,
       principalId: fresh.principal_id!,
+      publicKeyJkt,
       scopes,
       accessToken,
       accessTokenExpiresIn: ACCESS_TOKEN_TTL_SECONDS,
@@ -641,6 +651,7 @@ export class DeviceAuthStore {
           throw new Error("refresh-token rotation invariant violated");
         }
 
+        const publicKeyJkt = deviceRow.public_key_jkt ?? computeEd25519JwkThumbprintFromPem(deviceRow.public_key_pem);
         const encrypted = encryptRecoveryEnvelope(this.recovery, {
           deviceId: deviceRow.id,
           clientId: deviceRow.client_id,
@@ -648,6 +659,7 @@ export class DeviceAuthStore {
           payload: {
             deviceId: deviceRow.id,
             principalId: deviceRow.principal_id,
+            publicKeyJkt,
             scopes,
             accessToken,
             accessTokenExpiresIn: ACCESS_TOKEN_TTL_SECONDS,
@@ -692,6 +704,7 @@ export class DeviceAuthStore {
           recovered: false,
           deviceId: deviceRow.id,
           principalId: deviceRow.principal_id,
+          publicKeyJkt,
           scopes,
           accessToken,
           accessTokenExpiresIn: ACCESS_TOKEN_TTL_SECONDS,
@@ -707,6 +720,10 @@ export class DeviceAuthStore {
         if (!decrypted) {
           return { ok: false, error: "server_error", reason: "recovery_unavailable" };
         }
+        const publicKeyJkt =
+          decrypted.publicKeyJkt ??
+          deviceRow.public_key_jkt ??
+          computeEd25519JwkThumbprintFromPem(deviceRow.public_key_pem);
         this.emitAudit({
           name: "device_auth.refresh_recovered",
           deviceId: deviceRow.id,
@@ -721,7 +738,8 @@ export class DeviceAuthStore {
         return {
           ok: true,
           recovered: true,
-          ...decrypted
+          ...decrypted,
+          publicKeyJkt
         };
       }
 
@@ -777,9 +795,29 @@ export class DeviceAuthStore {
     return {
       deviceId: row.id,
       principalId: row.principal_id,
+      publicKeyJkt: row.public_key_jkt ?? computeEd25519JwkThumbprintFromPem(row.public_key_pem),
       scopes: JSON.parse(row.allowed_scopes_json) as string[],
       expiresAt: row.access_token_expires_at
     };
+  }
+
+  consumeDpopJti(jkt: string, jti: string, expiresAtIso: string, now: Date = new Date()): boolean {
+    if (!jkt || !jti) return false;
+    const nowIso = now.toISOString();
+    this.stmt(`DELETE FROM device_dpop_jtis WHERE expires_at <= ?`).run(nowIso);
+    const result = this.stmt(
+      `INSERT OR IGNORE INTO device_dpop_jtis (jkt, jti, expires_at, created_at) VALUES (?, ?, ?, ?)`
+    ).run(jkt, jti, expiresAtIso, nowIso);
+    return Number(result.changes) === 1;
+  }
+
+  listDevices(filter?: { principalId?: string }): DeviceRecord[] {
+    const rows = filter?.principalId
+      ? (this.stmt(`SELECT * FROM devices WHERE principal_id = ? ORDER BY created_at DESC`).all(
+          filter.principalId
+        ) as unknown as DeviceRow[])
+      : (this.stmt(`SELECT * FROM devices ORDER BY created_at DESC`).all() as unknown as DeviceRow[]);
+    return rows.map(toDeviceRecord);
   }
 
   getDevice(deviceId: string): DeviceRecord | undefined {
@@ -826,15 +864,19 @@ export class DeviceAuthStore {
   }
 
   private upsertDeviceForApproval(auth: DeviceAuthorizationRow, principalId: string, now: Date): string {
+    const jkt = computeEd25519JwkThumbprintFromPem(auth.device_public_key_pem);
     const existing = this.stmt(`SELECT * FROM devices WHERE public_key_pem = ?`).get(auth.device_public_key_pem) as
       DeviceRow | undefined;
     if (existing) {
       if (existing.status !== "active" || existing.principal_id !== principalId) {
         throw new Error("device approval invariant violated");
       }
-      this.stmt(`UPDATE devices SET name = ?, client_id = ?, allowed_scopes_json = ?, updated_at = ? WHERE id = ?`).run(
+      this.stmt(
+        `UPDATE devices SET name = ?, client_id = ?, public_key_jkt = ?, allowed_scopes_json = ?, updated_at = ? WHERE id = ?`
+      ).run(
         auth.device_name,
         auth.client_id,
+        jkt,
         auth.requested_scopes_json,
         now.toISOString(),
         existing.id
@@ -844,14 +886,15 @@ export class DeviceAuthStore {
     const id = createId("dev");
     this.stmt(
       `INSERT INTO devices
-         (id, principal_id, client_id, name, public_key_pem, allowed_scopes_json, status, metadata_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'active', '{}', ?, ?)`
+         (id, principal_id, client_id, name, public_key_pem, public_key_jkt, allowed_scopes_json, status, metadata_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', '{}', ?, ?)`
     ).run(
       id,
       principalId,
       auth.client_id,
       auth.device_name,
       auth.device_public_key_pem,
+      jkt,
       auth.requested_scopes_json,
       now.toISOString(),
       now.toISOString()
@@ -889,7 +932,9 @@ function toDeviceRecord(row: DeviceRow): DeviceRecord {
   return {
     id: row.id,
     principalId: row.principal_id,
+    clientId: row.client_id,
     name: row.name,
+    publicKeyJkt: row.public_key_jkt ?? computeEd25519JwkThumbprintFromPem(row.public_key_pem),
     status: row.status as DeviceRecord["status"],
     allowedScopes: JSON.parse(row.allowed_scopes_json) as string[],
     createdAt: row.created_at,
@@ -1016,6 +1061,7 @@ function recoveryAad(deviceId: string, clientId: string, predecessorHash: string
 interface RecoveryEnvelopePayload {
   deviceId: string;
   principalId: string;
+  publicKeyJkt?: string;
   scopes: string[];
   accessToken: string;
   accessTokenExpiresIn: number;
