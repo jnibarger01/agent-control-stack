@@ -22,7 +22,9 @@ import { localRoutingFromEnv, stripAuthorityMeta } from './jc-routing.js';
 import { managedModeFromEnv, jcModeFromEnv, identityAttribution, capabilityTransport, acsPost, isToolsCall, dcRuntimeIdentityFromState, issueRuntimeBootstrap, completeRuntimeBootstrap, injectRuntimeBootstrap } from './managed.js';
 import { enableAcsTiming } from './acs-timing.js';
 import { dcBridgeReady, jcBridgeReady } from './readiness.js';
-import { REPORTABLE_REFRESH_FAILURES, bearerChallenge, classifyBearer, createAuthEventReporter, equalSecrets, resolveRefresh } from './auth-health.js';
+import { REPORTABLE_REFRESH_FAILURES, bearerChallenge, classifyTokenAuth, createAuthEventReporter, dpopChallenge, equalSecrets, resolveRefresh } from './auth-health.js';
+import { SUPPORTED_DPOP_ALGS, createNonceManager, isValidJkt, verifyDpopProof } from './dpop.js';
+import { createGatewayStore, normalizeUserCode } from './store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -50,7 +52,14 @@ const testTtl = (name, fallback) => {
   return EDGE_TEST_MODE && Number.isFinite(v) && v > 0 ? Math.min(v, 86_400) : fallback; // lab only, capped at one day
 };
 const ACCESS_TTL_S = testTtl('EDGE_TEST_ACCESS_TTL_S', 3600);
+const JC_CLI_ACCESS_TTL_S = testTtl('EDGE_TEST_JC_CLI_ACCESS_TTL_S', testTtl('EDGE_TEST_ACCESS_TTL_S', 600));
 const REFRESH_TTL_S = testTtl('EDGE_TEST_REFRESH_TTL_S', 30 * 24 * 3600);
+const INACTIVITY_TTL_S = testTtl('EDGE_TEST_INACTIVITY_TTL_S', 7 * 24 * 3600);
+const DEVICE_CODE_TTL_S = testTtl('EDGE_TEST_DEVICE_CODE_TTL_S', 600);
+const DEVICE_INTERVAL_S = testTtl('EDGE_TEST_DEVICE_INTERVAL_S', 5);
+const RECOVERY_TTL_S = testTtl('EDGE_TEST_RECOVERY_TTL_S', 120);
+const DPOP_NONCE_REQUIRED = process.env.DPOP_NONCE_REQUIRED !== '0' && process.env.DPOP_NONCE_REQUIRED !== 'false';
+const JC_REFRESH_RECOVERY_KEY = process.env.JC_REFRESH_RECOVERY_KEY || '';
 if (EDGE_TEST_MODE) console.warn(`gateway: EDGE_TEST_MODE=1 (access ttl ${ACCESS_TTL_S}s, refresh ttl ${REFRESH_TTL_S}s). NOT FOR PRODUCTION.`);
 const CODE_TTL_S = 300;
 const MAX_BODY = 2 * 1024 * 1024; // 2 MB
@@ -96,6 +105,12 @@ if (JC_LOCAL.error) console.error(`gateway: jc local routing: ${JC_LOCAL.error}`
 // so hosted clients do not need path-specific DCR support.
 if (!GATEWAY_EXECUTION_TOKEN) console.log('gateway: GATEWAY_EXECUTION_TOKEN not set; executor identity attestation disabled (log-once)');
 fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+const PUBLIC_ORIGIN_CANONICAL = new URL(PUBLIC_ORIGIN).origin;
+const gatewayStore = createGatewayStore(path.join(DATA_DIR, 'gateway.db'), {
+  signingKey: SIGNING_KEY,
+  recoveryKey: JC_REFRESH_RECOVERY_KEY,
+});
+const dpopNonces = createNonceManager({ signingKey: SIGNING_KEY });
 
 const META = {
   resource: RESOURCE,
@@ -129,10 +144,17 @@ const oauthMeta = (lane) => ({
   authorization_endpoint: oauthEndpoint('/authorize', lane),
   token_endpoint: oauthEndpoint('/token', lane),
   registration_endpoint: oauthEndpoint('/register', lane),
+  ...(lane.name === 'jc'
+    ? { device_authorization_endpoint: `${PUBLIC_ORIGIN_CANONICAL}/jc/oauth/device/code` }
+    : {}),
   response_types_supported: ['code'],
-  grant_types_supported: ['authorization_code', 'refresh_token'],
+  grant_types_supported:
+    lane.name === 'jc'
+      ? ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:device_code']
+      : ['authorization_code', 'refresh_token'],
   code_challenge_methods_supported: ['S256'],
   token_endpoint_auth_methods_supported: ['none', 'client_secret_post'],
+  dpop_signing_alg_values_supported: [...SUPPORTED_DPOP_ALGS],
   scopes_supported: ['mcp'],
   client_id_metadata_document_supported: true,
   authorization_response_iss_parameter_supported: true,
@@ -323,10 +345,26 @@ function log(method, path, status, note = '') {
 }
 
 // ---------------------------------------------------------------------------
-// CIMD: fetch + validate a client's metadata document
+// Built-in static clients & CIMD: fetch + validate a client's metadata document
 // ---------------------------------------------------------------------------
+const BUILTIN_CLIENTS = Object.freeze({
+  'jace-commander-cli': Object.freeze({
+    client_name: 'Jace Commander CLI',
+    redirect_uris: ['http://127.0.0.1/callback', 'http://[::1]/callback'],
+    grant_types: ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:device_code'],
+    token_endpoint_auth_method: 'none',
+    oauth_lane: 'jc',
+    scope: 'mcp',
+    require_dpop: true,
+    require_state: true,
+    access_ttl_s: JC_CLI_ACCESS_TTL_S,
+    builtin: true,
+  }),
+});
+
 async function resolveClient(clientId) {
-  if (clients[clientId]) return clients[clientId];
+  if (typeof clientId === 'string' && Object.hasOwn(BUILTIN_CLIENTS, clientId)) return BUILTIN_CLIENTS[clientId];
+  if (typeof clientId === 'string' && Object.hasOwn(clients, clientId)) return clients[clientId];
   if (typeof clientId !== 'string' || !/^https:\/\//.test(clientId)) return null; // CIMD ids must be https URLs
   const cached = cimdCache.get(clientId);
   if (cached && cached._fetched + 3600_000 > Date.now()) return cached;
@@ -354,7 +392,7 @@ function validRedirect(client, redirectUri) {
 function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function consentPage(q, lane = DC_OAUTH_LANE) {
   const hidden = Object.entries(q)
-    .filter(([k]) => ['client_id', 'redirect_uri', 'response_type', 'scope', 'state', 'code_challenge', 'code_challenge_method', 'resource'].includes(k))
+    .filter(([k]) => ['client_id', 'redirect_uri', 'response_type', 'scope', 'state', 'code_challenge', 'code_challenge_method', 'resource', 'dpop_jkt', 'device_name'].includes(k))
     .map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join('\n');
   const requested = q.resource || lane.resource;
   const warning = requested === JC_RESOURCE
@@ -385,7 +423,7 @@ function denyPage(msg) {
 function parseQuery(url) { return Object.fromEntries(new URL(url, 'http://localhost').searchParams.entries()); }
 
 async function handleAuthorize(req, res, q, laneHint = null) {
-  const { client_id, redirect_uri, response_type, code_challenge, code_challenge_method, scope, state } = q;
+  const { client_id, redirect_uri, response_type, code_challenge, code_challenge_method, scope, state, dpop_jkt } = q;
   if (!client_id || !redirect_uri) return jsonError(res, 400, 'invalid_request', 'client_id and redirect_uri required');
   const client = await resolveClient(client_id);
   if (!client) return send(res, 400, denyPage('Unknown client.'), { 'Content-Type': 'text/html; charset=utf-8' });
@@ -400,7 +438,10 @@ async function handleAuthorize(req, res, q, laneHint = null) {
     return redirect(res, u.toString());
   };
   if (!lane) return fail('invalid_target', 'unknown resource');
+  if (client.builtin && client.oauth_lane === 'jc' && lane.name !== 'jc') return fail('invalid_target', 'client restricted to jc lane');
   if (response_type !== 'code') return fail('unsupported_response_type', 'response_type must be code');
+  if (client.require_state && !state) return fail('invalid_request', 'state is required');
+  if (dpop_jkt !== undefined && dpop_jkt !== '' && !isValidJkt(dpop_jkt)) return fail('invalid_request', 'malformed dpop_jkt');
   if (!code_challenge || code_challenge_method !== 'S256') return fail('invalid_request', 'PKCE with S256 is required');
   // Same rule as the consent POST: an S256 challenge is exactly 43 base64url characters.
   if (!isPkceChallenge(code_challenge)) return fail('invalid_request', 'malformed code_challenge');
@@ -412,7 +453,7 @@ async function handleAuthorize(req, res, q, laneHint = null) {
 
 async function handleConsent(req, res, body, laneHint = null) {
   const params = Object.fromEntries(new URLSearchParams(body.toString('utf8')).entries());
-  const { client_id, redirect_uri, scope, state, code_challenge, code_challenge_method } = params;
+  const { client_id, redirect_uri, scope, state, code_challenge, code_challenge_method, dpop_jkt, device_name } = params;
   const pass = params.passphrase || '';
   const passOk = pass.length > 0 && crypto.timingSafeEqual(
     Buffer.from(crypto.createHash('sha256').update(pass).digest()),
@@ -422,16 +463,22 @@ async function handleConsent(req, res, body, laneHint = null) {
   if (!client || !validRedirect(client, redirect_uri)) return send(res, 400, denyPage('Invalid client/redirect.'), { 'Content-Type': 'text/html; charset=utf-8' });
   const lane = laneHint || laneForClientResource(client, params.resource);
   if (!lane) return send(res, 400, denyPage('Unknown resource.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  if (client.builtin && client.oauth_lane === 'jc' && lane.name !== 'jc') return send(res, 400, denyPage('Client restricted to jc lane.'), { 'Content-Type': 'text/html; charset=utf-8' });
   const resource = params.resource || lane.resource;
   if (resource !== lane.resource) return send(res, 400, denyPage('Resource does not belong to this OAuth lane.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  if (client.require_state && !state) return send(res, 400, denyPage('state is required.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  if (dpop_jkt !== undefined && dpop_jkt !== '' && !isValidJkt(dpop_jkt)) return send(res, 400, denyPage('Malformed dpop_jkt.'), { 'Content-Type': 'text/html; charset=utf-8' });
   // The consent POST is a second entry point: it must enforce the same PKCE rule as /authorize, not trust the form.
   if (code_challenge_method !== 'S256' || !isPkceChallenge(code_challenge)) return send(res, 400, denyPage('PKCE with S256 is required.'), { 'Content-Type': 'text/html; charset=utf-8' });
   const reqScope = (scope || 'mcp').split(' ').filter((s) => s === 'mcp' || s === 'openid' || s === 'email' || s === 'profile');
   if (reqScope.length === 0) return send(res, 400, denyPage('No permitted scope requested.'), { 'Content-Type': 'text/html; charset=utf-8' });
   const code = randId();
-  codes.set(code, {
+  gatewayStore.saveAuthCode(code, {
     client_id, redirect_uri, scope: reqScope.join(' '), resource, issuer: lane.issuer,
-    code_challenge, code_challenge_method: 'S256', exp: now() + CODE_TTL_S,
+    code_challenge, code_challenge_method: 'S256',
+    dpop_jkt: dpop_jkt || null,
+    device_name: typeof device_name === 'string' ? device_name.replace(/[^\x20-\x7e]/g, '').trim().slice(0, 64) || null : null,
+    exp: now() + CODE_TTL_S,
   });
   const u = new URL(redirect_uri);
   u.searchParams.set('code', code);
@@ -443,8 +490,6 @@ async function handleConsent(req, res, body, laneHint = null) {
 // RFC 7636 section 4.1 / 4.2: 43-128 unreserved characters.
 const isPkceVerifier = (v) => typeof v === 'string' && /^[A-Za-z0-9\-._~]{43,128}$/.test(v);
 const isPkceChallenge = (v) => typeof v === 'string' && /^[A-Za-z0-9\-_]{43}$/.test(v);
-const codes = new Map();
-setInterval(() => { const t = now(); for (const [c, g] of codes) if (g.exp < t) codes.delete(c); }, 60_000);
 
 function issueTokens(grant, lane = DC_OAUTH_LANE, family = randId().slice(0, 12)) {
   const t = now();
@@ -457,6 +502,54 @@ function issueTokens(grant, lane = DC_OAUTH_LANE, family = randId().slice(0, 12)
   refreshTokens[rjti] = { client_id: grant.client_id, scope: grant.scope, resource: lane.resource, issuer: lane.issuer, exp: t + REFRESH_TTL_S, active: true, family };
   saveJson(tokensFile, refreshTokens);
   return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TTL_S, refresh_token: rjti, scope: grant.scope };
+}
+
+function mintDpopResponse({ sub, client_id, scope, lane, jkt, device_id, accessTtlS }) {
+  const t = now();
+  const jti = randId();
+  const access = signJwt({
+    iss: lane.issuer,
+    sub,
+    aud: lane.resource,
+    client_id,
+    scope,
+    iat: t,
+    exp: t + accessTtlS,
+    jti,
+    cnf: { jkt },
+    ...(device_id ? { did: device_id } : {}),
+  });
+  const refreshToken = randId();
+  return {
+    refresh_token: refreshToken,
+    response: {
+      access_token: access,
+      token_type: 'DPoP',
+      expires_in: accessTtlS,
+      refresh_token: refreshToken,
+      scope,
+      ...(device_id ? { device_id } : {}),
+    },
+  };
+}
+
+function verifyRequestDpop(req, pathname, { required = false, accessToken } = {}) {
+  const hdr = req.headers['dpop'];
+  if (typeof hdr !== 'string' || hdr.trim().length === 0) {
+    if (!required) return { ok: true, used: false, freshNonce: dpopNonces.issue(now()) };
+    return { ok: false, reason: 'missing_dpop', freshNonce: dpopNonces.issue(now()) };
+  }
+  const verified = verifyDpopProof(hdr, {
+    htm: req.method,
+    htu: `${PUBLIC_ORIGIN_CANONICAL}${pathname}`,
+    accessToken,
+    nowSec: now(),
+    nonceManager: dpopNonces,
+    nonceRequired: DPOP_NONCE_REQUIRED,
+    consumeJti: (jti, jkt, exp) => gatewayStore.consumeJti(jti, jkt, exp, now()),
+  });
+  if (!verified.ok) return verified;
+  return { ...verified, used: true };
 }
 
 // ---- Authentication health (ADR 0027) ----
@@ -486,17 +579,54 @@ function reportAuth(laneName, identity, kind, reason, refreshExpiresAt, family) 
 const logSafe = (value) => String(value ?? '-').replace(/[^\x20-\x7e]/g, '?').slice(0, 64);
 const isoFromSec = (sec) => new Date(sec * 1000).toISOString();
 
-async function handleToken(req, res, body, laneHint = null) {
-  const p = Object.fromEntries(new URLSearchParams(body.toString('utf8')).entries());
-  const { grant_type, code, code_verifier, redirect_uri, client_id, client_secret, refresh_token, resource } = p;
+const DEVICE_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+function randomUserCode() {
+  const bytes = crypto.randomBytes(8);
+  let out = '';
+  for (let i = 0; i < 8; i += 1) {
+    out += DEVICE_CODE_ALPHABET[bytes[i] % DEVICE_CODE_ALPHABET.length];
+    if (i === 3) out += '-';
+  }
+  return out;
+}
+
+function parseTokenBody(body) {
+  return Object.fromEntries(new URLSearchParams(body.toString('utf8')).entries());
+}
+
+function sendUseDpopNonce(res, freshNonce, asTokenEndpoint = false) {
+  if (asTokenEndpoint) {
+    return jsonError(res, 400, 'use_dpop_nonce', 'DPoP nonce required', { 'DPoP-Nonce': freshNonce });
+  }
+  return null;
+}
+
+async function handleToken(req, res, body, laneHint = null, pathname = '/token') {
+  const p = parseTokenBody(body);
+  const { grant_type, code, code_verifier, redirect_uri, client_id, client_secret, refresh_token, resource, refresh_request_id, device_code } = p;
   if (grant_type === 'authorization_code') {
-    const g = code ? codes.get(code) : null;
+    const peek = code ? gatewayStore.peekAuthCode(code, now()) : null;
+    if (!peek) return jsonError(res, 400, 'invalid_grant', 'unknown or expired code');
+    const peekClient = await resolveClient(client_id || peek.client_id);
+    const dpopRequired = Boolean(peekClient?.require_dpop || peek.dpop_jkt);
+    const dpopPresent = typeof req.headers['dpop'] === 'string' && req.headers['dpop'].trim().length > 0;
+    let dpopRes = null;
+    if (dpopRequired || dpopPresent) {
+      dpopRes = verifyRequestDpop(req, pathname, { required: true });
+      if (!dpopRes.ok) {
+        if (dpopRes.reason === 'use_dpop_nonce') return sendUseDpopNonce(res, dpopRes.freshNonce, true);
+        return jsonError(res, 400, 'invalid_dpop_proof', dpopRes.reason || 'DPoP verification failed');
+      }
+      if (peek.dpop_jkt && dpopRes.jkt !== peek.dpop_jkt) {
+        return jsonError(res, 400, 'invalid_dpop_proof', 'DPoP key thumbprint mismatch');
+      }
+    }
+    const g = gatewayStore.consumeAuthCode(code, now());
     if (!g) return jsonError(res, 400, 'invalid_grant', 'unknown or expired code');
-    codes.delete(code);
     const lane = laneForGrant(g);
     if (!lane || (laneHint && (lane.resource !== laneHint.resource || lane.issuer !== laneHint.issuer)))
       return jsonError(res, 400, 'invalid_target', 'authorization code belongs to a different OAuth lane');
-    const client = await resolveClient(client_id || g.client_id);
+    const client = peekClient;
     if (!client || (client_id && client_id !== g.client_id)) return jsonError(res, 400, 'invalid_grant', 'client mismatch');
     if (client.client_secret && !equalSecrets(client.client_secret, client_secret)) return jsonError(res, 401, 'invalid_client', 'client auth failed');
     if (redirect_uri !== g.redirect_uri) return jsonError(res, 400, 'invalid_grant', 'redirect_uri mismatch');
@@ -506,11 +636,109 @@ async function handleToken(req, res, body, laneHint = null) {
     const a = Buffer.from(expect); const b = Buffer.from(g.code_challenge);
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return jsonError(res, 400, 'invalid_grant', 'PKCE verification failed');
     if (resource && resource !== lane.resource) return jsonError(res, 400, 'invalid_target', 'resource mismatch');
+
+    if (dpopRes && dpopRes.used) {
+      const family = randId().slice(0, 12);
+      const accessTtlS = client.access_ttl_s || ACCESS_TTL_S;
+      const label = typeof p.device_name === 'string' && p.device_name.trim()
+        ? p.device_name.replace(/[^\x20-\x7e]/g, '').trim().slice(0, 64)
+        : (g.device_name || g.client_id);
+      const preMint = mintDpopResponse({
+        sub: 'jacen',
+        client_id: g.client_id,
+        scope: g.scope,
+        lane,
+        jkt: dpopRes.jkt,
+        device_id: null,
+        accessTtlS,
+      });
+      const issuedDev = gatewayStore.issueDpopGrant({
+        sub: 'jacen',
+        clientId: g.client_id,
+        jkt: dpopRes.jkt,
+        label,
+        scope: g.scope,
+        resource: lane.resource,
+        issuer: lane.issuer,
+        refreshToken: preMint.refresh_token,
+        family,
+        nowSec: now(),
+        refreshTtlS: REFRESH_TTL_S,
+        inactivityTtlS: INACTIVITY_TTL_S,
+      });
+      if (!issuedDev.ok) return jsonError(res, 400, 'invalid_grant', 'device has been revoked');
+      // Re-mint access JWT carrying the bound device_id claim (`did`).
+      const t = now();
+      const access = signJwt({
+        iss: lane.issuer, sub: 'jacen', aud: lane.resource, client_id: g.client_id,
+        scope: g.scope, iat: t, exp: t + accessTtlS, jti: randId(),
+        cnf: { jkt: dpopRes.jkt }, did: issuedDev.deviceId,
+      });
+      const response = {
+        access_token: access,
+        token_type: 'DPoP',
+        expires_in: accessTtlS,
+        refresh_token: preMint.refresh_token,
+        scope: g.scope,
+        device_id: issuedDev.deviceId,
+      };
+      reportAuth(lane.name, { clientId: g.client_id, subject: 'jacen' }, 'granted', undefined, isoFromSec(issuedDev.refreshExpiresAt), family);
+      return send(res, 200, response, {
+        'Cache-Control': 'no-store',
+        'Pragma': 'no-cache',
+        ...(dpopRes.freshNonce ? { 'DPoP-Nonce': dpopRes.freshNonce } : {}),
+      });
+    }
+
     const issued = issueTokens(g, lane);
     reportAuth(lane.name, { clientId: g.client_id, subject: 'jacen' }, 'granted', undefined, isoFromSec(refreshTokens[issued.refresh_token].exp), refreshTokens[issued.refresh_token].family);
     return send(res, 200, issued, { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' });
   }
   if (grant_type === 'refresh_token') {
+    const isDpopStoreToken = gatewayStore.hasRefreshToken(refresh_token);
+    const reqClient = client_id ? await resolveClient(client_id) : null;
+    if (isDpopStoreToken || reqClient?.require_dpop) {
+      const dpopRes = verifyRequestDpop(req, pathname, { required: true });
+      if (!dpopRes.ok) {
+        if (dpopRes.reason === 'use_dpop_nonce') return sendUseDpopNonce(res, dpopRes.freshNonce, true);
+        return jsonError(res, 400, 'invalid_dpop_proof', dpopRes.reason || 'DPoP verification failed');
+      }
+      if (!isDpopStoreToken) {
+        console.log(`auth: refresh refused reason=refresh_unknown lane=${laneHint ? laneHint.name : '-'} client=${logSafe(client_id)}`);
+        return jsonError(res, 400, 'invalid_grant', 'invalid refresh token', dpopRes.freshNonce ? { 'DPoP-Nonce': dpopRes.freshNonce } : {});
+      }
+      const laneTarget = laneHint || (resource === JC_RESOURCE ? JC_OAUTH_LANE : resource === RESOURCE ? DC_OAUTH_LANE : null);
+      if (resource && !laneTarget) return jsonError(res, 400, 'invalid_target', 'unknown resource');
+      const rot = gatewayStore.rotateDpopRefresh({
+        presentedRefreshToken: refresh_token,
+        presentedClientId: client_id,
+        dpopJkt: dpopRes.jkt,
+        refreshRequestId: refresh_request_id,
+        expectedResource: laneTarget ? laneTarget.resource : undefined,
+        expectedIssuer: laneTarget ? laneTarget.issuer : undefined,
+        nowSec: now(),
+        inactivityTtlS: INACTIVITY_TTL_S,
+        recoveryTtlS: RECOVERY_TTL_S,
+        mintTokens: ({ sub, client_id: cid, scope, resource: rRes, issuer: rIss, cnf_jkt, device_id }) => {
+          const lane = rRes === JC_RESOURCE && rIss === JC_ISSUER ? JC_OAUTH_LANE : DC_OAUTH_LANE;
+          const cDef = BUILTIN_CLIENTS[cid];
+          const accessTtlS = cDef?.access_ttl_s || ACCESS_TTL_S;
+          return mintDpopResponse({ sub, client_id: cid, scope, lane, jkt: cnf_jkt, device_id, accessTtlS });
+        },
+      });
+      const nonceHeader = dpopRes.freshNonce ? { 'DPoP-Nonce': dpopRes.freshNonce } : {};
+      if (!rot.ok) {
+        console.log(`auth: refresh refused reason=${rot.reason} lane=${laneHint ? laneHint.name : 'jc'} client=${logSafe(rot.clientId || client_id)}`);
+        if (rot.clientId && REPORTABLE_REFRESH_FAILURES.has(rot.reason)) {
+          reportAuth(laneHint ? laneHint.name : 'jc', { clientId: rot.clientId, subject: 'jacen' }, 'refresh_failed', rot.reason, undefined, rot.family);
+        }
+        if (rot.reason === 'invalid_target') return jsonError(res, 400, 'invalid_target', 'refresh token belongs to a different OAuth lane', nonceHeader);
+        return jsonError(res, 400, 'invalid_grant', rot.reason === 'refresh_reused' ? 'refresh_reused' : 'invalid refresh token', nonceHeader);
+      }
+      reportAuth(laneHint ? laneHint.name : 'jc', { clientId: rot.clientId, subject: 'jacen' }, 'refreshed', undefined, isoFromSec(rot.refreshExpiresAt), rot.family);
+      return send(res, 200, rot.response, { 'Cache-Control': 'no-store', 'Pragma': 'no-cache', ...nonceHeader });
+    }
+
     // Authenticate the client first (RFC 6749 section 6): a confidential client's refresh token alone is not enough.
     const known = Object.hasOwn(refreshTokens, refresh_token) ? refreshTokens[refresh_token] : undefined;
     const refreshClient = known ? await resolveClient(known.client_id) : null;
@@ -546,7 +774,159 @@ async function handleToken(req, res, body, laneHint = null) {
     reportAuth(lane.name, { clientId: rec.client_id, subject: 'jacen' }, 'refreshed', undefined, isoFromSec(refreshTokens[t.refresh_token].exp), rec.family);
     return send(res, 200, t, { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' });
   }
+  if (grant_type === 'urn:ietf:params:oauth:grant-type:device_code' && JC.enabled && (!laneHint || laneHint.name === 'jc')) {
+    const dpopRes = verifyRequestDpop(req, pathname, { required: true });
+    if (!dpopRes.ok) {
+      if (dpopRes.reason === 'use_dpop_nonce') return sendUseDpopNonce(res, dpopRes.freshNonce, true);
+      return jsonError(res, 400, 'invalid_dpop_proof', dpopRes.reason || 'DPoP verification failed');
+    }
+    const nonceHeader = dpopRes.freshNonce ? { 'DPoP-Nonce': dpopRes.freshNonce } : {};
+    const client = await resolveClient(client_id);
+    if (!client || client.oauth_lane !== 'jc' || !Array.isArray(client.grant_types) || !client.grant_types.includes('urn:ietf:params:oauth:grant-type:device_code')) {
+      return jsonError(res, 400, 'invalid_client', 'client not authorized for device_code grant', nonceHeader);
+    }
+    if (!device_code) return jsonError(res, 400, 'invalid_request', 'device_code required', nonceHeader);
+    const poll = gatewayStore.pollDeviceCode({
+      deviceCode: device_code,
+      clientId: client_id,
+      dpopJkt: dpopRes.jkt,
+      nowMs: Date.now(),
+    });
+    if (!poll.ok) {
+      return send(res, 400, {
+        error: poll.error,
+        ...(poll.interval ? { interval: poll.interval } : {}),
+        ...(poll.description ? { error_description: poll.description } : {}),
+      }, { 'Cache-Control': 'no-store', 'Pragma': 'no-cache', ...nonceHeader });
+    }
+    const family = randId().slice(0, 12);
+    const accessTtlS = client.access_ttl_s || ACCESS_TTL_S;
+    const preMint = mintDpopResponse({
+      sub: poll.sub,
+      client_id: poll.client_id,
+      scope: poll.scope,
+      lane: JC_OAUTH_LANE,
+      jkt: dpopRes.jkt,
+      device_id: null,
+      accessTtlS,
+    });
+    const issuedDev = gatewayStore.issueDpopGrant({
+      sub: poll.sub,
+      clientId: poll.client_id,
+      jkt: dpopRes.jkt,
+      label: poll.device_name || poll.client_id,
+      scope: poll.scope,
+      resource: JC_OAUTH_LANE.resource,
+      issuer: JC_OAUTH_LANE.issuer,
+      refreshToken: preMint.refresh_token,
+      family,
+      nowSec: now(),
+      refreshTtlS: REFRESH_TTL_S,
+      inactivityTtlS: INACTIVITY_TTL_S,
+    });
+    if (!issuedDev.ok) return jsonError(res, 400, 'invalid_grant', 'device has been revoked', nonceHeader);
+    const t = now();
+    const access = signJwt({
+      iss: JC_OAUTH_LANE.issuer, sub: poll.sub, aud: JC_OAUTH_LANE.resource, client_id: poll.client_id,
+      scope: poll.scope, iat: t, exp: t + accessTtlS, jti: randId(),
+      cnf: { jkt: dpopRes.jkt }, did: issuedDev.deviceId,
+    });
+    const response = {
+      access_token: access,
+      token_type: 'DPoP',
+      expires_in: accessTtlS,
+      refresh_token: preMint.refresh_token,
+      scope: poll.scope,
+      device_id: issuedDev.deviceId,
+    };
+    reportAuth('jc', { clientId: poll.client_id, subject: poll.sub }, 'granted', undefined, isoFromSec(issuedDev.refreshExpiresAt), family);
+    return send(res, 200, response, { 'Cache-Control': 'no-store', 'Pragma': 'no-cache', ...nonceHeader });
+  }
   return jsonError(res, 400, 'unsupported_grant_type', 'supported: authorization_code, refresh_token');
+}
+
+async function handleDeviceCode(req, res, body) {
+  let p;
+  const ct = String(req.headers['content-type'] || '');
+  if (ct.includes('application/json')) {
+    try { p = JSON.parse(body.toString('utf8')); } catch { return jsonError(res, 400, 'invalid_request', 'invalid JSON'); }
+  } else {
+    p = parseTokenBody(body);
+  }
+  const clientId = typeof p.client_id === 'string' ? p.client_id : '';
+  const client = await resolveClient(clientId);
+  if (!client || client.oauth_lane !== 'jc' || !Array.isArray(client.grant_types) || !client.grant_types.includes('urn:ietf:params:oauth:grant-type:device_code')) {
+    return jsonError(res, 400, 'invalid_client', 'client not authorized for device authorization');
+  }
+  const reqScope = String(p.scope || 'mcp').split(' ').filter((s) => s === 'mcp' || s === 'openid' || s === 'email' || s === 'profile');
+  if (reqScope.length === 0) return jsonError(res, 400, 'invalid_scope', 'no permitted scope requested');
+  const dpopJkt = typeof p.dpop_jkt === 'string' && p.dpop_jkt.length > 0 ? p.dpop_jkt : null;
+  if (dpopJkt && !isValidJkt(dpopJkt)) return jsonError(res, 400, 'invalid_request', 'malformed dpop_jkt');
+  const deviceName = typeof p.device_name === 'string'
+    ? p.device_name.replace(/[^\x20-\x7e]/g, '').trim().slice(0, 64) || null
+    : null;
+  const deviceCode = randId();
+  const userCode = randomUserCode();
+  const t = now();
+  gatewayStore.createDeviceCode({
+    deviceCode,
+    userCode,
+    clientId,
+    scope: reqScope.join(' '),
+    resource: JC_RESOURCE,
+    issuer: JC_ISSUER,
+    dpopJkt,
+    deviceName,
+    intervalS: DEVICE_INTERVAL_S,
+    expiresAt: t + DEVICE_CODE_TTL_S,
+    nowSec: t,
+  });
+  const verificationUri = `${PUBLIC_ORIGIN_CANONICAL}/jc/device`;
+  return send(res, 200, {
+    device_code: deviceCode,
+    user_code: userCode,
+    verification_uri: verificationUri,
+    verification_uri_complete: `${verificationUri}?user_code=${encodeURIComponent(userCode)}`,
+    expires_in: DEVICE_CODE_TTL_S,
+    interval: DEVICE_INTERVAL_S,
+  }, { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' });
+}
+
+function handleDeviceVerifyPage(req, res, q) {
+  const prefill = typeof q.user_code === 'string' ? q.user_code.replace(/[^A-Za-z0-9-]/g, '').slice(0, 16) : '';
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Jace Commander CLI - Device Verification</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font-family:system-ui,sans-serif;background:#111;color:#eee;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
+.card{background:#1c1c1c;padding:2rem;border-radius:12px;max-width:420px;width:90%}h1{font-size:1.1rem}
+input{width:100%;padding:.6rem;margin:.5rem 0 1rem;border-radius:6px;border:1px solid #444;background:#252525;color:#eee;box-sizing:border-box}
+.row{display:flex;gap:.75rem}button{flex:1;padding:.7rem;border:0;border-radius:6px;background:#4f8cff;color:#fff;font-size:1rem;cursor:pointer}
+button.deny{background:#555}</style></head>
+<body><div class="card"><h1>Authorize Jace Commander CLI device?</h1>
+<p>Confirm the user code shown in your terminal for <code>${esc(JC_RESOURCE)}</code>.</p>
+<form method="POST" action="/jc/device">
+<label>Device code<input type="text" name="user_code" value="${esc(prefill)}" autocomplete="off" required></label>
+<label>Consent passphrase<input type="password" name="passphrase" autocomplete="off" required></label>
+<div class="row"><button type="submit" name="decision" value="approve">Approve</button>
+<button type="submit" name="decision" value="deny" class="deny">Deny</button></div></form></div></body></html>`;
+  return send(res, 200, html, { 'Content-Type': 'text/html; charset=utf-8' });
+}
+
+function handleDeviceDecision(req, res, body) {
+  const params = parseTokenBody(body);
+  const pass = params.passphrase || '';
+  const passOk = pass.length > 0 && crypto.timingSafeEqual(
+    Buffer.from(crypto.createHash('sha256').update(pass).digest()),
+    Buffer.from(crypto.createHash('sha256').update(CONSENT_PASSPHRASE).digest()));
+  if (!passOk) return send(res, 401, denyPage('Invalid consent passphrase.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  const userCode = normalizeUserCode(params.user_code || '');
+  if (!userCode) return send(res, 400, denyPage('Missing user code.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  const decision = params.decision === 'deny' ? 'deny' : 'approve';
+  const result = gatewayStore.decideDeviceCode({ userCode, decision, sub: 'jacen', nowSec: now() });
+  if (!result.ok) return send(res, 400, denyPage('Unknown, expired, or already used device code.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  const msg = result.status === 'denied'
+    ? 'Device authorization denied. You may close this tab.'
+    : 'Device authorized for Jace Commander CLI. You may close this tab.';
+  return send(res, 200, denyPage(msg), { 'Content-Type': 'text/html; charset=utf-8' });
 }
 
 // Dynamic client registration is unauthenticated; bound its rate so a flood cannot starve /mcp (each write is a full, fsynced rewrite).
@@ -586,20 +966,97 @@ async function handleRegister(req, res, body, lane = DC_OAUTH_LANE) {
 }
 
 // ---------------------------------------------------------------------------
-// Bearer validation for /mcp
+// Bearer + DPoP validation for /mcp, /jc/mcp, and /jc/devices*
 // ---------------------------------------------------------------------------
 const CHALLENGE = () => 'Bearer resource_metadata="' + ISSUER + '/.well-known/oauth-protected-resource", scope="mcp"';
 const JC_CHALLENGE = () => 'Bearer resource_metadata="' + ISSUER + '/.well-known/oauth-protected-resource/jc/mcp", scope="mcp"';
+const DPOP_CHALLENGE = () => 'DPoP algs="EdDSA ES256", resource_metadata="' + ISSUER + '/.well-known/oauth-protected-resource", scope="mcp"';
+const JC_DPOP_CHALLENGE = () => 'DPoP algs="EdDSA ES256", resource_metadata="' + ISSUER + '/.well-known/oauth-protected-resource/jc/mcp", scope="mcp"';
 
-function checkAuthDetailed(req, expectedResource = RESOURCE, expectedIssuer = ISSUER) {
-  return classifyBearer(req.headers['authorization'] || '', { signingKey: SIGNING_KEY, issuer: expectedIssuer, resource: expectedResource, nowSec: now() });
-}
-/** 401 with the right RFC 6750 challenge; reports an attributable rejection (verified signature only). */
-function rejectBearer(res, laneName, result, baseChallenge) {
-  // Only an expired token is worth telling ACS about (it is renewable, so it never raises a warning by itself). Wrong
-  // audience / issuer are configuration or cross-lane mistakes and are not authentication health.
-  if (result.clientId && result.reason === 'expired') reportAuth(laneName, { clientId: result.clientId, subject: result.subject }, 'token_rejected', result.reason);
-  return send(res, 401, { error: 'unauthorized' }, { 'WWW-Authenticate': bearerChallenge(baseChallenge, result.reason) });
+function authenticateRequest(
+  req,
+  res,
+  { expectedResource = RESOURCE, expectedIssuer = ISSUER, baseChallenge = CHALLENGE(), dpopBaseChallenge = DPOP_CHALLENGE(), laneName = 'dc', pathname, requireDpop = false },
+) {
+  const authResult = classifyTokenAuth(req.headers['authorization'] || '', {
+    signingKey: SIGNING_KEY,
+    issuer: expectedIssuer,
+    resource: expectedResource,
+    nowSec: now(),
+  });
+  if (!authResult.ok) {
+    log(req.method, pathname, 401, `auth required (${authResult.reason})`);
+    if (authResult.clientId && authResult.reason === 'expired') {
+      reportAuth(laneName, { clientId: authResult.clientId, subject: authResult.subject }, 'token_rejected', authResult.reason);
+    }
+    if (authResult.scheme === 'dpop' || (requireDpop && authResult.reason === 'missing')) {
+      send(res, 401, { error: 'unauthorized' }, {
+        'WWW-Authenticate': dpopChallenge(dpopBaseChallenge, authResult.reason),
+        'DPoP-Nonce': dpopNonces.issue(now()),
+      });
+      return null;
+    }
+    send(res, 401, { error: 'unauthorized' }, { 'WWW-Authenticate': bearerChallenge(baseChallenge, authResult.reason) });
+    return null;
+  }
+
+  const payload = authResult.payload;
+  const boundJkt = payload && payload.cnf && typeof payload.cnf.jkt === 'string' ? payload.cnf.jkt : null;
+  if (boundJkt || requireDpop) {
+    if (authResult.scheme !== 'dpop' || !boundJkt) {
+      log(req.method, pathname, 401, 'dpop required');
+      send(res, 401, { error: 'unauthorized' }, {
+        'WWW-Authenticate': dpopChallenge(dpopBaseChallenge, 'dpop_required'),
+        'DPoP-Nonce': dpopNonces.issue(now()),
+      });
+      return null;
+    }
+    const dpopRes = verifyRequestDpop(req, pathname, { required: true, accessToken: authResult.token });
+    const nonce = dpopRes.freshNonce || dpopNonces.issue(now());
+    if (!dpopRes.ok) {
+      const mapped =
+        dpopRes.reason === 'use_dpop_nonce'
+          ? 'use_dpop_nonce'
+          : dpopRes.reason === 'replayed_jti'
+            ? 'dpop_replay'
+            : 'dpop_invalid';
+      log(req.method, pathname, 401, `dpop rejected (${dpopRes.reason})`);
+      send(res, 401, { error: mapped === 'use_dpop_nonce' ? 'use_dpop_nonce' : 'unauthorized' }, {
+        'WWW-Authenticate': dpopChallenge(dpopBaseChallenge, mapped),
+        'DPoP-Nonce': nonce,
+      });
+      return null;
+    }
+    if (dpopRes.jkt !== boundJkt) {
+      log(req.method, pathname, 401, 'dpop jkt mismatch');
+      send(res, 401, { error: 'unauthorized' }, {
+        'WWW-Authenticate': dpopChallenge(dpopBaseChallenge, 'dpop_invalid'),
+        'DPoP-Nonce': nonce,
+      });
+      return null;
+    }
+    if (gatewayStore.isDeviceOrJktRevoked(payload.did, boundJkt)) {
+      log(req.method, pathname, 401, 'device revoked');
+      send(res, 401, { error: 'unauthorized' }, {
+        'WWW-Authenticate': dpopChallenge(dpopBaseChallenge, 'device_revoked'),
+        'DPoP-Nonce': nonce,
+      });
+      return null;
+    }
+    gatewayStore.touchDevice(payload.did, now());
+    res.setHeader('DPoP-Nonce', nonce);
+    return payload;
+  }
+
+  if (authResult.scheme !== 'bearer') {
+    log(req.method, pathname, 401, 'bearer token sent with dpop scheme');
+    send(res, 401, { error: 'unauthorized' }, {
+      'WWW-Authenticate': dpopChallenge(dpopBaseChallenge, 'dpop_invalid'),
+      'DPoP-Nonce': dpopNonces.issue(now()),
+    });
+    return null;
+  }
+  return payload;
 }
 
 // ---------------------------------------------------------------------------
@@ -877,7 +1334,63 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const q = parseQuery(req.url);
       const lane = JC.enabled && q.oauth_lane === 'jc' ? JC_OAUTH_LANE : null;
-      await handleToken(req, res, body, lane); log('POST', '/token', res.statusCode); return;
+      await handleToken(req, res, body, lane, '/token'); log('POST', '/token', res.statusCode); return;
+    }
+    if (JC.enabled && pathName === '/jc/oauth/token' && req.method === 'POST') {
+      const body = await readBody(req);
+      await handleToken(req, res, body, JC_OAUTH_LANE, '/jc/oauth/token'); log('POST', '/jc/oauth/token', res.statusCode); return;
+    }
+    if (JC.enabled && pathName === '/jc/oauth/device/code' && req.method === 'POST') {
+      const body = await readBody(req);
+      await handleDeviceCode(req, res, body); log('POST', '/jc/oauth/device/code', res.statusCode); return;
+    }
+    if (JC.enabled && pathName === '/jc/device' && req.method === 'GET') {
+      handleDeviceVerifyPage(req, res, parseQuery(req.url)); log('GET', '/jc/device', res.statusCode); return;
+    }
+    if (JC.enabled && pathName === '/jc/device' && req.method === 'POST') {
+      const body = await readBody(req);
+      handleDeviceDecision(req, res, body); log('POST', '/jc/device', res.statusCode); return;
+    }
+    if (JC.enabled && pathName === '/jc/devices' && req.method === 'GET') {
+      const auth = authenticateRequest(req, res, {
+        expectedResource: JC_RESOURCE,
+        expectedIssuer: JC_ISSUER,
+        baseChallenge: JC_CHALLENGE(),
+        dpopBaseChallenge: JC_DPOP_CHALLENGE(),
+        laneName: 'jc',
+        pathname: '/jc/devices',
+        requireDpop: true,
+      });
+      if (!auth) return;
+      send(res, 200, { devices: gatewayStore.listDevices(auth.sub) });
+      log('GET', '/jc/devices', 200);
+      return;
+    }
+    if (JC.enabled) {
+      const revPost = req.method === 'POST' ? /^\/jc\/devices\/([A-Za-z0-9_-]{1,128})\/revoke$/.exec(pathName) : null;
+      const revDel = req.method === 'DELETE' ? /^\/jc\/devices\/([A-Za-z0-9_-]{1,128})$/.exec(pathName) : null;
+      const match = revPost || revDel;
+      if (match) {
+        const auth = authenticateRequest(req, res, {
+          expectedResource: JC_RESOURCE,
+          expectedIssuer: JC_ISSUER,
+          baseChallenge: JC_CHALLENGE(),
+          dpopBaseChallenge: JC_DPOP_CHALLENGE(),
+          laneName: 'jc',
+          pathname: pathName,
+          requireDpop: true,
+        });
+        if (!auth) return;
+        const result = gatewayStore.revokeDevice(match[1], auth.sub, now());
+        if (!result.found) {
+          send(res, 404, { error: 'not_found' });
+          log(req.method, pathName, 404);
+          return;
+        }
+        send(res, 200, { revoked: true, device_id: result.deviceId });
+        log(req.method, pathName, 200);
+        return;
+      }
     }
     if (pathName === '/register' && req.method === 'POST') {
       const body = await readBody(req);
@@ -888,12 +1401,15 @@ const server = http.createServer(async (req, res) => {
 
     // ---- MCP proxy (auth required, all methods) ----
     if (pathName === '/mcp') {
-      const authResult = checkAuthDetailed(req);
-      const auth = authResult.ok ? authResult.payload : null;
-      if (!auth) {
-        log(req.method, '/mcp', 401, `auth required (${authResult.reason})`);
-        return rejectBearer(res, 'dc', authResult, CHALLENGE());
-      }
+      const auth = authenticateRequest(req, res, {
+        expectedResource: RESOURCE,
+        expectedIssuer: ISSUER,
+        baseChallenge: CHALLENGE(),
+        dpopBaseChallenge: DPOP_CHALLENGE(),
+        laneName: 'dc',
+        pathname: '/mcp',
+      });
+      if (!auth) return;
       let body = req.method === 'POST' || req.method === 'PUT' ? await readBody(req) : null;
       if (MANAGED.enabled && req.method === 'POST') {
         const { isCall, parsed, hasBatchedCall } = isToolsCall(body);
@@ -964,12 +1480,15 @@ const server = http.createServer(async (req, res) => {
 
     // ---- Jace Commander MCP proxy (auth required; ACS-managed only) ----
     if (pathName === '/jc/mcp' && JC.enabled) {
-      const authResult = checkAuthDetailed(req, JC_RESOURCE, JC_ISSUER);
-      const auth = authResult.ok ? authResult.payload : null;
-      if (!auth) {
-        log(req.method, '/jc/mcp', 401, `auth required (${authResult.reason})`);
-        return rejectBearer(res, 'jc', authResult, JC_CHALLENGE());
-      }
+      const auth = authenticateRequest(req, res, {
+        expectedResource: JC_RESOURCE,
+        expectedIssuer: JC_ISSUER,
+        baseChallenge: JC_CHALLENGE(),
+        dpopBaseChallenge: JC_DPOP_CHALLENGE(),
+        laneName: 'jc',
+        pathname: '/jc/mcp',
+      });
+      if (!auth) return;
       let body = req.method === 'POST' || req.method === 'PUT' ? await readBody(req) : null;
       if (req.method === 'POST') {
         const { isCall, parsed, hasBatchedCall } = isToolsCall(body);
