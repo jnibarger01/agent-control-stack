@@ -5,23 +5,38 @@
 // packages/work-items/src/store.ts's connector_records (operator-provisioned tunnel
 // infrastructure, a different trust model). It owns exactly two tables: `devices` and
 // `oauth_device_authorizations` (storage/migrations/023_device_auth.sql).
-import { createHash, createPublicKey, randomBytes, randomInt, verify as verifySignature } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createPublicKey,
+  randomBytes,
+  randomInt,
+  verify as verifySignature
+} from "node:crypto";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { createId } from "@agent-control-stack/shared";
 import { MCP_SCOPES } from "./auth.js";
+import { computeEd25519JwkThumbprintFromPem } from "./device-dpop.js";
 
 export const DEFAULT_DEVICE_AUTH_CLIENT_ID = "acs-cli";
+export const DEFAULT_ALLOWED_CLIENT_IDS = [DEFAULT_DEVICE_AUTH_CLIENT_ID, "jace-commander"] as const;
 const DEVICE_CODE_TTL_SECONDS = 15 * 60;
 const DEFAULT_POLL_INTERVAL_SECONDS = 5;
 const SLOW_DOWN_INCREMENT_SECONDS = 5;
 const ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 const USER_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I - avoids transcription errors
-const DISALLOWED_DEVICE_SCOPES = new Set(["acs:work:approve"]);
+const DISALLOWED_DEVICE_SCOPES = new Set(["acs:work:approve", "acs:execution-mode:admin", "acs:admin", "*"]);
 const ALLOWED_DEVICE_SCOPES = new Set<string>(MCP_SCOPES);
 const MAX_DEVICE_PUBLIC_KEY_BYTES = 8 * 1024;
 const MAX_DEVICE_NAME_LENGTH = 128;
 const DEVICE_CODE_PROOF_DOMAIN = "acs-device-code-proof-v1";
+const DEVICE_REFRESH_PROOF_DOMAIN = "acs-device-refresh-proof-v1";
+const DEVICE_REFRESH_PROOF_MAX_SKEW_SECONDS = 300;
+const DEVICE_REFRESH_RECOVERY_AAD_DOMAIN = "acs-device-refresh-recovery-v1";
+export const DEFAULT_REFRESH_RECOVERY_WINDOW_SECONDS = 120;
+export const MAX_REFRESH_RECOVERY_WINDOW_SECONDS = 600;
 
 export interface DeviceCodeRequestInput {
   clientId: string;
@@ -53,6 +68,7 @@ export type DeviceTokenPollResult =
       status: "success";
       deviceId: string;
       principalId: string;
+      publicKeyJkt: string;
       scopes: string[];
       accessToken: string;
       accessTokenExpiresIn: number;
@@ -73,7 +89,9 @@ export interface DeviceAuthorizationSummary {
 export interface DeviceRecord {
   id: string;
   principalId: string;
+  clientId: string;
   name: string;
+  publicKeyJkt: string;
   status: "active" | "revoked";
   allowedScopes: string[];
   createdAt: string;
@@ -106,8 +124,10 @@ interface DeviceAuthorizationRow {
 interface DeviceRow {
   id: string;
   principal_id: string;
+  client_id: string;
   name: string;
   public_key_pem: string;
+  public_key_jkt?: string | null;
   allowed_scopes_json: string;
   status: string;
   metadata_json: string;
@@ -122,11 +142,119 @@ interface DeviceRow {
   revoked_at: string | null;
 }
 
+interface RecoveryEnvelopeRow {
+  predecessor_refresh_token_hash: string;
+  device_id: string;
+  client_id: string;
+  successor_refresh_token_hash: string;
+  key_id: string;
+  iv_base64url: string;
+  auth_tag_base64url: string;
+  ciphertext_base64url: string;
+  created_at: string;
+  expires_at: string;
+}
+
 export interface DeviceAccessIdentity {
   deviceId: string;
   principalId: string;
+  publicKeyJkt: string;
   scopes: string[];
   expiresAt: string;
+}
+
+export type DeviceAuthAuditEventName =
+  | "device_auth.refresh_rotated"
+  | "device_auth.refresh_recovered"
+  | "device_auth.refresh_replay_detected"
+  | "device_auth.refresh_invalid_proof"
+  | "device_auth.device_revoked"
+  | "device_auth.reregistration_rejected";
+
+export interface DeviceAuthAuditEvent {
+  name: DeviceAuthAuditEventName;
+  deviceId?: string;
+  principalId?: string;
+  body: Record<string, unknown>;
+}
+
+export interface DeviceRefreshRecoveryConfig {
+  primaryKeyBase64: string;
+  keyId?: string;
+  previousKeyBase64?: string;
+  previousKeyId?: string;
+  windowSeconds?: number;
+}
+
+export interface DeviceAuthStoreOptions {
+  recovery?: DeviceRefreshRecoveryConfig | false;
+  onAuditEvent?: (event: DeviceAuthAuditEvent) => void;
+}
+
+export type RefreshFailureReason =
+  | "missing_proof"
+  | "invalid_proof"
+  | "refresh_replay"
+  | "device_revoked"
+  | "refresh_expired"
+  | "unknown_refresh_token"
+  | "recovery_unavailable";
+
+export interface RefreshAccessTokenInput {
+  clientId: string;
+  refreshToken: string;
+  deviceId: string | undefined;
+  proofIssuedAt: number | undefined;
+  refreshProof: string | undefined;
+  now?: Date;
+}
+
+export type RefreshAccessTokenResult =
+  | {
+      ok: true;
+      recovered: boolean;
+      deviceId: string;
+      principalId: string;
+      publicKeyJkt: string;
+      scopes: string[];
+      accessToken: string;
+      accessTokenExpiresIn: number;
+      refreshToken: string;
+      refreshTokenExpiresIn: number;
+    }
+  | {
+      ok: false;
+      error: "invalid_request" | "invalid_grant" | "server_error";
+      reason: RefreshFailureReason;
+    };
+
+interface ResolvedRecoveryConfig {
+  primaryKey: Buffer;
+  primaryKeyId: string;
+  decryptKeys: Map<string, Buffer>;
+  windowSeconds: number;
+}
+
+export function deviceRefreshRecoveryConfigFromEnv(
+  env: NodeJS.ProcessEnv = process.env
+): DeviceRefreshRecoveryConfig | undefined {
+  const primaryKeyBase64 = env.ACS_DEVICE_REFRESH_RECOVERY_KEY?.trim();
+  if (!primaryKeyBase64) return undefined;
+  const windowRaw = env.ACS_DEVICE_REFRESH_RECOVERY_WINDOW_SECONDS?.trim();
+  const windowSeconds = windowRaw !== undefined && windowRaw.length > 0 ? Number(windowRaw) : undefined;
+  return {
+    primaryKeyBase64,
+    ...(env.ACS_DEVICE_REFRESH_RECOVERY_KEY_ID?.trim()
+      ? { keyId: env.ACS_DEVICE_REFRESH_RECOVERY_KEY_ID.trim() }
+      : {}),
+    ...(env.ACS_DEVICE_REFRESH_RECOVERY_KEY_PREVIOUS?.trim()
+      ? { previousKeyBase64: env.ACS_DEVICE_REFRESH_RECOVERY_KEY_PREVIOUS.trim() }
+      : {}),
+    ...(env.ACS_DEVICE_REFRESH_RECOVERY_KEY_PREVIOUS_ID?.trim()
+      ? { previousKeyId: env.ACS_DEVICE_REFRESH_RECOVERY_KEY_PREVIOUS_ID.trim() }
+      : {}),
+    ...(windowSeconds !== undefined ? { windowSeconds } : {})
+  };
 }
 
 export class DeviceAuthStore {
@@ -139,10 +267,14 @@ export class DeviceAuthStore {
    * connection and reused. Statements are finalized by `close()`.
    */
   private readonly statements = new Map<string, StatementSync>();
+  private readonly recovery: ResolvedRecoveryConfig | undefined;
+  private readonly onAuditEvent: ((event: DeviceAuthAuditEvent) => void) | undefined;
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, options: DeviceAuthStoreOptions = {}) {
     this.db = new DatabaseSync(dbPath);
-    this.db.exec("PRAGMA foreign_keys = ON");
+    this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
+    this.recovery = resolveRecoveryConfig(options.recovery);
+    this.onAuditEvent = options.onAuditEvent;
   }
 
   /** Returns the compiled statement for `sql`, preparing it only on first use. */
@@ -162,7 +294,7 @@ export class DeviceAuthStore {
 
   requestDeviceCode(
     input: DeviceCodeRequestInput,
-    allowedClientIds: readonly string[] = [DEFAULT_DEVICE_AUTH_CLIENT_ID]
+    allowedClientIds: readonly string[] = DEFAULT_ALLOWED_CLIENT_IDS
   ): DeviceCodeRequestResult {
     if (!allowedClientIds.includes(input.clientId)) {
       return { ok: false, error: "invalid_client" };
@@ -255,6 +387,18 @@ export class DeviceAuthStore {
         DeviceRow | undefined;
       if (existing?.status === "revoked") {
         this.db.exec("ROLLBACK");
+        this.emitAudit({
+          name: "device_auth.reregistration_rejected",
+          deviceId: existing.id,
+          principalId: existing.principal_id,
+          body: {
+            deviceId: existing.id,
+            principalId: existing.principal_id,
+            attemptedPrincipalId: principalId,
+            clientId: fresh.client_id,
+            reason: "device_revoked"
+          }
+        });
         return { ok: false, error: "device_revoked" };
       }
       if (existing && existing.principal_id !== principalId) {
@@ -367,10 +511,12 @@ export class DeviceAuthStore {
       this.db.exec("ROLLBACK");
       throw error;
     }
+    const publicKeyJkt = computeEd25519JwkThumbprintFromPem(fresh.device_public_key_pem);
     return {
       status: "success",
       deviceId: fresh.device_id!,
       principalId: fresh.principal_id!,
+      publicKeyJkt,
       scopes,
       accessToken,
       accessTokenExpiresIn: ACCESS_TOKEN_TTL_SECONDS,
@@ -379,86 +525,266 @@ export class DeviceAuthStore {
     };
   }
 
-  /** Refresh-token rotation: same device row, never mints a new device. */
-  refreshAccessToken(
-    rawRefreshToken: string,
-    now: Date = new Date()
-  ):
-    | {
-        ok: true;
-        deviceId: string;
-        principalId: string;
-        scopes: string[];
-        accessToken: string;
-        accessTokenExpiresIn: number;
-        refreshToken: string;
-        refreshTokenExpiresIn: number;
-      }
-    | { ok: false; error: "invalid_grant" | "device_revoked" } {
-    const hash = sha256(rawRefreshToken);
+  /** Refresh-token rotation with Ed25519 proof-of-possession and AES-256-GCM idempotent recovery. */
+  refreshAccessToken(input: RefreshAccessTokenInput): RefreshAccessTokenResult {
+    const now = input.now ?? new Date();
+    if (!input.deviceId || input.proofIssuedAt === undefined || !input.refreshProof) {
+      return { ok: false, error: "invalid_request", reason: "missing_proof" };
+    }
+    if (!this.recovery) {
+      return { ok: false, error: "server_error", reason: "recovery_unavailable" };
+    }
+
+    const hash = sha256(input.refreshToken);
+    const nowIso = now.toISOString();
+    const nowSeconds = Math.floor(now.getTime() / 1000);
+    let pendingAudit: DeviceAuthAuditEvent[];
+
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const row = this.stmt(`SELECT * FROM devices WHERE refresh_token_hash = ?`).get(hash) as DeviceRow | undefined;
-      if (!row) {
-        const reused = this.stmt(`SELECT * FROM devices WHERE previous_refresh_token_hash = ?`).get(hash) as
-          DeviceRow | undefined;
-        if (reused?.status === "active") {
-          this.stmt(
-            `UPDATE devices
-               SET status = 'revoked', revoked_at = ?, updated_at = ?,
-                   access_token_hash = NULL, access_token_expires_at = NULL,
-                   refresh_token_hash = NULL, refresh_token_expires_at = NULL
-               WHERE id = ? AND status = 'active'`
-          ).run(now.toISOString(), now.toISOString(), reused.id);
+      this.stmt(`DELETE FROM device_refresh_recovery_envelopes WHERE expires_at <= ?`).run(nowIso);
+
+      const currentRow = this.stmt(`SELECT * FROM devices WHERE refresh_token_hash = ?`).get(hash) as
+        | DeviceRow
+        | undefined;
+      const envelope = this.stmt(
+        `SELECT * FROM device_refresh_recovery_envelopes WHERE predecessor_refresh_token_hash = ?`
+      ).get(hash) as RecoveryEnvelopeRow | undefined;
+      const previousRow = currentRow
+        ? undefined
+        : (this.stmt(`SELECT * FROM devices WHERE previous_refresh_token_hash = ?`).get(hash) as
+            | DeviceRow
+            | undefined);
+
+      const matchedByToken = Boolean(currentRow ?? previousRow ?? envelope);
+      const fallbackRevokedRow = matchedByToken
+        ? undefined
+        : (this.stmt(`SELECT * FROM devices WHERE id = ?`).get(input.deviceId) as DeviceRow | undefined);
+
+      const deviceRow =
+        currentRow ??
+        previousRow ??
+        (envelope
+          ? (this.stmt(`SELECT * FROM devices WHERE id = ?`).get(envelope.device_id) as DeviceRow | undefined)
+          : fallbackRevokedRow?.status === "revoked"
+            ? fallbackRevokedRow
+            : undefined);
+
+      if (!deviceRow) {
+        this.db.exec("COMMIT");
+        return { ok: false, error: "invalid_grant", reason: "unknown_refresh_token" };
+      }
+
+      const proofValid =
+        deviceRow.id === input.deviceId &&
+        deviceRow.client_id === input.clientId &&
+        Number.isSafeInteger(input.proofIssuedAt) &&
+        Math.abs(nowSeconds - input.proofIssuedAt) <= DEVICE_REFRESH_PROOF_MAX_SKEW_SECONDS &&
+        verifyRefreshProof(
+          deviceRow.public_key_pem,
+          {
+            clientId: input.clientId,
+            deviceId: input.deviceId,
+            refreshTokenSha256: hash,
+            issuedAt: input.proofIssuedAt
+          },
+          input.refreshProof
+        );
+
+      if (!proofValid) {
+        this.db.exec("COMMIT");
+        if (!matchedByToken) {
+          // Revoked device with cleared token hashes: do not leak device existence or revocation
+          // status when the caller does not present a valid Ed25519 proof for that device.
+          return { ok: false, error: "invalid_grant", reason: "unknown_refresh_token" };
         }
-        this.db.exec("COMMIT");
-        return { ok: false, error: "invalid_grant" };
+        this.emitAudit({
+          name: "device_auth.refresh_invalid_proof",
+          deviceId: deviceRow.id,
+          principalId: deviceRow.principal_id,
+          body: {
+            deviceId: deviceRow.id,
+            principalId: deviceRow.principal_id,
+            clientId: input.clientId,
+            reason: "invalid_proof"
+          }
+        });
+        return { ok: false, error: "invalid_grant", reason: "invalid_proof" };
       }
-      if (row.status === "revoked") {
+
+      if (deviceRow.status === "revoked") {
         this.db.exec("COMMIT");
-        return { ok: false, error: "device_revoked" };
+        return { ok: false, error: "invalid_grant", reason: "device_revoked" };
       }
-      if (!row.refresh_token_expires_at || Date.parse(row.refresh_token_expires_at) <= now.getTime()) {
+
+      if (currentRow) {
+        if (!deviceRow.refresh_token_expires_at || Date.parse(deviceRow.refresh_token_expires_at) <= now.getTime()) {
+          this.db.exec("COMMIT");
+          return { ok: false, error: "invalid_grant", reason: "refresh_expired" };
+        }
+
+        const accessToken = randomBytes(32).toString("base64url");
+        const refreshToken = randomBytes(32).toString("base64url");
+        const accessTokenExpiresAt = new Date(now.getTime() + ACCESS_TOKEN_TTL_SECONDS * 1000).toISOString();
+        const refreshTokenExpiresAt = new Date(now.getTime() + REFRESH_TOKEN_TTL_SECONDS * 1000).toISOString();
+        const scopes = JSON.parse(deviceRow.allowed_scopes_json) as string[];
+        const successorHash = sha256(refreshToken);
+
+        const updated = this.stmt(
+          `UPDATE devices
+             SET access_token_hash = ?, access_token_expires_at = ?,
+                 previous_refresh_token_hash = refresh_token_hash,
+                 refresh_token_hash = ?, refresh_token_expires_at = ?,
+                 last_seen_at = ?, updated_at = ?
+             WHERE id = ? AND refresh_token_hash = ? AND status = 'active'`
+        ).run(
+          sha256(accessToken),
+          accessTokenExpiresAt,
+          successorHash,
+          refreshTokenExpiresAt,
+          nowIso,
+          nowIso,
+          deviceRow.id,
+          hash
+        );
+        if (Number(updated.changes) !== 1) {
+          throw new Error("refresh-token rotation invariant violated");
+        }
+
+        const publicKeyJkt = deviceRow.public_key_jkt ?? computeEd25519JwkThumbprintFromPem(deviceRow.public_key_pem);
+        const encrypted = encryptRecoveryEnvelope(this.recovery, {
+          deviceId: deviceRow.id,
+          clientId: deviceRow.client_id,
+          predecessorHash: hash,
+          payload: {
+            deviceId: deviceRow.id,
+            principalId: deviceRow.principal_id,
+            publicKeyJkt,
+            scopes,
+            accessToken,
+            accessTokenExpiresIn: ACCESS_TOKEN_TTL_SECONDS,
+            refreshToken,
+            refreshTokenExpiresIn: REFRESH_TOKEN_TTL_SECONDS
+          }
+        });
+        const recoveryExpiresAt = new Date(now.getTime() + this.recovery.windowSeconds * 1000).toISOString();
+        this.stmt(
+          `INSERT OR REPLACE INTO device_refresh_recovery_envelopes
+             (predecessor_refresh_token_hash, device_id, client_id, successor_refresh_token_hash,
+              key_id, iv_base64url, auth_tag_base64url, ciphertext_base64url, created_at, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+          hash,
+          deviceRow.id,
+          deviceRow.client_id,
+          successorHash,
+          encrypted.keyId,
+          encrypted.ivBase64url,
+          encrypted.authTagBase64url,
+          encrypted.ciphertextBase64url,
+          nowIso,
+          recoveryExpiresAt
+        );
+
         this.db.exec("COMMIT");
-        return { ok: false, error: "invalid_grant" };
+        this.emitAudit({
+          name: "device_auth.refresh_rotated",
+          deviceId: deviceRow.id,
+          principalId: deviceRow.principal_id,
+          body: {
+            deviceId: deviceRow.id,
+            principalId: deviceRow.principal_id,
+            clientId: deviceRow.client_id,
+            keyId: encrypted.keyId,
+            recoveryExpiresAt
+          }
+        });
+        return {
+          ok: true,
+          recovered: false,
+          deviceId: deviceRow.id,
+          principalId: deviceRow.principal_id,
+          publicKeyJkt,
+          scopes,
+          accessToken,
+          accessTokenExpiresIn: ACCESS_TOKEN_TTL_SECONDS,
+          refreshToken,
+          refreshTokenExpiresIn: REFRESH_TOKEN_TTL_SECONDS
+        };
       }
-      const accessToken = randomBytes(32).toString("base64url");
-      const refreshToken = randomBytes(32).toString("base64url");
-      const updated = this.stmt(
+
+      // Predecessor token presented: recover iff unexpired envelope exists and successor is not superseded.
+      if (envelope && envelope.successor_refresh_token_hash === deviceRow.refresh_token_hash) {
+        const decrypted = decryptRecoveryEnvelope(this.recovery, envelope);
+        this.db.exec("COMMIT");
+        if (!decrypted) {
+          return { ok: false, error: "server_error", reason: "recovery_unavailable" };
+        }
+        const publicKeyJkt =
+          decrypted.publicKeyJkt ??
+          deviceRow.public_key_jkt ??
+          computeEd25519JwkThumbprintFromPem(deviceRow.public_key_pem);
+        this.emitAudit({
+          name: "device_auth.refresh_recovered",
+          deviceId: deviceRow.id,
+          principalId: deviceRow.principal_id,
+          body: {
+            deviceId: deviceRow.id,
+            principalId: deviceRow.principal_id,
+            clientId: deviceRow.client_id,
+            keyId: envelope.key_id
+          }
+        });
+        return {
+          ok: true,
+          recovered: true,
+          ...decrypted,
+          publicKeyJkt
+        };
+      }
+
+      // Genuine refresh-token replay (outside window or successor already superseded): fail closed and revoke.
+      this.stmt(
         `UPDATE devices
-           SET access_token_hash = ?, access_token_expires_at = ?,
-               previous_refresh_token_hash = refresh_token_hash,
-               refresh_token_hash = ?, refresh_token_expires_at = ?,
-               last_seen_at = ?, updated_at = ?
-           WHERE id = ? AND refresh_token_hash = ? AND status = 'active'`
-      ).run(
-        sha256(accessToken),
-        new Date(now.getTime() + ACCESS_TOKEN_TTL_SECONDS * 1000).toISOString(),
-        sha256(refreshToken),
-        new Date(now.getTime() + REFRESH_TOKEN_TTL_SECONDS * 1000).toISOString(),
-        now.toISOString(),
-        now.toISOString(),
-        row.id,
-        hash
-      );
-      if (Number(updated.changes) !== 1) {
-        throw new Error("refresh-token rotation invariant violated");
-      }
+           SET status = 'revoked', revoked_at = ?, updated_at = ?,
+               access_token_hash = NULL, access_token_expires_at = NULL,
+               refresh_token_hash = NULL, refresh_token_expires_at = NULL
+           WHERE id = ? AND status = 'active'`
+      ).run(nowIso, nowIso, deviceRow.id);
+      this.stmt(`DELETE FROM device_refresh_recovery_envelopes WHERE device_id = ?`).run(deviceRow.id);
+      pendingAudit = [
+        {
+          name: "device_auth.refresh_replay_detected",
+          deviceId: deviceRow.id,
+          principalId: deviceRow.principal_id,
+          body: {
+            deviceId: deviceRow.id,
+            principalId: deviceRow.principal_id,
+            clientId: deviceRow.client_id,
+            reason: "refresh_replay"
+          }
+        },
+        {
+          name: "device_auth.device_revoked",
+          deviceId: deviceRow.id,
+          principalId: deviceRow.principal_id,
+          body: {
+            deviceId: deviceRow.id,
+            principalId: deviceRow.principal_id,
+            reason: "refresh_replay"
+          }
+        }
+      ];
       this.db.exec("COMMIT");
-      return {
-        ok: true,
-        deviceId: row.id,
-        principalId: row.principal_id,
-        scopes: JSON.parse(row.allowed_scopes_json) as string[],
-        accessToken,
-        accessTokenExpiresIn: ACCESS_TOKEN_TTL_SECONDS,
-        refreshToken,
-        refreshTokenExpiresIn: REFRESH_TOKEN_TTL_SECONDS
-      };
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
+
+    for (const event of pendingAudit) {
+      this.emitAudit(event);
+    }
+    return { ok: false, error: "invalid_grant", reason: "refresh_replay" };
   }
 
   authenticateAccessToken(rawAccessToken: string, now: Date = new Date()): DeviceAccessIdentity | undefined {
@@ -469,9 +795,29 @@ export class DeviceAuthStore {
     return {
       deviceId: row.id,
       principalId: row.principal_id,
+      publicKeyJkt: row.public_key_jkt ?? computeEd25519JwkThumbprintFromPem(row.public_key_pem),
       scopes: JSON.parse(row.allowed_scopes_json) as string[],
       expiresAt: row.access_token_expires_at
     };
+  }
+
+  consumeDpopJti(jkt: string, jti: string, expiresAtIso: string, now: Date = new Date()): boolean {
+    if (!jkt || !jti) return false;
+    const nowIso = now.toISOString();
+    this.stmt(`DELETE FROM device_dpop_jtis WHERE expires_at <= ?`).run(nowIso);
+    const result = this.stmt(
+      `INSERT OR IGNORE INTO device_dpop_jtis (jkt, jti, expires_at, created_at) VALUES (?, ?, ?, ?)`
+    ).run(jkt, jti, expiresAtIso, nowIso);
+    return Number(result.changes) === 1;
+  }
+
+  listDevices(filter?: { principalId?: string }): DeviceRecord[] {
+    const rows = filter?.principalId
+      ? (this.stmt(`SELECT * FROM devices WHERE principal_id = ? ORDER BY created_at DESC`).all(
+          filter.principalId
+        ) as unknown as DeviceRow[])
+      : (this.stmt(`SELECT * FROM devices ORDER BY created_at DESC`).all() as unknown as DeviceRow[]);
+    return rows.map(toDeviceRecord);
   }
 
   getDevice(deviceId: string): DeviceRecord | undefined {
@@ -479,25 +825,58 @@ export class DeviceAuthStore {
     return row && toDeviceRecord(row);
   }
 
-  revokeDevice(deviceId: string, now: Date = new Date()): boolean {
-    const result = this.stmt(
-      `UPDATE devices
-         SET status = 'revoked', revoked_at = ?, updated_at = ?,
-             access_token_hash = NULL, access_token_expires_at = NULL
-         WHERE id = ? AND status = 'active'`
-    ).run(now.toISOString(), now.toISOString(), deviceId);
-    return Number(result.changes) > 0;
+  revokeDevice(deviceId: string, now: Date = new Date(), actorId?: string): boolean {
+    const nowIso = now.toISOString();
+    let changed: boolean;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.stmt(
+        `UPDATE devices
+           SET status = 'revoked', revoked_at = ?, updated_at = ?,
+               access_token_hash = NULL, access_token_expires_at = NULL,
+               refresh_token_hash = NULL, refresh_token_expires_at = NULL,
+               previous_refresh_token_hash = NULL
+           WHERE id = ? AND status = 'active'`
+      ).run(nowIso, nowIso, deviceId);
+      this.stmt(`DELETE FROM device_refresh_recovery_envelopes WHERE device_id = ?`).run(deviceId);
+      changed = Number(result.changes) > 0;
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    if (changed) {
+      this.emitAudit({
+        name: "device_auth.device_revoked",
+        deviceId,
+        body: {
+          deviceId,
+          ...(actorId ? { actorId } : {}),
+          reason: "operator_revoked"
+        }
+      });
+    }
+    return changed;
+  }
+
+  private emitAudit(event: DeviceAuthAuditEvent): void {
+    this.onAuditEvent?.(event);
   }
 
   private upsertDeviceForApproval(auth: DeviceAuthorizationRow, principalId: string, now: Date): string {
+    const jkt = computeEd25519JwkThumbprintFromPem(auth.device_public_key_pem);
     const existing = this.stmt(`SELECT * FROM devices WHERE public_key_pem = ?`).get(auth.device_public_key_pem) as
       DeviceRow | undefined;
     if (existing) {
       if (existing.status !== "active" || existing.principal_id !== principalId) {
         throw new Error("device approval invariant violated");
       }
-      this.stmt(`UPDATE devices SET name = ?, allowed_scopes_json = ?, updated_at = ? WHERE id = ?`).run(
+      this.stmt(
+        `UPDATE devices SET name = ?, client_id = ?, public_key_jkt = ?, allowed_scopes_json = ?, updated_at = ? WHERE id = ?`
+      ).run(
         auth.device_name,
+        auth.client_id,
+        jkt,
         auth.requested_scopes_json,
         now.toISOString(),
         existing.id
@@ -507,13 +886,15 @@ export class DeviceAuthStore {
     const id = createId("dev");
     this.stmt(
       `INSERT INTO devices
-         (id, principal_id, name, public_key_pem, allowed_scopes_json, status, metadata_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'active', '{}', ?, ?)`
+         (id, principal_id, client_id, name, public_key_pem, public_key_jkt, allowed_scopes_json, status, metadata_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', '{}', ?, ?)`
     ).run(
       id,
       principalId,
+      auth.client_id,
       auth.device_name,
       auth.device_public_key_pem,
+      jkt,
       auth.requested_scopes_json,
       now.toISOString(),
       now.toISOString()
@@ -551,7 +932,9 @@ function toDeviceRecord(row: DeviceRow): DeviceRecord {
   return {
     id: row.id,
     principalId: row.principal_id,
+    clientId: row.client_id,
     name: row.name,
+    publicKeyJkt: row.public_key_jkt ?? computeEd25519JwkThumbprintFromPem(row.public_key_pem),
     status: row.status as DeviceRecord["status"],
     allowedScopes: JSON.parse(row.allowed_scopes_json) as string[],
     createdAt: row.created_at,
@@ -605,5 +988,144 @@ function verifyDeviceCodeProof(publicKeyPem: string, deviceCode: string, signatu
     );
   } catch {
     return false;
+  }
+}
+
+function verifyRefreshProof(
+  publicKeyPem: string,
+  input: { clientId: string; deviceId: string; refreshTokenSha256: string; issuedAt: number },
+  signature: string | undefined
+): boolean {
+  if (!signature) return false;
+  try {
+    const publicKey = createPublicKey(publicKeyPem);
+    if (publicKey.asymmetricKeyType !== "ed25519") return false;
+    const rawSignature = Buffer.from(signature, "base64url");
+    if (rawSignature.length !== 64) return false;
+    const message = [
+      DEVICE_REFRESH_PROOF_DOMAIN,
+      `client_id=${input.clientId}`,
+      `device_id=${input.deviceId}`,
+      `refresh_token_sha256=${input.refreshTokenSha256}`,
+      "operation=refresh_token",
+      `issued_at=${input.issuedAt}`
+    ].join("\n");
+    return verifySignature(null, Buffer.from(message, "utf8"), publicKey, rawSignature);
+  } catch {
+    return false;
+  }
+}
+
+function decodeAes256Key(base64: string | undefined): Buffer | undefined {
+  if (!base64) return undefined;
+  try {
+    const buf = Buffer.from(base64.trim(), "base64");
+    return buf.length === 32 ? buf : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveRecoveryConfig(
+  config: DeviceRefreshRecoveryConfig | false | undefined
+): ResolvedRecoveryConfig | undefined {
+  if (!config) return undefined;
+  const primaryKey = decodeAes256Key(config.primaryKeyBase64);
+  if (!primaryKey) return undefined;
+  const rawWindow = config.windowSeconds ?? DEFAULT_REFRESH_RECOVERY_WINDOW_SECONDS;
+  if (!Number.isFinite(rawWindow) || rawWindow <= 0) return undefined;
+  const windowSeconds = Math.min(MAX_REFRESH_RECOVERY_WINDOW_SECONDS, Math.floor(rawWindow));
+  const primaryKeyId = config.keyId?.trim() || createHash("sha256").update(primaryKey).digest("hex").slice(0, 16);
+  const decryptKeys = new Map<string, Buffer>([[primaryKeyId, primaryKey]]);
+  const previousKey = decodeAes256Key(config.previousKeyBase64);
+  if (previousKey) {
+    const previousKeyId =
+      config.previousKeyId?.trim() || createHash("sha256").update(previousKey).digest("hex").slice(0, 16);
+    decryptKeys.set(previousKeyId, previousKey);
+  }
+  return {
+    primaryKey,
+    primaryKeyId,
+    decryptKeys,
+    windowSeconds
+  };
+}
+
+function recoveryAad(deviceId: string, clientId: string, predecessorHash: string, keyId: string): Buffer {
+  return Buffer.from(
+    `${DEVICE_REFRESH_RECOVERY_AAD_DOMAIN}\n${deviceId}\n${clientId}\n${predecessorHash}\n${keyId}`,
+    "utf8"
+  );
+}
+
+interface RecoveryEnvelopePayload {
+  deviceId: string;
+  principalId: string;
+  publicKeyJkt?: string;
+  scopes: string[];
+  accessToken: string;
+  accessTokenExpiresIn: number;
+  refreshToken: string;
+  refreshTokenExpiresIn: number;
+}
+
+function encryptRecoveryEnvelope(
+  recovery: ResolvedRecoveryConfig,
+  input: {
+    deviceId: string;
+    clientId: string;
+    predecessorHash: string;
+    payload: RecoveryEnvelopePayload;
+  }
+): {
+  keyId: string;
+  ivBase64url: string;
+  authTagBase64url: string;
+  ciphertextBase64url: string;
+} {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", recovery.primaryKey, iv);
+  cipher.setAAD(recoveryAad(input.deviceId, input.clientId, input.predecessorHash, recovery.primaryKeyId));
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(input.payload), "utf8"), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return {
+    keyId: recovery.primaryKeyId,
+    ivBase64url: iv.toString("base64url"),
+    authTagBase64url: authTag.toString("base64url"),
+    ciphertextBase64url: ciphertext.toString("base64url")
+  };
+}
+
+function decryptRecoveryEnvelope(
+  recovery: ResolvedRecoveryConfig,
+  row: RecoveryEnvelopeRow
+): RecoveryEnvelopePayload | undefined {
+  const key = recovery.decryptKeys.get(row.key_id);
+  if (!key) return undefined;
+  try {
+    const iv = Buffer.from(row.iv_base64url, "base64url");
+    const authTag = Buffer.from(row.auth_tag_base64url, "base64url");
+    const ciphertext = Buffer.from(row.ciphertext_base64url, "base64url");
+    const decipher = createDecipheriv("aes-256-gcm", key, iv);
+    decipher.setAAD(
+      recoveryAad(row.device_id, row.client_id, row.predecessor_refresh_token_hash, row.key_id)
+    );
+    decipher.setAuthTag(authTag);
+    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
+    const parsed = JSON.parse(plaintext) as Partial<RecoveryEnvelopePayload>;
+    if (
+      typeof parsed.deviceId !== "string" ||
+      typeof parsed.principalId !== "string" ||
+      !Array.isArray(parsed.scopes) ||
+      typeof parsed.accessToken !== "string" ||
+      typeof parsed.accessTokenExpiresIn !== "number" ||
+      typeof parsed.refreshToken !== "string" ||
+      typeof parsed.refreshTokenExpiresIn !== "number"
+    ) {
+      return undefined;
+    }
+    return parsed as RecoveryEnvelopePayload;
+  } catch {
+    return undefined;
   }
 }

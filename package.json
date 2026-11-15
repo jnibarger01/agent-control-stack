@@ -25,6 +25,7 @@
     "slice:new": "bash scripts/new-slice.sh",
     "pr:preflight": "node scripts/pr-preflight.mjs",
     "test:vitest": "vitest run",
+    "test:device-auth-reliability": "vitest run tests/device-auth-reliability",
     "test:protocol-conformance": "npm run build && vitest run apps/gateway/src/security-contract-conformance.test.ts",
     "test:agentos": "npm test -w packages/agentos-contracts",
     "test:public-site-safety": "npm run verify:safety -w apps/public-site",

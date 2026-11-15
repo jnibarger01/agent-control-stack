@@ -662,8 +662,9 @@ const GROUP_TITLES: Record<string, string> = {
 
 /** Local commands that never touch /jc/mcp. */
 export const LOCAL_COMMANDS: ReadonlyArray<{ usage: string; summary: string }> = Object.freeze([
-  { usage: 'connect [--mcp-url URL]', summary: 'Authorize this CLI against /jc/mcp (browser approval)' },
-  { usage: 'disconnect', summary: 'Forget the stored /jc/mcp credential' },
+  { usage: 'auth <login|status|refresh|logout|devices|revoke>', summary: 'Manage /jc/mcp OAuth 2.1 + DPoP credentials and devices' },
+  { usage: 'connect [--device] [--mcp-url URL]', summary: 'Authorize this CLI against /jc/mcp (alias for `auth login`)' },
+  { usage: 'disconnect', summary: 'Forget the stored /jc/mcp credential (alias for `auth logout`)' },
   { usage: 'tools [--remote]', summary: 'List tools (manifest; --remote asks the server via tools/list)' },
   { usage: 'status --local', summary: 'Local readiness: config, credentials, sudo helper (no network)' },
   { usage: 'login | whoami | logout', summary: 'ACS device login used by the server for acs_submit_mission' },

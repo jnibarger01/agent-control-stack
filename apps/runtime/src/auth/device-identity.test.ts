@@ -1,8 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readCredentials } from "./credential-store.js";
+import { CorruptCredentialsError, readCredentials } from "./credential-store.js";
 import { loadOrCreateDeviceIdentity } from "./device-identity.js";
 
 describe("loadOrCreateDeviceIdentity", () => {
@@ -42,5 +42,14 @@ describe("loadOrCreateDeviceIdentity", () => {
       credentialsPathOverride: file
     });
     expect(second.devicePublicKeyPem).not.toBe(first.devicePublicKeyPem);
+  });
+
+  it("refuses to overwrite a corrupt credentials file with a new identity", () => {
+    const file = path();
+    writeFileSync(file, "{corrupt", { mode: 0o600 });
+    expect(() =>
+      loadOrCreateDeviceIdentity("https://acs.example.com", "acs-cli", { credentialsPathOverride: file })
+    ).toThrow(CorruptCredentialsError);
+    expect(readFileSync(file, "utf8")).toBe("{corrupt");
   });
 });
