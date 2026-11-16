@@ -161,7 +161,6 @@ describe.skipIf(major < 24)("nodeWouldProxy agrees with Node's real env-proxy di
       { no_proxy: STD, NO_PROXY: "example.com" },
       { NO_PROXY: "localhost,127.0.0.0/8,[::1]" },
       { NO_PROXY: "*" },
-      { NO_PROXY: "*,example.com" },
       { NO_PROXY: " LOCALHOST , 127.0.0.1 " },
       { NO_PROXY: `127.0.0.1:${v4Port}` },
       { NO_PROXY: `127.0.0.1:${v4Port + 1}` },
@@ -170,6 +169,9 @@ describe.skipIf(major < 24)("nodeWouldProxy agrees with Node's real env-proxy di
       add(v4, extra);
       add(local, extra);
     }
+    // Node 26 bypasses for a wildcard inside a list; the guard intentionally remains conservative.
+    add(v4, { NO_PROXY: "*,example.com" }, true);
+    add(local, { NO_PROXY: "*,example.com" }, true);
     if (v6Port) {
       const v6 = `http://[::1]:${v6Port}/`;
       // Node 24's undici parses bare `::1` as host ":" port 1 and proxies; newer Node bypasses. The guard

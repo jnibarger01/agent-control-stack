@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
@@ -297,7 +297,7 @@ describe("installed OpenClaw interoperability", () => {
                 model: { primary: "fixture/fixture-model" },
                 skipBootstrap: true
               },
-              list: [{ id: "main", default: true, workspace: allowed, model: "fixture/fixture-model" }]
+              entries: { main: { workspace: allowed, model: "fixture/fixture-model" } }
             },
             models: {
               mode: "merge",
@@ -357,6 +357,20 @@ describe("installed OpenClaw interoperability", () => {
         openclawGatewayProcess.stdout?.on("data", (chunk: Buffer) => (gatewayOutput += chunk.toString("utf8")));
         openclawGatewayProcess.stderr?.on("data", (chunk: Buffer) => (gatewayOutput += chunk.toString("utf8")));
         await waitForPort(openclawGatewayPort, () => gatewayOutput);
+        // The WebSocket port can bind before OpenClaw finishes its plugin/agent initialization.
+        // Require a successful authenticated Gateway health check before sending the fixture turn.
+        let gatewayReady = false;
+        const healthDeadline = Date.now() + 45_000;
+        while (Date.now() < healthDeadline && openclawGatewayProcess.exitCode === null) {
+          const health = spawnSync(
+            openclawExecutable,
+            ["--profile", "acs-test", "gateway", "health", "--port", String(openclawGatewayPort), "--token", "deterministic-openclaw-gateway-token", "--timeout", "4000"],
+            { cwd: allowed, env: openclawFixtureEnvironment(dir, openclawStateDir, openclawConfigPath), encoding: "utf8", timeout: 6000 }
+          );
+          if (health.status === 0) { gatewayReady = true; break; }
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+        expect(gatewayReady, gatewayOutput).toBe(true);
         expect(openclawGatewayProcess.exitCode, gatewayOutput).toBeNull();
         openclawProcess = spawn(
           openclawExecutable,
@@ -449,7 +463,7 @@ describe("installed OpenClaw interoperability", () => {
       expect(modelServer.listening).toBe(false);
       expect(existsSync(dir)).toBe(false);
     },
-    45_000
+    100_000
   );
 });
 

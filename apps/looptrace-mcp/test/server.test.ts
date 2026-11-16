@@ -133,6 +133,7 @@ describe("acs-looptrace-mcp (read-only MCP server)", () => {
     dirs.push(dir);
     const key = join(dir, "key");
     writeFileSync(key, "k".repeat(40), { mode: 0o644 });
+    chmodSync(key, 0o644); // File creation honors process umask; force the unsafe mode under test.
     expect(() => configFromEnv({ LOOPTRACE_GRANT_KEY_FILE: key })).toThrow(/group\/world/);
     chmodSync(key, 0o600);
     const { config } = configFromEnv({ LOOPTRACE_GRANT_KEY_FILE: key, LOOPTRACE_HEALTH_TARGETS: '{"gw":"http://127.0.0.1:1/h"}' });
