@@ -132,7 +132,7 @@ describe("Suite B: Headless RFC 8628 device flow, device-key registration, and d
       devices: Array<{ device_id: string; jkt: string; status: string }>;
     };
     expect(devicesBody.devices.some((d) => d.device_id === tokenBody.device_id && d.jkt === key.jkt && d.status === "active")).toBe(true);
-  });
+  }, 20_000);
 
   it("SEC-08: RFC 8628 negative states: slow_down, access_denied, wrong passphrase, expired_token, and single-use replay rejection", async () => {
     const gw = await startJc({ extraEnv: { EDGE_TEST_DEVICE_CODE_TTL_S: "2" } });

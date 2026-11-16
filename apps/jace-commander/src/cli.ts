@@ -462,7 +462,7 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
   }
 }
 
-const isEntrypoint = process.argv[1] && /(?:^|[\\/])(?:cli\.js|jace-commander|jc|jace)$/u.test(process.argv[1]);
+const isEntrypoint = process.argv[1] && /(?:^|[\\/])(?:cli\.(?:js|ts)|jace-commander|jc|jace)$/u.test(process.argv[1]);
 if (isEntrypoint) {
   main(process.argv.slice(2)).then(
     (code) => {
