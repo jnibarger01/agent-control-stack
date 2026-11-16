@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createProcessRegistry } from '../dist/processes.js';
 import { sandboxPolicyFromEnv } from '../dist/sandbox.js';
+import { waitForPtyOutput } from './fixtures/pty-output.mjs';
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jc-native-'));
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jc-native-state-'));
 // Workloads always run sandboxed; the registry refuses a policy without one.
@@ -21,9 +22,11 @@ try {
   await assert.rejects(registry.run({command:'pwd', cwd:root, env:{NODE_OPTIONS:'--inspect'}}, policy, 'alice'), /environment/i);
   const env = await registry.run({command:'printf "%s" "$JC_SECRET_CANARY"',cwd:root,waitMs:2000},policy,'alice');
   assert.equal(env.stdout, '');
-  const interactive = await registry.terminal({cwd:root,timeoutMs:3000},policy,'alice');
-  const out = await registry.interact({sessionId:interactive.sessionId,input:'test -t 0 && printf PTY_OK\n',waitMs:300},'alice');
-  assert.match(out.stdout, /PTY_OK/);
+  const interactive = await registry.terminal({cwd:root,timeoutMs:8000},policy,'alice');
+  const out = await registry.interact({sessionId:interactive.sessionId,input:"test -t 0 && printf 'PTY_%s\\n' OK\n",waitMs:300},'alice');
+  const ptyOutput = await waitForPtyOutput(out,
+    (offsets) => registry.read({sessionId:interactive.sessionId,...offsets},'alice'), /PTY_OK/,5000);
+  assert.match(ptyOutput, /PTY_OK/);
   assert.throws(() => registry.output({sessionId:interactive.sessionId},'bob'), /session/i);
   await assert.rejects(registry.kill({sessionId:interactive.sessionId},'bob'), /process|session/i);
   assert.equal(registry.list('bob').processes.length, 0);

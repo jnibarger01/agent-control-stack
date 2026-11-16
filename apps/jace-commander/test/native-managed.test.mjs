@@ -7,6 +7,7 @@ import {InMemoryTransport} from '@modelcontextprotocol/sdk/inMemory.js';
 import {createJcServer} from '../dist/server.js';
 import {loadJcConfig} from '../dist/config.js';
 import {makeIssuer,authorityBody} from './fixtures/jc-mint.js';
+import {waitForPtyOutput} from './fixtures/pty-output.mjs';
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'jc-managed-'));
 const root=path.join(tmp,'work'); fs.mkdirSync(root);
 const issuer=makeIssuer(); let mode='active'; let helperCalls=0;
@@ -49,10 +50,16 @@ try {
  const bad=request('run_command',args);bad.arguments={...bad.arguments,command:'touch marker'};
  assert.equal(code(await client.callTool(bad)),'JC_CAPABILITY_ARGUMENTS_MISMATCH');
  assert.equal(fs.existsSync(file),false);
- const started=await call('start_terminal_session',{cwd:root,timeoutMs:3000});ok(started);
+ const started=await call('start_terminal_session',{cwd:root,timeoutMs:8000});ok(started);
  const id=started.structuredContent.sessionId;
- const sent=await call('interact_with_process',{sessionId:id,input:'printf NATIVE_PTY\n',waitMs:100});ok(sent);
- assert.match(sent.structuredContent.stdout,/NATIVE_PTY/);
+ // Split the expected marker in the input: a PTY echo alone must not satisfy the assertion.
+ const sent=await call('interact_with_process',{sessionId:id,input:"printf 'NATIVE_%s\\n' PTY\n",waitMs:100});ok(sent);
+ const ptyOutput=await waitForPtyOutput(sent.structuredContent,async(offsets)=>{
+  const next=await call('read_process_output',{sessionId:id,...offsets});
+  ok(next);
+  return next.structuredContent;
+ },/NATIVE_PTY/,5000);
+ assert.match(ptyOutput,/NATIVE_PTY/);
  assert.equal(code(await call('read_process_output',{sessionId:id},'bob')),'not_found');
  assert.equal(code(await call('kill_process',{sessionId:id},'bob')),'JC_AUTHORITY_REVOKED');
  ok(await call('kill_process',{sessionId:id}));

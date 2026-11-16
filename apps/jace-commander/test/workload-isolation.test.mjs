@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { createProcessRegistry } from '../dist/processes.js';
 import { gitAdd } from '../dist/git-ops.js';
 import { sandboxPolicyFromEnv, sandboxSelfTest, sandboxArgv } from '../dist/sandbox.js';
+import { waitForPtyOutput } from './fixtures/pty-output.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CANARY = `jc-canary-${process.pid}-${Date.now()}`;
@@ -124,8 +125,10 @@ try {
   await test('interactive PTY works inside the sandbox (private devpts)', async () => {
     const session = await registry.terminal({ cwd: work, timeoutMs: 10_000 }, policy, 'alice');
     const out = await registry.interact({ sessionId: session.sessionId, input: 'test -t 0 && tty && echo PTY_$((40+2))\n', waitMs: 5000 }, 'alice');
-    assert.match(out.stdout, /PTY_42/);
-    assert.match(out.stdout, /\/dev\/pts\/\d+/);
+    const ptyOutput = await waitForPtyOutput(out,
+      (offsets) => registry.read({sessionId:session.sessionId,...offsets},'alice'), /PTY_42/,5000);
+    assert.match(ptyOutput, /PTY_42/);
+    assert.match(ptyOutput, /\/dev\/pts\/\d+/);
     assert.equal((await registry.kill({ sessionId: session.sessionId }, 'alice')).exited, true);
   });
 
