@@ -9,12 +9,15 @@
  *     carry a valid `x-dc-attestation` for the claimed `x-dc-agent`, and the
  *     verified identity is stamped into the request body as `_meta.gateway`.
  *     Client-supplied `_meta.gateway` is always stripped (spoof-proofing).
+ *   - Attestation jti values are tracked until expiry to reject replays.
  *   - JSON-RPC batches that contain any `tools/call` are refused: the server
  *     cannot attribute authority per element and cannot safely stamp each call.
- *   - Client-supplied authority metadata (`_meta.acsCapability`/`capability`)
- *     is stripped unless it arrived through a verified, attested gateway path
- *     that is explicitly allowed to forward it.
+ *   - Client-supplied authority metadata (`_meta.acsCapability`/`capability`,
+ *     bootstrap/runtime identity) is stripped before dispatch unless it arrived
+ *     through a verified, attested gateway path that stamped identity.
  *   - Sessions are isolated; unknown session ids are rejected.
+ *   - Basic request hardening: Host/Origin validation (when present),
+ *     Content-Type enforcement for POST, and bounded request bodies.
  */
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -40,6 +43,10 @@ export interface JcHttpOptions {
   attestationToken?: string;
   /** When true, managed-mode posture: attestation required if token configured is not enough? caller decides. */
   requireAttestation?: boolean;
+  /** Additional allowed Host header values (lowercased, host[:port]). Loopback forms are always allowed. */
+  allowedHosts?: string[];
+  /** Additional allowed Origin values. Missing Origin is allowed (non-browser clients). */
+  allowedOrigins?: string[];
   /** Optional authority/status info for /authority. */
   authority?: () => Record<string, unknown>;
 }
@@ -65,6 +72,47 @@ function sendRpcError(res: http.ServerResponse, status: number, id: unknown, cod
   sendJson(res, status, { jsonrpc: '2.0', error: { code, message }, id: id ?? null });
 }
 
+function headerString(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) return value[0];
+  return value;
+}
+
+function isLoopbackHost(host: string): boolean {
+  const h = host.toLowerCase();
+  return h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h === '::1'
+    || h.startsWith('localhost:') || h.startsWith('127.0.0.1:') || h.startsWith('[::1]:');
+}
+
+export function isAllowedHost(hostHeader: string | undefined, extra: readonly string[] = []): boolean {
+  if (!hostHeader) return false;
+  const host = hostHeader.toLowerCase().trim();
+  if (isLoopbackHost(host)) return true;
+  return extra.map((v) => v.toLowerCase()).includes(host);
+}
+
+export function isAllowedOrigin(originHeader: string | undefined, reqHost: string | undefined, extra: readonly string[] = []): boolean {
+  if (!originHeader) return true; // non-browser / server-to-server clients
+  let origin: URL;
+  try {
+    origin = new URL(originHeader);
+  } catch {
+    return false;
+  }
+  const value = origin.origin.toLowerCase();
+  if (extra.map((v) => v.toLowerCase()).includes(value)) return true;
+  const host = origin.host.toLowerCase();
+  if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host.startsWith('localhost:') || host.startsWith('127.0.0.1:') || host.startsWith('[::1]:')) return true;
+  // allow same-origin as the request Host when Host is explicit
+  if (reqHost && host === reqHost.toLowerCase().trim()) return true;
+  return false;
+}
+
+function isJsonContentType(contentType: string | undefined): boolean {
+  if (!contentType) return false;
+  const type = contentType.split(';', 1)[0]!.trim().toLowerCase();
+  return type === 'application/json' || type.endsWith('+json');
+}
+
 async function readJsonBody(req: http.IncomingMessage): Promise<Json> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -88,10 +136,16 @@ async function readJsonBody(req: http.IncomingMessage): Promise<Json> {
   }
 }
 
-export function verifyGatewayAttestation(value: string | string[] | undefined, agentHeader: string | string[] | undefined, token: string): { sub: string; client_id: string; jti: string; exp: number; iat: number } | null {
+export interface VerifiedAttestation { sub: string; client_id: string; jti: string; exp: number; iat: number }
+
+export function verifyGatewayAttestation(
+  value: string | string[] | undefined,
+  agentHeader: string | string[] | undefined,
+  token: string,
+): VerifiedAttestation | null {
   try {
-    const raw = Array.isArray(value) ? value[0] : value;
-    const agent = Array.isArray(agentHeader) ? agentHeader[0] : agentHeader;
+    const raw = headerString(value);
+    const agent = headerString(agentHeader);
     const parts = String(raw ?? '').split('.');
     if (parts.length !== 2 || !parts.every((part) => /^[A-Za-z0-9_-]+$/.test(part))) return null;
     const [body, sig] = parts;
@@ -104,8 +158,8 @@ export function verifyGatewayAttestation(value: string | string[] | undefined, a
     const t = Math.floor(Date.now() / 1000);
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
     if (typeof payload.sub !== 'string' || !payload.sub.trim()) return null;
-    if (typeof payload.exp !== 'number' || payload.exp < t) return null;
-    if (typeof payload.iat !== 'number' || payload.iat > t || payload.exp - payload.iat > 60 || payload.exp <= payload.iat) return null;
+    if (typeof payload.exp !== 'number' || typeof payload.iat !== 'number') return null;
+    if (payload.exp < t || payload.iat > t + 5 || payload.exp - payload.iat > 60 || payload.exp <= payload.iat) return null;
     if (agent && payload.sub !== agent) return null;
     return {
       sub: String(payload.sub),
@@ -117,6 +171,28 @@ export function verifyGatewayAttestation(value: string | string[] | undefined, a
   } catch {
     return null;
   }
+}
+
+/** In-memory jti replay cache (bounded by attestation TTL). */
+export class ReplayCache {
+  private readonly seen = new Map<string, number>();
+  constructor(private readonly now: () => number = () => Math.floor(Date.now() / 1000)) {}
+  /** Returns true if this (jti, exp) is fresh and records it; false if replay/invalid. */
+  accept(jti: string, exp: number): boolean {
+    this.sweep();
+    if (!jti) return true; // legacy attestations without jti: rely on short TTL/expiry
+    if (this.seen.has(jti)) return false;
+    if (this.seen.size > 10_000) return false; // fail closed on exhaustion
+    this.seen.set(jti, exp);
+    return true;
+  }
+  sweep(): void {
+    const t = this.now();
+    for (const [jti, exp] of this.seen) {
+      if (exp <= t) this.seen.delete(jti);
+    }
+  }
+  get size(): number { return this.seen.size; }
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -142,7 +218,7 @@ function stripAuthoritySpoof(meta: Record<string, unknown>): void {
 }
 
 /** Stamp verified gateway identity and strip spoofed authority fields. */
-export function stampGatewayIdentity(body: Json, payload: { sub: string; client_id: string; jti: string; iat: number }, token: string): Json {
+export function stampGatewayIdentity(body: Json, payload: VerifiedAttestation, token: string): Json {
   const stamp = (msg: unknown): unknown => {
     if (!isPlainRecord(msg)) return msg;
     const params = isPlainRecord(msg.params) ? { ...msg.params } : undefined;
@@ -184,6 +260,9 @@ export async function startJcHttpServer(options: JcHttpOptions): Promise<{ serve
   const sessions = new Map<string, Session>();
   const attestationToken = options.attestationToken ?? '';
   const requireAttestation = options.requireAttestation ?? (options.mode === 'managed' || options.mode === 'local');
+  const allowedHosts = options.allowedHosts ?? [];
+  const allowedOrigins = options.allowedOrigins ?? [];
+  const replay = new ReplayCache();
 
   function closeSession(id: string): void {
     const session = sessions.get(id);
@@ -206,8 +285,16 @@ export async function startJcHttpServer(options: JcHttpOptions): Promise<{ serve
   }
 
   async function handleMcp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const reqHost = headerString(req.headers.host);
+    if (!isAllowedHost(reqHost, allowedHosts)) {
+      return sendRpcError(res, 403, null, -32000, 'forbidden host');
+    }
+    if (!isAllowedOrigin(headerString(req.headers.origin), reqHost, allowedOrigins)) {
+      return sendRpcError(res, 403, null, -32000, 'forbidden origin');
+    }
+
     const mustAttest = requireAttestation && !!attestationToken;
-    let attested: ReturnType<typeof verifyGatewayAttestation> = null;
+    let attested: VerifiedAttestation | null = null;
     if (attestationToken) {
       attested = verifyGatewayAttestation(req.headers['x-dc-attestation'], req.headers['x-dc-agent'], attestationToken);
       if (mustAttest && !attested) {
@@ -216,12 +303,18 @@ export async function startJcHttpServer(options: JcHttpOptions): Promise<{ serve
       if (req.headers['x-dc-attestation'] && !attested) {
         return sendRpcError(res, 400, null, -32001, 'gateway attestation invalid');
       }
+      if (attested && !replay.accept(attested.jti, attested.exp)) {
+        return sendRpcError(res, 401, null, -32001, 'gateway attestation replayed');
+      }
     } else if (requireAttestation) {
       return sendRpcError(res, 401, null, -32001, 'gateway attestation required');
     }
 
     let body: Json | undefined;
     if (req.method === 'POST') {
+      if (!isJsonContentType(headerString(req.headers['content-type']))) {
+        return sendRpcError(res, 415, null, -32600, 'Content-Type must be application/json');
+      }
       try {
         body = await readJsonBody(req);
       } catch (error) {
@@ -235,10 +328,9 @@ export async function startJcHttpServer(options: JcHttpOptions): Promise<{ serve
       body = attested ? stampGatewayIdentity(body, attested, attestationToken) : stripUntrustedGatewayMeta(body);
     }
 
-    const sid = req.headers['mcp-session-id'];
-    const sessionId = Array.isArray(sid) ? sid[0] : sid;
-    let session = sessionId ? sessions.get(sessionId) : undefined;
-    if (sessionId && !session) {
+    const sid = headerString(req.headers['mcp-session-id']);
+    let session = sid ? sessions.get(sid) : undefined;
+    if (sid && !session) {
       return sendRpcError(res, 400, null, -32001, 'session unknown; reconnect and re-initialize');
     }
     if (!session) {
@@ -254,7 +346,7 @@ export async function startJcHttpServer(options: JcHttpOptions): Promise<{ serve
       if (session.transport.sessionId && !sessions.has(session.transport.sessionId)) {
         sessions.set(session.transport.sessionId, session);
       }
-    } catch (error) {
+    } catch {
       if (!res.headersSent) {
         sendRpcError(res, 500, null, -32603, 'internal error');
       }
@@ -268,7 +360,7 @@ export async function startJcHttpServer(options: JcHttpOptions): Promise<{ serve
     }
     if (urlPath === '/authority') {
       const extra = options.authority ? options.authority() : {};
-      return sendJson(res, 200, { variant: 'jc-native-http', mode: options.mode, ...extra });
+      return sendJson(res, 200, { variant: 'jc-native-http', mode: options.mode, manifestHash: JC_MANIFEST.manifestHash, ...extra });
     }
     if (urlPath === '/ready') {
       return sendJson(res, 200, { ready: true, variant: 'jc-native-http', sessions: sessions.size });
@@ -297,7 +389,6 @@ export async function startJcHttpServer(options: JcHttpOptions): Promise<{ serve
 
   const close = async () => {
     for (const id of [...sessions.keys()]) closeSession(id);
-    // Node 18+ supports closeAllConnections; use if available for fast shutdown.
     const anyServer = httpServer as http.Server & { closeAllConnections?: () => void; closeIdleConnections?: () => void };
     anyServer.closeIdleConnections?.();
     await new Promise<void>((resolve) => httpServer.close(() => resolve()));
