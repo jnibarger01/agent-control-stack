@@ -21,7 +21,6 @@ import {
   releaseJcExecutorLease,
   renewJcExecutorLease,
   resolveJcReleaseIdentity,
-  startManagedJcExecutorLease,
 } from '../dist/executor-lease.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -204,7 +203,11 @@ test('release identity comes from the spelled entrypoint and its RELEASE.json', 
 
   const bare = tmpDir();
   fs.mkdirSync(path.join(bare, 'dist'), { recursive: true });
-  assert.equal(resolveJcReleaseIdentity(path.join(bare, 'dist', 'cli.js')), undefined, 'no RELEASE.json means no release identity');
+  assert.deepEqual(
+    resolveJcReleaseIdentity(path.join(bare, 'dist', 'cli.js')),
+    { releaseRoot: bare, releaseCommit: 'unreleased' },
+    'a runtime outside an installed release is recorded as unreleased, never as a release',
+  );
 });
 
 test('standalone and local presets never require or acquire the managed lease', () => {
@@ -247,97 +250,6 @@ test('concurrent startup from two real processes yields exactly one owner', asyn
   const results = await Promise.all([start(), start(), start(), start()]);
   assert.equal(results.filter((r) => r.ok).length, 1, JSON.stringify(results));
   assert.equal(results.filter((r) => !r.ok).every((r) => r.reason === 'held-by-live-process'), true, JSON.stringify(results));
-});
-
-/** A throwaway installed release: root/releases/<id>/RELEASE.json with root/current -> it. */
-function installedRelease(commit = '607128e5fee9') {
-  const root = tmpDir();
-  const rel = path.join(root, 'releases', '1.0.0-test');
-  fs.mkdirSync(path.join(rel, 'dist'), { recursive: true });
-  fs.writeFileSync(path.join(rel, 'dist', 'cli.js'), '');
-  fs.writeFileSync(path.join(rel, 'RELEASE.json'), JSON.stringify({ version: '1.0.0', commit }));
-  fs.symlinkSync(rel, path.join(root, 'current'));
-  return { root, lockDir: path.join(root, 'lock'), entry: path.join(root, 'current', 'dist', 'cli.js') };
-}
-
-test('managed start refuses an entrypoint that is not an installed release', () => {
-  const dir = tmpDir();
-  const loose = path.join(dir, 'app', 'dist', 'cli.js');
-  fs.mkdirSync(path.dirname(loose), { recursive: true });
-  fs.writeFileSync(loose, '');
-  const lockDir = path.join(dir, 'lock');
-  const result = startManagedJcExecutorLease({
-    env: { DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: lockDir },
-    entrypoint: loose,
-    pid: process.pid,
-    instanceId: 'loose-1',
-    onLost: () => {},
-  });
-  assert.equal(result.ok, false, JSON.stringify(result));
-  assert.equal(result.reason, 'release-identity-unavailable');
-  assert.equal(fs.existsSync(path.join(lockDir, 'executor.lock')), false);
-});
-
-test('managed start binds the lease to the installed release as the process spells it', () => {
-  const { root, lockDir, entry } = installedRelease();
-  const result = startManagedJcExecutorLease({
-    env: { DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: lockDir },
-    entrypoint: entry,
-    pid: process.pid,
-    instanceId: 'managed-1',
-    onLost: () => {},
-  });
-  assert.equal(result.ok, true, JSON.stringify(result));
-  const onDisk = readLease(lockDir);
-  assert.equal(onDisk.executorKind, 'jace-commander');
-  // The `current` symlink spelling, matching the holder's /proc cmdline that ACS reads.
-  assert.equal(onDisk.releaseRoot, path.join(root, 'current'));
-  assert.equal(onDisk.releaseCommit, '607128e5fee9');
-  assert.equal(onDisk.pid, process.pid);
-  result.lease.release();
-});
-
-test('a second managed start is refused while the first holder is alive', () => {
-  const { lockDir, entry } = installedRelease();
-  const env = { DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: lockDir };
-  const first = startManagedJcExecutorLease({ env, entrypoint: entry, pid: process.pid, instanceId: 'first', onLost: () => {} });
-  assert.equal(first.ok, true, JSON.stringify(first));
-  const second = startManagedJcExecutorLease({ env, entrypoint: entry, pid: process.pid, instanceId: 'second', onLost: () => {} });
-  assert.equal(second.ok, false, JSON.stringify(second));
-  assert.equal(second.reason, 'held-by-live-process');
-  first.lease.release();
-});
-
-test('release frees the lease so the next managed start can acquire it', () => {
-  const { lockDir, entry } = installedRelease();
-  const env = { DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: lockDir };
-  const first = startManagedJcExecutorLease({ env, entrypoint: entry, pid: process.pid, instanceId: 'first', onLost: () => {} });
-  assert.equal(first.ok, true);
-  first.lease.release();
-  assert.equal(fs.existsSync(path.join(lockDir, 'executor.lock')), false);
-  const next = startManagedJcExecutorLease({ env, entrypoint: entry, pid: process.pid, instanceId: 'next', onLost: () => {} });
-  assert.equal(next.ok, true, JSON.stringify(next));
-  next.lease.release();
-});
-
-test('losing the lease to another owner is reported so the holder can stop serving', async () => {
-  const { lockDir, entry } = installedRelease();
-  let lost = null;
-  const held = startManagedJcExecutorLease({
-    env: { DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: lockDir },
-    entrypoint: entry,
-    pid: process.pid,
-    instanceId: 'holder',
-    renewMs: 20,
-    onLost: (reason) => { lost = reason; },
-  });
-  assert.equal(held.ok, true, JSON.stringify(held));
-  const file = path.join(lockDir, 'executor.lock');
-  fs.writeFileSync(file, JSON.stringify({ ...readLease(lockDir), instanceId: 'usurper' }));
-  await new Promise((resolve) => setTimeout(resolve, 200));
-  assert.notEqual(lost, null, 'onLost must fire when another owner replaces the lease');
-  held.lease.release();
-  assert.equal(readLease(lockDir).instanceId, 'usurper', 'a lost holder must never delete the new owner');
 });
 
 let passed = 0;

@@ -80,21 +80,23 @@ export type RenewResult = { ok: true; record: ExecutorLeaseRecord } | { ok: fals
 export type ReleaseResult = { ok: true } | { ok: false; reason: 'not-held' | 'not-owner' };
 
 /**
- * The installed release this entrypoint belongs to, read from RELEASE.json.
- * The root is taken from the path as spelled (not realpath), because ACS matches
- * the holder by its command line, which names the `current` symlink.
+ * The runtime identity a managed lease is bound to. The root is the entrypoint
+ * directory's parent, taken from the path as spelled (not realpath), because ACS
+ * matches the holder by its command line, which names the `current` symlink.
+ * The commit comes from RELEASE.json; a runtime outside an installed release
+ * records `unreleased`, which ACS never recognizes as its managed executor.
  */
-export function resolveJcReleaseIdentity(entrypoint: string): { releaseRoot: string; releaseCommit: string } | undefined {
+export function resolveJcReleaseIdentity(entrypoint: string): { releaseRoot: string; releaseCommit: string } {
   const releaseRoot = path.dirname(path.dirname(path.resolve(entrypoint)));
   try {
     const release = JSON.parse(fs.readFileSync(path.join(releaseRoot, 'RELEASE.json'), 'utf8')) as { commit?: unknown };
-    if (typeof release.commit === 'string' && /^[0-9a-f]{7,40}$/u.test(release.commit)) {
+    if (typeof release.commit === 'string' && /^[A-Za-z0-9._-]{1,64}$/u.test(release.commit)) {
       return { releaseRoot, releaseCommit: release.commit };
     }
   } catch {
-    // Not an installed release: no release identity to bind a managed lease to.
+    // Not an installed release.
   }
-  return undefined;
+  return { releaseRoot, releaseCommit: 'unreleased' };
 }
 
 /** Only a managed executor claims the ACS singleton. Standalone and local never do. */
@@ -326,22 +328,22 @@ export function holdJcExecutorLease(
   if (!acquired.ok) return acquired;
   let record = acquired.record;
   let released = false;
-  const release = (): void => {
-    if (released) return;
-    released = true;
-    if (timer) clearInterval(timer);
-    releaseJcExecutorLease({ lockDir: options.lockDir, record });
-  };
-  const timer = setInterval(() => {
+  const timer: NodeJS.Timeout = setInterval(() => {
     const renewed = renewJcExecutorLease({ lockDir: options.lockDir, record, nowMs: Date.now(), ttlMs: options.ttlMs });
     if (renewed.ok) {
       record = renewed.record;
       return;
     }
-    if (timer) clearInterval(timer);
+    clearInterval(timer);
     released = true;
     options.onLost(renewed.reason);
   }, options.renewMs);
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    clearInterval(timer);
+    releaseJcExecutorLease({ lockDir: options.lockDir, record });
+  };
   timer.unref();
   process.once('exit', release);
   return {
@@ -353,46 +355,4 @@ export function holdJcExecutorLease(
       release,
     } as HeldExecutorLease,
   };
-}
-
-export interface ManagedLeaseStartOptions {
-  env: NodeJS.ProcessEnv;
-  /** The entrypoint as launched (process.argv[1]); its release identity is what the lease binds to. */
-  entrypoint: string;
-  pid: number;
-  instanceId: string;
-  onLost: (reason: string) => void;
-  ttlMs?: number;
-  graceMs?: number;
-  renewMs?: number;
-}
-
-export type ManagedLeaseStart =
-  | { ok: true; lease: HeldExecutorLease }
-  | { ok: false; reason: AcquireFailure | 'release-identity-unavailable'; blockedBy?: number };
-
-/**
- * Acquires and holds the canonical executor lease for a managed `serve`. Refuses
- * unless the entrypoint is an installed release (RELEASE.json names its commit):
- * a checkout or ad-hoc launch has no release identity for ACS to verify.
- */
-export function startManagedJcExecutorLease(options: ManagedLeaseStartOptions): ManagedLeaseStart {
-  const identity = resolveJcReleaseIdentity(options.entrypoint);
-  if (!identity) return { ok: false, reason: 'release-identity-unavailable' };
-  const held = holdJcExecutorLease({
-    lockDir: defaultExecutorLockDir(options.env),
-    pid: options.pid,
-    instanceId: options.instanceId,
-    releaseRoot: identity.releaseRoot,
-    releaseCommit: identity.releaseCommit,
-    nowMs: Date.now(),
-    ttlMs: options.ttlMs ?? 30_000,
-    graceMs: options.graceMs ?? 10_000,
-    renewMs: options.renewMs ?? 10_000,
-    isAlive: isProcessAlive,
-    readIdentity: readLinuxProcessIdentity,
-    onLost: options.onLost,
-  });
-  if (!held.ok) return held;
-  return { ok: true, lease: held.lease };
 }

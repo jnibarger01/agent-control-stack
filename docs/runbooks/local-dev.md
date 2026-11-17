@@ -36,6 +36,22 @@ ACS_DB_PATH=storage/local.db npm run start:gateway
 
 Open `http://127.0.0.1:3000`.
 
+Dashboard and login HTML carry a meta description and link the gateway-served
+`/favicon.svg`; `/favicon.ico` redirects to it so browsers stop logging a
+missing-icon 404. The gateway compresses compressible responses (HTML, JSON,
+JavaScript, SVG) with Brotli or gzip when the client advertises it and the body
+is at least 1 KiB. Event streams, `204`/`304`, and `no-transform` responses are
+never compressed; `HEAD` reports the same encoding and length as `GET`. A
+compression failure falls back to the
+uncompressed body. Use `curl -H 'Accept-Encoding: br' -I http://127.0.0.1:3000/`
+to confirm negotiation.
+
+The Mission Control coding-missions panel only fetches `/coding-missions` when
+the server renders it as configured. A local gateway without coding-mission
+ports therefore shows "not configured" instead of logging a
+`coding_mission_unconfigured` 503 in the console. Configure the ports to enable
+that panel; the 503 remains the correct fail-closed API response.
+
 Optional: set `ACS_READYZ_SANDBOX_PROBE=1` only on Linux hosts that should
 surface missing Bubblewrap/systemd/cgroup v2 on `/readyz`. Leave unset for
 ordinary dry-run local development (see [production.md](./production.md)).

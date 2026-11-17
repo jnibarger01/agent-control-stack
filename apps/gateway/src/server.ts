@@ -2,6 +2,8 @@ import { probeExecutableVersion } from "@agent-control-stack/agent-cli";
 import { advisorPortFromEnv } from "./advisor-consultation.js";
 import { registerMissionDispatchRoutes } from "./mission-dispatch-routes.js";
 import { registerDashboardRoutes, eventReadOptions } from "./dashboard-routes.js";
+import { registerFaviconRoutes } from "./favicon.js";
+import { registerResponseCompression } from "./compression.js";
 import { openItemsSummaryConfigFromEnv, registerOpenItemsSummaryRoute } from "./open-items-summary.js";
 import { HashChainedInferenceAuditSink, openAiCompatibleConfigFromEnv } from "./moa/openai-compatible.js";
 import { registerCsrfGuard } from "./csrf-guard.js";
@@ -414,6 +416,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
   const directAgentController = resolveDirectAgentController(options);
   const app = Fastify({ logger: options.logger ?? true, bodyLimit: DEFAULT_JSON_BODY_LIMIT_BYTES });
+  registerFaviconRoutes(app);
+  registerResponseCompression(app);
   const sseClients = new Set<ServerResponse>();
   // Principal is retained per stream so a disconnect can decrement the right
   // bucket without rescanning every open client.
@@ -1413,6 +1417,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     projectTunnelSession: (session, ttl) => projectTunnelSession(session, ttl),
     validateRegisteredAgentPromptTarget: (store, input) => validateRegisteredAgentPromptTarget(store, input),
     requireRead,
+    codingMissionsEnabled: Boolean(codingMissions),
     missionControlWebDefaultRoot: () => missionControlWebDefaultRoot(options.missionControlWeb),
     sendError
   });
@@ -5564,7 +5569,9 @@ export function renderLoginPage(redirectTo = "/"): string {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Sign in to ACS Mission Control, the local-first agent control plane." />
     <title>AgentOS Mission Control Login</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <style>
       :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #071019; color: #d7e0ea; }
       body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #071019; }

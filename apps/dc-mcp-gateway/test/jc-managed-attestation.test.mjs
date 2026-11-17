@@ -24,7 +24,8 @@ async function fixture(t, overrides = {}) {
   await once(listener, 'listening');
   const port = listener.address().port;
   await new Promise((resolve) => listener.close(resolve));
-  const child = spawn(process.execPath, [`${root}bridge.js`], { env: { ...baseEnv, BRIDGE_PORT: String(port), JC_STATE_DIR: state, DC_GATEWAY_EXECUTION_TOKEN: secret, ...overrides }, stdio: ['ignore', 'pipe', 'pipe'] });
+  // Never let a test runtime claim the developer's real executor lease.
+  const child = spawn(process.execPath, [`${root}bridge.js`], { env: { ...baseEnv, BRIDGE_PORT: String(port), JC_STATE_DIR: state, DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: path.join(state, 'locks'), DC_GATEWAY_EXECUTION_TOKEN: secret, ...overrides }, stdio: ['ignore', 'pipe', 'pipe']});
   let output = '';
   child.stdout.on('data', (d) => { output += d; });
   child.stderr.on('data', (d) => { output += d; });
