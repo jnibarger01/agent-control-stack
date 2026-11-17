@@ -25,11 +25,40 @@ From the repository root:
 
 | Command | What it proves |
 | --- | --- |
-| `npm test -w apps/jace-commander` | 30 suites: contract, tools, terminal/PTY, sandbox isolation, live authority, documents, approval, privileged helper |
-| `ACS_DC_E2E=1 npx vitest run tests/e2e/acs-jc-mcp` | Real chain: OAuth edge, bridge, native JC and authenticated ACS with JC holding an `acs:read`-only token (30 tests, incl. revocation, lease expiry, replay, principal isolation, audited outcome, least privilege, missing-token refusal) |
+| `npm test -w apps/jace-commander` | Jace Commander suites: contract, tools, terminal/PTY, sandbox isolation, live authority, documents, approval, privileged helper, native HTTP transport, JSON Schema tool registry |
+| `ACS_DC_E2E=1 npx vitest run tests/e2e/acs-jc-mcp` | Real chain: OAuth edge, bridge, native JC and authenticated ACS with JC holding an `acs:read`-only token (incl. revocation, lease expiry, replay, principal isolation, audited outcome, least privilege, missing-token refusal) |
 | `npm run jc:verify-release` | Clean install outside every repository, runtime deps only, with `$HOME/projects` masked; dependency graph, shipped-graph audit, full suite, real MCP client session, module-resolution trace. Evidence: `verification/jc-release-standalone-evidence.json` |
 | `npm run jc:verify-independence` | Copy-out build and test with no workspace or vendor tree |
 | `npm run jc-contracts:check` | Embedded manifest matches the canonical ACS contract |
+
+## Native Streamable HTTP transport
+
+In addition to stdio (`jace-commander serve`), JC can serve MCP directly over
+Streamable HTTP for self-hosted / direct MCP clients:
+
+```bash
+jace-commander serve --transport http [--http-host 127.0.0.1] [--http-port 8011]
+```
+
+- `POST|GET|DELETE /mcp` — Streamable HTTP MCP endpoint (session-based).
+- `GET /health` (`/healthz`) — liveness and manifest identity.
+- `GET /ready` — readiness.
+- `GET /authority` — native authority/mode metadata.
+- `GET /tools` — JSON Schema tool registry (every tool, `inputSchema`, scopes, risk, approval metadata) derived from the canonical manifest.
+
+When a gateway attestation token is configured
+(`DC_GATEWAY_EXECUTION_TOKEN` or `JC_GATEWAY_ATTESTATION_TOKEN`), managed and
+local HTTP modes require a valid `x-dc-attestation` on every `/mcp` request,
+strip client-supplied gateway/authority metadata, and stamp verified gateway
+identity into request bodies (spoof-proofing). JSON-RPC batches that contain
+`tools/call` are refused (`batched_tools_call_rejected`) because authority
+cannot be attributed per element. Managed/local HTTP mode fails closed at
+startup without an attestation token.
+
+The canonical JSON Schema tool registry is also exported from
+`apps/jace-commander/src/tool-registry.ts` (`JC_TOOL_REGISTRY`,
+`getToolRegistry`, `toolRegistryJson`) so tool schemas and metadata stay
+sourced from the generated manifest.
 
 Set `JC_E2E_RUNTIME_DIR=<release>/current` to run the chain e2e against an
 installed release (pinned with `JC_REQUIRE_INSTALLED_RELEASE=1`) instead of the
