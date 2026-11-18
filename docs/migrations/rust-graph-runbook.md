@@ -25,6 +25,8 @@ For a local or staging canary, launch the ACS command that uses the Integration 
 
 Package the target-built `acs_integration_graph.node` alongside `native/bridge.cjs` inside `packages/integration-manager`. Keep `dist/` at the same depth. The binary is ignored in Git. Build on the oldest compatible glibc baseline for the intended target. Record the target triple, toolchain and checksum. Verify the checksum and smoke-test load and batch parity from the installed layout. Build and verify separately for each CPU, OS and libc. The pilot covers Linux x86-64 glibc. Other targets use the default TypeScript backend until they have verification evidence. [napi-rs build reference](https://github.com/napi-rs/napi-rs/blob/main/crates/napi/README.md)
 
+Node needs to map the addon's executable segments from its filesystem. In a container with a `noexec` temporary directory, point `TMPDIR` at a dedicated writable scratch mount that permits executable mappings when running the package smoke test. The installed addon can live on a read-only filesystem that permits those mappings.
+
 Rust Anything scaffolded the crate and manifest. The crate uses a source-owned, typed binding and JS adapter to avoid sending unused PR metadata through the generated generic wire. `index.cjs` calls that same adapter and throws on unsupported fixtures. Running `rust-anything refresh` would replace the source-owned binding. Generate new scaffolds in scratch directories.
 
 ## Replay and performance
