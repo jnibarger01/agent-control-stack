@@ -18,6 +18,7 @@ import type {
   EngineIsolationRequest
 } from "./engine-contracts.js";
 import { createEngineIsolation, type EngineRuntimeMount } from "./engine.js";
+import { RUST_SUPERVISOR_BACKEND_TAG, defaultRustSupervisorPath } from "./rust-supervisor.js";
 
 const runIntegration = process.env.ACS_SANDBOX_INTEGRATION === "1";
 
@@ -384,6 +385,77 @@ describe.runIf(runIntegration)("Engine isolation boundary (ADR 0014)", () => {
     }
   }, 20_000);
 });
+
+describe.runIf(runIntegration && existsSync(defaultRustSupervisorPath))(
+  "Engine Rust scope supervisor live parity",
+  () => {
+    const cases: Array<[string, string, Partial<EngineIsolationRequest>, number | undefined]> = [
+      [
+        "stdin",
+        `let text = ""; process.stdin.on("data", (c) => (text += c)); process.stdin.on("end", () => console.log(text.toUpperCase()));`,
+        { stdin: "engine stdin é" },
+        undefined
+      ],
+      [
+        "denied-egress",
+        `const r = await fetch("http://198.51.100.7/").then(() => "reached", () => "blocked"); console.log(r);`,
+        {},
+        undefined
+      ],
+      [
+        "timeout",
+        `setInterval(() => {}, 1000);`,
+        { limits: { ...defaultLimits(), wallClockMs: 400, terminationGraceMs: 100 } },
+        undefined
+      ],
+      ["cancel", `setInterval(() => {}, 1000);`, {}, 300]
+    ];
+
+    it.each(cases)(
+      "matches the TypeScript reference for %s",
+      async (name, source, overrides, abortAfterMs) => {
+        const observed = [];
+        for (const backend of ["typescript", "rust"] as const) {
+          const fixture = createFixture();
+          try {
+            writeScript(fixture.workspace, source);
+            const request = fixtureRequest(
+              fixture.workspace,
+              `parity_${name}_${backend}`,
+              [{ host: "127.0.0.1", port: 1 }],
+              overrides
+            );
+            const controller = new AbortController();
+            if (abortAfterMs !== undefined) setTimeout(() => controller.abort(), abortAfterMs);
+            const result = await createEngineIsolation({
+              authorityVerifier: fixtureAuthority(request),
+              runtimeMounts: nodeRuntimeMounts(),
+              runtimeDir: fixture.parent,
+              scopeSupervisor: { backend }
+            }).execute(request, { signal: controller.signal });
+            expect(result.backendVersion.endsWith(`+${RUST_SUPERVISOR_BACKEND_TAG}`)).toBe(backend === "rust");
+            observed.push({
+              outcome: result.outcome,
+              observedSuccess: result.observedSuccess,
+              cleanup: result.cleanup,
+              exitCode: result.exitCode,
+              signal: result.signal,
+              stdout: result.stdout,
+              stderr: result.stderr,
+              error: result.error,
+              egressAllowedCount: result.egressAllowedCount,
+              egressDeniedCount: result.egressDeniedCount
+            });
+          } finally {
+            rmSync(fixture.parent, { recursive: true, force: true });
+          }
+        }
+        expect(observed[1]).toEqual(observed[0]);
+      },
+      30_000
+    );
+  }
+);
 
 function createFixture(): { parent: string; workspace: string } {
   const parent = mkdtempSync(join(tmpdir(), "acs-engine-isolation-integration-"));

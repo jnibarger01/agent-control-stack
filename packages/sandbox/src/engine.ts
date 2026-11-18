@@ -15,6 +15,13 @@ import {
 } from "./engine-contracts.js";
 import { startEgressProxy, type EgressDecision, type EgressProxyHandle } from "./egress-proxy.js";
 import {
+  RUST_SUPERVISOR_BACKEND_TAG,
+  requireRustSupervisor,
+  scopeSupervisorFromEnvironment,
+  superviseWithRust,
+  type ScopeSupervisorSelection
+} from "./rust-supervisor.js";
+import {
   boundedMessage,
   captureChunk,
   emptyCapturedOutput,
@@ -61,6 +68,8 @@ export interface EngineIsolationOptions {
   hostCommandRunner?: HostCommandRunner;
   unitNameFactory?: (attemptId: string) => string;
   now?: () => Date;
+  /** Pinned for the lifetime of the backend instance. Defaults to the process environment. */
+  scopeSupervisor?: ScopeSupervisorSelection;
 }
 
 interface ResolvedEngineOptions {
@@ -74,6 +83,7 @@ interface ResolvedEngineOptions {
   hostCommandRunner: HostCommandRunner;
   unitNameFactory: (attemptId: string) => string;
   now: () => Date;
+  scopeSupervisor: ScopeSupervisorSelection;
 }
 
 const EGRESS_BRIDGE_PORT = 39_217;
@@ -169,6 +179,33 @@ export class EngineIsolationBackend implements EngineIsolation {
     egressDecisions: EgressDecision[]
   ): Promise<EngineIsolationObservation> {
     const started = this.options.now();
+    if (this.options.scopeSupervisor.backend === "rust") {
+      const run = await superviseWithRust({
+        binaryPath: requireRustSupervisor(this.options.scopeSupervisor),
+        binding: request,
+        invocation,
+        systemctlPath: this.options.systemctlPath,
+        limits: request.limits,
+        launcherEnvironment: launcherEnvironment(),
+        signal: executionOptions.signal,
+        stdin: request.stdin ?? "",
+        forceStopScope: () => signalScope(this.options, invocation.unitName, "SIGKILL")
+      });
+      return await this.finishObservation({
+        request,
+        invocation,
+        backendVersion,
+        started,
+        output: run.output,
+        ...(run.trigger ? { trigger: run.trigger } : {}),
+        ...(run.terminationError ? { terminationError: run.terminationError } : {}),
+        ...(run.launchError ? { launchError: run.launchError } : {}),
+        exitCode: run.exitCode,
+        signal: run.signal,
+        egressDecisions,
+        cleanup: run.cleanup
+      });
+    }
     const output: CapturedOutput = emptyCapturedOutput();
     let launchError: string | undefined;
 
@@ -236,8 +273,10 @@ export class EngineIsolationBackend implements EngineIsolation {
     exitCode: number | null;
     signal: NodeJS.Signals | null;
     egressDecisions: EgressDecision[];
+    /** Supplied by the Rust supervisor, which owns the cleanup observation on that path. */
+    cleanup?: "verified" | "failed" | "unknown";
   }): Promise<EngineIsolationObservation> {
-    const cleanup = await verifyScopeCleanup(this.options, input.invocation.unitName);
+    const cleanup = input.cleanup ?? (await verifyScopeCleanup(this.options, input.invocation.unitName));
     const finished = this.options.now();
     const outcome = observedOutcome(input, cleanup);
     const error = observationError(input, cleanup);
@@ -469,7 +508,8 @@ function resolveOptions(options: EngineIsolationOptions): ResolvedEngineOptions 
     runtimeDir: options.runtimeDir ?? tmpdir(),
     hostCommandRunner: options.hostCommandRunner ?? runHostCommand,
     unitNameFactory: options.unitNameFactory ?? defaultEngineUnitName,
-    now: options.now ?? (() => new Date())
+    now: options.now ?? (() => new Date()),
+    scopeSupervisor: options.scopeSupervisor ?? scopeSupervisorFromEnvironment()
   };
 }
 
@@ -485,6 +525,10 @@ async function probeEngineHost(options: ResolvedEngineOptions): Promise<string> 
   // (resolveOptions); a missing path fails closed there, before any
   // request is accepted, rather than being silently skipped here.
   verifyCgroupV2(statfsSync("/sys/fs/cgroup") as StatsFs);
+  const supervisorTag =
+    options.scopeSupervisor.backend === "rust"
+      ? (requireRustSupervisor(options.scopeSupervisor), `+${RUST_SUPERVISOR_BACKEND_TAG}`)
+      : "";
 
   const bwrapVersion = await options.hostCommandRunner(options.bwrapPath, ["--version"], { timeoutMs: 5_000 });
   if (bwrapVersion.code !== 0 || !/^bubblewrap\s+\d+\.\d+/u.test(bwrapVersion.stdout.trim())) {
@@ -521,7 +565,7 @@ async function probeEngineHost(options: ResolvedEngineOptions): Promise<string> 
     );
   }
 
-  return bwrapVersion.stdout.trim();
+  return `${bwrapVersion.stdout.trim()}${supervisorTag}`;
 }
 
 function defaultEngineUnitName(attemptId: string): string {

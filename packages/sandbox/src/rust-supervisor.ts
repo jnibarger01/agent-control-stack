@@ -167,6 +167,8 @@ export interface SuperviseOptions {
   /** Invoked when the helper is lost, to make a best-effort forced stop of the scope. */
   forceStopScope: () => Promise<void>;
   sessionId?: string;
+  /** UTF-8 text written to the workload's stdin, then closed. */
+  stdin?: string | undefined;
 }
 
 function emptyCapturedOutput(): CapturedOutput {
@@ -212,7 +214,8 @@ export async function superviseWithRust(options: SuperviseOptions): Promise<Supe
       wallClockMs: options.limits.wallClockMs,
       terminationGraceMs: options.limits.terminationGraceMs,
       outputBytes: options.limits.outputBytes
-    }
+    },
+    ...(options.stdin !== undefined ? { stdin: Buffer.from(options.stdin, "utf8").toString("base64") } : {})
   };
 
   const frame = await runHelper(options, sessionId, `${JSON.stringify(startFrame)}\n`);
