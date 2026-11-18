@@ -24,10 +24,18 @@ covers bytes discarded from its stream during capture or rendering.
 
 Both live backends settle an in-flight scope signal before the final status
 probe. Launcher close cancels pending timers and prevents further
-process-group signaling. An active or transitioning scope still receives a
-forced cleanup attempt. An interrupted, empty, or ambiguous status response
-leaves cleanup unknown. Verified cleanup requires a clean inactive or absent
-response for the attempt's unit. [systemctl exit status](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html#Exit%20status)
+process-group signaling. An active or transitioning scope receives SIGKILL
+and up to three short follow-up probes. Verified cleanup requires a clean
+inactive or absent response for the attempt's unit. Cleanup fails if the
+scope stays active through all probes. An interrupted, empty, or ambiguous
+status response leaves cleanup unknown. [systemctl exit status](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html#Exit%20status)
+
+## Scoped egress startup
+
+Engine execution waits for the relay to listen on private loopback. A bounded
+TCP probe sends zero bytes. The host proxy still makes egress decisions only
+for CONNECT requests. If the probe fails, the launcher exits nonzero before
+starting the workload.
 
 ## Real-execution release gate
 

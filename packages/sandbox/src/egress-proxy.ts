@@ -114,6 +114,7 @@ async function handleConnection(client: Socket, context: ConnectionContext): Pro
   };
 
   client.on("data", onData);
+  client.once("close", () => clearTimeout(headerTimer));
   client.on("error", () => {
     clearTimeout(headerTimer);
   });
