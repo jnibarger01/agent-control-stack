@@ -9,54 +9,72 @@
       "pullRequests": 24,
       "fn": "analyzeDependencies",
       "repetitions": 300,
-      "typescriptMs": 0.04971988666666666,
-      "nativeMs": 0.025528670000000014,
-      "speedup": 1.9476097527472693
+      "typescriptMs": 0.02939627999999999,
+      "nativeMs": 0.018097583333333347,
+      "speedup": 1.6243207426405901
     },
     {
       "dataset": "routine",
       "pullRequests": 24,
       "fn": "findOverlaps",
       "repetitions": 300,
-      "typescriptMs": 0.06997204666666676,
-      "nativeMs": 0.07432969333333346,
-      "speedup": 0.9413740798428332
+      "typescriptMs": 0.0446487966666668,
+      "nativeMs": 0.040539986666666625,
+      "speedup": 1.1013520313606462
+    },
+    {
+      "dataset": "GitHub single-page limit",
+      "pullRequests": 100,
+      "fn": "analyzeDependencies",
+      "repetitions": 60,
+      "typescriptMs": 0.21582918333333415,
+      "nativeMs": 0.042012183333333536,
+      "speedup": 5.137299854685004
+    },
+    {
+      "dataset": "GitHub single-page limit",
+      "pullRequests": 100,
+      "fn": "findOverlaps",
+      "repetitions": 60,
+      "typescriptMs": 1.3415964166666658,
+      "nativeMs": 0.48724863333333324,
+      "speedup": 2.7534123748867696
     },
     {
       "dataset": "stacked and overlapping",
       "pullRequests": 150,
       "fn": "analyzeDependencies",
       "repetitions": 40,
-      "typescriptMs": 0.6497034749999984,
-      "nativeMs": 0.09700002499999982,
-      "speedup": 6.697972242790654
+      "typescriptMs": 0.3333533750000015,
+      "nativeMs": 0.06229042499999764,
+      "speedup": 5.351598981705682
     },
     {
       "dataset": "stacked and overlapping",
       "pullRequests": 150,
       "fn": "findOverlaps",
       "repetitions": 40,
-      "typescriptMs": 3.9582158500000046,
-      "nativeMs": 1.7327893000000016,
-      "speedup": 2.284303030957082
+      "typescriptMs": 3.028885475000004,
+      "nativeMs": 1.1105484000000048,
+      "speedup": 2.72737818090593
     },
     {
       "dataset": "large stress",
       "pullRequests": 1500,
       "fn": "analyzeDependencies",
       "repetitions": 3,
-      "typescriptMs": 63.21496800000008,
-      "nativeMs": 1.1432810000001155,
-      "speedup": 55.292590360544516
+      "typescriptMs": 32.82269433333325,
+      "nativeMs": 0.6831776666666277,
+      "speedup": 48.04415591259344
     },
     {
       "dataset": "large stress",
       "pullRequests": 1500,
       "fn": "findOverlaps",
       "repetitions": 3,
-      "typescriptMs": 475.26797200000027,
-      "nativeMs": 178.98219566666617,
-      "speedup": 2.655392455264838
+      "typescriptMs": 311.4706509999999,
+      "nativeMs": 74.92792966666669,
+      "speedup": 4.156936570723966
     }
   ]
 }
