@@ -105,9 +105,11 @@ narrow, auditable exception, not a relaxation of the namespace:
    relays raw bytes between the sandbox's own private loopback (which the
    sandboxed process may bring up inside its own unshared network namespace
    — a namespace it owns, reachable only from itself) and the mounted
-   `AF_UNIX` socket.
+   `AF_UNIX` socket. Before the engine starts, a bounded private-loopback
+   probe checks that the relay is listening. It sends zero bytes to the proxy
+   and the launcher exits nonzero if the probe cannot connect.
 4. The engine is pointed at that private loopback address via
-   `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`. Because the sandbox's network
+   `HTTPS_PROXY` and `HTTP_PROXY`. Because the sandbox's network
    namespace has no route to anything else — not the host, not the
    internet, not another sandbox's namespace — there is no bypass available
    to a compromised or malicious engine binary that ignores the proxy

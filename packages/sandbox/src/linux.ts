@@ -695,25 +695,40 @@ export async function verifyScopeCleanup(
   unitName: string
 ): Promise<"verified" | "failed" | "unknown"> {
   try {
-    const result = await options.hostCommandRunner(options.systemctlPath, ["--user", "is-active", unitName], {
-      timeoutMs: 5_000
-    });
-    const state = result.stdout.trim();
-    if (state === "active" || state === "activating" || state === "deactivating") {
-      await signalScope(options, unitName, "SIGKILL");
-      return "failed";
+    const initial = await readScopeState(options, unitName, 5_000);
+    if (initial !== "active") return initial;
+
+    await signalScope(options, unitName, "SIGKILL");
+    // The manager can acknowledge the signal before the scope becomes inactive.
+    for (const delayMs of [20, 50, 100]) {
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      const state = await readScopeState(options, unitName, 250);
+      if (state !== "active") return state;
     }
-    if (result.signal !== null || result.stderr.trim() !== "") return "unknown";
-    if (
-      (result.code === 3 && state === "inactive") ||
-      (result.code === 4 && (state === "inactive" || state === "unknown"))
-    ) {
-      return "verified";
-    }
-    return "unknown";
+    return "failed";
   } catch {
     return "unknown";
   }
+}
+
+async function readScopeState(
+  options: ScopeSignalOptions,
+  unitName: string,
+  timeoutMs: number
+): Promise<"active" | "verified" | "unknown"> {
+  const result = await options.hostCommandRunner(options.systemctlPath, ["--user", "is-active", unitName], {
+    timeoutMs
+  });
+  const state = result.stdout.trim();
+  if (state === "active" || state === "activating" || state === "deactivating") return "active";
+  if (result.signal !== null || result.stderr.trim() !== "") return "unknown";
+  if (
+    (result.code === 3 && state === "inactive") ||
+    (result.code === 4 && (state === "inactive" || state === "unknown"))
+  ) {
+    return "verified";
+  }
+  return "unknown";
 }
 
 export function observedOutcome(

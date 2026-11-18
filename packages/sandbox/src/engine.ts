@@ -410,11 +410,17 @@ export function buildEngineBubblewrapInvocation(
 
   args.push("--chdir", request.cwd === "." ? "/workspace" : `/workspace/${request.cwd}`, "--");
 
-  // POSIX sh (this runs under /bin/sh, typically dash - not bash), so no
-  // "disown": plain "&" backgrounding is enough. The shell process image is
-  // replaced by exec below, and the backgrounded socat bridge is reaped
-  // along with everything else in the cgroup/pid namespace on cleanup.
-  const bridgeCommand = `${shellQuote(options.socatPath)} TCP-LISTEN:${EGRESS_BRIDGE_PORT},bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/run/acs/egress.sock >/dev/null 2>&1 & exec "$@"`;
+  // Wait for the relay inside the private namespace. The probe sends zero
+  // bytes, so the scoped proxy has no CONNECT request to authorize.
+  const socat = shellQuote(options.socatPath);
+  const bridgeCommand = [
+    `${socat} TCP-LISTEN:${EGRESS_BRIDGE_PORT},bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/run/acs/egress.sock >/dev/null 2>&1 &`,
+    `if ! ${socat} -u /dev/null TCP4:127.0.0.1:${EGRESS_BRIDGE_PORT},retry=20,interval=0.05,connect-timeout=0.025 >/dev/null 2>&1; then`,
+    "  echo 'sandbox egress relay unavailable' >&2",
+    "  exit 1",
+    "fi",
+    'exec "$@"'
+  ].join("\n");
   args.push("/bin/sh", "-c", bridgeCommand, "sh", request.executable, ...request.args);
 
   return { command: options.bwrapPath, args };

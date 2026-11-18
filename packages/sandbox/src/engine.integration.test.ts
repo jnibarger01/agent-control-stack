@@ -155,7 +155,7 @@ describe.runIf(runIntegration)("Engine isolation boundary (ADR 0014)", () => {
     }
   }, 20_000);
 
-  it("reaches an allowlisted destination only through the scoped-egress proxy", async () => {
+  it("waits for a delayed relay and reaches the allowlisted destination through scoped egress", async () => {
     const fixture = createFixture();
     try {
       const port = await startAllowedDestination("allowed-dest-reached\n");
@@ -181,13 +181,37 @@ describe.runIf(runIntegration)("Engine isolation boundary (ADR 0014)", () => {
       const request = fixtureRequest(fixture.workspace, "egress-allow", [{ host: "127.0.0.1", port }]);
       const result = await createEngineIsolation({
         authorityVerifier: fixtureAuthority(request),
-        runtimeMounts: nodeRuntimeMounts()
+        ...fixtureBridgeOptions(fixture.parent, "sleep 0.4")
       }).execute(request);
 
       expect(result).toMatchObject({ outcome: "exited", observedSuccess: true, cleanup: "verified", exitCode: 0 });
       expect(result.stdout).toContain("egress-allowed-as-expected");
       expect(result.egressAllowedCount).toBe(1);
       expect(result.egressDeniedCount).toBe(0);
+    } finally {
+      rmSync(fixture.parent, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("does not execute the workload when the private egress relay cannot start", async () => {
+    const fixture = createFixture();
+    try {
+      writeScript(fixture.workspace, `import { writeFileSync } from "node:fs"; writeFileSync("ran", "unexpected");`);
+      const request = fixtureRequest(fixture.workspace, "egress-relay-failure", [{ host: "127.0.0.1", port: 1 }]);
+      const result = await createEngineIsolation({
+        authorityVerifier: fixtureAuthority(request),
+        ...fixtureBridgeOptions(fixture.parent, "exit 1")
+      }).execute(request);
+
+      expect(result).toMatchObject({
+        outcome: "exited",
+        exitCode: 1,
+        observedSuccess: false,
+        cleanup: "verified",
+        egressAllowedCount: 0
+      });
+      expect(result.stderr).toContain("sandbox egress relay unavailable");
+      expect(existsSync(join(fixture.workspace, "ran"))).toBe(false);
     } finally {
       rmSync(fixture.parent, { recursive: true, force: true });
     }
@@ -370,6 +394,23 @@ function createFixture(): { parent: string; workspace: string } {
 
 function writeScript(workspace: string, source: string): void {
   writeFileSync(join(workspace, "script.mjs"), `${source.trim()}\n`, { mode: 0o600 });
+}
+
+function fixtureBridgeOptions(parent: string, listenerSetup: string) {
+  const bridgeDirectory = join(parent, "bridge");
+  const socatPath = join(bridgeDirectory, "socat");
+  mkdirSync(bridgeDirectory, { mode: 0o700 });
+  writeFileSync(
+    socatPath,
+    `#!/bin/sh\ncase "$1" in TCP-LISTEN:*) ${listenerSetup} ;; esac\nexec /usr/bin/socat "$@"\n`,
+    {
+      mode: 0o700
+    }
+  );
+  return {
+    socatPath,
+    runtimeMounts: [...nodeRuntimeMounts(), { hostPath: bridgeDirectory, sandboxPath: bridgeDirectory }]
+  };
 }
 
 function fixtureRequest(
