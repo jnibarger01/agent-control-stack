@@ -4,6 +4,8 @@
 
 **Proposed** (2026-11-17). Subject to ADR 0017's Codex Swarm integration review and independent authority tests.
 
+**Amendment note (2026-11-18, planning intent only; status unchanged).** The Maximum Adaptive Autonomy amendment on PR #460 moves future design away from ACS as a universal orchestrator. The F1–F10 implementation separates coordination (agents plan and run lanes) from enforcement (ACS keeps leases, fencing, budgets, approvals and terminal acceptance). Adaptive trust is not implemented. See `docs/ai-factory/implementation-status.md`.
+
 ## Context
 
 ACS already owns mission lifecycle, plans, leases, approvals, execution modes, sandboxing, verification and the canonical audit. Codex Swarm supplies within-attempt parallel work and candidate evidence, but its standalone operator service also contains approval/promotion features. An "AI factory" that adds a new queue/lease/approval/promotion pipeline would create an unreviewable split-brain authority.

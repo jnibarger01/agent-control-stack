@@ -54,7 +54,7 @@ function object(input: unknown, field: string, fields: readonly string[]): Recor
   return Object.fromEntries(keys.map((key) => [key, descriptors[key]!.value]));
 }
 
-function boundedText(input: unknown, field: string, min: number, max: number): string {
+export function boundedText(input: unknown, field: string, min: number, max: number): string {
   if (typeof input !== "string" || input.length < min || input.length > max ||
       input !== input.trim() || Array.from(input).some((ch) => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127)) {
     throw new FactoryIntentError(field, "invalid bounded text");
@@ -87,7 +87,8 @@ function list(
   return result;
 }
 
-function path(input: unknown, field: string): string {
+/** Lexical relative POSIX path check shared by intent and plan parsing. Not filesystem containment. */
+export function parseRelativePath(input: unknown, field: string): string {
   const value = boundedText(input, field, 1, 512);
   // Lexical validation is not realpath containment or a replacement for host sandboxing.
   if (!/^[A-Za-z0-9._@-]+(?:\/[A-Za-z0-9._@-]+)*$/u.test(value) ||
@@ -121,8 +122,8 @@ export function parseFactoryIntent(input: unknown): FactoryIntent {
     repository,
     baseSha,
     acceptanceCriteria: list(a.acceptanceCriteria, "acceptanceCriteria", 1, 20, (v, f) => boundedText(v, f, 6, 600)),
-    permittedPaths: list(a.permittedPaths, "permittedPaths", 1, 64, path),
-    forbiddenPaths: list(a.forbiddenPaths, "forbiddenPaths", 0, 64, path),
+    permittedPaths: list(a.permittedPaths, "permittedPaths", 1, 64, parseRelativePath),
+    forbiddenPaths: list(a.forbiddenPaths, "forbiddenPaths", 0, 64, parseRelativePath),
     budget: {
       maxLanes: safeInteger(b.maxLanes, "budget.maxLanes", 1, 8),
       maxWallClockMs: safeInteger(b.maxWallClockMs, "budget.maxWallClockMs", 1_000, 86_400_000),

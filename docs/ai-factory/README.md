@@ -4,6 +4,10 @@
 
 ACS AI Factory is the **production management layer** for governed engineering missions. It converts bounded demand into evidence-defined outcomes, routes eligible execution through the existing ACS mission/attempt lifecycle, uses Codex Swarm as an *untrusted subordinate engine*, and delivers reviewable PRs. It is not a new scheduler, approval service, lease system, audit database, or agent runtime.
 
+## Status
+
+F1–F10 are implemented and tested locally; F11 exists only as a simulated rehearsal; F12 is **NO-GO**. See [implementation-status.md](implementation-status.md) and [go-no-go.md](go-no-go.md).
+
 ## Start here
 
 1. [Product requirements](PRD.md): users, requirements, service levels, non-goals and success measures.

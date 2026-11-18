@@ -3,6 +3,7 @@
 **Program:** ACS AI Factory
 **Start:** F0 in this PR
 **Target:** F12 production go/no-go
+**Status (2026-11-18):** see [implementation-status.md](implementation-status.md) for per-slice evidence and [go-no-go.md](go-no-go.md) for the F12 decision (currently NO-GO). The MAA planning amendment recorded on PR #460 is reconciled there.
 **Rule:** Every slice is a separately reviewable PR on a pinned base, with test logs, artifact hashes, owner, failure handling and rollback. Passing a downstream test cannot waive an upstream authority gate.
 
 ## Dependency map

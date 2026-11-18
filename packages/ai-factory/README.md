@@ -1,8 +1,7 @@
-# ACS AI Factory F0
+# ACS AI Factory contracts
 
-This is an **internal TypeScript project**, not an activated npm workspace, runtime or API. F0 only parses untrusted intent and deterministically produces proposal-only hashes. It must never be accepted as a policy/approval/lease/capability token.
+Pure, side-effect-free contracts for the AI Factory: intent parsing and proposal hashing (F0), principal-bound preview (F1), admission mapping onto existing ACS coding missions (F2), and plan DAG validation (F3). `src/architecture.test.ts` enforces that no module here imports network, process, filesystem, database or authority packages.
 
-F1/F2 will add workspace metadata, update the root package lockfile and wire an authenticated ACS admission path. Keeping this directory off the workspace lockfile in F0 avoids an incomplete `npm ci` transition. The root TypeScript project graph includes it.
+Runtime pieces with side effects live in `packages/ai-factory-runtime`, and HTTP routes in `apps/gateway/src/factory-intake.ts`. Status: `docs/ai-factory/implementation-status.md`.
 
-Run `npx vitest run packages/ai-factory/src/plan.test.ts packages/ai-factory/src/architecture.test.ts`. See `docs/ai-factory/README.md`.
-
+Run: `npx vitest run packages/ai-factory`.

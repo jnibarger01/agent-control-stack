@@ -86,3 +86,14 @@ Use deterministic injected failures after write-before-ack, after lease issue, b
 
 The manifest is a required future release artifact, **not created by F0**.
 
+
+## Commands run for F1–F11 (2026-11-18)
+
+```bash
+npx vitest run packages/ai-factory packages/ai-factory-runtime apps/gateway/src/factory-intake.test.ts apps/gateway/src/factory-pilot-rehearsal.test.ts apps/mission-control-web packages/engine-adapter
+ACS_SANDBOX_INTEGRATION=1 npx vitest run packages/engine-adapter/src/codex-swarm.isolation.test.ts
+ACS_CODEX_SWARM_ACS_SERVE=<codex-swarm>/dist/acs-serve.js npx vitest run packages/engine-adapter/src/codex-swarm.parity.test.ts
+(cd <codex-swarm> && npm test && npx tsc -p tsconfig.json --noEmit)
+```
+
+The live-parity and sandbox suites are skipped unless their variables are set. A skipped run is not evidence.
