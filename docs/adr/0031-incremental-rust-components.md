@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed for the larger migration. The opt-in integration graph is implemented and its local verification is recorded in the [pilot evidence](../migrations/rust-pilot-evidence.md).
+Proposed for the larger migration. The opt-in integration graph and the opt-in live scope supervisor and egress relay are implemented, and their local verification is recorded in the [pilot evidence](../migrations/rust-pilot-evidence.md). The [migration ledger](../migrations/rust-migration-ledger.md) inventories every shipping surface. The completion brief's target, a Node-free Rust server runtime, goes beyond this ADR's TypeScript ownership of application surfaces and will need a superseding decision before the gateway moves.
 
 ## Context
 
