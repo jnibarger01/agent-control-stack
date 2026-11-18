@@ -1,0 +1,54 @@
+{
+  "schema": "rust-anything/bridge@1",
+  "root": "../..",
+  "unit": "packages/integration-manager/src/graph.ts",
+  "language": "ts",
+  "kind": "napi",
+  "crate_name": "acs-integration-graph",
+  "exports": [
+    {
+      "name": "analyzeDependencies",
+      "file": "packages/integration-manager/src/graph.ts",
+      "line": 21,
+      "params": [
+        {
+          "name": "prs",
+          "ts_type": "readonly PullRequestSnapshot[]",
+          "optional": false,
+          "rest": false
+        },
+        {
+          "name": "targetRef",
+          "ts_type": "string",
+          "optional": false,
+          "rest": false
+        }
+      ],
+      "returns": "DependencyAnalysis",
+      "is_async": false,
+      "is_generator": false,
+      "type_params": [],
+      "uses_instanceof": false
+    },
+    {
+      "name": "findOverlaps",
+      "file": "packages/integration-manager/src/graph.ts",
+      "line": 126,
+      "params": [
+        {
+          "name": "prs",
+          "ts_type": "readonly PullRequestSnapshot[]",
+          "optional": false,
+          "rest": false
+        }
+      ],
+      "returns": "Map<number, Array<{ number: number; files: string[] }>>",
+      "is_async": false,
+      "is_generator": false,
+      "type_params": [],
+      "uses_instanceof": false
+    }
+  ],
+  "classes": [],
+  "js_only": []
+}
