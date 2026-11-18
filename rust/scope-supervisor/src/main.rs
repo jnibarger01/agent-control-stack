@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod coordinator;
+mod supervise;
 
 use std::{
     io::{self, BufRead, Read, Write},
@@ -67,7 +68,17 @@ fn session(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
 }
 
 fn main() -> ExitCode {
-    if std::env::args_os().len() == 1 && session(io::stdin().lock(), io::stdout().lock()).is_ok() {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let result = match args.as_slice() {
+        // Protocol v1: termination decisions only, used by the parity harness.
+        [] => session(io::stdin().lock(), io::stdout().lock()),
+        // Protocol v2: one live, attempt-bound supervised scope.
+        [mode] if mode == "supervise" => {
+            supervise::run(io::BufReader::new(io::stdin()), io::stdout().lock())
+        }
+        _ => Err(protocol_error()),
+    };
+    if result.is_ok() {
         ExitCode::SUCCESS
     } else {
         eprintln!("ACS scope supervisor session did not finish");
