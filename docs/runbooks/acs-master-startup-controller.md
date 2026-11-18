@@ -77,3 +77,9 @@ automatically. If a reload fails or the process is interrupted, keep the receipt
 The script refuses to overwrite an altered link or remove an edited controller file. Inspect the reported
 path and preserve any operator edits before retrying. A controller installed manually requires manual
 rollback using the backup from that installation.
+
+## Validate the templates
+
+Run `npx vitest run tests/deploy/acs-stack.test.ts` on Linux with `systemd-analyze` installed. Vitest skips this
+suite where the verifier is unavailable. The suite uses temporary unit definitions and a stubbed user manager
+with real systemd unit verification.
