@@ -18,7 +18,6 @@ import {
   boundedMessage,
   captureChunk,
   emptyCapturedOutput,
-  errorMessage,
   finalizeCapturedOutput,
   launcherEnvironment,
   observationError,
@@ -27,6 +26,7 @@ import {
   runHostCommand,
   signalProcessGroup,
   signalScope,
+  startScopeTermination,
   verifyCgroupV2,
   verifyScopeCleanup,
   verifyWorkspace,
@@ -142,6 +142,12 @@ export class EngineIsolationBackend implements EngineIsolation {
         this.options
       );
       const systemd = buildEngineSystemdScopeInvocation(request, bubblewrap, unitName, this.options);
+      if (executionOptions.signal?.aborted) {
+        throw new ControlStackError(
+          "engine_isolation_cancelled",
+          "engine request was cancelled before process creation"
+        );
+      }
 
       return await this.launch(request, systemd, backendVersion, executionOptions, egressDecisions);
     } finally {
@@ -164,12 +170,7 @@ export class EngineIsolationBackend implements EngineIsolation {
   ): Promise<EngineIsolationObservation> {
     const started = this.options.now();
     const output: CapturedOutput = emptyCapturedOutput();
-    let trigger: "timeout" | "cancelled" | undefined;
-    let terminationError: string | undefined;
     let launchError: string | undefined;
-    let settled = false;
-    let terminationTimer: ReturnType<typeof setTimeout> | undefined;
-    let forceTimer: ReturnType<typeof setTimeout> | undefined;
 
     return await new Promise<EngineIsolationObservation>((resolvePromise, rejectPromise) => {
       const child = spawn(invocation.command, invocation.args, {
@@ -185,34 +186,13 @@ export class EngineIsolationBackend implements EngineIsolation {
         child.stdin.end();
       }
 
-      const terminate = async (reason: "timeout" | "cancelled"): Promise<void> => {
-        if (trigger) return;
-        trigger = reason;
-        try {
-          await signalScope(this.options, invocation.unitName, "SIGTERM");
-        } catch (error) {
-          terminationError = errorMessage(error);
-        }
-        signalProcessGroup(child.pid, "SIGTERM");
-        forceTimer = setTimeout(() => {
-          void signalScope(this.options, invocation.unitName, "SIGKILL")
-            .catch((error) => {
-              terminationError ??= errorMessage(error);
-            })
-            .finally(() => {
-              signalProcessGroup(child.pid, "SIGKILL");
-            });
-        }, request.limits.terminationGraceMs);
-      };
-
-      terminationTimer = setTimeout(() => {
-        void terminate("timeout");
-      }, request.limits.wallClockMs);
-
-      const abort = (): void => {
-        void terminate("cancelled");
-      };
-      executionOptions.signal?.addEventListener("abort", abort, { once: true });
+      const finishTermination = startScopeTermination({
+        wallClockMs: request.limits.wallClockMs,
+        terminationGraceMs: request.limits.terminationGraceMs,
+        signal: executionOptions.signal,
+        signalUnit: (signal) => signalScope(this.options, invocation.unitName, signal),
+        signalLauncher: (signal) => signalProcessGroup(child, signal)
+      });
 
       child.stdout.on("data", (chunk: Buffer) => {
         captureChunk(output, "stdout", chunk, request.limits.outputBytes);
@@ -223,26 +203,23 @@ export class EngineIsolationBackend implements EngineIsolation {
       child.on("error", (error) => {
         launchError = error.message;
       });
-      child.on("close", (exitCode, signal) => {
-        if (settled) return;
-        settled = true;
-        if (terminationTimer) clearTimeout(terminationTimer);
-        if (forceTimer) clearTimeout(forceTimer);
-        executionOptions.signal?.removeEventListener("abort", abort);
-
-        void this.finishObservation({
-          request,
-          invocation,
-          backendVersion,
-          started,
-          output,
-          trigger,
-          terminationError,
-          launchError,
-          exitCode,
-          signal,
-          egressDecisions
-        }).then(resolvePromise, rejectPromise);
+      child.once("close", (exitCode, signal) => {
+        void finishTermination()
+          .then((termination) =>
+            this.finishObservation({
+              request,
+              invocation,
+              backendVersion,
+              started,
+              output,
+              ...termination,
+              launchError,
+              exitCode,
+              signal,
+              egressDecisions
+            })
+          )
+          .then(resolvePromise, rejectPromise);
       });
     });
   }

@@ -1,5 +1,14 @@
 import { createServer, type Server } from "node:net";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -42,6 +51,32 @@ describe.runIf(runIntegration)("Engine isolation boundary (ADR 0014)", () => {
       });
     });
   }
+
+  it("honors cancellation during proxy setup before creating the workload", async () => {
+    const fixture = createFixture();
+    const controller = new AbortController();
+    try {
+      writeScript(fixture.workspace, `import { writeFileSync } from "node:fs"; writeFileSync("ran", "unexpected");`);
+      const request = fixtureRequest(fixture.workspace, "cancel-setup", [{ host: "127.0.0.1", port: 1 }]);
+      const runtimeEntries = readdirSync(fixture.parent);
+      const engine = createEngineIsolation({
+        authorityVerifier: fixtureAuthority(request),
+        runtimeMounts: nodeRuntimeMounts(),
+        runtimeDir: fixture.parent,
+        unitNameFactory: () => {
+          queueMicrotask(() => controller.abort());
+          return `acs-engine-cancel-setup-${process.pid}.scope`;
+        }
+      });
+      await expect(engine.execute(request, { signal: controller.signal })).rejects.toMatchObject({
+        code: "engine_isolation_cancelled"
+      });
+      expect(existsSync(join(fixture.workspace, "ran"))).toBe(false);
+      expect(readdirSync(fixture.parent)).toEqual(runtimeEntries);
+    } finally {
+      rmSync(fixture.parent, { recursive: true, force: true });
+    }
+  }, 20_000);
 
   it("cannot read a file under the real host HOME, and gets a private empty HOME instead", async () => {
     const fixture = createFixture();

@@ -20,6 +20,15 @@ inside a UTF-8 code point omits the unfinished character. The returned strings
 also share the output cap after decoding and redaction. Each truncation flag
 covers bytes discarded from its stream during capture or rendering.
 
+## Scope cleanup observations
+
+Both live backends settle an in-flight scope signal before the final status
+probe. Launcher close cancels pending timers and prevents further
+process-group signaling. An active or transitioning scope still receives a
+forced cleanup attempt. An interrupted, empty, or ambiguous status response
+leaves cleanup unknown. Verified cleanup requires a clean inactive or absent
+response for the attempt's unit. [systemctl exit status](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html#Exit%20status)
+
 ## Real-execution release gate
 
 Before enabling live sandbox execution (worker wiring, default configs, or

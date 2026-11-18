@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SandboxAuthorityVerifier, SandboxExecutionRequest } from "./contracts.js";
 import {
   buildBubblewrapInvocation,
@@ -12,8 +12,150 @@ import {
   emptyCapturedOutput,
   finalizeCapturedOutput,
   launcherEnvironment,
-  verifyAuthorityReceipt
+  signalProcessGroup,
+  startScopeTermination,
+  verifyAuthorityReceipt,
+  verifyScopeCleanup,
+  type HostCommandResult
 } from "./linux.js";
+
+function pendingScopeSignal() {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((accept, decline) => {
+    resolve = accept;
+    reject = decline;
+  });
+  return { promise, resolve, reject };
+}
+
+describe("scope termination", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("settles pending TERM after close without signaling the launcher or scheduling escalation", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const term = pendingScopeSignal();
+    const signalUnit = vi.fn(() => term.promise);
+    const signalLauncher = vi.fn();
+    const finish = startScopeTermination({
+      wallClockMs: 200,
+      terminationGraceMs: 100,
+      signal: controller.signal,
+      signalUnit,
+      signalLauncher
+    });
+    controller.abort();
+    const closed = finish();
+    term.reject(new Error("TERM failed"));
+    expect(await closed).toEqual({ trigger: "cancelled", terminationError: "TERM failed" });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(signalUnit.mock.calls).toEqual([["SIGTERM"]]);
+    expect(signalLauncher).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps the first trigger and settles in-flight escalation before cleanup", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const kill = pendingScopeSignal();
+    const signalUnit = vi.fn((signal: string) => (signal === "SIGKILL" ? kill.promise : Promise.resolve()));
+    const signalLauncher = vi.fn();
+    const finish = startScopeTermination({
+      wallClockMs: 200,
+      terminationGraceMs: 100,
+      signal: controller.signal,
+      signalUnit,
+      signalLauncher
+    });
+
+    await vi.advanceTimersByTimeAsync(200);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(signalUnit.mock.calls).toEqual([["SIGTERM"], ["SIGKILL"]]);
+    const completed = vi.fn();
+    const closed = finish().then(completed);
+    await Promise.resolve();
+    expect(completed).not.toHaveBeenCalled();
+    kill.resolve();
+    await closed;
+    expect(completed).toHaveBeenCalledWith({ trigger: "timeout", terminationError: undefined });
+    expect(signalLauncher.mock.calls).toEqual([["SIGTERM"]]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("clears timers and ignores cancellation after normal close", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const signalUnit = vi.fn(async () => {});
+    const finish = startScopeTermination({
+      wallClockMs: 200,
+      terminationGraceMs: 100,
+      signal: controller.signal,
+      signalUnit,
+      signalLauncher: vi.fn()
+    });
+    expect(await finish()).toEqual({ trigger: undefined, terminationError: undefined });
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(signalUnit).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not signal a process group after observing its launcher exit", () => {
+    const signal = vi.spyOn(process, "kill").mockReturnValue(true);
+    try {
+      signalProcessGroup({ pid: 123, exitCode: 0, signalCode: null }, "SIGTERM");
+      signalProcessGroup({ pid: 123, exitCode: null, signalCode: "SIGTERM" }, "SIGKILL");
+      expect(signal).not.toHaveBeenCalled();
+    } finally {
+      signal.mockRestore();
+    }
+  });
+});
+
+describe("systemd cleanup evidence", () => {
+  it.each([
+    [3, "inactive", "verified"],
+    [4, "inactive", "verified"],
+    [4, "unknown", "verified"],
+    [3, "unknown", "unknown"],
+    [3, "failed", "unknown"],
+    [1, "", "unknown"],
+    [4, "", "unknown"],
+    [1, "inactive", "unknown"]
+  ] as const)("classifies exit %s with stdout %j as %s", async (code, stdout, expected) => {
+    const hostCommandRunner = vi.fn(async () => ({ code, stdout, stderr: "", signal: null }));
+    await expect(verifyScopeCleanup({ systemctlPath: "systemctl", hostCommandRunner }, "test.scope")).resolves.toBe(
+      expected
+    );
+    expect(hostCommandRunner).toHaveBeenCalledTimes(1);
+  });
+
+  it.each<HostCommandResult>([
+    { code: null, stdout: "inactive", stderr: "", signal: "SIGKILL" },
+    { code: 4, stdout: "inactive", stderr: "manager unavailable", signal: null }
+  ])("treats a failed probe as unknown", async (result) => {
+    await expect(
+      verifyScopeCleanup({ systemctlPath: "systemctl", hostCommandRunner: async () => result }, "test.scope")
+    ).resolves.toBe("unknown");
+  });
+
+  it("escalates a reported active scope even when the probe also returned a diagnostic", async () => {
+    const hostCommandRunner = vi
+      .fn()
+      .mockResolvedValueOnce({ code: 0, stdout: "active", stderr: "manager diagnostic", signal: null })
+      .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "", signal: null });
+    await expect(verifyScopeCleanup({ systemctlPath: "systemctl", hostCommandRunner }, "test.scope")).resolves.toBe(
+      "failed"
+    );
+    expect(hostCommandRunner).toHaveBeenLastCalledWith(
+      "systemctl",
+      ["--user", "kill", "--kill-whom=all", "--signal=SIGKILL", "test.scope"],
+      { timeoutMs: 5000 }
+    );
+  });
+});
 
 describe("sandbox observation output", () => {
   it("counts raw bytes and omits a partial last code point at the shared cap", () => {

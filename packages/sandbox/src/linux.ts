@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { accessSync, constants, lstatSync, realpathSync, statfsSync, type StatsFs } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -140,12 +140,7 @@ export class BubblewrapSystemdSandbox implements SandboxBackend {
   ): Promise<SandboxExecutionObservation> {
     const started = this.options.now();
     const output = emptyCapturedOutput();
-    let trigger: "timeout" | "cancelled" | undefined;
-    let terminationError: string | undefined;
     let launchError: string | undefined;
-    let settled = false;
-    let terminationTimer: ReturnType<typeof setTimeout> | undefined;
-    let forceTimer: ReturnType<typeof setTimeout> | undefined;
 
     return await new Promise<SandboxExecutionObservation>((resolvePromise, rejectPromise) => {
       const child = spawn(invocation.command, invocation.args, {
@@ -155,34 +150,13 @@ export class BubblewrapSystemdSandbox implements SandboxBackend {
         stdio: ["ignore", "pipe", "pipe"]
       });
 
-      const terminate = async (reason: "timeout" | "cancelled"): Promise<void> => {
-        if (trigger) return;
-        trigger = reason;
-        try {
-          await signalScope(this.options, invocation.unitName, "SIGTERM");
-        } catch (error) {
-          terminationError = errorMessage(error);
-        }
-        signalProcessGroup(child.pid, "SIGTERM");
-        forceTimer = setTimeout(() => {
-          void signalScope(this.options, invocation.unitName, "SIGKILL")
-            .catch((error) => {
-              terminationError ??= errorMessage(error);
-            })
-            .finally(() => {
-              signalProcessGroup(child.pid, "SIGKILL");
-            });
-        }, request.limits.terminationGraceMs);
-      };
-
-      terminationTimer = setTimeout(() => {
-        void terminate("timeout");
-      }, request.limits.wallClockMs);
-
-      const abort = (): void => {
-        void terminate("cancelled");
-      };
-      executionOptions.signal?.addEventListener("abort", abort, { once: true });
+      const finishTermination = startScopeTermination({
+        wallClockMs: request.limits.wallClockMs,
+        terminationGraceMs: request.limits.terminationGraceMs,
+        signal: executionOptions.signal,
+        signalUnit: (signal) => signalScope(this.options, invocation.unitName, signal),
+        signalLauncher: (signal) => signalProcessGroup(child, signal)
+      });
 
       child.stdout.on("data", (chunk: Buffer) => {
         captureChunk(output, "stdout", chunk, request.limits.outputBytes);
@@ -193,25 +167,22 @@ export class BubblewrapSystemdSandbox implements SandboxBackend {
       child.on("error", (error) => {
         launchError = error.message;
       });
-      child.on("close", (exitCode, signal) => {
-        if (settled) return;
-        settled = true;
-        if (terminationTimer) clearTimeout(terminationTimer);
-        if (forceTimer) clearTimeout(forceTimer);
-        executionOptions.signal?.removeEventListener("abort", abort);
-
-        void this.finishObservation({
-          request,
-          invocation,
-          backendVersion,
-          started,
-          output,
-          trigger,
-          terminationError,
-          launchError,
-          exitCode,
-          signal
-        }).then(resolvePromise, rejectPromise);
+      child.once("close", (exitCode, signal) => {
+        void finishTermination()
+          .then((termination) =>
+            this.finishObservation({
+              request,
+              invocation,
+              backendVersion,
+              started,
+              output,
+              ...termination,
+              launchError,
+              exitCode,
+              signal
+            })
+          )
+          .then(resolvePromise, rejectPromise);
       });
     });
   }
@@ -648,10 +619,63 @@ export interface ScopeSignalOptions {
   hostCommandRunner: HostCommandRunner;
 }
 
+type TerminationSignal = "SIGTERM" | "SIGKILL";
+
+interface ScopeTerminationOptions {
+  wallClockMs: number;
+  terminationGraceMs: number;
+  signal?: AbortSignal | undefined;
+  signalUnit: (signal: TerminationSignal) => Promise<void>;
+  signalLauncher: (signal: TerminationSignal) => void;
+}
+
+// Both launchers settle their in-flight scope command before collecting the final observation.
+export function startScopeTermination(options: ScopeTerminationOptions) {
+  let trigger: "timeout" | "cancelled" | undefined;
+  let terminationError: string | undefined;
+  let closed = false;
+  let pendingSignal: Promise<void> | undefined;
+  let forceTimer: ReturnType<typeof setTimeout> | undefined;
+
+  async function send(signal: TerminationSignal): Promise<void> {
+    try {
+      await options.signalUnit(signal);
+    } catch (error) {
+      terminationError ??= errorMessage(error);
+    }
+    if (!closed) options.signalLauncher(signal);
+  }
+
+  function terminate(reason: "timeout" | "cancelled"): void {
+    if (closed || trigger) return;
+    trigger = reason;
+    pendingSignal = send("SIGTERM").then(() => {
+      if (closed) return;
+      forceTimer = setTimeout(() => {
+        pendingSignal = send("SIGKILL");
+      }, options.terminationGraceMs);
+    });
+  }
+
+  const deadline = setTimeout(() => terminate("timeout"), options.wallClockMs);
+  const abort = () => terminate("cancelled");
+  options.signal?.addEventListener("abort", abort, { once: true });
+  if (options.signal?.aborted) abort();
+
+  return async () => {
+    closed = true;
+    clearTimeout(deadline);
+    if (forceTimer) clearTimeout(forceTimer);
+    options.signal?.removeEventListener("abort", abort);
+    await pendingSignal;
+    return { trigger, terminationError };
+  };
+}
+
 export async function signalScope(
   options: ScopeSignalOptions,
   unitName: string,
-  signal: "SIGTERM" | "SIGKILL"
+  signal: TerminationSignal
 ): Promise<void> {
   const result = await options.hostCommandRunner(
     options.systemctlPath,
@@ -675,12 +699,16 @@ export async function verifyScopeCleanup(
       timeoutMs: 5_000
     });
     const state = result.stdout.trim();
-    if (result.code !== 0 && (state === "inactive" || state === "failed" || state === "unknown" || state === "")) {
-      return "verified";
-    }
     if (state === "active" || state === "activating" || state === "deactivating") {
       await signalScope(options, unitName, "SIGKILL");
       return "failed";
+    }
+    if (result.signal !== null || result.stderr.trim() !== "") return "unknown";
+    if (
+      (result.code === 3 && state === "inactive") ||
+      (result.code === 4 && (state === "inactive" || state === "unknown"))
+    ) {
+      return "verified";
     }
     return "unknown";
   } catch {
@@ -781,10 +809,13 @@ export function isContainedPath(root: string, candidate: string): boolean {
   return path === "" || (!path.startsWith(`..${sep}`) && path !== ".." && !path.startsWith(sep));
 }
 
-export function signalProcessGroup(pid: number | undefined, signal: NodeJS.Signals): void {
-  if (!pid) return;
+export function signalProcessGroup(
+  child: Pick<ChildProcess, "pid" | "exitCode" | "signalCode">,
+  signal: TerminationSignal
+): void {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
   try {
-    process.kill(-pid, signal);
+    process.kill(-child.pid, signal);
   } catch {
     // The process may already be gone; scope verification remains authoritative.
   }
