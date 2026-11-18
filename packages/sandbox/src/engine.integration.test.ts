@@ -218,11 +218,10 @@ describe.runIf(runIntegration)("Engine isolation boundary (ADR 0014)", () => {
       }).execute(request);
 
       expect(result.observedSuccess).toBe(true);
-      // 1_024 is an exact multiple of the emoji's 4-byte encoding, so the
-      // cut lands on a character boundary: no partial sequence, no U+FFFD
-      // replacement inflating the decoded string past the byte budget.
+      // Both streams share the raw budget. Launcher stderr can shift stdout's
+      // cut inside an emoji even when the total cap is divisible by four.
       expect(result.outputBytes).toBe(1_024);
-      expect(Buffer.byteLength(`${result.stdout}${result.stderr}`, "utf8")).toBe(1_024);
+      expect(Buffer.byteLength(`${result.stdout}${result.stderr}`, "utf8")).toBeLessThanOrEqual(1_024);
       expect(result.stdout).not.toContain("�");
       expect(result.stdoutTruncated || result.stderrTruncated).toBe(true);
     } finally {
@@ -255,6 +254,8 @@ describe.runIf(runIntegration)("Engine isolation boundary (ADR 0014)", () => {
 
       expect(result.observedSuccess).toBe(true);
       expect(result.outputBytes).toBe(1_025);
+      expect(Buffer.byteLength(`${result.stdout}${result.stderr}`, "utf8")).toBeLessThanOrEqual(1_025);
+      expect(result.stdout).not.toContain("�");
       expect(result.stdoutTruncated || result.stderrTruncated).toBe(true);
     } finally {
       rmSync(fixture.parent, { recursive: true, force: true });
