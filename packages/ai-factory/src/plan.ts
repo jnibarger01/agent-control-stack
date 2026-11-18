@@ -45,7 +45,7 @@ function object(input: unknown, field: string, fields: readonly string[]): Recor
   }
   const descriptors = Object.getOwnPropertyDescriptors(input);
   const keys = Object.keys(descriptors);
-  if (keys.length !== fields.length || keys.some((key) => !fields.includes(key))) {
+  if (Reflect.ownKeys(descriptors).length !== fields.length || keys.some((key) => !fields.includes(key))) {
     throw new FactoryIntentError(field, "unknown or missing field");
   }
   if (keys.some((key) => !Object.hasOwn(descriptors[key]!, "value"))) {
@@ -56,7 +56,7 @@ function object(input: unknown, field: string, fields: readonly string[]): Recor
 
 function boundedText(input: unknown, field: string, min: number, max: number): string {
   if (typeof input !== "string" || input.length < min || input.length > max ||
-      input !== input.trim() || /[\u0000-\u001f\u007f]/u.test(input)) {
+      input !== input.trim() || Array.from(input).some((ch) => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127)) {
     throw new FactoryIntentError(field, "invalid bounded text");
   }
   return input;
@@ -78,6 +78,9 @@ function list(
 ): string[] {
   if (!Array.isArray(input) || input.length < min || input.length > max) {
     throw new FactoryIntentError(field, "invalid list length");
+  }
+  for (const index of input.keys()) {
+    if (!Object.hasOwn(input, index)) throw new FactoryIntentError(field, "sparse lists are forbidden");
   }
   const result = input.map((value: unknown, index: number) => parse(value, field + "[" + index + "]"));
   if (new Set(result).size !== result.length) throw new FactoryIntentError(field, "duplicate values");

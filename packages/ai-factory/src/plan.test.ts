@@ -100,5 +100,12 @@ describe("AI Factory F0 proposal contract", () => {
     Object.assign(inherited, valid());
     expect(() => parseFactoryIntent(inherited)).toThrow();
   });
-});
 
+  it("rejects sparse input lists and symbol injection", () => {
+    const sparse = new Array(1) as string[];
+    expect(() => parseFactoryIntent({ ...valid(), acceptanceCriteria: sparse })).toThrow();
+    const injected = valid();
+    Object.defineProperty(injected, Symbol("approved"), { value: true });
+    expect(() => parseFactoryIntent(injected)).toThrow();
+  });
+});
