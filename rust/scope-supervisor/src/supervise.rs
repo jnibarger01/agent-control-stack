@@ -32,7 +32,9 @@ use serde::{Deserialize, Serialize};
 use crate::coordinator::{Coordinator, Effect, Event, Phase, Signal, Trigger};
 
 pub(crate) const VERSION: u8 = 2;
-const MAX_REQUEST_BYTES: u64 = 64 * 1024;
+/// Large enough for a base64 stdin of `MAX_STDIN_BYTES` plus the invocation.
+const MAX_REQUEST_BYTES: u64 = 6 * 1024 * 1024;
+const MAX_STDIN_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CONTROL_FRAME_BYTES: u64 = 1024;
 const MAX_CONTROL_FRAMES: u32 = 16;
 const MAX_ARGS: usize = 256;
@@ -83,6 +85,9 @@ pub(crate) struct Request {
     environment: BTreeMap<String, String>,
     systemctl_path: String,
     limits: Limits,
+    /// Canonical base64 bytes written to the workload's stdin, then closed.
+    #[serde(default)]
+    stdin: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -327,6 +332,11 @@ pub(crate) fn validate(request: &Request) -> Result<(), &'static str> {
         })
     {
         return Err("environment_invalid");
+    }
+    if let Some(stdin) = &request.stdin
+        && decode_base64(stdin).is_none_or(|bytes| bytes.len() > MAX_STDIN_BYTES)
+    {
+        return Err("stdin_invalid");
     }
     let limits = &request.limits;
     if !(100..=15 * 60 * 1000).contains(&limits.wall_clock_ms)
@@ -585,6 +595,31 @@ pub(crate) fn base64(bytes: &[u8]) -> String {
     out
 }
 
+/// Strict decoder: only canonical, padded base64 is accepted.
+pub(crate) fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(4) {
+        return None;
+    }
+    let value = |c: u8| BASE64.iter().position(|&a| a == c).map(|v| v as u32);
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let bytes = text.as_bytes();
+    for (index, quad) in bytes.chunks(4).enumerate() {
+        let last = index + 1 == bytes.len() / 4;
+        let pad = quad.iter().rev().take_while(|&&c| c == b'=').count();
+        if pad > 2 || (pad > 0 && !last) {
+            return None;
+        }
+        let mut n = 0u32;
+        for &c in &quad[..4 - pad] {
+            n = (n << 6) | value(c)?;
+        }
+        n <<= 6 * pad as u32;
+        let decoded = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+        out.extend_from_slice(&decoded[..3 - pad]);
+    }
+    (base64(&out) == text).then_some(out)
+}
+
 fn signal_str(number: i32) -> Option<&'static str> {
     NixSignal::try_from(number)
         .ok()
@@ -612,7 +647,11 @@ fn supervise<'a>(request: &'a Request, input: impl BufRead + Send + 'static) -> 
         .args(&request.args)
         .env_clear()
         .envs(&request.environment)
-        .stdin(Stdio::null())
+        .stdin(if request.stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
@@ -623,6 +662,13 @@ fn supervise<'a>(request: &'a Request, input: impl BufRead + Send + 'static) -> 
     match spawned {
         Ok(mut child) => {
             pgid = i32::try_from(child.id()).ok().map(Pid::from_raw);
+            if let (Some(mut pipe), Some(text)) = (child.stdin.take(), request.stdin.as_deref()) {
+                let bytes = decode_base64(text).unwrap_or_default();
+                // A workload that exits without reading stdin closes the pipe; ignore EPIPE.
+                thread::spawn(move || {
+                    let _ = pipe.write_all(&bytes);
+                });
+            }
             let out = spawn_stream_reader(
                 child.stdout.take().expect("piped stdout"),
                 true,

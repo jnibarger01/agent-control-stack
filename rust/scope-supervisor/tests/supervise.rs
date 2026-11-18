@@ -487,3 +487,27 @@ fn invalid_start_requests_launch_nothing() {
     );
     assert_eq!(rejected(|s| s["extra"] = json!(true)), "request_malformed");
 }
+
+#[test]
+fn stdin_is_delivered_and_must_be_canonical_base64() {
+    let fixture = Fixture::new("inactive");
+    let mut start = start_frame(&fixture, "cat", 5000, 4096);
+    start["stdin"] = json!("aGVsbG8gc3RkaW4=");
+    let (obs, _) = exchange(&start, &[], false);
+    assert_eq!(decode(&obs["stdout"]), b"hello stdin");
+    assert_eq!(
+        rejected(|s| s["stdin"] = json!("aGVsbG8=x")),
+        "stdin_invalid"
+    );
+    assert_eq!(
+        rejected(|s| s["stdin"] = json!("aGVsbG9=")),
+        "stdin_invalid"
+    );
+    let fixture = Fixture::new("inactive");
+    let (obs, _) = exchange(
+        &start_frame(&fixture, "cat; echo done", 5000, 4096),
+        &[],
+        false,
+    );
+    assert_eq!(decode(&obs["stdout"]), b"done\n");
+}
