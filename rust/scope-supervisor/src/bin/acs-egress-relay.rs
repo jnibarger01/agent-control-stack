@@ -18,7 +18,6 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc,
     },
     thread,
     time::{Duration, Instant},
@@ -318,50 +317,37 @@ fn run(mut input: impl BufRead + Send + 'static, output: Output) -> Result<(), &
             return Err("listen_failed");
         }
     };
-    if listener.set_nonblocking(true).is_err() {
-        let _ = std::fs::remove_file(path);
-        emit(
-            &output,
-            &Frame::Rejected {
-                code: "listen_failed",
-            },
-        );
-        return Err("listen_failed");
-    }
     emit(&output, &Frame::Ready);
-
-    // Any further stdin (data or EOF) ends the relay; ACS never sends more frames.
-    let (stop_tx, stop_rx) = mpsc::channel::<()>();
-    thread::spawn(move || {
-        let mut sink = [0u8; 64];
-        let _ = input.read(&mut sink);
-        let _ = stop_tx.send(());
-    });
 
     let tracker = Arc::new(Tracker {
         closing: AtomicBool::new(false),
         sockets: Mutex::new(Vec::new()),
     });
-    loop {
-        match stop_rx.try_recv() {
-            Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
-            Err(mpsc::TryRecvError::Empty) => {}
-        }
-        match listener.accept() {
-            Ok((client, _)) => {
-                if client.set_nonblocking(false).is_err() {
-                    continue;
+    // Blocking accept: no polling delay on the CONNECT path. Shutdown sets
+    // `closing` and wakes the accept with one local connection.
+    let acceptor = {
+        let (start, output, tracker) = (start.clone(), output.clone(), tracker.clone());
+        thread::spawn(move || {
+            for client in listener.incoming() {
+                if tracker.closing.load(Ordering::SeqCst) {
+                    return;
                 }
+                let Ok(client) = client else {
+                    thread::sleep(Duration::from_millis(1));
+                    continue;
+                };
                 let (start, output, tracker) = (start.clone(), output.clone(), tracker.clone());
                 thread::spawn(move || handle(client, &start, &output, &tracker));
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(5));
-            }
-            Err(_) => thread::sleep(Duration::from_millis(5)),
-        }
-    }
-    drop(listener);
+        })
+    };
+
+    // Any further stdin (data or EOF) ends the relay; ACS never sends more frames.
+    let mut sink = [0u8; 64];
+    let _ = input.read(&mut sink);
+    tracker.closing.store(true, Ordering::SeqCst);
+    let _ = UnixStream::connect(path);
+    let _ = acceptor.join();
     tracker.close_all();
     let _ = std::fs::remove_file(path);
     emit(&output, &Frame::Closed);
