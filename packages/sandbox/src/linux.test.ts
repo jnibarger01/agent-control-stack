@@ -142,18 +142,43 @@ describe("systemd cleanup evidence", () => {
   });
 
   it("escalates a reported active scope even when the probe also returned a diagnostic", async () => {
+    const active = { code: 0, stdout: "active", stderr: "manager diagnostic", signal: null };
     const hostCommandRunner = vi
       .fn()
-      .mockResolvedValueOnce({ code: 0, stdout: "active", stderr: "manager diagnostic", signal: null })
+      .mockResolvedValue(active)
+      .mockResolvedValueOnce(active)
       .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "", signal: null });
     await expect(verifyScopeCleanup({ systemctlPath: "systemctl", hostCommandRunner }, "test.scope")).resolves.toBe(
       "failed"
     );
-    expect(hostCommandRunner).toHaveBeenLastCalledWith(
+    expect(hostCommandRunner).toHaveBeenNthCalledWith(
+      2,
       "systemctl",
       ["--user", "kill", "--kill-whom=all", "--signal=SIGKILL", "test.scope"],
       { timeoutMs: 5000 }
     );
+    expect(hostCommandRunner).toHaveBeenCalledTimes(5);
+  });
+
+  it.each([
+    [{ code: 3, stdout: "inactive", stderr: "", signal: null }, "verified"],
+    [{ code: 4, stdout: "unknown", stderr: "", signal: null }, "verified"],
+    [{ code: 4, stdout: "unknown", stderr: "manager unavailable", signal: null }, "unknown"]
+  ] as const)("requires fresh terminal evidence after forced cleanup (%j)", async (terminal, expected) => {
+    const hostCommandRunner = vi
+      .fn()
+      .mockResolvedValueOnce({ code: 0, stdout: "active", stderr: "", signal: null })
+      .mockResolvedValueOnce({ code: 0, stdout: "", stderr: "", signal: null })
+      .mockResolvedValueOnce({ code: 0, stdout: "deactivating", stderr: "", signal: null })
+      .mockResolvedValueOnce(terminal);
+
+    await expect(verifyScopeCleanup({ systemctlPath: "systemctl", hostCommandRunner }, "test.scope")).resolves.toBe(
+      expected
+    );
+    expect(hostCommandRunner).toHaveBeenCalledTimes(4);
+    expect(hostCommandRunner).toHaveBeenLastCalledWith("systemctl", ["--user", "is-active", "test.scope"], {
+      timeoutMs: 250
+    });
   });
 });
 
