@@ -196,4 +196,57 @@ describe("CodexEngineAdapter", () => {
     const outcome = await adapter.invoke(task(binary));
     expect(outcome).toEqual({ status: "timeout", durationMs: 5_000 });
   });
+
+  it.each([
+    ["an unknown outcome", "unknown", "unknown"],
+    ["unverified cleanup", "exited", "failed"]
+  ] as const)(
+    "maps %s to isolation_unknown so the attempt is reconciled, not retried",
+    async (_name, observedOutcome, cleanup) => {
+      const binary = writeFixtureBinary(["#!/bin/sh", "exit 0"].join("\n"));
+      const adapter = new CodexEngineAdapter({
+        binaryPath: binary,
+        authorityVerifier: fakeAuthority(),
+        credentialSource: () => "fake-key",
+        isolationFactory: () => ({
+          execute: async () => ({
+            schemaVersion: "acs.engine-isolation-observation.v1",
+            executionMode: "live",
+            backend: "engine-isolation-v1",
+            backendVersion: "test",
+            unitName: "acs-engine-test.scope",
+            outcome: observedOutcome,
+            observedSuccess: false,
+            cleanup,
+            exitCode: observedOutcome === "exited" ? 0 : null,
+            error: "supervisor lost its control channel",
+            stdout: "",
+            stderr: "",
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            outputBytes: 0,
+            startedAt: new Date().toISOString(),
+            finishedAt: new Date().toISOString(),
+            durationMs: 5_000,
+            enforcedLimits: {
+              wallClockMs: 5000,
+              terminationGraceMs: 500,
+              cpuQuotaPercent: 100,
+              memoryBytes: 1,
+              pids: 1,
+              outputBytes: 1,
+              tmpfsBytes: 1
+            },
+            egressAllowedCount: 0,
+            egressDeniedCount: 0,
+            egressDeniedSample: []
+          }),
+          preflight: async () => {}
+        })
+      });
+
+      const outcome = await adapter.invoke(task(binary));
+      expect(outcome).toEqual({ status: "isolation_unknown", message: "supervisor lost its control channel" });
+    }
+  );
 });

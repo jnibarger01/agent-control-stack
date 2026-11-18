@@ -138,6 +138,9 @@ export class EngineAdapterRegistry {
 }
 
 function outcomeFromObservation(observation: EngineIsolationObservation): EngineOutcome {
+  if (observation.outcome === "unknown" || observation.cleanup !== "verified") {
+    return { status: "isolation_unknown", message: observation.error ?? `engine isolation cleanup is ${observation.cleanup}` };
+  }
   if (observation.outcome === "timed_out") return { status: "timeout", durationMs: observation.durationMs };
   if (observation.outcome === "cancelled") return { status: "cancelled", durationMs: observation.durationMs };
   if (observation.outcome === "exited" && observation.exitCode !== null) {
