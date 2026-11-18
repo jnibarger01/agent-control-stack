@@ -28,10 +28,13 @@ function median(samples) {
 const rows = [];
 for (const [dataset, count, dense, repetitions] of [
   ["routine", 24, false, 300],
+  ["GitHub single-page limit", 100, true, 60],
   ["stacked and overlapping", 150, true, 40],
   ["large stress", 1500, false, 3]
 ]) {
   const prs = workload(count, dense);
+  // Reconciliation sorts snapshots by PR number before invoking the kernels.
+  prs.sort((a, b) => a.number - b.number);
   for (const [fn, args] of [
     ["analyzeDependencies", [prs, "main"]],
     ["findOverlaps", [prs]]

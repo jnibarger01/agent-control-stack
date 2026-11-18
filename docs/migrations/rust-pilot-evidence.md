@@ -23,28 +23,33 @@ The Linux x86-64 GNU build used rustc and Cargo 1.99.1, Rust Anything 1.5.1 and 
 
 The native integration run covering the integration manager, Outcome Engine, CLI outcome command and outcome boundary tests passed all 248 tests across 20 files.
 
+The compiled package smoke test also passed in a read-only Debian Bookworm container with networking disabled, Node 24.16.0 and glibc 2.36. This used the Dockerfile's `node:24.16.0-bookworm-slim` base at digest `sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203`. It also passed on Bookworm with Node 24.22.3. The tests used staged synthetic fixtures, the built addon and the package loader. The scratch filesystem needs executable mappings for Node to load the addon.
+
 ## Repository gate
 
 - `npm run check` exited 1 with the CI pins Node 24.16.0 and npm 11.17.0 on the local Linux host. Optional external CLI tests used the CI-style no-client configuration. An unresolved OpenCode fixture override selected its normal skip path because the installed binary rejects the fixture's `--pure` flag. The separate focused runs exercised native graph opt-in.
 - Formatting, lint, build, public/DC/JC contract drift, dry-run release boundary, Mission Control harness checks, and the main Vitest run passed. Vitest reported 5,322 passed and 107 skipped across 425 files. The gate advanced to `test:jc-native`, where 33 of 35 suites passed. The approval fixture failed to observe a marker from a child using the temporary Node binary path, and the workload isolation fixture failed to observe expected PTY output. The approval failure repeated on the pinned binary. The isolated PTY rerun passed on the pinned binary, and the full Jace Commander suite passed 35 of 35 on the host's system Node.
-- The failed Jace Commander suite ended the chained command before authority coverage and audit. `npm run test:authority-coverage` passed separately under the same CI-style configuration and met all 12 file thresholds. `npm run security:audit` exited 1 with 15 moderate and six high findings in the baseline npm dependency tree. The pilot changes no npm dependencies. [High-severity advisory](https://github.com/advisories/GHSA-fc5q-39xc-vjpf)
+- A retry installed the pinned toolchain under an ignored worktree directory with the standard `bin/node`, `bin/npm` and `lib/node_modules/npm` layout. That put the Node executable outside the workload sandbox's private `/tmp` and satisfied the ACS sandbox unit fixture's npm layout. The pinned standalone Jace Commander run passed 35 of 35 suites, and the ACS Linux sandbox unit suite passed all 12 tests. Two full-gate retries with the corrected layout each reached 5,321 passed and 107 skipped before a different gateway fixture failed its five-second timeout. The affected production-config suite passed 10 of 10 on its own, and the affected agent-dispatch case passed in 766 ms in isolation. The eight-worker full retry still timed out in agent dispatch, so the full-gate discrepancy is open.
+- The failed Jace Commander suite ended the chained command before authority coverage and audit. `npm run test:authority-coverage` passed separately under the same CI-style configuration and met all 12 file thresholds. `npm run security:audit` exited 1 with 15 moderate and six high findings in the baseline npm dependency tree. The advisory reports no patched picomatch release through 4.0.7, which matched the registry's latest version at verification time. The pilot changes no npm dependencies. [High-severity advisory](https://github.com/advisories/GHSA-fc5q-39xc-vjpf)
 - Browser and external CLI interoperability gates were limited to their documented test conditions. Cross-platform native binaries and a production canary remain future acceptance work.
 
 ## Performance
 
-Node 24.16.0, Linux x86-64, AMD Ryzen 7 9800X3D, one pinned logical CPU. Both implementations used identical synthetic PR snapshots, including branch stacks, fork flags and file overlaps. Measurements include request projection, Node-API calls and reconstruction of the public result. The workload benchmark warmed both paths, alternated run order, and took the median of seven rounds. It checks ordered parity at each size before timing.
+Node 24.16.0, Linux x86-64, AMD Ryzen 7 9800X3D, one pinned logical CPU. Both implementations used identical synthetic PR snapshots, including branch stacks, fork flags and file overlaps. Inputs follow reconciliation's ascending PR order. The GitHub source refuses a partial result beyond 100 open PRs, so 150 and 1,500 PRs measure kernel capacity. Measurements include request projection, Node-API calls and reconstruction of the public result. The workload benchmark warmed both paths, alternated run order, and took the median of seven rounds. It checks ordered parity at each size before timing.
 
 | Dataset   | Operation    | TypeScript ms/call | Rust ms/call | TS/Rust |
 | --------- | ------------ | -----------------: | -----------: | ------: |
-| 24 PRs    | Dependencies |              0.050 |        0.026 |   1.95× |
-| 24 PRs    | Overlaps     |              0.070 |        0.074 |   0.94× |
-| 150 PRs   | Dependencies |              0.650 |        0.097 |   6.70× |
-| 150 PRs   | Overlaps     |              3.958 |        1.733 |   2.28× |
-| 1,500 PRs | Dependencies |             63.215 |        1.143 |  55.29× |
-| 1,500 PRs | Overlaps     |            475.268 |      178.982 |   2.66× |
+| 24 PRs    | Dependencies |              0.029 |        0.018 |   1.62× |
+| 24 PRs    | Overlaps     |              0.045 |        0.041 |   1.10× |
+| 100 PRs   | Dependencies |              0.216 |        0.042 |   5.14× |
+| 100 PRs   | Overlaps     |              1.342 |        0.487 |   2.75× |
+| 150 PRs   | Dependencies |              0.333 |        0.062 |   5.35× |
+| 150 PRs   | Overlaps     |              3.029 |        1.111 |   2.73× |
+| 1,500 PRs | Dependencies |             32.823 |        0.683 |  48.04× |
+| 1,500 PRs | Overlaps     |            311.471 |       74.928 |   4.16× |
 
-Rust Anything's recorded mix measured 3.22× for dependencies and 1.38× for overlaps. The larger speedups reflect algorithmic differences as well as language. Payload size, overlap density and the bridge all affect latency. Keep TypeScript as the default. [Rust Anything benchmark](evidence/graph-rust-anything-bench.txt) · [Workload benchmark JSON](evidence/graph-benchmark.json)
+Rust Anything's recorded mix measured 3.22× for dependencies and 1.38× for overlaps. An earlier descending-order workload measured 0.94× for overlaps at 24 PRs, so these small-input timings cannot establish a reliable adoption threshold. The larger speedups reflect algorithmic differences as well as language. Keep TypeScript as the default. [Rust Anything benchmark](evidence/graph-rust-anything-bench.txt) · [Workload benchmark JSON](evidence/graph-benchmark.json)
 
 ## Live sandbox baseline for the next slice
 
-The opt-in Linux and engine containment suites exercised Bubblewrap 0.13.1, systemd and cgroup v2 on disposable fixtures. The run passed 16 of 18 tests. Engine output decoding produced 1,026 UTF-8 bytes against a 1,024-byte cap, which reproduced in a focused run. The Linux cancellation observation was `unknown` with cleanup `failed` in the full run. It passed when run in isolation, so the cancellation discrepancy remains unresolved. Both suites used the existing sandbox code. The supervisor implementation is deferred pending an independently green baseline. [Next slice](rust-roadmap.md#next-slice-for-linux-scope-supervision)
+The opt-in Linux and engine containment suites exercised Bubblewrap 0.13.1, systemd and cgroup v2 on disposable fixtures. The initial run passed 16 of 18 tests. A serial rerun passed 17 of 18. Engine output decoding again produced 1,026 UTF-8 bytes against a 1,024-byte cap. The Linux cancellation observation was `unknown` with cleanup `failed` in the initial run. It passed both in isolation and in the serial rerun. The supervisor implementation is deferred pending an independently green baseline. [Next slice](rust-roadmap.md#next-slice-for-linux-scope-supervision)
