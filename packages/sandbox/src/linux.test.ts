@@ -6,11 +6,56 @@ import type { SandboxAuthorityVerifier, SandboxExecutionRequest } from "./contra
 import {
   buildBubblewrapInvocation,
   buildSystemdScopeInvocation,
+  captureChunk,
   checkSandboxPrerequisites,
   createLinuxSandbox,
+  emptyCapturedOutput,
+  finalizeCapturedOutput,
   launcherEnvironment,
   verifyAuthorityReceipt
 } from "./linux.js";
+
+describe("sandbox observation output", () => {
+  it("counts raw bytes and omits a partial last code point at the shared cap", () => {
+    const output = emptyCapturedOutput();
+    const bytes = Buffer.from("🙂🙂");
+    captureChunk(output, "stderr", Buffer.from("!"), 6);
+    captureChunk(output, "stdout", bytes.subarray(0, 2), 6);
+    captureChunk(output, "stdout", bytes.subarray(2), 6);
+
+    expect(finalizeCapturedOutput(output, 6)).toEqual({
+      stdout: "🙂",
+      stderr: "!",
+      stdoutTruncated: true,
+      stderrTruncated: false,
+      outputBytes: 6
+    });
+  });
+
+  it("caps normalized invalid UTF-8 without emitting a partial replacement character", () => {
+    const output = emptyCapturedOutput();
+    captureChunk(output, "stdout", Buffer.from([0x61, 0x62, 0x63, 0x80]), 4);
+    const observation = finalizeCapturedOutput(output, 4);
+
+    expect(observation).toEqual({
+      stdout: "abc",
+      stderr: "",
+      stdoutTruncated: true,
+      stderrTruncated: false,
+      outputBytes: 4
+    });
+  });
+
+  it("applies the existing redactor before publishing bounded output", () => {
+    const output = emptyCapturedOutput();
+    captureChunk(output, "stderr", Buffer.from("TOKEN=fixture-value"), 24);
+    expect(finalizeCapturedOutput(output, 24)).toMatchObject({
+      stderr: "[redacted]",
+      stderrTruncated: false,
+      outputBytes: 19
+    });
+  });
+});
 
 function validSandboxRequest(overrides: Partial<SandboxExecutionRequest> = {}): SandboxExecutionRequest {
   return {

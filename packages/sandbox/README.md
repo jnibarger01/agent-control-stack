@@ -12,6 +12,14 @@ Execution boundary for ACS.
 Do not claim real command execution or hardened OS sandbox isolation until the
 release gate below is complete.
 
+## Observation output
+
+Both live backends share one raw byte budget for stdout and stderr.
+`outputBytes` counts the captured bytes before decoding and redaction. A cut
+inside a UTF-8 code point omits the unfinished character. The returned strings
+also share the output cap after decoding and redaction. Each truncation flag
+covers bytes discarded from its stream during capture or rendering.
+
 ## Real-execution release gate
 
 Before enabling live sandbox execution (worker wiring, default configs, or

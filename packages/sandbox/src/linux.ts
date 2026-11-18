@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { accessSync, constants, lstatSync, realpathSync, statfsSync, type StatsFs } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { ControlStackError, redactValue } from "@agent-control-stack/shared";
 import {
   sandboxAuthorityReceiptSchema,
@@ -242,11 +243,7 @@ export class BubblewrapSystemdSandbox implements SandboxBackend {
       cleanup,
       exitCode: input.exitCode,
       ...(input.signal ? { signal: input.signal } : {}),
-      stdout: redactOutput(Buffer.concat(input.output.stdout).toString("utf8")),
-      stderr: redactOutput(Buffer.concat(input.output.stderr).toString("utf8")),
-      stdoutTruncated: input.output.stdoutTruncated,
-      stderrTruncated: input.output.stderrTruncated,
-      outputBytes: input.output.stdoutBytes + input.output.stderrBytes,
+      ...finalizeCapturedOutput(input.output, input.request.limits.outputBytes),
       startedAt: input.started.toISOString(),
       finishedAt: finished.toISOString(),
       durationMs: Math.max(0, finished.getTime() - input.started.getTime()),
@@ -750,6 +747,33 @@ export function captureChunk(
     if (stream === "stdout") output.stdoutTruncated = true;
     else output.stderrTruncated = true;
   }
+}
+
+export function finalizeCapturedOutput(output: CapturedOutput, maximumBytes: number) {
+  const stdout = finalizeStream(output.stdout, output.stdoutTruncated, maximumBytes);
+  const stderr = finalizeStream(
+    output.stderr,
+    output.stderrTruncated,
+    maximumBytes - Buffer.byteLength(stdout.text, "utf8")
+  );
+  return {
+    stdout: stdout.text,
+    stderr: stderr.text,
+    stdoutTruncated: stdout.truncated,
+    stderrTruncated: stderr.truncated,
+    outputBytes: output.stdoutBytes + output.stderrBytes
+  };
+}
+
+function finalizeStream(chunks: Buffer[], truncated: boolean, maximumBytes: number) {
+  const bytes = Buffer.concat(chunks);
+  // If capture cut the stream short, omit the unfinished character at the cut.
+  const text = redactOutput(truncated ? new StringDecoder("utf8").write(bytes) : bytes.toString("utf8"));
+  if (Buffer.byteLength(text, "utf8") <= maximumBytes) return { text, truncated };
+
+  // Decoding invalid bytes or applying redaction can expand the rendered output.
+  const prefix = Buffer.from(text, "utf8").subarray(0, maximumBytes);
+  return { text: new StringDecoder("utf8").write(prefix), truncated: true };
 }
 
 export function isContainedPath(root: string, candidate: string): boolean {
