@@ -43,6 +43,8 @@ ADR status values:
 | [0028](0028-outcome-engine-verdict-records.md)                           | Outcome Engine verdicts are evidence records, never authority                             | Accepted                            |
 | [0029](0029-desktop-harness-is-an-acs-client.md)                         | The desktop harness is an ACS client; ACS stays the only execution authority              | Proposed                            |
 
+| [0030](0030-ai-factory-demand-management-layer.md) | AI Factory demand and evidence workflow within ACS | Proposed |
+
 ## Decision rules
 
 1. If a decision affects privilege, auditability, approval, or remote exposure, create an ADR before implementation.
