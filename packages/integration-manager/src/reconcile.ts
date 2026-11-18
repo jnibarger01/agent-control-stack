@@ -1,5 +1,5 @@
 import { evaluateGate } from "./gate.js";
-import { analyzeDependencies, findOverlaps } from "./graph.js";
+import { analyzeDependencies, findOverlaps } from "./graph-backend.js";
 import type { GitRunner } from "./git-simulator.js";
 import { MergeSimulator } from "./git-simulator.js";
 import {

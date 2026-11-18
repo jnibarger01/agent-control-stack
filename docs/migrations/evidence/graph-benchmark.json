@@ -1,0 +1,62 @@
+{
+  "node": "v24.16.0",
+  "arch": "x64",
+  "os": "linux",
+  "cpu": "AMD Ryzen 7 9800X3D 8-Core Processor",
+  "rows": [
+    {
+      "dataset": "routine",
+      "pullRequests": 24,
+      "fn": "analyzeDependencies",
+      "repetitions": 300,
+      "typescriptMs": 0.04971988666666666,
+      "nativeMs": 0.025528670000000014,
+      "speedup": 1.9476097527472693
+    },
+    {
+      "dataset": "routine",
+      "pullRequests": 24,
+      "fn": "findOverlaps",
+      "repetitions": 300,
+      "typescriptMs": 0.06997204666666676,
+      "nativeMs": 0.07432969333333346,
+      "speedup": 0.9413740798428332
+    },
+    {
+      "dataset": "stacked and overlapping",
+      "pullRequests": 150,
+      "fn": "analyzeDependencies",
+      "repetitions": 40,
+      "typescriptMs": 0.6497034749999984,
+      "nativeMs": 0.09700002499999982,
+      "speedup": 6.697972242790654
+    },
+    {
+      "dataset": "stacked and overlapping",
+      "pullRequests": 150,
+      "fn": "findOverlaps",
+      "repetitions": 40,
+      "typescriptMs": 3.9582158500000046,
+      "nativeMs": 1.7327893000000016,
+      "speedup": 2.284303030957082
+    },
+    {
+      "dataset": "large stress",
+      "pullRequests": 1500,
+      "fn": "analyzeDependencies",
+      "repetitions": 3,
+      "typescriptMs": 63.21496800000008,
+      "nativeMs": 1.1432810000001155,
+      "speedup": 55.292590360544516
+    },
+    {
+      "dataset": "large stress",
+      "pullRequests": 1500,
+      "fn": "findOverlaps",
+      "repetitions": 3,
+      "typescriptMs": 475.26797200000027,
+      "nativeMs": 178.98219566666617,
+      "speedup": 2.655392455264838
+    }
+  ]
+}
