@@ -1,0 +1,141 @@
+{
+  "description": "acs.jc.v1 sign/verify interop vector. Produced by agent-control-stack (packages/desktop-commander-adapter/src/jace-commander-capability.ts) with a deterministic TEST-ONLY Ed25519 key; verified by desktop-commander JcCapabilityVerifier. Ed25519 is deterministic, so any change to canonicalization, field set, or hashing changes the signatures.",
+  "keySeed": "sha256(\"acs.jc.v1 interop vector seed v1\") as the raw 32-byte Ed25519 seed (test only)",
+  "publicKey": "MCowBQYDK2VwAyEAnsp5IXUnUBq1NrvXqsl49eLKQWThIMgRaR_Xa7brKnc",
+  "keyId": "acs-jc-interop-1",
+  "runtimeId": "jc-interop-runtime",
+  "verifyAtMs": 1790424010000,
+  "cases": [
+    {
+      "name": "read tool",
+      "toolName": "acs_read",
+      "arguments": {
+        "view": "work-items",
+        "status": "needs_approval"
+      },
+      "invocationHash": "5123f725637c78423f07e037d53c60fbd320f4aeab116991f5dcfd91ee39ad38",
+      "canonicalPayloadSha256": "0ba153a768c464b21f6a20f6045875db4b82b6f4d55226c6db5072fb5d597773",
+      "capability": {
+        "payload": {
+          "version": "acs.jc.v1",
+          "issuer": "acs",
+          "audience": "jace-commander",
+          "runtimeId": "jc-interop-runtime",
+          "workItemId": "wi_interop_1",
+          "attemptId": "attempt_interop_1",
+          "leaseId": "lease_interop_1",
+          "leaseEpoch": 1,
+          "toolName": "acs_read",
+          "normalizedArguments": {
+            "status": "needs_approval",
+            "view": "work-items"
+          },
+          "invocationHash": "5123f725637c78423f07e037d53c60fbd320f4aeab116991f5dcfd91ee39ad38",
+          "actionHash": "bf0a9567032309b7baa0f4bd90dc12357f538dfe9ef120e5abd45d4c9b9039d6",
+          "requestHash": "19f1064b619d49d35392eac7261cd7266c720671fc594f4b226f32bf0bee74ba",
+          "planHash": "e26d9cd1dae99fe1f83a87da2f873a25d4c51c62290b003465c57ff544a899fd",
+          "scopes": [
+            "integration.read"
+          ],
+          "issuedAt": "2026-09-26T12:00:00.000Z",
+          "expiresAt": "2026-09-26T12:00:29.000Z",
+          "nonce": "nj8VYyTULw6ktvT86B1W-9ZKIUOj_dYKEw2ckOW01og"
+        },
+        "signature": "HBHMFcHiO-VsFevGp8lOf_49CZjeH8jGPxVhJprL8H8cPSo9JJIqkE7bT2XNdRWBzjvCJZchxjUgxwF7aDz0Bw",
+        "keyId": "acs-jc-interop-1"
+      }
+    },
+    {
+      "name": "approved privileged_exec",
+      "toolName": "privileged_exec",
+      "arguments": {
+        "argv": [
+          "/usr/bin/apt-get",
+          "install",
+          "-y",
+          "jq"
+        ],
+        "cwd": "/",
+        "timeoutMs": 300000,
+        "stdin": "y\n"
+      },
+      "invocationHash": "8b5ae74ff8132ee4bb09863d7fbc9fe3a12bf66e80e824c609fd7874a22e1f52",
+      "canonicalPayloadSha256": "a9f91885191c55f64513c16d8e67f2410b04c07d885bdbbdd9c4874c211b3547",
+      "capability": {
+        "payload": {
+          "version": "acs.jc.v1",
+          "issuer": "acs",
+          "audience": "jace-commander",
+          "runtimeId": "jc-interop-runtime",
+          "workItemId": "wi_interop_2",
+          "attemptId": "attempt_interop_2",
+          "leaseId": "lease_interop_2",
+          "leaseEpoch": 1,
+          "toolName": "privileged_exec",
+          "normalizedArguments": {
+            "argv": [
+              "/usr/bin/apt-get",
+              "install",
+              "-y",
+              "jq"
+            ],
+            "cwd": "/",
+            "stdin": "y\n",
+            "timeoutMs": 300000
+          },
+          "invocationHash": "8b5ae74ff8132ee4bb09863d7fbc9fe3a12bf66e80e824c609fd7874a22e1f52",
+          "actionHash": "500919b59d84baef88dbb44d9dfcdb366e95e089230be6b649accf77b29cdbc9",
+          "requestHash": "6fc63565247226593c49a36e9da488e6e1c33a9a1fcd8a76f55573483136b880",
+          "planHash": "4bbcce8051290ac52c4c5ecdcd12c1b187ecaa7018122b258cf294ca3b565469",
+          "scopes": [
+            "process.privileged"
+          ],
+          "approvalId": "plan_approval_interop_2",
+          "issuedAt": "2026-09-26T12:00:00.000Z",
+          "expiresAt": "2026-09-26T12:00:29.000Z",
+          "nonce": "dHTB5-2SmvWA_mbkYLBgOWDe_uDIOZ88QKKhZgt9bwk"
+        },
+        "signature": "mH39ScC34eEeLmv8M6qEniA-I26KQrnjKvkeA7CiMUWVNCvmcL-mQqWBaAZW2rtMwSs7seRIgWCkR3g_VnwLCg",
+        "keyId": "acs-jc-interop-1"
+      }
+    }
+  ],
+  "negatives": [
+    {
+      "name": "acs.dc.v1 audience cross-use",
+      "toolName": "acs_read",
+      "arguments": {
+        "view": "health"
+      },
+      "expectedCode": "JC_CAPABILITY_VERSION_INVALID",
+      "capability": {
+        "payload": {
+          "version": "acs.dc.v1",
+          "issuer": "acs",
+          "audience": "desktop-commander",
+          "runtimeId": "jc-interop-runtime",
+          "workItemId": "wi_interop_3",
+          "attemptId": "attempt_interop_3",
+          "leaseId": "lease_interop_3",
+          "leaseEpoch": 1,
+          "toolName": "acs_read",
+          "normalizedArguments": {
+            "view": "health"
+          },
+          "invocationHash": "92aa7dd353ab8a15eadd7524b00e43aff6287cca90aef6194172861f41991461",
+          "actionHash": "0eeb572a9deb2d6ecece556c1eeb8f0d95b0a03ee79af2892e42fb8c8fabe36c",
+          "requestHash": "6a9bf8080a9636f003c3b91da45caf49d44e2fb974eca1d0a3ad51fd943f942b",
+          "planHash": "a2c7ffef59d61daa74f0dedf36a74d21a177de4e00c9883d8518f890f14d8916",
+          "scopes": [
+            "fs.read"
+          ],
+          "issuedAt": "2026-09-26T12:00:00.000Z",
+          "expiresAt": "2026-09-26T12:00:29.000Z",
+          "nonce": "87qeQI4G_PwjQOCG0fEovM5wZR0K9mPX-8ljja7_hxI"
+        },
+        "signature": "UkIRrL2osdEckx90ku3rjpw_ynVNiJl9xSLAWjUcg7p_5CxYhVEXsQA-WHkrODx-6HhKnIuduFu6kaXyFXZaBg",
+        "keyId": "acs-jc-interop-1"
+      }
+    }
+  ]
+}

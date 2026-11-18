@@ -48,7 +48,7 @@ describe("B2: self-approval is refused; admin approval is accepted for every gat
         const self = evaluateWorkItemPolicy(item, REQUESTER, "approve");
         expect(summarizePolicy(self)).toMatchObject({ decision: "deny", matchedRules: ["deny:self-approval"] });
         const admin = summarizePolicy(evaluateWorkItemPolicy(item, ACS_ADMIN_APPROVER, "approve"));
-        expect(admin.decision).toBe("require_approval");
+        expect(admin.decision).toBe(tool === "gui_action" ? "deny" : "require_approval");
         expect(summarizePolicy(evaluateWorkItemPolicy(item, HUMAN, "approve")).decision).toBe("require_approval");
 
         // Through the real approve gate: nothing is recorded for the requester.
@@ -64,7 +64,7 @@ describe("B2: self-approval is refused; admin approval is accepted for every gat
 
     for (const [approver, code] of [
       [REQUESTER, "jace_commander_self_approval_denied"],
-      [ACS_ADMIN_APPROVER, undefined],
+      [ACS_ADMIN_APPROVER, tool === "gui_action" ? "jace_commander_gui_admin_approval_denied" : undefined],
       [HUMAN, undefined]
     ] as const) {
       it(`${tool}: the issuance registry ${code ? `refuses an approval by ${approver} (${code})` : "accepts a different human's approval"}`, () => {

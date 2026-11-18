@@ -9,6 +9,14 @@ export interface LeaseFile {
   instanceId?: string;
   bootId?: string;
   processStartTicks?: string;
+  /**
+   * Additive v2 fields written by the native Jace Commander executor. Desktop
+   * Commander leases omit them and keep their original semantics.
+   */
+  executorKind?: string;
+  /** Release root the holder must be running from (trailing slash optional). */
+  releaseRoot?: string;
+  releaseCommit?: string;
 }
 
 export interface AuthorityFiles {
@@ -66,6 +74,19 @@ const ACS_EXECUTOR_PACKAGE_DIR = "desktop-commander";
 const ACS_RELEASE_ROOT_PATTERN =
   /(?:^|\/)releases\/(?:acs|dc|dc-mcp-gateway)\/[^/]+\/|(?:^|\/)packages\/(?:[^/]+\/)*desktop-commander\//;
 
+/**
+ * The installed standalone Jace Commander runtime (apps/jace-commander/deploy/
+ * install-user-release.sh) is a read-only release at
+ * ~/.local/lib/jace-commander/{current|releases/<id>}/ and runs as dist/cli.js.
+ * Only that exact installed layout is recognized, so the generic dist/cli.js
+ * name never makes an arbitrary tree a managed executor.
+ */
+const JC_RUNTIME_SCRIPT = "dist/cli.js";
+const JC_RELEASE_ROOT_PATTERN = /(?:^|\/)\.local\/lib\/jace-commander\/(?:current|releases\/[^/]+)\/$/;
+
+/** Lease schema marker written by the native Jace Commander executor (additive, v2). */
+const JC_EXECUTOR_KIND = "jace-commander";
+
 export function acsExecutorRoot(command: string): string | undefined {
   let root: string | undefined;
   for (const token of command.split(/\s+/u)) {
@@ -88,6 +109,14 @@ export function acsExecutorRoot(command: string): string | undefined {
     // script shape, so "is it under node_modules" is the discriminator that keeps
     // them out of the managed-executor set.
     const vendored = parent.split("/").includes("node_modules");
+
+    if (!vendored && resolved.endsWith(JC_RUNTIME_SCRIPT)) {
+      const candidate = resolved.slice(0, resolved.length - JC_RUNTIME_SCRIPT.length);
+      if (JC_RELEASE_ROOT_PATTERN.test(candidate)) {
+        root = candidate;
+        break;
+      }
+    }
 
     if (!vendored) {
       for (const known of ACS_EXECUTOR_SCRIPTS) {
@@ -231,7 +260,34 @@ function classifyLease(
       detail: "executor lease holder is not a managed executor"
     };
   }
+  if (parsed.executorKind !== undefined) {
+    // A v2 lease must name the release root it was written from, and that root
+    // must be the root the verified holder process is actually running from.
+    // A lease that names another root (or none) is forged or stale: fail closed.
+    const kindError = jcLeaseBindingError(parsed, runtime);
+    if (kindError) {
+      return { active: false, ambiguous: true, pid: parsed.pid, detail: kindError };
+    }
+  }
   return { active: true, ambiguous: false, pid: parsed.pid, detail: `executor lease held by pid ${parsed.pid}` };
+}
+
+function jcLeaseBindingError(parsed: LeaseFile, runtime: AuthorityRuntime): string | undefined {
+  if (parsed.executorKind !== JC_EXECUTOR_KIND) {
+    return `executor lease kind ${JSON.stringify(parsed.executorKind)} is not recognized`;
+  }
+  if (typeof parsed.releaseRoot !== "string" || parsed.releaseRoot.length === 0) {
+    return "executor lease has no release root";
+  }
+  if (typeof runtime.holderCommand !== "string") {
+    return "executor lease holder command is unreadable";
+  }
+  const holderRoot = acsExecutorRoot(runtime.holderCommand);
+  const claimedRoot = parsed.releaseRoot.replace(/\/+$/u, "");
+  if (holderRoot === undefined || holderRoot !== claimedRoot) {
+    return "executor lease release root does not match the holder process";
+  }
+  return undefined;
 }
 
 function classifyBreakGlass(

@@ -279,6 +279,23 @@ const strs = (value: unknown): string[] =>
  * has a builder here, and jaceCommanderApprovalSummary fails closed if not.
  */
 export const JACE_COMMANDER_APPROVAL_SUMMARY_BUILDERS: Readonly<Record<string, SummaryBuilder>> = Object.freeze({
+  // GUI text may be passwords, commands or private data. Never reveal it in
+  // persistent approval summaries: only the ACS-signed invocation hash binds it.
+  gui_action: (args) => ({
+    action: args.action,
+    ...(typeof args.x === "number" ? { x: args.x } : {}),
+    ...(typeof args.y === "number" ? { y: args.y } : {}),
+    ...(typeof args.toX === "number" ? { toX: args.toX } : {}),
+    ...(typeof args.toY === "number" ? { toY: args.toY } : {}),
+    ...(typeof args.direction === "string" ? { direction: args.direction } : {}),
+    ...(typeof args.amount === "number" ? { amount: args.amount } : {}),
+    ...(typeof args.text === "string"
+      ? {
+          inputBytes: Buffer.byteLength(args.text, "utf8"),
+          inputSha256: sha256Hex(args.text)
+        }
+      : {})
+  }),
   privileged_exec: (args) => {
     // Same bounded, argv-aware redacted path as start_process: the approver sees
     // the command shape, never a secret passed on the command line. The exact
@@ -295,6 +312,17 @@ export const JACE_COMMANDER_APPROVAL_SUMMARY_BUILDERS: Readonly<Record<string, S
   },
   write_file: (args) => {
     const content = str(args.content) ?? "";
+    if (args.encoding === "base64") {
+      const decoded = Buffer.from(content, "base64");
+      return {
+        path: pathText(args.path),
+        encoding: "base64",
+        bytes: decoded.byteLength,
+        sha256: createHash("sha256").update(decoded).digest("hex"),
+        preview: "[binary content omitted]",
+        overwrite: args.overwrite === true
+      };
+    }
     return {
       path: pathText(args.path),
       bytes: Buffer.byteLength(content, "utf8"),
@@ -321,6 +349,29 @@ export const JACE_COMMANDER_APPROVAL_SUMMARY_BUILDERS: Readonly<Record<string, S
       timeoutMs: typeof args.timeoutMs === "number" ? args.timeoutMs : "default"
     };
   },
+  run_command: (args) => ({
+    commandPreview: preview(str(args.command) ?? ""),
+    commandSha256: sha256Hex(str(args.command) ?? ""),
+    cwd: pathText(args.cwd),
+    shell: pathText(args.shell) ?? "/bin/bash",
+    timeoutMs: args.timeoutMs ?? 30_000,
+    pty: args.pty === true,
+    // Caller-supplied values stay in the signed invocation, never in an audit preview.
+    environmentNames: Object.keys((args.env ?? {}) as Record<string, unknown>).sort()
+  }),
+  start_terminal_session: (args) => ({
+    cwd: pathText(args.cwd),
+    shell: pathText(args.shell) ?? "/bin/bash",
+    timeoutMs: args.timeoutMs ?? 300_000,
+    environmentNames: Object.keys((args.env ?? {}) as Record<string, unknown>).sort()
+  }),
+  interact_with_process: (args) => ({
+    sessionId: str(args.sessionId),
+    inputBytes: Buffer.byteLength(str(args.input) ?? "", "utf8"),
+    inputSha256: sha256Hex(str(args.input) ?? ""),
+    inputPreview: preview(str(args.input) ?? "")
+  }),
+  delete_file: (args) => ({ path: pathText(args.path), recursive: args.recursive === true }),
   kill_process: (args) => ({
     ...(str(args.sessionId) !== undefined ? { sessionId: str(args.sessionId) } : {}),
     ...(typeof args.pid === "number" ? { pid: args.pid } : {}),

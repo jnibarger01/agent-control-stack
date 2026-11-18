@@ -15,9 +15,9 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build:chatgpt-widget && tsc -b && npm run build -w apps/public-site && npm run build -w apps/mission-control-web && npm run release:dry-run-gate",
+    "build": "npm run build:chatgpt-widget && npm run build -w apps/jace-commander && tsc -b && npm run build -w apps/public-site && npm run build -w apps/mission-control-web && npm run release:dry-run-gate",
     "build:chatgpt-widget": "npm run build -w apps/chatgpt-widget",
-    "test": "npm run test:vitest && npm run test:release-integrity && npm run test:agentos && npm run test:public-site-safety && npm run test:dc-mcp-gateway && npm run test:dc-relay && npm run test:deploy-script && npm run test:slice-workflow",
+    "test": "npm run test:vitest && npm run test:release-integrity && npm run test:agentos && npm run test:public-site-safety && npm run test:dc-mcp-gateway && npm run test:dc-relay && npm run test:deploy-script && npm run test:slice-workflow && npm run test:jc-native",
     "test:release-integrity": "npm test -w packages/release-integrity",
     "release:integrity": "node scripts/release-integrity.mjs",
     "test:deploy-script": "bash scripts/deploy-gateway-release.test.sh",
@@ -61,7 +61,10 @@
     "start:vercel-bridge": "node apps/vercel-bridge-worker/dist/cli.js",
     "start:scheduler": "node apps/scheduler/dist/cli.js",
     "acs": "node apps/runtime/dist/cli.js",
-    "ops:pending-approval-digest": "node packages/policy-gate/dist/pending-approval-digest-cli.js"
+    "ops:pending-approval-digest": "node packages/policy-gate/dist/pending-approval-digest-cli.js",
+    "test:jc-native": "npm test -w apps/jace-commander",
+    "jc:verify-independence": "node scripts/verify-jc-independence.mjs",
+    "jc:verify-release": "node scripts/verify-jc-release.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -91,8 +94,8 @@
     "brace-expansion@^2.0.0": "2.1.7",
     "brace-expansion@^5.0.0": "5.0.12",
     "browserslist": "4.28.7",
-    "fast-uri": "3.1.7",
-    "fastify": "5.12.7",
+    "fast-uri": "3.1.9",
+    "fastify": "5.12.8",
     "source-map-js": "1.2.2",
     "tinypool": "2.1.2"
   }

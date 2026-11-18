@@ -53,6 +53,10 @@ function codingMissionCard(mission) {
 async function refreshCodingMissions() {
   const root = document.getElementById('coding-mission-list');
   if (!root) return;
+  // The server renders this attribute from its own configuration. A gateway
+  // without coding-mission ports answers /coding-missions with a deliberate
+  // fail-closed 503, so do not probe it and do not turn that into console noise.
+  if (root.getAttribute('data-coding-missions') !== 'enabled') return;
   let payload = null;
   try {
     const response = await fetch('/coding-missions', { credentials: 'same-origin', headers: { accept: 'application/json' } });

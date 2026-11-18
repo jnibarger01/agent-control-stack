@@ -150,19 +150,6 @@ export function fetchClientMetadata(clientId, options = {}) {
   return new Promise((resolve, reject) => {
     let u;
     try { u = parseMetadataUrl(clientId); } catch (err) { return reject(err); }
-    let settled = false;
-    let deadline;
-    const settle = (fn, value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(deadline);
-      fn(value);
-    };
-    // Reject and tear down the connection: rejected or oversized bodies are never drained.
-    const fail = (err) => {
-      settle(reject, err);
-      req.destroy();
-    };
     const req = https.request({
       ...tlsOptions,
       method: 'GET',
@@ -173,32 +160,29 @@ export function fetchClientMetadata(clientId, options = {}) {
       agent: false,               // no pooled sockets, no global agent
       lookup,                     // the connection-time address policy
       headers: { accept: 'application/json' },
-      timeout: timeoutMs,         // socket inactivity
+      timeout: timeoutMs,
     }, (res) => {
-      if (res.statusCode !== 200) return fail(new Error(`client metadata HTTP ${res.statusCode}`));
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error(`client metadata HTTP ${res.statusCode}`)); }
       const type = String(res.headers['content-type'] || '');
-      if (!/^application\/json(\s*;|$)/i.test(type)) return fail(new Error('client metadata content-type must be application/json'));
+      if (!/^application\/json(\s*;|$)/i.test(type)) { res.resume(); return reject(new Error('client metadata content-type must be application/json')); }
       const declared = Number(res.headers['content-length']);
-      if (Number.isFinite(declared) && declared > maxBytes) return fail(new Error('client metadata too large'));
+      if (Number.isFinite(declared) && declared > maxBytes) { res.resume(); return reject(new Error('client metadata too large')); }
       const chunks = [];
       let total = 0;
       res.on('data', (chunk) => {
         total += chunk.length;
-        if (total > maxBytes) return fail(new Error('client metadata too large'));
+        if (total > maxBytes) return req.destroy(new Error('client metadata too large'));
         chunks.push(chunk);
       });
-      res.on('error', (err) => fail(err));
+      res.on('error', reject);
       res.on('end', () => {
-        if (settled) return;
         try {
-          settle(resolve, parseClientMetadata(clientId, JSON.parse(Buffer.concat(chunks).toString('utf8'))));
-        } catch (err) { settle(reject, err); }
+          resolve(parseClientMetadata(clientId, JSON.parse(Buffer.concat(chunks).toString('utf8'))));
+        } catch (err) { reject(err); }
       });
     });
-    // Absolute deadline: a server that keeps trickling bytes never trips the inactivity timeout.
-    deadline = setTimeout(() => fail(new Error('client metadata fetch timed out')), timeoutMs);
-    req.on('timeout', () => fail(new Error('client metadata fetch timed out')));
-    req.on('error', (err) => fail(err));
+    req.on('timeout', () => req.destroy(new Error('client metadata fetch timed out')));
+    req.on('error', reject);
     req.end();
   });
 }

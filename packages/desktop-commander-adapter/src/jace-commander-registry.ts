@@ -159,6 +159,12 @@ export class SqliteJaceCommanderIssuanceRegistry {
             `${input.toolName} cannot be self-approved`
           );
         }
+        if (input.toolName === "gui_action" && approval.approved_by_actor_id === "acs:admin") {
+          throw new ControlStackError(
+            "jace_commander_gui_admin_approval_denied",
+            "native GUI input requires a human approval, not admin auto-approval"
+          );
+        }
         approvalId = approval.approval_id;
         approvedBy = approval.approved_by_actor_id;
       } else if (lease.approval_id || input.approvalId !== undefined) {

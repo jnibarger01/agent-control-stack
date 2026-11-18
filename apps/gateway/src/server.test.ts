@@ -4613,7 +4613,13 @@ describe("gateway dashboard sessions", () => {
       expect(page.statusCode).toBe(401);
       expect(String(page.headers["content-type"])).toContain("text/html");
       expect(page.body).toContain("login-form");
+      expect(page.body).toContain('<meta name="description"');
+      expect(page.body).toContain('href="/favicon.svg"');
       expect(page.body).not.toContain("Agent Roster");
+
+      const icon = await app.inject({ method: "GET", url: "/favicon.svg" });
+      expect(icon.statusCode).toBe(200);
+      expect(String(icon.headers["content-type"])).toContain("image/svg+xml");
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });

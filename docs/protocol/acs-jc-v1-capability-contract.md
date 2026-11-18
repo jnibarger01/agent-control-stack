@@ -1,8 +1,6 @@
 # ACS/Jace Commander v1 Capability Contract (`acs.jc.v1`)
 
-Status: implemented (`POST /jc/capability/issue`). The verifier and the root
-helper live in `jnibarger01/desktop-commander` (`src/jace-commander/`,
-`docs/jace-commander.md`).
+Status: implemented (POST /jc/capability/issue). The verifier and root helper now live in the independent apps/jace-commander package. See its README for native tools, current-authority checks, security limits and migration.
 
 `acs.jc.v1` authorizes calls to the Jace Commander MCP server. It includes
 `privileged_exec`, which runs one exact argv as root on the managed host.
@@ -27,7 +25,7 @@ in every rule not listed below:
 | signing key            | `ACS_DESKTOP_COMMANDER_CAPABILITY_PRIVATE_KEY`                                          | `ACS_JACE_COMMANDER_CAPABILITY_PRIVATE_KEY` (must be a different key)                                                                                        |
 | issuer worker identity | `acs-dc-bridge`                                                                         | `acs-jc-bridge`                                                                                                                                              |
 | issuance table         | `desktop_commander_capability_issuances`                                                | `jace_commander_capability_issuances` (migration 028)                                                                                                        |
-| admin execution mode   | may auto-approve                                                                        | may auto-approve ordinary gated mutations; **never** `privileged_exec`                                                                                       |
+| admin execution mode   | may auto-approve                                                                        | may auto-approve managed gated mutations, including `privileged_exec`                                                                                        |
 
 Because the version and audience differ, a capability from either contract is
 rejected by the other verifier.
@@ -162,3 +160,16 @@ only to the Jace Commander gateway bridge.
 - Result submission for jc attempts. Leases expire after `JC_BRIDGE_LEASE_MS`.
   The helper's root-owned audit chain is the execution evidence until
   results are wired.
+
+## Native runtime additions
+
+The native JC package adds run_command, start_terminal_session, interact_with_process
+and delete_file. All four require an approval record and exact invocation binding.
+Migration 076 adds their durable allowlist rows (candidate number; preflight required).
+The existing Desktop Commander runtime and contract are unchanged.
+
+In managed mode every non-read native JC operation checks the current ACS work item
+and lease immediately before dispatch, in addition to signature and nonce verification.
+The runtime refuses current-authority read failures, revoked/expired leases, fencing,
+plan, approval, invocation and authenticated-principal mismatches. This is a
+pre-dispatch check; it does not cancel previously started work retroactively.

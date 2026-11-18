@@ -106,6 +106,8 @@ export interface DashboardRouteDeps {
   projectTunnelSession: (session: RegisteredTunnelSession, heartbeatTtlMs: number) => { effectiveStatus: string };
   validateRegisteredAgentPromptTarget: (store: SqliteWorkItemStore, input: Record<string, unknown>) => void;
   requireRead: (request: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
+  /** True when the gateway has coding-mission ports, so the dashboard may call `/coding-missions`. */
+  codingMissionsEnabled: boolean;
   /** True when `/` should redirect to the React app. Evaluated per request; fail-closed. */
   missionControlWebDefaultRoot?: () => boolean;
   sendError: (reply: FastifyReply, error: unknown) => unknown;
@@ -125,6 +127,7 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardRou
     projectTunnelSession,
     validateRegisteredAgentPromptTarget,
     requireRead,
+    codingMissionsEnabled,
     missionControlWebDefaultRoot,
     sendError
   } = deps;
@@ -220,6 +223,7 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: DashboardRou
       executionTelemetry: executionReads.telemetry(now),
       readiness: mergeSandboxReadyzCheck(workItems.readinessHealth(), evaluateSandboxReadyzCheck(sandboxReadiness)),
       composerActionKinds: [...SUPPORTED_ACTION_KINDS],
+      codingMissionsEnabled,
       policyDecisionEvents: workItems.readEvents({ name: "policy.decided", limit: POLICY_SUMMARY_WINDOW }),
       now,
       ...dashboardExecutionMode()

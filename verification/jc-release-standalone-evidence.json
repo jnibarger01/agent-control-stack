@@ -1,0 +1,107 @@
+{
+  "verdict": "PASS",
+  "date": "2026-11-05T01:39:36.781Z",
+  "commit": "0497b505a9c25fa71fc7d3f403516e8bce6bd02a",
+  "version": "1.0.0",
+  "stage": "/home/jacen/.cache/jc-release-verify-VPtLYg/jace-commander-1.0.0",
+  "maskedPath": "/home/jacen/projects",
+  "steps": {
+    "isolation": [
+      "0",
+      "vendor-absent"
+    ],
+    "install": {
+      "status": 0,
+      "tail": [
+        "added 124 packages in 580ms"
+      ]
+    },
+    "dependencyGraph": {
+      "installedPaths": 125,
+      "outsideRelease": [],
+      "packages": 123,
+      "direct": [
+        "@modelcontextprotocol/sdk@1.32.2",
+        "@simplewebauthn/server@14.0.3",
+        "isbinaryfile@5.0.7",
+        "pizzip@3.3.0",
+        "unpdf@1.9.1"
+      ]
+    },
+    "shippedAudit": {
+      "vulnerabilities": {
+        "info": 0,
+        "low": 0,
+        "moderate": 0,
+        "high": 0,
+        "critical": 0,
+        "total": 0
+      },
+      "findings": []
+    },
+    "testSuite": {
+      "where": "installed release, outside all repositories",
+      "status": 0,
+      "summary": [
+        "",
+        "30/30 suites passed"
+      ],
+      "failed": []
+    },
+    "testSuiteMasked": {
+      "where": "$HOME/projects masked",
+      "excluded": [
+        "policy.test.mjs",
+        "privileged-local.test.mjs",
+        "privileged.test.mjs"
+      ],
+      "reason": "root-owned trust-anchor checks need the host uid mapping",
+      "status": 0,
+      "summary": [
+        "",
+        "27/27 suites passed"
+      ]
+    },
+    "mcpSession": {
+      "verdict": "PASS",
+      "release": "/home/jacen/.cache/jc-release-verify-VPtLYg/jace-commander-1.0.0",
+      "node": "v26.13.0",
+      "mcpSdkVersion": "1.32.2",
+      "server": {
+        "name": "jace-commander",
+        "version": "1.0.0"
+      },
+      "checks": [
+        "MCP initialize + tools/list over stdio (40 tools)",
+        "a call without an ACS capability is refused and nothing runs",
+        "terminal: run_command (bash) with stdout, stderr and exit code",
+        "terminal: run_command in a PTY",
+        "terminal: interactive PTY session with streamed input",
+        "files: write (utf8 + base64 binary), read, info, list, move, delete",
+        "documents: pdf, docx and xlsx parse through the native readers",
+        "processes: start_process, read_process_output, list_processes, kill_process",
+        "git: status on a real repository (sandboxed git)",
+        "jc_doctor: runtime path, capability verification and workload isolation healthy",
+        "module resolution: every loaded file is inside the release (no repo, workspace or vendor)"
+      ],
+      "resolvedFiles": 309,
+      "resolvedPackages": [
+        "@modelcontextprotocol/sdk",
+        "@simplewebauthn/server",
+        "ajv",
+        "ajv-formats",
+        "fast-deep-equal",
+        "fast-uri",
+        "isbinaryfile",
+        "json-schema-traverse",
+        "pako",
+        "pizzip",
+        "unpdf",
+        "zod",
+        "zod-to-json-schema"
+      ],
+      "builtins": 15,
+      "outsideRelease": []
+    }
+  }
+}

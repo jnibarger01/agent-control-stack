@@ -41,7 +41,9 @@ export const JC_SCOPES = Object.freeze([
   "process.privileged",
   "git.read",
   "git.write",
-  "git.network"
+  "git.network",
+  "gui.observe",
+  "gui.input"
 ] as const);
 export type JcScope = (typeof JC_SCOPES)[number];
 
@@ -56,6 +58,8 @@ export const JC_ACTION_KINDS = Object.freeze([
   "jc.git.read",
   "jc.git.write",
   "jc.git.network",
+  "jc.gui.observe",
+  "jc.gui.input",
   "privileged.exec"
 ] as const);
 export type JcActionKind = (typeof JC_ACTION_KINDS)[number];
@@ -68,6 +72,7 @@ export const JC_TOOL_GROUPS = Object.freeze([
   "filesystem",
   "search",
   "process",
+  "gui",
   "git",
   "acs",
   "mission",
@@ -243,6 +248,38 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     true,
     "root execution; approval is re-verified by a root-owned helper, not this process"
   ),
+  gui_screenshot: row(
+    "Capture a PNG screenshot of the explicitly configured isolated X11 desktop. Available only in ACS managed mode with a signed gui.observe capability. Screenshots may contain sensitive information.",
+    { type: "object", properties: {}, additionalProperties: false },
+    ["gui.observe"],
+    "jc.gui.observe",
+    "low",
+    false,
+    "bounded observation; never available from standalone/local presets"
+  ),
+  gui_action: row(
+    "Perform one exact mouse or keyboard action on the explicitly configured X11 desktop. Each invocation needs an ACS-approved gui.input capability. X11 only; no shell.",
+    {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["click", "move", "drag", "type", "key", "scroll"] },
+        x: { type: "integer", minimum: 0, maximum: 8191 },
+        y: { type: "integer", minimum: 0, maximum: 8191 },
+        toX: { type: "integer", minimum: 0, maximum: 8191 },
+        toY: { type: "integer", minimum: 0, maximum: 8191 },
+        text: { type: "string", minLength: 1, maxLength: 2048 },
+        direction: { type: "string", enum: ["up", "down", "left", "right"] },
+        amount: { type: "integer", minimum: 1, maximum: 15 }
+      },
+      required: ["action"],
+      additionalProperties: false
+    },
+    ["gui.input"],
+    "jc.gui.input",
+    "medium",
+    true,
+    "GUI actions can mutate external state; policy approval required and no root/shell escape"
+  ),
   list_directory: row(
     "List a directory under an allowed filesystem root. Returns structured entries (name, relative path, type, size), recursing up to `depth` levels (default 1, max 5). Output is capped; `truncated` reports when entries were omitted.",
     {
@@ -371,13 +408,14 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "cancels a local search; no filesystem mutation"
   ),
   write_file: row(
-    "Write a UTF-8 file under an allowed root. Existing files are replaced only when overwrite is true. Symlinks are refused.",
+    "Write a file under an allowed root (UTF-8 text, or binary with encoding base64). Existing files are replaced only when overwrite is true. Symlinks are refused.",
     {
       type: "object",
       properties: {
         path: str("Absolute file path"),
-        content: str("File contents, at most 256 KiB"),
-        overwrite: { type: "boolean" }
+        content: str("File contents, at most 256 KiB (base64 text when encoding is base64)"),
+        overwrite: { type: "boolean" },
+        encoding: { type: "string", enum: ["utf8", "base64"], description: "Content encoding (default utf8)" }
       },
       required: ["path", "content"],
       additionalProperties: false
@@ -453,10 +491,29 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "execution; approval required in strict mode; no shell"
   ),
   read_process_output: row(
-    "Read buffered stdout and stderr for a process this server started.",
+    "Read stdout and stderr of a process session you started, from absolute offsets (stream by passing back nextStdoutOffset/nextStderrOffset), optionally waiting for new output.",
     {
       type: "object",
-      properties: { sessionId: str("Session id"), offset: { type: "integer", minimum: 0 } },
+      properties: {
+        sessionId: str("Session id"),
+        offset: { type: "integer", minimum: 0, description: "Legacy: one offset applied to both streams" },
+        stdoutOffset: {
+          type: "integer",
+          minimum: 0,
+          description: "Absolute stdout byte offset to read from (streaming cursor)"
+        },
+        stderrOffset: {
+          type: "integer",
+          minimum: 0,
+          description: "Absolute stderr byte offset to read from (streaming cursor)"
+        },
+        waitMs: {
+          type: "integer",
+          minimum: 0,
+          maximum: 60000,
+          description: "Long-poll: wait up to this long for new output or exit"
+        }
+      },
       required: ["sessionId"],
       additionalProperties: false
     },
@@ -487,6 +544,88 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "medium",
     true,
     "termination of a managed process; approval required in strict mode"
+  ),
+  delete_file: row(
+    "Delete a file, symlink or (with recursive true) a directory tree under an allowed root. A configured root, .git metadata and symlink targets are never deleted.",
+    {
+      type: "object",
+      properties: { path: str("Absolute path to delete"), recursive: { type: "boolean" } },
+      required: ["path"],
+      additionalProperties: false
+    },
+    ["fs.write"],
+    "jc.fs.write",
+    "medium",
+    true,
+    "destructive mutation; approval required in strict mode; contained"
+  ),
+  run_command: row(
+    "Run one shell command (bash by default, or another configured shell) in a contained cwd with an allowlisted environment, optionally in a pseudo-terminal. Returns output and exit code when it finishes within waitMs, otherwise a session id to stream with read_process_output. Approval binds the exact command, shell, cwd, env and timeout.",
+    {
+      type: "object",
+      properties: {
+        command: str("Shell command text, at most 16 KiB"),
+        cwd: str("Absolute working directory"),
+        shell: str("Absolute path of a configured shell (default: the first configured shell, /bin/bash)"),
+        timeoutMs: { type: "integer", minimum: 1, maximum: 600000 },
+        env: {
+          type: "object",
+          additionalProperties: { type: "string" },
+          description: "Extra environment variables (names are restricted)"
+        },
+        pty: { type: "boolean", description: "Run attached to a pseudo-terminal" },
+        waitMs: {
+          type: "integer",
+          minimum: 0,
+          maximum: 60000,
+          description: "How long to wait for completion before returning (default 10000)"
+        }
+      },
+      required: ["command", "cwd"],
+      additionalProperties: false
+    },
+    ["process.exec"],
+    "jc.process.exec",
+    "medium",
+    true,
+    "arbitrary shell execution as the JC account; approval binds the exact command"
+  ),
+  start_terminal_session: row(
+    "Start an interactive shell in a pseudo-terminal in a contained cwd. Every input sent with interact_with_process is separately approved.",
+    {
+      type: "object",
+      properties: {
+        cwd: str("Absolute working directory"),
+        shell: str("Absolute path of a configured shell"),
+        timeoutMs: { type: "integer", minimum: 1, maximum: 3600000 },
+        env: { type: "object", additionalProperties: { type: "string" } }
+      },
+      required: ["cwd"],
+      additionalProperties: false
+    },
+    ["process.exec"],
+    "jc.process.exec",
+    "medium",
+    true,
+    "interactive shell; each input is a separately approved call"
+  ),
+  interact_with_process: row(
+    "Write input to the stdin (or terminal) of a running process session you started, then return the output produced within waitMs.",
+    {
+      type: "object",
+      properties: {
+        sessionId: str("Session id"),
+        input: str("Text to send (include a trailing newline to submit a line), at most 64 KiB"),
+        waitMs: { type: "integer", minimum: 0, maximum: 60000 }
+      },
+      required: ["sessionId", "input"],
+      additionalProperties: false
+    },
+    ["process.exec"],
+    "jc.process.exec",
+    "medium",
+    true,
+    "input to a running process is execution; approval binds the exact input"
   ),
   git_status: row(
     "Structured git status for a repository inside an allowed root.",
@@ -673,6 +812,8 @@ const TOOL_SURFACE: Readonly<Record<JcToolName, SurfaceRow>> = {
   // has no view of those roots, so it does not contain them (unchanged).
   looptrace_verify: surface("mission", [], ["looptrace verify"]),
   privileged_exec: surface("privileged", [], ["sudo"]),
+  gui_screenshot: surface("gui", [], []),
+  gui_action: surface("gui", [], []),
   list_directory: surface("filesystem", ["path"], ["ls"]),
   get_file_info: surface("filesystem", ["path"], ["stat"]),
   read_file: surface("filesystem", ["path"], ["read", "cat"]),
@@ -689,6 +830,10 @@ const TOOL_SURFACE: Readonly<Record<JcToolName, SurfaceRow>> = {
   read_process_output: surface("process", [], ["output"]),
   list_processes: surface("process", [], ["ps"]),
   kill_process: surface("process", [], ["kill"]),
+  run_command: surface("process", ["cwd"], ["run"]),
+  start_terminal_session: surface("process", ["cwd"], []),
+  interact_with_process: surface("process", [], ["send"]),
+  delete_file: surface("filesystem", ["path"], ["rm"]),
   git_status: surface("git", ["repo"], ["git status"]),
   git_diff: surface("git", ["repo"], ["git diff"]),
   git_log: surface("git", ["repo"], ["git log"]),
@@ -794,10 +939,9 @@ export interface JcPortableManifest {
 }
 
 /**
- * The manifest as data Jace Commander embeds (it cannot import this package:
- * vendor/desktop-commander is built outside the npm workspace graph).
+ * The manifest as data Jace Commander embeds so it builds independently.
  * scripts/jc-tool-manifest.ts writes it to
- * vendor/desktop-commander/src/jace-commander/manifest.generated.ts.
+ * apps/jace-commander/src/manifest.generated.ts.
  */
 export function jcPortableManifest(): JcPortableManifest {
   const tools = jcToolContracts().map(

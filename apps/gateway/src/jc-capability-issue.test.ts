@@ -209,7 +209,7 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
 
   it("denies unknown tools and invalid arguments deterministically", () =>
     withGateway(async (ctx) => {
-      const unknown = await issue(ctx, "run_command", { command: "id" });
+      const unknown = await issue(ctx, "unknown_native_tool", { command: "id" });
       expect(unknown.statusCode).toBe(403);
       expect(unknown.json().reason).toBe("unknown_tool");
       for (const argv of [["apt-get", "update"], ["/usr/bin/../bin/id"], []]) {
@@ -356,6 +356,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
   ): Record<string, { args: Record<string, unknown>; fields: Record<string, unknown> }> => {
     const ws = join(root, "workspace");
     return {
+      gui_action: { args: { action: "click", x: 24, y: 32 }, fields: { action: "click", x: 24, y: 32 } },
       privileged_exec: { args: PRIV_ARGS, fields: { runAs: "root", argv: PRIV_ARGS.argv, timeoutMs: 120000 } },
       write_file: {
         args: { path: join(ws, "new.txt"), content: "hello approver\n", overwrite: false },
@@ -374,6 +375,16 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         args: { argv: ["/usr/bin/node", "--version"], cwd: ws, timeoutMs: 5000 },
         fields: { argv: ["/usr/bin/node", "--version"], cwd: ws, timeoutMs: 5000 }
       },
+      run_command: {
+        args: { command: "printf hello", cwd: ws, timeoutMs: 5000 },
+        fields: { cwd: ws, timeoutMs: 5000 }
+      },
+      start_terminal_session: { args: { cwd: ws }, fields: { cwd: ws } },
+      interact_with_process: {
+        args: { sessionId: "proc_1", input: "hello" },
+        fields: { sessionId: "proc_1", inputBytes: 5 }
+      },
+      delete_file: { args: { path: join(ws, "new.txt") }, fields: { path: join(ws, "new.txt"), recursive: false } },
       kill_process: { args: { sessionId: "proc_1" }, fields: { sessionId: "proc_1" } },
       git_add: { args: { repo: ws, paths: ["src/index.ts"] }, fields: { repo: ws, paths: ["src/index.ts"] } },
       git_commit: {
@@ -394,8 +405,8 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
     return [dir];
   };
 
-  it("the gated list is the manifest's (11 tools) and every one has fixtures", () => {
-    expect(GATED).toHaveLength(11);
+  it("the gated list is the manifest's (16 tools) and every one has fixtures", () => {
+    expect(GATED).toHaveLength(16);
     const fixtures = argsFor("/tmp/x");
     for (const tool of GATED) expect(fixtures[tool], tool).toBeDefined();
   });
@@ -448,7 +459,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         expect(switched.json()).toMatchObject({ executionMode: "admin", approvalPolicy: "auto" });
 
         const fixtures = argsFor(ctx.root);
-        for (const tool of GATED) {
+        for (const tool of GATED.filter((name) => name !== "gui_action")) {
           const { args } = fixtures[tool]!;
           const first = await issue(ctx, tool, args);
           expect(first.statusCode, `${tool}: ${first.body}`).toBe(200);

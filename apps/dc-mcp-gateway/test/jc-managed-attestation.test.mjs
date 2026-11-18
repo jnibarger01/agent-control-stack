@@ -24,7 +24,8 @@ async function fixture(t, overrides = {}) {
   await once(listener, 'listening');
   const port = listener.address().port;
   await new Promise((resolve) => listener.close(resolve));
-  const child = spawn(process.execPath, [`${root}bridge.js`], { env: { ...baseEnv, BRIDGE_PORT: String(port), JC_STATE_DIR: state, DC_GATEWAY_EXECUTION_TOKEN: secret, ...overrides }, stdio: ['ignore', 'pipe', 'pipe'] });
+  // Never let a test runtime claim the developer's real executor lease.
+  const child = spawn(process.execPath, [`${root}bridge.js`], { env: { ...baseEnv, BRIDGE_PORT: String(port), JC_STATE_DIR: state, DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: path.join(state, 'locks'), DC_GATEWAY_EXECUTION_TOKEN: secret, ...overrides }, stdio: ['ignore', 'pipe', 'pipe']});
   let output = '';
   child.stdout.on('data', (d) => { output += d; });
   child.stderr.on('data', (d) => { output += d; });
@@ -39,6 +40,22 @@ async function fixture(t, overrides = {}) {
   const post = (body, extra = {}) => fetch(`${base}/mcp`, { method: 'POST', headers: { ...headers, ...extra }, body: JSON.stringify(body) });
   return { base, post, headers, state };
 }
+
+test('managed JC forwards only approved GUI activation variables to the child', async (t) => {
+  const f = await fixture(t, {
+    JC_GUI_ENABLED: '1',
+    JC_GUI_DISPLAY: ':81',
+    JC_GUI_XAUTHORITY: '/tmp/isolated-xauth',
+    JC_GUI_UNAPPROVED: 'must-not-forward',
+  });
+  const response = await f.post(init);
+  assert.equal(response.status, 200);
+  const child = JSON.parse(fs.readFileSync(path.join(f.state, 'argv.json'), 'utf8'));
+  for (const key of ['JC_GUI_ENABLED', 'JC_GUI_DISPLAY', 'JC_GUI_XAUTHORITY']) {
+    assert.ok(child.env.includes(key), key);
+  }
+  assert.equal(child.env.includes('JC_GUI_UNAPPROVED'), false);
+});
 
 test('managed JC refuses startup without an execution token', () => {
   const run = spawnSync(process.execPath, [`${root}bridge.js`], { env: baseEnv, encoding: 'utf8', timeout: 3000 });
@@ -95,15 +112,25 @@ test('attested initialization and discovery work; every subsequent method requir
 test('real managed JC child refuses execution without an ACS capability', async (t) => {
   const { publicKey } = generateKeyPairSync('ed25519');
   const f = await fixture(t, {
-    DC_ARGS: `${path.resolve(root, '../../vendor/desktop-commander/dist/jace-commander/cli.js')} serve`,
-    JC_ACS_PUBLIC_KEY: publicKey.export({ format: 'pem', type: 'spki' }),
+    DC_ARGS: `${path.resolve(root, '../jace-commander/dist/cli.js')} serve`,
+    JC_ACS_PUBLIC_KEY: publicKey.export({ format: 'der', type: 'spki' }).toString('base64url'),
   });
   const response = await f.post(init);
-  assert.equal(response.status, 200);
-  await response.text();
+  assert.equal(
+response.status,
+200,
+`initialize failed: HTTP ${response.status}
+${await response.clone().text()}`
+);
+await response.text();
   const headers = { 'mcp-session-id': response.headers.get('mcp-session-id') };
   const result = await f.post({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'write_file', arguments: { path: path.join(f.state, 'must-not-exist'), content: 'unauthorized' } } }, headers);
-  assert.equal(result.status, 200);
+  assert.equal(
+    result.status,
+    200,
+    `tools/call failed: HTTP ${result.status}
+${await result.clone().text()}`
+  );
   const text = await result.text();
   assert.match(text, /JC_CAPABILITY_MISSING/);
   assert.match(text, /"isError":true/);
