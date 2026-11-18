@@ -383,6 +383,47 @@ describe.runIf(runIntegration && existsSync(defaultRustSupervisorPath))("Rust sc
     },
     30_000
   );
+
+  it("reports helper loss as unknown, force-stops the scope and leaves no workload behind", async () => {
+    const fixture = createFixture();
+    try {
+      writeFixtureScript(fixture.workspace, `console.log("started"); setInterval(() => {}, 1000);`);
+      const request = fixtureRequest(fixture.workspace, "helper-loss", {
+        limits: { ...defaultLimits(), wallClockMs: 20_000 }
+      });
+      const pending = createLinuxSandbox({
+        authorityVerifier: fixtureAuthority(request),
+        scopeSupervisor: { backend: "rust" }
+      }).execute(request);
+      let helper = "";
+      for (let tries = 0; tries < 100 && !helper; tries += 1) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+        try {
+          helper = execFileSync("pgrep", ["-P", String(process.pid), "-f", "acs-scope-supervisor supervise"], {
+            encoding: "utf8"
+          }).trim();
+        } catch {
+          helper = "";
+        }
+      }
+      expect(helper).toMatch(/^\d+$/u);
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+      process.kill(Number(helper), "SIGKILL");
+      const result = await pending;
+
+      expect(result).toMatchObject({ outcome: "unknown", cleanup: "unknown", observedSuccess: false });
+      expect(result.error).toContain("supervisor exited without one observation");
+      let state = "";
+      try {
+        state = execFileSync("systemctl", ["--user", "is-active", result.unitName], { encoding: "utf8" }).trim();
+      } catch (error) {
+        state = String((error as { stdout?: string }).stdout ?? "").trim();
+      }
+      expect(["inactive", "unknown"]).toContain(state);
+    } finally {
+      rmSync(fixture.parent, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
 
 function createFixture(): { parent: string; workspace: string } {
