@@ -42,6 +42,12 @@ A base branch lives in the repository being merged into, so only a pull request 
 parent; a fork's branch that shares a name is never matched. A genuine dependency cycle is reported as `dependency_cycle` on
 its members; a pull request that only depends on one is `blocked_by_cycle`, and is still simulated on its own.
 
+## Optional native graph
+
+TypeScript is the default for dependency analysis and file overlap. With the matching Node-API addon installed,
+`ACS_INTEGRATION_GRAPH_BACKEND=rust` opts into the pilot for package exports and reconciliation. See the
+[native graph runbook](migrations/rust-graph-runbook.md) for artifact layout, diagnostics and rollback.
+
 ## Credentials and configuration
 
 - The GitHub response is validated at runtime (strict enums, required fields). An unknown `mergeable`, `reviewDecision` or
