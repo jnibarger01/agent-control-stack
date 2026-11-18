@@ -123,9 +123,24 @@ try {
 
   await test('interactive PTY works inside the sandbox (private devpts)', async () => {
     const session = await registry.terminal({ cwd: work, timeoutMs: 10_000 }, policy, 'alice');
-    const out = await registry.interact({ sessionId: session.sessionId, input: 'test -t 0 && tty && echo PTY_$((40+2))\n', waitMs: 5000 }, 'alice');
-    assert.match(out.stdout, /PTY_42/);
-    assert.match(out.stdout, /\/dev\/pts\/\d+/);
+    const deadline = Date.now() + 5000;
+    // Force a gap after the terminal echo. The response may contain only the
+    // echo, so follow the output cursors within the same deadline.
+    let out = await registry.interact({ sessionId: session.sessionId, input: 'test -t 0 && sleep 0.25 && tty && echo PTY_$((40+2))\n', waitMs: 5000 }, 'alice');
+    let stdout = out.stdout;
+    while (out.running && !stdout.includes('PTY_42')) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      out = await registry.read({
+        sessionId: session.sessionId,
+        stdoutOffset: out.nextStdoutOffset,
+        stderrOffset: out.nextStderrOffset,
+        waitMs: remaining,
+      }, 'alice');
+      stdout += out.stdout;
+    }
+    assert.match(stdout, /PTY_42/);
+    assert.match(stdout, /\/dev\/pts\/\d+/);
     assert.equal((await registry.kill({ sessionId: session.sessionId }, 'alice')).exited, true);
   });
 
