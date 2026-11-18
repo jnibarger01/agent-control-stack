@@ -13,7 +13,12 @@ import {
   type EngineIsolationObservation,
   type EngineIsolationRequest
 } from "./engine-contracts.js";
-import { startEgressProxy, type EgressDecision, type EgressProxyHandle } from "./egress-proxy.js";
+import {
+  startEgressProxy,
+  type EgressDecision,
+  type EgressProxyHandle,
+  type EgressProxyOptions
+} from "./egress-proxy.js";
 import {
   RUST_SUPERVISOR_BACKEND_TAG,
   requireRustSupervisor,
@@ -21,6 +26,7 @@ import {
   superviseWithRust,
   type ScopeSupervisorSelection
 } from "./rust-supervisor.js";
+import { requireRustEgressRelay, startRustEgressRelay } from "./rust-egress-relay.js";
 import {
   boundedMessage,
   captureChunk,
@@ -137,13 +143,21 @@ export class EngineIsolationBackend implements EngineIsolation {
     const egressDecisions: EgressDecision[] = [];
     let proxy: EgressProxyHandle | undefined;
     try {
-      proxy = await startEgressProxy({
+      const proxyOptions: EgressProxyOptions = {
         socketPath: join(runtimeDir, "egress.sock"),
         allowlist: request.egressAllowlist,
         onDecision: (decision) => {
           if (egressDecisions.length < 10_000) egressDecisions.push(decision);
         }
-      });
+      };
+      proxy =
+        this.options.scopeSupervisor.backend === "rust"
+          ? await startRustEgressRelay(
+              requireRustEgressRelay(this.options.scopeSupervisor),
+              proxyOptions,
+              launcherEnvironment()
+            )
+          : await startEgressProxy(proxyOptions);
 
       const bubblewrap = buildEngineBubblewrapInvocation(
         request,
@@ -527,7 +541,9 @@ async function probeEngineHost(options: ResolvedEngineOptions): Promise<string> 
   verifyCgroupV2(statfsSync("/sys/fs/cgroup") as StatsFs);
   const supervisorTag =
     options.scopeSupervisor.backend === "rust"
-      ? (requireRustSupervisor(options.scopeSupervisor), `+${RUST_SUPERVISOR_BACKEND_TAG}`)
+      ? (requireRustSupervisor(options.scopeSupervisor),
+        requireRustEgressRelay(options.scopeSupervisor),
+        `+${RUST_SUPERVISOR_BACKEND_TAG}`)
       : "";
 
   const bwrapVersion = await options.hostCommandRunner(options.bwrapPath, ["--version"], { timeoutMs: 5_000 });
