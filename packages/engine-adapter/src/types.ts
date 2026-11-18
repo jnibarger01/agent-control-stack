@@ -87,6 +87,17 @@ export const engineOutcomeSchema = z.discriminatedUnion("status", [
       status: z.literal("process_error"),
       message: z.string()
     })
+    .strict(),
+  /**
+   * Isolation could not prove the process scope ended: the supervisor was
+   * lost, its observation was untrusted, or cleanup was unverified. The
+   * attempt must be reconciled before any retry or publication.
+   */
+  z
+    .object({
+      status: z.literal("isolation_unknown"),
+      message: z.string()
+    })
     .strict()
 ]);
 

@@ -29,7 +29,7 @@ const task: EngineTask = {
 };
 
 function fakeIsolation() {
-  const execute = vi.fn(async () => ({ outcome: "exited" as const, exitCode: 0, stdout: "ok", stderr: "", durationMs: 1, stdoutTruncated: false, stderrTruncated: false }));
+  const execute = vi.fn(async () => ({ outcome: "exited" as const, cleanup: "verified" as const, exitCode: 0, stdout: "ok", stderr: "", durationMs: 1, stdoutTruncated: false, stderrTruncated: false }));
   return { execute } as unknown as EngineIsolation;
 }
 
