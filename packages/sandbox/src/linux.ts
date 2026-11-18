@@ -16,6 +16,13 @@ import {
   type SandboxExecutionObservation,
   type SandboxExecutionRequest
 } from "./contracts.js";
+import {
+  RUST_SUPERVISOR_BACKEND_TAG,
+  requireRustSupervisor,
+  scopeSupervisorFromEnvironment,
+  superviseWithRust,
+  type ScopeSupervisorSelection
+} from "./rust-supervisor.js";
 
 const CGROUP2_SUPER_MAGIC = 0x63677270;
 const MAX_PROBE_OUTPUT_BYTES = 16 * 1_024;
@@ -38,6 +45,8 @@ export interface LinuxSandboxOptions {
   hostCommandRunner?: HostCommandRunner;
   unitNameFactory?: (attemptId: string) => string;
   now?: () => Date;
+  /** Pinned for the lifetime of the backend instance. Defaults to the process environment. */
+  scopeSupervisor?: ScopeSupervisorSelection;
 }
 
 export interface HostCommandResult {
@@ -75,6 +84,7 @@ interface ResolvedLinuxSandboxOptions {
   hostCommandRunner: HostCommandRunner;
   unitNameFactory: (attemptId: string) => string;
   now: () => Date;
+  scopeSupervisor: ScopeSupervisorSelection;
 }
 
 interface ProfileCommand {
@@ -139,6 +149,31 @@ export class BubblewrapSystemdSandbox implements SandboxBackend {
     executionOptions: SandboxExecuteOptions
   ): Promise<SandboxExecutionObservation> {
     const started = this.options.now();
+    if (this.options.scopeSupervisor.backend === "rust") {
+      const run = await superviseWithRust({
+        binaryPath: requireRustSupervisor(this.options.scopeSupervisor),
+        binding: request,
+        invocation,
+        systemctlPath: this.options.systemctlPath,
+        limits: request.limits,
+        launcherEnvironment: launcherEnvironment(),
+        signal: executionOptions.signal,
+        forceStopScope: () => signalScope(this.options, invocation.unitName, "SIGKILL")
+      });
+      return await this.finishObservation({
+        request,
+        invocation,
+        backendVersion,
+        started,
+        output: run.output,
+        ...(run.trigger ? { trigger: run.trigger } : {}),
+        ...(run.terminationError ? { terminationError: run.terminationError } : {}),
+        ...(run.launchError ? { launchError: run.launchError } : {}),
+        exitCode: run.exitCode,
+        signal: run.signal,
+        cleanup: run.cleanup
+      });
+    }
     const output = emptyCapturedOutput();
     let launchError: string | undefined;
 
@@ -198,8 +233,10 @@ export class BubblewrapSystemdSandbox implements SandboxBackend {
     launchError?: string;
     exitCode: number | null;
     signal: NodeJS.Signals | null;
+    /** Supplied by the Rust supervisor, which owns the cleanup observation on that path. */
+    cleanup?: "verified" | "failed" | "unknown";
   }): Promise<SandboxExecutionObservation> {
-    const cleanup = await verifyScopeCleanup(this.options, input.invocation.unitName);
+    const cleanup = input.cleanup ?? (await verifyScopeCleanup(this.options, input.invocation.unitName));
     const finished = this.options.now();
     const outcome = observedOutcome(input, cleanup);
     const error = observationError(input, cleanup);
@@ -414,7 +451,8 @@ function resolveOptions(options: LinuxSandboxOptions): ResolvedLinuxSandboxOptio
     gitPath: options.gitPath ?? "/usr/bin/git",
     hostCommandRunner: options.hostCommandRunner ?? runHostCommand,
     unitNameFactory: options.unitNameFactory ?? defaultUnitName,
-    now: options.now ?? (() => new Date())
+    now: options.now ?? (() => new Date()),
+    scopeSupervisor: options.scopeSupervisor ?? scopeSupervisorFromEnvironment()
   };
 }
 
@@ -428,6 +466,10 @@ async function probeLinuxHost(options: ResolvedLinuxSandboxOptions): Promise<str
   requireExecutable(options.nodePath, "sandbox_runtime_missing");
   requireExecutable(options.gitPath, "sandbox_runtime_missing");
   verifyCgroupV2(statfsSync("/sys/fs/cgroup"));
+  const supervisorTag =
+    options.scopeSupervisor.backend === "rust"
+      ? (requireRustSupervisor(options.scopeSupervisor), `+${RUST_SUPERVISOR_BACKEND_TAG}`)
+      : "";
 
   const bwrapVersion = await options.hostCommandRunner(options.bwrapPath, ["--version"], { timeoutMs: 5_000 });
   if (bwrapVersion.code !== 0 || !/^bubblewrap\s+\d+\.\d+/u.test(bwrapVersion.stdout.trim())) {
@@ -464,7 +506,7 @@ async function probeLinuxHost(options: ResolvedLinuxSandboxOptions): Promise<str
     );
   }
 
-  return bwrapVersion.stdout.trim();
+  return `${bwrapVersion.stdout.trim()}${supervisorTag}`;
 }
 
 export interface WorkspaceBoundRequest {

@@ -105,6 +105,10 @@ impl Coordinator {
         Some(effects)
     }
 
+    pub(crate) fn trigger(&self) -> Option<Trigger> {
+        self.trigger
+    }
+
     fn start(&mut self, trigger: Trigger) -> Vec<Effect> {
         self.trigger = Some(trigger);
         self.phase = Phase::SignalPending(Signal::Term);

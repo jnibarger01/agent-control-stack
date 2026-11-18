@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { SandboxAuthorityReceipt, SandboxAuthorityVerifier, SandboxExecutionRequest } from "./contracts.js";
 import { createLinuxSandbox } from "./linux.js";
+import { RUST_SUPERVISOR_BACKEND_TAG, defaultRustSupervisorPath } from "./rust-supervisor.js";
+import { existsSync } from "node:fs";
 
 const runIntegration = process.env.ACS_SANDBOX_INTEGRATION === "1";
 
@@ -329,6 +331,58 @@ describe.runIf(runIntegration)("Bubblewrap Linux containment", () => {
       rmSync(fixture.parent, { recursive: true, force: true });
     }
   }, 20_000);
+});
+
+describe.runIf(runIntegration && existsSync(defaultRustSupervisorPath))("Rust scope supervisor live parity", () => {
+  const cases: Array<[string, string, Partial<SandboxExecutionRequest["limits"]>, number | undefined]> = [
+    ["exit", `console.log("parity-ok"); process.stderr.write("err");`, {}, undefined],
+    ["nonzero", `process.exitCode = 4;`, {}, undefined],
+    ["timeout", `setInterval(() => {}, 1000);`, { wallClockMs: 300, terminationGraceMs: 100 }, undefined],
+    [
+      "term-ignored",
+      `process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);`,
+      { wallClockMs: 300, terminationGraceMs: 100 },
+      undefined
+    ],
+    ["cancel", `setInterval(() => {}, 1000);`, {}, 200]
+  ];
+
+  it.each(cases)(
+    "matches the TypeScript reference for %s",
+    async (name, source, limits, abortAfterMs) => {
+      const observed = [];
+      for (const backend of ["typescript", "rust"] as const) {
+        const fixture = createFixture();
+        try {
+          writeFixtureScript(fixture.workspace, source);
+          const request = fixtureRequest(fixture.workspace, `parity-${name}-${backend}`, {
+            limits: { ...defaultLimits(), ...limits }
+          });
+          const controller = new AbortController();
+          if (abortAfterMs !== undefined) setTimeout(() => controller.abort(), abortAfterMs);
+          const result = await createLinuxSandbox({
+            authorityVerifier: fixtureAuthority(request),
+            scopeSupervisor: { backend }
+          }).execute(request, { signal: controller.signal });
+          expect(result.backendVersion.endsWith(`+${RUST_SUPERVISOR_BACKEND_TAG}`)).toBe(backend === "rust");
+          observed.push({
+            outcome: result.outcome,
+            observedSuccess: result.observedSuccess,
+            cleanup: result.cleanup,
+            exitCode: result.exitCode,
+            signal: result.signal,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            error: result.error
+          });
+        } finally {
+          rmSync(fixture.parent, { recursive: true, force: true });
+        }
+      }
+      expect(observed[1]).toEqual(observed[0]);
+    },
+    30_000
+  );
 });
 
 function createFixture(): { parent: string; workspace: string } {
