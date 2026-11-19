@@ -1,6 +1,7 @@
 import { probeExecutableVersion } from "@agent-control-stack/agent-cli";
 import { advisorPortFromEnv } from "./advisor-consultation.js";
 import { registerMissionDispatchRoutes } from "./mission-dispatch-routes.js";
+import { factoryIntakeConfigFromEnv, registerFactoryIntakeRoutes, type FactoryIntakeConfig } from "./factory-intake.js";
 import { registerDashboardRoutes, eventReadOptions } from "./dashboard-routes.js";
 import { registerFaviconRoutes } from "./favicon.js";
 import { registerResponseCompression } from "./compression.js";
@@ -15,6 +16,7 @@ import {
 } from "./mission-control-web.js";
 import {
   CodingMissionController,
+  CodingMissionStore,
   codingMissionPortsFromEnv,
   type CodingMissionPorts
 } from "@agent-control-stack/coding-mission";
@@ -312,6 +314,8 @@ export interface GatewayOptions {
   /** Test seam: clock for agent confirmation expiry. */
   agentRunNow?: () => number;
   missionDispatchEnabled?: boolean;
+  /** AI Factory F1 preview intake. Defaults to the ACS_FACTORY_* environment (off unless enabled). */
+  factoryIntake?: FactoryIntakeConfig;
   /**
    * Optional bounded lifetime for admin execution mode (60000-86400000 ms). Unset means sticky: admin stays on until
    * an operator disables it, and nothing in this process supplies a default. Env: ACS_ADMIN_MODE_TTL_MS.
@@ -1748,6 +1752,30 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     requireHumanActor: (request, reply) => requireHumanApprovalActor(request, reply, auth),
     sendError
   });
+  let factoryMissionStore: CodingMissionStore | undefined;
+  registerFactoryIntakeRoutes({
+    app,
+    store: workItems,
+    config: options.factoryIntake ?? factoryIntakeConfigFromEnv(),
+    // Principal comes from configured ACS credentials; a write-scoped operator or service may preview.
+    requireActor: (request, reply) => requireMutationActor(request, reply, auth),
+    requireReader: (request, reply) => {
+      const credential = gatewayCredentialForRequest(request, auth);
+      if (!credential?.scopes.includes("acs:read")) {
+        reply.code(401).send({ error: "unauthorized" });
+        return undefined;
+      }
+      return mutationActorForCredential(credential);
+    },
+    metrics,
+    missions: () => {
+      if (codingMissions) return codingMissions.store;
+      factoryMissionStore ??= new CodingMissionStore(dbPath);
+      return factoryMissionStore;
+    },
+    sendError
+  });
+  app.addHook("onClose", async () => factoryMissionStore?.close());
   const agentRuns = new AgentRunService(
     workItems,
     options.agentDispatch ?? agentDispatchConfigFromEnv(),
@@ -5379,6 +5407,7 @@ function isRateLimitedRoute(url: string): boolean {
     path === "/mcp-clients/observe" ||
     path === "/mcp-clients/auth-event" ||
     path.startsWith("/api/mission-dispatch") ||
+    path.startsWith("/api/factory/") ||
     path === "/api/mcp-clients" ||
     path === "/api/mcp-clients/label" ||
     path === "/api/mcp-clients/label/clear" ||

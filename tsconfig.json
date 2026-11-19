@@ -92,6 +92,9 @@
       "path": "./packages/ai-factory"
     },
     {
+      "path": "./packages/ai-factory-runtime"
+    },
+    {
       "path": "./packages/outcome-engine"
     },
     {

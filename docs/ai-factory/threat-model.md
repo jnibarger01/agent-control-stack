@@ -48,3 +48,11 @@ ACS credentials, operator identity, scoped mission grant, audit integrity, alloc
 
 At F4, review ACS-controlled Swarm path in both repositories and ensure no operator API fallback. At F11, run an independent review of real sandbox/network/credential isolation, GitHub permissions, cancellation and audit replay. Keep a signed evidence manifest tied to exact commits, tool versions and environment.
 
+
+## Findings and implemented controls (2026-11-18)
+
+- **Fixed:** Codex Swarm's `/acs/v1` scaffold accepted the MAC key on the socket (`params.secret`). A peer could forge any envelope. The secret now arrives only on an inherited fd, and a request carrying `secret` is refused.
+- **Fixed:** cross-repo canonical JSON and envelope-hash mismatch. Swarm's verification is now byte-identical to ACS, proven by the shared fixture and a live run.
+- **Implemented:** `codex-swarm-v1` (systemd scope + bubblewrap): no network, cleared environment, workspace as the only writable host path, task/memory/CPU quotas, scope kill. Verified adversarially on a live host.
+- **Implemented:** the fence oracle (`fence.sock`), late-result fencing, pid + start-time identity before any kill, unknown-never-replayed.
+- **Open:** scoped egress with a single injected credential for model-backed lanes; independent security review; the store's `completeOperation` accepts an `unknown` unit under its old claim token (the factory path never calls it there, but other callers could).

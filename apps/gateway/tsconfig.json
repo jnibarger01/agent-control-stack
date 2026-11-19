@@ -10,6 +10,8 @@
     { "path": "../../apps/control-ui" },
     { "path": "../../packages/acp-adapter" },
     { "path": "../../packages/advisory" },
+    { "path": "../../packages/ai-factory" },
+    { "path": "../../packages/ai-factory-runtime" },
     { "path": "../../packages/coding-mission" },
     { "path": "../../packages/evidence" },
     { "path": "../../packages/machine-controller" },

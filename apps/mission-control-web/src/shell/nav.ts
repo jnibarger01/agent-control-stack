@@ -1,6 +1,6 @@
 import { abbrUiEnabled } from "../features/black-box/flag";
 
-/** The eleven canonical destinations. Pages not yet migrated link to the classic console, so nothing disappears. */
+/** The canonical destinations. Pages not yet migrated link to the classic console, so nothing disappears. */
 export interface NavItem {
   key: string;
   label: string;
@@ -16,6 +16,7 @@ const CANONICAL_NAV: NavItem[] = [
   { key: "queue", label: "Work Queue", route: "/queue", description: "All work items, plans and execution traces" },
   { key: "execution", label: "Execution", route: "/execution", description: "Attempts, leases and throughput" },
   { key: "approvals", label: "Approvals", route: "/approvals", description: "Work waiting on a human" },
+  { key: "factory", label: "AI Factory", route: "/factory", description: "Factory missions, stages and evidence" },
   { key: "agents", label: "Agents", route: "/agents", description: "Registered agents and heartbeats" },
   { key: "executors", label: "Executors", route: "/executors", description: "Execution bridges and runtimes" },
   { key: "connectors", label: "Connectors", route: "/connectors", description: "Connector registry and sessions" },

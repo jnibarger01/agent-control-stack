@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type AuditFilters, AuthRequiredError, NotFoundError, SchemaError, fetchAgent, fetchAgents, fetchAudit, fetchApprovals, fetchConnector, fetchConnectors, fetchExecution, fetchExecutor, fetchExecutors, fetchOverview, fetchQueue, fetchTrace } from "./api";
+import { type AuditFilters, AuthRequiredError, NotFoundError, SchemaError, fetchAgent, fetchAgents, fetchAudit, fetchApprovals, fetchConnector, fetchConnectors, fetchExecution, fetchExecutor, fetchExecutors, fetchFactoryBacklog, fetchOverview, fetchQueue, fetchTrace } from "./api";
 import { useEventStream, type EventSourceFactory, type StreamState } from "./stream";
 
 export const ROOT_KEY = ["mission-control"] as const;
@@ -59,6 +59,7 @@ const TIME_DERIVED_REFRESH_MS = 60_000;
 const shared = { staleTime: TIME_DERIVED_REFRESH_MS, refetchOnWindowFocus: true, refetchInterval: TIME_DERIVED_REFRESH_MS, retry } as const;
 
 export const useOverview = () => useQuery({ queryKey: OVERVIEW_KEY, queryFn: ({ signal }) => fetchOverview(fetch, signal), ...shared });
+export const useFactoryBacklog = () => useQuery({ queryKey: [...ROOT_KEY, "factory"], queryFn: ({ signal }) => fetchFactoryBacklog(fetch, signal), ...shared });
 export const useQueue = () => useQuery({ queryKey: QUEUE_KEY, queryFn: ({ signal }) => fetchQueue(fetch, signal), ...shared });
 export const useTrace = (id: string) => useQuery({ queryKey: traceKey(id), queryFn: ({ signal }) => fetchTrace(id, fetch, signal), ...shared });
 export const useApprovals = () => useQuery({ queryKey: [...ROOT_KEY, "approvals"], queryFn: ({ signal }) => fetchApprovals(fetch, signal), ...shared });

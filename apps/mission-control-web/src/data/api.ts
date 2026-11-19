@@ -1,5 +1,7 @@
 import {
   parseAgentDetail,
+  parseFactoryBacklog,
+  type FactoryBacklogReadModel,
   parseAgentsList,
   parseApprovalsReadModel,
   parseAuditReadModel,
@@ -82,6 +84,9 @@ async function fetchContract<T>(url: string, parse: (input: unknown) => Parsed<T
 
 export const fetchOverview = (fetcher: typeof fetch = fetch, signal?: AbortSignal): Promise<OverviewReadModel> =>
   fetchContract(OVERVIEW_URL, parseOverviewReadModel, fetcher, signal);
+export const FACTORY_BACKLOG_URL = "/api/factory/backlog";
+export const fetchFactoryBacklog = (fetcher: typeof fetch = fetch, signal?: AbortSignal): Promise<FactoryBacklogReadModel> =>
+  fetchContract(FACTORY_BACKLOG_URL, parseFactoryBacklog, fetcher, signal);
 export const fetchQueue = (fetcher: typeof fetch = fetch, signal?: AbortSignal): Promise<QueueReadModel> =>
   fetchContract(QUEUE_URL, parseQueueReadModel, fetcher, signal);
 export const fetchTrace = (id: string, fetcher: typeof fetch = fetch, signal?: AbortSignal): Promise<TraceReadModel> =>
