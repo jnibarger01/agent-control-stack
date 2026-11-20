@@ -6,7 +6,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
-import net from 'node:net';
 
 const root = new URL('../', import.meta.url).pathname;
 const secret = 'managed-jc-test-execution-token';
@@ -17,25 +16,74 @@ function attestation(overrides = {}, key = secret) {
   return `${body}.${createHmac('sha256', key).update(body).digest('base64url')}`;
 }
 const baseEnv = { PATH: process.env.PATH, HOME: process.env.HOME, BRIDGE_PROFILE: 'jace-commander', ACS_MANAGED_MODE: '1', DC_CMD: process.execPath, DC_ARGS: `${root}test/stub-jc.mjs serve`, JC_DC_DIR: root, JC_ACS_PUBLIC_KEY: 'test-key', JC_ACS_KEY_ID: 'test-key-id', JC_RUNTIME_ID: 'test-runtime' };
+
+// 127.0.0.1 is stored little-endian in /proc/net/tcp; 0A is TCP_LISTEN.
+function loopbackListenPort(pid) {
+  let inodes;
+  try {
+    inodes = new Set();
+    for (const fd of fs.readdirSync(`/proc/${pid}/fd`)) {
+      let link;
+      try { link = fs.readlinkSync(`/proc/${pid}/fd/${fd}`); } catch { continue; }
+      const match = /^socket:\[(\d+)\]$/.exec(link);
+      if (match) inodes.add(match[1]);
+    }
+  } catch { return null; }
+  let tcp;
+  try { tcp = fs.readFileSync('/proc/net/tcp', 'utf8'); } catch { return null; }
+  const ports = [];
+  for (const line of tcp.split('\n').slice(1)) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 10) continue;
+    const [addr, portHex] = parts[1].split(':');
+    if (addr !== '0100007F' || parts[3] !== '0A' || !inodes.has(parts[9])) continue;
+    const port = Number.parseInt(portHex, 16);
+    if (port > 0) ports.push(port);
+  }
+  return ports.length === 1 ? ports[0] : null;
+}
+
 async function fixture(t, overrides = {}) {
   const state = fs.mkdtempSync(path.join(os.tmpdir(), 'jc-attestation-'));
-  const listener = net.createServer();
-  listener.listen(0, '127.0.0.1');
-  await once(listener, 'listening');
-  const port = listener.address().port;
-  await new Promise((resolve) => listener.close(resolve));
   // Never let a test runtime claim the developer's real executor lease.
-  const child = spawn(process.execPath, [`${root}bridge.js`], { env: { ...baseEnv, BRIDGE_PORT: String(port), JC_STATE_DIR: state, DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: path.join(state, 'locks'), DC_GATEWAY_EXECUTION_TOKEN: secret, ...overrides }, stdio: ['ignore', 'pipe', 'pipe']});
+  // BRIDGE_PORT=0 makes the child bind an ephemeral port and keep it. The
+  // fixture reads that port from the child's socket table. Reserving a port
+  // and closing it before spawn lets a parallel test bind it first.
+  const child = spawn(process.execPath, [`${root}bridge.js`], {
+    env: {
+      ...baseEnv,
+      JC_STATE_DIR: state,
+      DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: path.join(state, 'locks'),
+      DC_GATEWAY_EXECUTION_TOKEN: secret,
+      ...overrides,
+      BRIDGE_PORT: '0',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
   let output = '';
   child.stdout.on('data', (d) => { output += d; });
   child.stderr.on('data', (d) => { output += d; });
   t.after(async () => { if (child.exitCode === null) { const exit = once(child, 'exit'); child.kill(); await exit; } fs.rmSync(state, { recursive: true, force: true }); });
+  let port = null;
+  for (let i = 0; i < 100 && port === null; i += 1) {
+    if (child.exitCode !== null) break;
+    port = loopbackListenPort(child.pid);
+    if (port === null) await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(child.exitCode, null, output);
+  assert.ok(port, `bridge did not listen on 127.0.0.1: ${output}`);
   const base = `http://127.0.0.1:${port}`;
   for (let i = 0; i < 100; i += 1) {
-    try { if ((await fetch(`${base}/healthz`)).ok) break; } catch { /* starting */ }
-    assert.equal(child.exitCode, null, output);
+    if (child.exitCode !== null) break;
+    try {
+      // Abort a stalled handshake. A stolen port's peer can accept and never
+      // answer, and fetch would otherwise wait out its 300s headers timeout.
+      if ((await fetch(`${base}/healthz`, { signal: AbortSignal.timeout(250) })).ok) break;
+    } catch { /* starting, or the attempt timed out */ }
+    if (child.exitCode !== null) break;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
+  assert.equal(child.exitCode, null, output);
   const headers = { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'x-dc-agent': 'operator', 'x-dc-attestation': attestation() };
   const post = (body, extra = {}) => fetch(`${base}/mcp`, { method: 'POST', headers: { ...headers, ...extra }, body: JSON.stringify(body) });
   return { base, post, headers, state };
