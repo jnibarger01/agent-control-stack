@@ -31,11 +31,11 @@ function stageRelease(name, { readOnly = true, releaseJson = true } = {}) {
   fs.cpSync(path.join(app, 'dist'), path.join(dir, 'dist'), { recursive: true });
   fs.copyFileSync(path.join(app, 'package.json'), path.join(dir, 'package.json'));
   fs.symlinkSync(path.join(repo, 'node_modules'), path.join(dir, 'node_modules'));
-  if (releaseJson) fs.writeFileSync(path.join(dir, 'RELEASE.json'), JSON.stringify({ version: '1.0.0', commit: 'testcommit00', installedAt: new Date().toISOString() }));
+  if (releaseJson) fs.writeFileSync(path.join(dir, 'RELEASE.json'), JSON.stringify({ version: '1.0.0', commit: '0c0ffee5ab1e', installedAt: new Date().toISOString() }));
   if (readOnly) spawnSync('chmod', ['-R', 'a-w', dir]);
   return dir;
 }
-const release = stageRelease('releases/1.0.0-testcommit00'.replace('/', '-'));
+const release = stageRelease('releases/1.0.0-0c0ffee5ab1e'.replace('/', '-'));
 const current = path.join(base, 'current');
 fs.symlinkSync(release, current);
 const writable = stageRelease('writable', { readOnly: false });
@@ -106,7 +106,7 @@ test('the pinned installed release starts, reports its identity and becomes read
   assert.equal(authority.runtime.releaseRequired, true);
   assert.deepEqual(
     { realDir: authority.runtime.installedRelease.realDir, readOnly: authority.runtime.installedRelease.readOnly, commit: authority.runtime.installedRelease.commit },
-    { realDir: fs.realpathSync(release), readOnly: true, commit: 'testcommit00' },
+    { realDir: fs.realpathSync(release), readOnly: true, commit: '0c0ffee5ab1e' },
   );
   assert.equal(authority.runtime.entrypoint, path.join(current, 'dist', 'cli.js'));
   assert.doesNotMatch(JSON.stringify(authority.runtime), /desktop-commander|apps\/jace-commander/);
