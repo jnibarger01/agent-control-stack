@@ -242,3 +242,22 @@ sent, and adds `error="invalid_token"` when a token was presented but is expired
 shows **Reauthentication required** for a client whose refresh token was rejected, reused, expired or revoked. See
 [ADR 0027](adr/0027-oauth-reauthentication-detection.md) and the "Reauthentication required" section of
 [the client visibility runbook](runbooks/mcp-client-visibility.md). Reporting to ACS is off unless the edge sets `ACS_MCP_AUTH_EVENTS=1`.
+
+## Jace Auth preset (production issuer — frozen)
+
+The operator's central issuer is [jace-auth](https://github.com/jnibarger01/jace-auth),
+frozen at `https://jace-auth.vercel.app` (see that repo's `docs/ISSUER.md`).
+Production preset — audience must stay exactly the string jace-auth mints:
+
+```sh
+ACS_OAUTH_ISSUER=https://jace-auth.vercel.app
+ACS_OAUTH_AUDIENCE=https://jace-auth.vercel.app/resources/agent-control-stack
+ACS_OAUTH_JWKS_URI=https://jace-auth.vercel.app/jwks
+```
+
+If the public gateway MCP URL should be the resource indicator instead, set
+`JACE_RESOURCE_AGENT_CONTROL_STACK=<gateway URL>` on jace-auth AND
+`ACS_OAUTH_AUDIENCE=<gateway URL>` here — the two strings must be equal.
+E2E verification against this issuer: `docs/jace-auth-e2e-verification.md`
+(local issuer variant, 2026-08-24); production-issuer negative proofs:
+`docs/jace-auth-production-negative-proofs.md`.
