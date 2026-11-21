@@ -1,0 +1,10 @@
+{
+  "sha256": "bdf14d3c381e06a5bf79930c947a0528d9a61c152d1badc12c64b9cb2c124e0f",
+  "keys": [
+    {
+      "kid": "r2x5WAGgEnlK4DpzofC7qsxxfjajcxm8",
+      "kty": "RSA",
+      "alg": "RS256"
+    }
+  ]
+}

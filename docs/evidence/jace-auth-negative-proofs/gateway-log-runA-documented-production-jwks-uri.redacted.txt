@@ -1,0 +1,8 @@
+{"level":30,"time":1795225972195,"pid":525491,"hostname":"cachyos-x8664","msg":"Server listening at http://127.0.0.1:3010"}
+{"level":30,"time":1795225972241,"pid":525491,"hostname":"cachyos-x8664","reqId":"req-1","req":{"method":"GET","url":"/mcp","host":"127.0.0.1:3010","remoteAddress":"127.0.0.1","remotePort":53884},"msg":"incoming request"}
+{"level":30,"time":1795225972243,"pid":525491,"hostname":"cachyos-x8664","reqId":"req-1","res":{"statusCode":405},"responseTime":1.7123359999999934,"msg":"request completed"}
+{"level":30,"time":1795225972243,"pid":525491,"hostname":"cachyos-x8664","reqId":"req-2","req":{"method":"GET","url":"/.well-known/oauth-protected-resource/mcp","host":"127.0.0.1:3010","remoteAddress":"127.0.0.1","remotePort":53900},"msg":"incoming request"}
+{"level":30,"time":1795225972244,"pid":525491,"hostname":"cachyos-x8664","reqId":"req-2","res":{"statusCode":200},"responseTime":0.2585879999999747,"msg":"request completed"}
+{"level":30,"time":1795225972245,"pid":525491,"hostname":"cachyos-x8664","reqId":"req-3","req":{"method":"POST","url":"/mcp","host":"127.0.0.1:3010","remoteAddress":"127.0.0.1","remotePort":53884},"msg":"incoming request"}
+{"level":30,"time":1795225972247,"pid":525491,"hostname":"cachyos-x8664","reqId":"req-3","res":{"statusCode":401},"responseTime":2.121456999999964,"msg":"request completed"}
+{"level":30,"time":1795225972248,"pid":525491,"hostname":"cachyos-x8664","reqId":"req-4","req":{"method":"POST","url":"/mcp","host":"127.0.0.1:3010","remoteAddress":"127.0.0.1","remotePort":53900},"msg":"incoming request"}
