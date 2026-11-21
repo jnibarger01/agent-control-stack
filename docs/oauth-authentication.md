@@ -31,6 +31,21 @@ The gateway publishes protected resource metadata at:
 
 The `resource` metadata value is `ACS_OAUTH_AUDIENCE`. `authorization_servers` contains `ACS_OAUTH_ISSUER`.
 
+The `WWW-Authenticate` challenge advertises a `resource_metadata` URL. That URL names the gateway, which is the resource server. Set it explicitly with `ACS_MCP_RESOURCE_METADATA_URL=https://<gateway>/.well-known/oauth-protected-resource/mcp`. In strict production mode it is required whenever OAuth is configured, and the gateway rejects an `https` URL on the issuer's origin at boot. Without the override, the URL is derived from the audience. When the audience sits on the issuer's host, as the jace-auth preset does, the derived URL points at a path the issuer does not serve.
+
+### jace-auth production preset
+
+For production with jace-auth, the frozen values supersede the generic example above:
+
+```sh
+ACS_OAUTH_ISSUER=https://jace-auth.vercel.app
+ACS_OAUTH_AUDIENCE=https://jace-auth.vercel.app/resources/agent-control-stack
+ACS_OAUTH_JWKS_URI=https://jace-auth.vercel.app/jwks
+ACS_MCP_RESOURCE_METADATA_URL=https://<gateway>/.well-known/oauth-protected-resource/mcp
+```
+
+The audience is the jace-auth resource identifier, not the gateway's `/mcp` URL. Both values are frozen in jace-auth `docs/ISSUER.md`. The template is `compose.production.env.example`. The negative proofs are in `docs/jace-auth-production-negative-proofs.md`.
+
 ## Scopes
 
 | Tool                | Required scope     |

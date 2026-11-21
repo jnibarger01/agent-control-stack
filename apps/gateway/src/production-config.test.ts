@@ -41,7 +41,8 @@ async function freeLoopbackPort(): Promise<number> {
 const OAUTH = {
   ACS_OAUTH_ISSUER: "https://issuer.example",
   ACS_OAUTH_AUDIENCE: "https://acs.example/mcp",
-  ACS_OAUTH_JWKS_URI: "https://issuer.example/jwks"
+  ACS_OAUTH_JWKS_URI: "https://issuer.example/jwks",
+  ACS_MCP_RESOURCE_METADATA_URL: "https://acs.example/.well-known/oauth-protected-resource/mcp"
 } as const;
 
 describe("production config fail-fast validator", () => {
@@ -137,6 +138,48 @@ describe("production config fail-fast validator", () => {
           ACS_TRUSTED_TUNNEL_PROXY: "10.0.0.1"
         })
       ).not.toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects OAuth without a gateway-owned protected-resource metadata URL", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-prod-config-"));
+    const base = {
+      NODE_ENV: "production",
+      HOST: "0.0.0.0",
+      ACS_DB_PATH: join(dir, "control.db"),
+      ACS_GATEWAY_CREDENTIALS_JSON: VALID_CREDENTIALS,
+      ACS_MCP_ALLOWED_ORIGINS: "https://acs.example"
+    };
+    const keysFor = (env: NodeJS.ProcessEnv): string[] => {
+      try {
+        validateProductionConfig(env);
+        return [];
+      } catch (error) {
+        return (error as ProductionConfigError).issues.map((issue) => issue.key);
+      }
+    };
+    try {
+      const { ACS_MCP_RESOURCE_METADATA_URL: _unused, ...withoutMetadata } = OAUTH;
+      expect(keysFor({ ...base, ...withoutMetadata })).toEqual(["ACS_MCP_RESOURCE_METADATA_URL"]);
+      // The exact bug: the audience-derived URL lives on the issuer's host. The issuer is not the resource.
+      expect(
+        keysFor({
+          ...base,
+          ...OAUTH,
+          ACS_MCP_RESOURCE_METADATA_URL: "https://issuer.example/.well-known/oauth-protected-resource/resources/agent-control-stack"
+        })
+      ).toEqual(["ACS_MCP_RESOURCE_METADATA_URL"]);
+      expect(
+        keysFor({ ...base, ...OAUTH, ACS_MCP_RESOURCE_METADATA_URL: "http://acs.example/.well-known/oauth-protected-resource/mcp" })
+      ).toEqual(["ACS_MCP_RESOURCE_METADATA_URL"]);
+      expect(
+        keysFor({ ...base, ...OAUTH, ACS_MCP_RESOURCE_METADATA_URL: "https://acs.example/mcp" })
+      ).toEqual(["ACS_MCP_RESOURCE_METADATA_URL"]);
+      expect(keysFor({ ...base, ...OAUTH, ACS_MCP_RESOURCE_METADATA_URL: "not a url" })).toEqual([
+        "ACS_MCP_RESOURCE_METADATA_URL"
+      ]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

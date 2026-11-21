@@ -138,11 +138,60 @@ function validateAuthMode(env: NodeJS.ProcessEnv, issues: ProductionConfigIssue[
       }
     }
   }
+  if (oauthAll) {
+    validateResourceMetadataUrl(env, issues);
+  }
 
   if (env.ACS_AUTH_MODE === "tunnel_id" && !env.ACS_TRUSTED_TUNNEL_PROXY?.trim()) {
     issues.push({
       key: "ACS_TRUSTED_TUNNEL_PROXY",
       message: "required when ACS_AUTH_MODE=tunnel_id"
+    });
+  }
+}
+
+/**
+ * The protected-resource metadata URL is the gateway's own endpoint. It cannot be derived from the
+ * OAuth audience: the audience identifies the resource and usually lives on the issuer's host, so a
+ * derived URL points the MCP client at a path the issuer does not serve.
+ */
+function validateResourceMetadataUrl(env: NodeJS.ProcessEnv, issues: ProductionConfigIssue[]): void {
+  const raw = env.ACS_MCP_RESOURCE_METADATA_URL?.trim();
+  if (!raw) {
+    issues.push({
+      key: "ACS_MCP_RESOURCE_METADATA_URL",
+      message: "required with OAuth: the gateway's https://<gateway>/.well-known/oauth-protected-resource/mcp URL"
+    });
+    return;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    issues.push({ key: "ACS_MCP_RESOURCE_METADATA_URL", message: "must be an absolute URL" });
+    return;
+  }
+  if (parsed.protocol !== "https:") {
+    issues.push({ key: "ACS_MCP_RESOURCE_METADATA_URL", message: "must use https" });
+  }
+  // The resource server publishes this document. The authorization server (the issuer) must not.
+  const issuer = env.ACS_OAUTH_ISSUER?.trim();
+  if (issuer) {
+    try {
+      if (new URL(issuer).origin === parsed.origin) {
+        issues.push({
+          key: "ACS_MCP_RESOURCE_METADATA_URL",
+          message: "must be served by the gateway origin, not the OAuth issuer origin"
+        });
+      }
+    } catch {
+      // An invalid issuer is reported by its own validation path.
+    }
+  }
+  if (!parsed.pathname.startsWith("/.well-known/oauth-protected-resource")) {
+    issues.push({
+      key: "ACS_MCP_RESOURCE_METADATA_URL",
+      message: "path must be a /.well-known/oauth-protected-resource endpoint of the gateway"
     });
   }
 }
