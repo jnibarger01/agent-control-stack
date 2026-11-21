@@ -168,15 +168,20 @@ describe("production config fail-fast validator", () => {
         keysFor({
           ...base,
           ...OAUTH,
-          ACS_MCP_RESOURCE_METADATA_URL: "https://issuer.example/.well-known/oauth-protected-resource/resources/agent-control-stack"
+          ACS_MCP_RESOURCE_METADATA_URL:
+            "https://issuer.example/.well-known/oauth-protected-resource/resources/agent-control-stack"
         })
       ).toEqual(["ACS_MCP_RESOURCE_METADATA_URL"]);
       expect(
-        keysFor({ ...base, ...OAUTH, ACS_MCP_RESOURCE_METADATA_URL: "http://acs.example/.well-known/oauth-protected-resource/mcp" })
+        keysFor({
+          ...base,
+          ...OAUTH,
+          ACS_MCP_RESOURCE_METADATA_URL: "http://acs.example/.well-known/oauth-protected-resource/mcp"
+        })
       ).toEqual(["ACS_MCP_RESOURCE_METADATA_URL"]);
-      expect(
-        keysFor({ ...base, ...OAUTH, ACS_MCP_RESOURCE_METADATA_URL: "https://acs.example/mcp" })
-      ).toEqual(["ACS_MCP_RESOURCE_METADATA_URL"]);
+      expect(keysFor({ ...base, ...OAUTH, ACS_MCP_RESOURCE_METADATA_URL: "https://acs.example/mcp" })).toEqual([
+        "ACS_MCP_RESOURCE_METADATA_URL"
+      ]);
       expect(keysFor({ ...base, ...OAUTH, ACS_MCP_RESOURCE_METADATA_URL: "not a url" })).toEqual([
         "ACS_MCP_RESOURCE_METADATA_URL"
       ]);

@@ -57,6 +57,8 @@ The audience is the jace-auth resource identifier, not the gateway's `/mcp` URL.
 | `unblock_work_item` | `acs:work:approve` |
 | `cancel_work_item`  | `acs:work:approve` |
 
+The table above lists MCP tool scopes, which OAuth access tokens must carry. The static `ACS_GATEWAY_CREDENTIALS_JSON` credentials use the legacy gateway REST scopes (`acs:read`, `acs:write`, `acs:approve`). Those are a different set, and an MCP token does not need them.
+
 Worker claim and result submission tools are not exposed on the public MCP gateway in `v0.1.0-alpha`. They remain local worker/store paths only.
 
 ## Local Development
@@ -272,7 +274,9 @@ ACS_OAUTH_JWKS_URI=https://jace-auth.vercel.app/jwks
 
 If the public gateway MCP URL should be the resource indicator instead, set
 `JACE_RESOURCE_AGENT_CONTROL_STACK=<gateway URL>` on jace-auth AND
-`ACS_OAUTH_AUDIENCE=<gateway URL>` here — the two strings must be equal.
+`ACS_OAUTH_AUDIENCE=<gateway URL>` here. The gateway accepts a token whose `aud` or `resource` claim
+matches `ACS_OAUTH_AUDIENCE`, so the two issuer-side values must agree, but the audience is not the
+only configuration the verifier accepts.
 E2E verification against this issuer: `docs/jace-auth-e2e-verification.md`
 (local issuer variant, 2026-08-24); production-issuer negative proofs:
 `docs/jace-auth-production-negative-proofs.md`.

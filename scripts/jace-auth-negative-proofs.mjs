@@ -192,7 +192,10 @@ async function main() {
   };
 
   const jwks = await fetchProductionJwks();
-  const productionKid = jwks.keys.find((key) => key.kty === "RSA" && key.use === "sig" && key.alg === "RS256")?.kid;
+  // RSA signing key with alg RS256, or no alg field (the production set omits use and alg on some keys).
+  const productionKid = jwks.keys.find(
+    (key) => key.kty === "RSA" && (key.alg === "RS256" || key.alg === undefined)
+  )?.kid;
   if (!productionKid) throw new Error("production JWKS has no RS256 signing key");
 
   // The forged token. Its key pair is in memory only.
@@ -222,7 +225,12 @@ async function main() {
   const remote = jose.createRemoteJWKSet(new URL(PROD_JWKS));
   let signatureStage;
   try {
-    await jose.jwtVerify(forged, remote, { issuer: ISSUER, audience: AUDIENCE, algorithms: ["RS256", "PS256"], currentDate: new Date() });
+    await jose.jwtVerify(forged, remote, {
+      issuer: ISSUER,
+      audience: AUDIENCE,
+      algorithms: ["RS256", "PS256"],
+      currentDate: new Date()
+    });
     signatureStage = { result: "accepted", note: "unexpected: forged token verified" };
   } catch (error) {
     signatureStage = { result: "rejected", code: error.code ?? null, name: error.name, message: error.message };
@@ -270,7 +278,8 @@ async function main() {
   }
 
   const relayFetches = relayLog.filter((entry) => entry.upstreamStatus !== undefined);
-  const relayMatchesProduction = relayFetches.length > 0 && relayFetches.every((entry) => entry.bodySha256 === jwks.sha256);
+  const relayMatchesProduction =
+    relayFetches.length > 0 && relayFetches.every((entry) => entry.bodySha256 === jwks.sha256);
 
   const n1 = runs["runA-documented-production-jwks-uri"].n1NoBearer;
   const n1Pass =
@@ -281,7 +290,8 @@ async function main() {
     !n1.wwwAuthenticate.includes(`${ISSUER}/.well-known/oauth-protected-resource`);
   const n2 = runs["runA-documented-production-jwks-uri"].n2ForgedToken;
   const n2RunB = runs["runB-relayed-production-jwks"].n2ForgedToken;
-  const stageRejected = signatureStage.result === "rejected" && signatureStage.code === "ERR_JWS_SIGNATURE_VERIFICATION_FAILED";
+  const stageRejected =
+    signatureStage.result === "rejected" && signatureStage.code === "ERR_JWS_SIGNATURE_VERIFICATION_FAILED";
   const n2Pass =
     n2.status === 401 &&
     n2.body.includes("invalid_token") &&
@@ -299,14 +309,18 @@ async function main() {
     relay: { fetches: relayFetches.length, allMatchProduction: relayMatchesProduction, log: relayLog },
     runs,
     verdicts: {
-      N0_metadata_endpoint_served: runs["runA-documented-production-jwks-uri"].n0MetadataEndpoint.status === 200 ? "PASS" : "FAIL",
+      N0_metadata_endpoint_served:
+        runs["runA-documented-production-jwks-uri"].n0MetadataEndpoint.status === 200 ? "PASS" : "FAIL",
       N1_no_bearer_advertises_gateway_metadata: n1Pass ? "PASS" : "FAIL",
       N2_forged_token_rejected_at_signature_against_production_jwks: n2Pass ? "PASS" : "UNVERIFIED",
       N2_rejection_stage_detail: stageRejected ? "signature" : "not established"
     }
   };
   writeFileSync(join(OUT, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`);
-  writeFileSync(join(OUT, "jwks-production.public.json"), `${JSON.stringify({ sha256: jwks.sha256, keys: jwks.keys }, null, 2)}\n`);
+  writeFileSync(
+    join(OUT, "jwks-production.public.json"),
+    `${JSON.stringify({ sha256: jwks.sha256, keys: jwks.keys }, null, 2)}\n`
+  );
   rmSync(tempDir, { recursive: true, force: true });
   console.log(JSON.stringify(summary.verdicts, null, 2));
 }
