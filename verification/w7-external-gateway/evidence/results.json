@@ -1,0 +1,57 @@
+[
+  {
+    "area": "canonical-external-origin+https-termination",
+    "status": "PASS",
+    "detail": "GET https://127.0.0.1:46709/.well-known/oauth-protected-resource/jc/mcp via TLS reverse proxy -> public ingress -> gateway returned 200; resource=https://127.0.0.1:46709/jc/mcp issuer/as=https://127.0.0.1:46709/jc"
+  },
+  {
+    "area": "nonce-challenge+nonce-retry (/token)",
+    "status": "PASS",
+    "detail": "token exchange status=200 token_type=DPoP code_present=true"
+  },
+  {
+    "area": "dpop-htu-correctness",
+    "status": "PASS",
+    "detail": "canonical htu https://127.0.0.1:46709/jc/mcp -> 200"
+  },
+  {
+    "area": "nonce-challenges+nonce-retry (/jc/mcp)",
+    "status": "PASS",
+    "detail": "missing nonce -> 401 www-auth=DPoP algs=\"EdDSA ES256\", resource_metadata=\"https://127.0.0.1:46709/.well-known/oauth-protected-resource/jc/mcp\", scope=\"mcp\", error=\"use_dpop_nonce\", error_description=\"DPoP nonce required\" retry -> 200"
+  },
+  {
+    "area": "forwarded-header-handling",
+    "status": "PASS",
+    "detail": "canonical proof with spoofed Host/X-Forwarded-* -> 200 (gateway binds htu to configured canonical origin, not forwarded headers)"
+  },
+  {
+    "area": "wrong-origin-rejection",
+    "status": "PASS",
+    "detail": "attacker-origin htu -> 401, wrong-path htu -> 401"
+  },
+  {
+    "area": "replay-protection",
+    "status": "PASS",
+    "detail": "first -> 200, replay same jti -> 401"
+  },
+  {
+    "area": "access-token-audience",
+    "status": "PARTIAL",
+    "detail": "jc-audience token presented to DC /mcp through filtered public ingress -> 404 (denied at ingress route policy before gateway; gateway-level wrong-audience/resource rejection not directly reachable on /mcp through this external ingress). Positive audience binding on /jc/mcp evidenced by successful canonical access and wrong-resource/htu rejection."
+  },
+  {
+    "area": "wrong-key-rejection",
+    "status": "PASS",
+    "detail": "stolen token with attacker key -> 401"
+  },
+  {
+    "area": "bearer-downgrade-rejection",
+    "status": "PASS",
+    "detail": "Bearer on DPoP-bound token -> 401 www-auth=DPoP algs=\"EdDSA ES256\", resource_metadata=\"https://127.0.0.1:46709/.well-known/oauth-protected-resource/jc/mcp\", scope=\"mcp\", error=\"invalid_token\", error_description=\"DPoP authentication is required for this token\""
+  },
+  {
+    "area": "revoked-device-rejection",
+    "status": "PASS",
+    "detail": "revoke -> 200, post-revoke /jc/mcp -> 401"
+  }
+]
