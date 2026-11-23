@@ -19,6 +19,7 @@
     "build:chatgpt-widget": "npm run build -w apps/chatgpt-widget",
     "build:native": "node scripts/build-native.mjs",
     "test:audit-chain-parity": "tsx scripts/audit-chain-parity.ts",
+    "test:work-items-parity": "tsx scripts/work-items-parity.ts --db storage/local.db.bak-20261103-182951",
     "test": "npm run test:vitest && npm run test:release-integrity && npm run test:agentos && npm run test:public-site-safety && npm run test:dc-mcp-gateway && npm run test:dc-relay && npm run test:deploy-script && npm run test:slice-workflow && npm run test:jc-native",
     "test:release-integrity": "npm test -w packages/release-integrity",
     "release:integrity": "node scripts/release-integrity.mjs",

@@ -129,6 +129,48 @@ impl Store {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// The `work_items` row with this id, if any.
+    pub fn work_item_row(&self, id: &str) -> Result<Option<WorkItemRow>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, title, requester, requester_subject, status, intent, target_json, \
+                    requested_actions_json, risk, result_json, metadata_json, source_work_item_id, \
+                    lineage_type, retry_reason, retry_sequence, root_work_item_id, created_at, updated_at \
+             FROM work_items WHERE id = ?1",
+        )?;
+        let mut rows = statement.query_map([id], |row| {
+            Ok(WorkItemRow {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                requester: row.get(2)?,
+                requester_subject: row.get(3)?,
+                status: row.get(4)?,
+                intent: row.get(5)?,
+                target_json: row.get(6)?,
+                requested_actions_json: row.get(7)?,
+                risk: row.get(8)?,
+                result_json: row.get(9)?,
+                metadata_json: row.get(10)?,
+                source_work_item_id: row.get(11)?,
+                lineage_type: row.get(12)?,
+                retry_reason: row.get(13)?,
+                retry_sequence: row.get(14)?,
+                root_work_item_id: row.get(15)?,
+                created_at: row.get(16)?,
+                updated_at: row.get(17)?,
+            })
+        })?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// Every work item id, in ascending order.
+    pub fn work_item_ids(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT id FROM work_items ORDER BY id ASC")?;
+        let ids = statement.query_map([], |row| row.get(0))?;
+        Ok(ids.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// The number of audit rows with `sequence <= through`, and the stored hash at `through`.
     pub fn audit_prefix(&self, through: i64) -> Result<(i64, Option<String>), StoreError> {
         let mut statement = self.connection.prepare(
@@ -137,4 +179,27 @@ impl Store {
         )?;
         Ok(statement.query_row([through], |row| Ok((row.get(0)?, row.get(1)?)))?)
     }
+}
+
+/// One `work_items` row, as stored.
+#[derive(Debug, Clone)]
+pub struct WorkItemRow {
+    pub id: String,
+    pub title: String,
+    pub requester: String,
+    pub requester_subject: Option<String>,
+    pub status: String,
+    pub intent: String,
+    pub target_json: String,
+    pub requested_actions_json: String,
+    pub risk: String,
+    pub result_json: Option<String>,
+    pub metadata_json: Option<String>,
+    pub source_work_item_id: Option<String>,
+    pub lineage_type: Option<String>,
+    pub retry_reason: Option<String>,
+    pub retry_sequence: Option<i64>,
+    pub root_work_item_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }

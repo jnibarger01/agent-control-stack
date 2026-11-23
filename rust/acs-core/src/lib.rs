@@ -9,3 +9,4 @@ pub mod audit;
 pub mod canonical;
 pub mod legacy;
 pub mod store;
+pub mod work_items;
