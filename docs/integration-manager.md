@@ -45,7 +45,7 @@ its members; a pull request that only depends on one is `blocked_by_cycle`, and 
 ## Optional native graph
 
 TypeScript is the default for dependency analysis and file overlap. With the matching Node-API addon installed,
-`ACS_INTEGRATION_GRAPH_BACKEND=rust` opts into the pilot for package exports and reconciliation. See the
+`ACS_INTEGRATION_GRAPH_BACKEND=rust` opts into the pilot for package exports and reconciliation. With it set, a missing or incompatible addon throws instead of falling back to TypeScript. See the
 [native graph runbook](migrations/rust-graph-runbook.md) for artifact layout, diagnostics and rollback.
 
 ## Credentials and configuration

@@ -15,6 +15,10 @@ napi-derive = "3"
 [build-dependencies]
 napi-build = "2"
 
+# Test-only: parses the recorded JSONL fixtures. Already pinned in rust/scope-supervisor.
+[dev-dependencies]
+serde_json = "1"
+
 [profile.release]
 lto = true
 
