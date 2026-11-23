@@ -1,0 +1,6 @@
+# Pins the Rust toolchain for rust/integration-graph and rust/scope-supervisor.
+# Bump deliberately, with the Rust CI workflow green on the new version.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
