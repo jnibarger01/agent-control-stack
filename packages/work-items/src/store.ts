@@ -57,6 +57,8 @@ import {
   recordExecutionScopeInputSchema,
   recordVerifiedCleanupInputSchema,
   retryInFlightError,
+  retryFenceModeFromEnvironment,
+  type RetryFenceMode,
   unprovenExecutionError,
   type AttemptCleanupEvidence,
   type AttemptExecutionScope,
@@ -1250,6 +1252,12 @@ function validateAdminModeTtl(value: number): number {
 
 export interface SqliteWorkItemStoreOptions {
   /**
+   * Retry fence mode. Defaults to ACS_RETRY_FENCE: unset or "off" records execution scopes and cleanup evidence but
+   * refuses nothing (the behaviour of releases before the fence); "enforce" refuses replacement attempts and retries
+   * while an attempt is unproven, and a second in-flight retry of the same source. Any other value is refused.
+   */
+  retryFence?: RetryFenceMode;
+  /**
    * Shadow audit verifier. Defaults to the Rust core when ACS_CORE_BACKEND=rust, otherwise none. The TypeScript
    * verdict stays authoritative; a shadow disagreement fails the audit health check closed.
    */
@@ -1773,6 +1781,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
   private auditChainVerifiedAtMs = 0;
   private readonly dbPath: string;
   private readonly auditShadowVerifier: CoreVerifier | undefined;
+  private readonly retryFence: RetryFenceMode;
   private readonly auditShadowCounters = { compared: 0, incremental: 0, skipped: 0, failed: 0 };
   /** The last chain prefix both verifiers agreed on; cleared before every shadow call and on any disagreement. */
   private auditShadowAnchor: AuditChainAnchor | undefined;
@@ -1804,6 +1813,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     this.releaseSha = traceProducer.releaseSha;
     mkdirSync(dirname(dbPath), { recursive: true });
     this.dbPath = dbPath;
+    this.retryFence = options.retryFence ?? retryFenceModeFromEnvironment();
     // Selection errors (an invalid ACS_CORE_BACKEND) surface here, before the database is opened.
     this.auditShadowVerifier =
       options.auditShadowVerifier === null
@@ -3487,8 +3497,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
         throw new ControlStackError("execution_plan_not_current", "attempts must bind to the current execution plan");
       }
       // Every claim path creates its attempt here, so this is the single gate for replacement attempts.
-      const unproven = this.unprovenExecutionAttemptId(parsed.workItemId);
-      if (unproven) throw unprovenExecutionError(unproven);
+      if (this.retryFence === "enforce") {
+        const unproven = this.unprovenExecutionAttemptId(parsed.workItemId);
+        if (unproven) throw unprovenExecutionError(unproven);
+      }
       const maxAttempt = this.db
         .prepare(`SELECT MAX(attempt_number) AS n FROM execution_attempts WHERE work_item_id = ?`)
         .get(parsed.workItemId) as { n: number | null };
@@ -9159,7 +9171,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       if (lineageType === "retry" && !overrides.retryReason) {
         throw new ControlStackError("invalid_retry_request", "retry reason is required");
       }
-      if (lineageType === "retry") {
+      if (lineageType === "retry" && this.retryFence === "enforce") {
         // Retry is the other replacement path: it creates a fresh work item from the source.
         const unproven = this.unprovenExecutionAttemptId(source.id);
         if (unproven) throw unprovenExecutionError(unproven);

@@ -96,6 +96,16 @@ export const UNPROVEN_EXECUTION_SQL = `
     )
   LIMIT 1`;
 
+export type RetryFenceMode = "off" | "enforce";
+
+/** ACS_RETRY_FENCE: unset, empty or "off" is off; "enforce" enforces; anything else is refused, never guessed. */
+export function retryFenceModeFromEnvironment(env: NodeJS.ProcessEnv = process.env): RetryFenceMode {
+  const value = env.ACS_RETRY_FENCE?.trim() ?? "";
+  if (value === "" || value === "off") return "off";
+  if (value === "enforce") return "enforce";
+  throw new ControlStackError("invalid_configuration", "ACS_RETRY_FENCE must be off or enforce");
+}
+
 export function unprovenExecutionError(attemptId: string): ControlStackError {
   return new ControlStackError(
     "execution_fence_held",

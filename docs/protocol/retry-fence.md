@@ -2,6 +2,21 @@
 
 Status: implemented and tested on the local Rust-cutover development branch, **not shipped or production-wired**. Schema migration `083_retry_fence_cleanup_evidence.sql` is new and additive. Tests: `packages/work-items/src/retry-fence.test.ts`.
 
+## Enforcement mode
+
+`ACS_RETRY_FENCE` selects the mode for every process that opens the work-item store (gateway, worker, scheduler):
+
+- unset, empty or `off` (default): execution scopes and verified cleanup evidence are recorded, but nothing is
+  refused. This is the behaviour of releases without the fence, so deploying this code does not change lifecycle
+  semantics.
+- `enforce`: replacement attempts and retries are refused while an attempt is live or unproven, and a second
+  in-flight retry of the same source is refused.
+- any other value: the store refuses to open (`invalid_configuration`).
+
+Rollout (docs/migrations/production-cutover-plan.md, B1 then B3): ship with the mode off, let scopes and evidence
+accumulate for every new attempt, provide the operator route for recording verified cleanup evidence, then set
+`enforce`. Rolling back the mode is setting `off` and restarting; stored rows are unaffected.
+
 ## Problem
 
 An attempt whose outcome is uncertain (`unknown`, `quarantined`) may still have side effects: a process may still run, or its workspace may be unreleased. Before this change the store did not check that when it created a replacement attempt or a retry.
@@ -41,7 +56,7 @@ Verified cleanup is recorded in two steps, both privileged and both inside the s
    - `cleanup_evidence_binding_mismatch` when the lease, epoch or unit differs from the recorded scope;
    - `cleanup_evidence_contradiction` when scope evidence, external-effect disposition, or external-effect evidence hash contradicts the stored record.
    - missing or malformed external-effect fields (schema validation); no row is created and the fence stays held.
-   Re-recording identical evidence returns the stored record and changes nothing.
+     Re-recording identical evidence returns the stored record and changes nothing.
 
 `verdict` accepts only `verified`. A failed, unknown or partial cleanup has no storable form, so it cannot release the fence.
 
