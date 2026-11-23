@@ -2,7 +2,13 @@ import { execFile } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { type AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { EgressConfigError, assertDirectLoopbackEgress, envProxyModeOn, nodeWouldProxy } from "./egress.js";
+import {
+  EgressConfigError,
+  assertDirectLoopbackEgress,
+  envProxyModeOn,
+  noProxyRulesForRuntime,
+  nodeWouldProxy
+} from "./egress.js";
 
 const PROXY = "http://proxy.invalid:3128";
 const BASE = "http://127.0.0.1:11434";
@@ -62,8 +68,15 @@ describe("assertDirectLoopbackEgress", () => {
     expect(verdict({ NO_PROXY: "localhost,127.0.0.0/8,[::1]" })).toBe("refuse");
   });
 
-  it("does not count bare ::1 as coverage for [::1]", () => {
-    expect(verdict({ NO_PROXY: "localhost,127.0.0.1,::1" }, "http://[::1]:11434")).toBe("refuse");
+  it("counts bare ::1 as coverage for [::1] only under Node 26", () => {
+    const env = { HTTP_PROXY: PROXY, NO_PROXY: "localhost,127.0.0.1,::1" };
+    const v6 = new URL("http://[::1]:11434");
+    expect(nodeWouldProxy(v6, env, "node24")).toBe(true);
+    expect(nodeWouldProxy(v6, env, "node26")).toBe(false);
+    expect(nodeWouldProxy(v6, env, "strictest")).toBe(true);
+    expect(verdict({ NO_PROXY: "localhost,127.0.0.1,::1" }, "http://[::1]:11434")).toBe(
+      nodeWouldProxy(v6, env, noProxyRulesForRuntime()) ? "refuse" : "allow"
+    );
     expect(verdict({ NO_PROXY: STD }, "http://[::1]:11434")).toBe("allow");
   });
 
@@ -74,9 +87,16 @@ describe("assertDirectLoopbackEgress", () => {
     expect(verdict({ NO_PROXY: "127.0.0.1:80" }, "http://127.0.0.1")).toBe("allow");
   });
 
-  it("treats * as a wildcard only when it is the whole value", () => {
+  it("treats a listed * as a wildcard under Node 26 but only the whole value under Node 24", () => {
     expect(verdict({ NO_PROXY: "*" })).toBe("allow");
-    expect(verdict({ NO_PROXY: "*,example.com" })).toBe("refuse");
+    const env = { HTTP_PROXY: PROXY, NO_PROXY: "*,example.com" };
+    const base = new URL(BASE);
+    expect(nodeWouldProxy(base, env, "node24")).toBe(true);
+    expect(nodeWouldProxy(base, env, "node26")).toBe(false);
+    expect(nodeWouldProxy(base, env, "strictest")).toBe(true);
+    expect(verdict({ NO_PROXY: "*,example.com" })).toBe(
+      nodeWouldProxy(base, env, noProxyRulesForRuntime()) ? "refuse" : "allow"
+    );
   });
 
   it("checks https targets against https_proxy and falls back to the http proxy", () => {
@@ -162,6 +182,12 @@ describe.skipIf(major < 24)("nodeWouldProxy agrees with Node's real env-proxy di
       { NO_PROXY: "localhost,127.0.0.0/8,[::1]" },
       { NO_PROXY: "*" },
       { NO_PROXY: "*,example.com" },
+      { NO_PROXY: "example.com,*" },
+      { NO_PROXY: `*:${v4Port}` },
+      { NO_PROXY: `*:${v4Port + 1}` },
+      { NO_PROXY: "*.localhost" },
+      { NO_PROXY: "localhost.,127.0.0.1." },
+      { NO_PROXY: "[127.0.0.1]" },
       { NO_PROXY: " LOCALHOST , 127.0.0.1 " },
       { NO_PROXY: `127.0.0.1:${v4Port}` },
       { NO_PROXY: `127.0.0.1:${v4Port + 1}` },
@@ -172,8 +198,8 @@ describe.skipIf(major < 24)("nodeWouldProxy agrees with Node's real env-proxy di
     }
     if (v6Port) {
       const v6 = `http://[::1]:${v6Port}/`;
-      // Node 24's undici parses bare `::1` as host ":" port 1 and proxies; newer Node bypasses. The guard
-      // follows the stricter behavior, so here only the safe direction (never allow a proxied request) is asserted.
+      // Node 24's undici parses bare `::1` as host ":" port 1 and proxies; Node 26 bypasses. The guard is exact
+      // on both; the safety-only fallback applies only where the guard's prediction is PROXIED.
       add(v6, { NO_PROXY: "localhost,127.0.0.1,::1" }, true);
       add(v6, { NO_PROXY: STD });
       add(v6, { NO_PROXY: `[::1]:${v6Port}` });
@@ -189,5 +215,57 @@ describe.skipIf(major < 24)("nodeWouldProxy agrees with Node's real env-proxy di
       }
       expect({ url, extra, got: results[index] }).toEqual({ url, extra, got: expected });
     });
+  });
+});
+
+describe("NO_PROXY rule generations", () => {
+  const env = (noProxy: string) => ({ HTTP_PROXY: "http://proxy.invalid:3128", NO_PROXY: noProxy });
+  const url = new URL("http://localhost:8080/");
+
+  it("selects verified rules for Node 24 and 26 and the strictest union otherwise", () => {
+    expect(noProxyRulesForRuntime("24.16.0")).toBe("node24");
+    expect(noProxyRulesForRuntime("26.13.1")).toBe("node26");
+    expect(noProxyRulesForRuntime("25.0.0")).toBe("strictest");
+    expect(noProxyRulesForRuntime("27.1.0")).toBe("strictest");
+  });
+
+  it("treats a listed `*` as bypass-all only under Node 26", () => {
+    expect(nodeWouldProxy(url, env("*,example.com"), "node24")).toBe(true);
+    expect(nodeWouldProxy(url, env("*,example.com"), "node26")).toBe(false);
+    expect(nodeWouldProxy(url, env("*,example.com"), "strictest")).toBe(true);
+    expect(nodeWouldProxy(url, env("*:8080"), "node26")).toBe(false);
+    expect(nodeWouldProxy(url, env("*:8081"), "node26")).toBe(true);
+  });
+
+  it("matches `*.suffix` exactly under Node 24 but only subdomains under Node 26", () => {
+    expect(nodeWouldProxy(url, env("*.localhost"), "node24")).toBe(false);
+    expect(nodeWouldProxy(url, env("*.localhost"), "node26")).toBe(true);
+    expect(nodeWouldProxy(url, env("*.localhost"), "strictest")).toBe(true);
+    expect(nodeWouldProxy(new URL("http://a.localhost/"), env("*.localhost"), "node26")).toBe(false);
+  });
+
+  it("never lets the strictest union report direct when either generation proxies", () => {
+    const shapes = [
+      "",
+      "*",
+      "*,x",
+      "x,*",
+      "localhost",
+      ".localhost",
+      "*.localhost",
+      "localhost.",
+      "[::1]",
+      "::1",
+      "localhost:8080",
+      "localhost:1"
+    ];
+    const targets = ["http://localhost:8080/", "http://[::1]:8080/", "http://a.localhost/", "https://127.0.0.1/"];
+    for (const shape of shapes) {
+      for (const target of targets) {
+        const t = new URL(target);
+        const union = nodeWouldProxy(t, env(shape), "strictest");
+        expect(union).toBe(nodeWouldProxy(t, env(shape), "node24") || nodeWouldProxy(t, env(shape), "node26"));
+      }
+    }
   });
 });

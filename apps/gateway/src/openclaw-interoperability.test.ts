@@ -297,7 +297,9 @@ describe("installed OpenClaw interoperability", () => {
                 model: { primary: "fixture/fixture-model" },
                 skipBootstrap: true
               },
-              list: [{ id: "main", default: true, workspace: allowed, model: "fixture/fixture-model" }]
+              // OpenClaw 2026.11 keys agents by id under `entries` and rejects the legacy `list` and per-entry `default`
+              // markers. The single entry is the default agent; it inherits the fixture model from `defaults`.
+              entries: { main: { workspace: allowed } }
             },
             models: {
               mode: "merge",
