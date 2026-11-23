@@ -200,6 +200,16 @@ describe("Rust scope supervisor client", () => {
       "not executable"
     );
   });
+
+  it("negative, typescript: a broken Rust path is never required or substituted", () => {
+    // Selecting TypeScript must not consult the Rust helper, even with a path set.
+    const selection = scopeSupervisorFromEnvironment({
+      ACS_SANDBOX_SUPERVISOR_BACKEND: "typescript",
+      ACS_SCOPE_SUPERVISOR_PATH: "/nonexistent/helper"
+    });
+    expect(selection.backend).toBe("typescript");
+    expect(() => requireRustSupervisor({ ...selection, backend: "rust" })).toThrow("not executable");
+  });
 });
 
 const realBinary = existsSync(defaultRustSupervisorPath) && process.env.ACS_TEST_SCOPE_SUPERVISOR === "1";
