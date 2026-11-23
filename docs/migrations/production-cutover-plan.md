@@ -89,6 +89,22 @@ discards writes.
 - Pin `LANG=C.UTF-8` and `LC_ALL=C.UTF-8` on every ACS unit until canonical hash v1 is retired (locale-dependent
   key order).
 
+## Restart rehearsal (G4), 2026-11-23
+
+Staging gateway on port 3100, build `1244bf97` (B1-wire), fresh copy of the production database, Rust audit shadow on,
+lease reaper at 1 s, fence `off`.
+
+- **Gateway SIGKILL under write load.** 8 concurrent writers; SIGKILL after 2.5 s with 4.2 MB of uncheckpointed WAL.
+  120 writes had been acknowledged (later ones got 429 from the pending-queue limit on the production copy; 8 were
+  in flight and reset). Restart to ready: 1.0 s, every readiness check green. All 120 acknowledged work items were
+  present after restart (0 lost). `PRAGMA integrity_check` ok, no foreign-key violations, Rust verifier `ok`.
+- **Worker and gateway crash mid-attempt.** A worker claimed a real attempt (3 s lease) and was SIGKILLed while it
+  was `running`; the gateway was SIGKILLed immediately after. After restart (ready, audit chain ok), the reaper
+  expired the lease on schedule: attempt `unknown`, work item `failed`, lease `expired`. Final audit chain: `ok`,
+  26,090 events.
+- The orphaned attempt had no recorded execution scope and is held under `ACS_RETRY_FENCE=enforce`, which confirms
+  the open protocol item above: enforcing now would block such attempts permanently.
+
 ## Authorization checks
 
 - Every step needs a separate explicit authorization naming the step (B0–B3), the target instance and the
@@ -108,7 +124,7 @@ command output.
 | G1   | Full Vitest suite: 0 failures in two consecutive runs; skips only for absent optional tools, listed by name    | Baseline fix branch: run 1 one load-induced Hermes timeout, run 2 0 failures                                                                                                                                                                                                          |
 | G2   | `cargo test` for every crate: 0 failures; `audit-chain-parity`: all fixtures agree                             | Pass (89/89)                                                                                                                                                                                                                                                                          |
 | G3   | Mixed-version tests above pass                                                                                 | **Not written**                                                                                                                                                                                                                                                                       |
-| G4   | Restart rehearsal per step passes                                                                              | **Not done**                                                                                                                                                                                                                                                                          |
+| G4   | Restart rehearsal per step passes                                                                              | **Pass (staging, B1-wire build, 2026-11-23)**: see "Restart rehearsal" below                                                                                                                                                                                                          |
 | G5   | Contract sweep: every public operation's status equals the previous release, authenticated and unauthenticated | Unauthenticated GET sweep only                                                                                                                                                                                                                                                        |
 | G6   | `/health` p95 ≤ previous release + 10% with shadows enabled; event-loop block from a shadow ≤ 50 ms            | **Pass (staging copy, 2026-11-22)**: incremental shadow (R1c) blocks 2.6 ms p50, 3.3 ms p99, 4.0 ms max per inspection over 100 inspections with writes; one full read (267 ms) at store open; `health()` p50 within ±2% of TypeScript-only, p95 within run-to-run noise (290–353 ms) |
 | G7   | Shadow disagreements = 0 over a 7-day staging soak; skipped comparisons < 1%                                   | 4/4 agree on the production copy; no soak                                                                                                                                                                                                                                             |
