@@ -44,6 +44,19 @@ import {
 } from "./change-set-review.js";
 import { readMissionTrace, type MissionTrace, type MissionTraceQuery } from "./mission-trace.js";
 import {
+  FENCE_HOLDING_ATTEMPT_STATUSES,
+  LIVE_ATTEMPT_STATUSES,
+  UNPROVEN_EXECUTION_SQL,
+  recordExecutionScopeInputSchema,
+  recordVerifiedCleanupInputSchema,
+  retryInFlightError,
+  unprovenExecutionError,
+  type AttemptCleanupEvidence,
+  type AttemptExecutionScope,
+  type RecordExecutionScopeInput,
+  type RecordVerifiedCleanupInput
+} from "./retry-fence.js";
+import {
   buildAuthoritativeCompletionReceipts,
   authoritativeReceiptBundleHash
 } from "./authoritative-completion-receipt.js";
@@ -379,6 +392,56 @@ interface ExecutionPlanAdmissionRow {
   requires_approval: number;
   admitted_by_actor_id: string;
   admitted_at: string;
+}
+
+interface AttemptExecutionScopeRow {
+  attempt_id: string;
+  work_item_id: string;
+  lease_id: string;
+  fencing_epoch: number;
+  unit_name: string;
+  recorded_at: string;
+}
+
+interface AttemptCleanupEvidenceRow {
+  attempt_id: string;
+  work_item_id: string;
+  lease_id: string;
+  fencing_epoch: number;
+  unit_name: string;
+  verdict: string;
+  evidence_hash: string;
+  effects_disposition: "no_external_effects" | "reconciled";
+  effects_evidence_hash: string;
+  observed_at: string;
+  recorded_at: string;
+}
+
+function rowToAttemptExecutionScope(row: AttemptExecutionScopeRow): AttemptExecutionScope {
+  return {
+    attemptId: row.attempt_id,
+    workItemId: row.work_item_id,
+    leaseId: row.lease_id,
+    fencingEpoch: row.fencing_epoch,
+    unitName: row.unit_name,
+    recordedAt: row.recorded_at
+  };
+}
+
+function rowToAttemptCleanupEvidence(row: AttemptCleanupEvidenceRow): AttemptCleanupEvidence {
+  return {
+    attemptId: row.attempt_id,
+    workItemId: row.work_item_id,
+    leaseId: row.lease_id,
+    fencingEpoch: row.fencing_epoch,
+    unitName: row.unit_name,
+    verdict: "verified",
+    evidenceHash: row.evidence_hash,
+    effectsDisposition: row.effects_disposition,
+    effectsEvidenceHash: row.effects_evidence_hash,
+    observedAt: row.observed_at,
+    recordedAt: row.recorded_at
+  };
 }
 
 interface ExecutionAttemptRow {
@@ -1379,6 +1442,15 @@ export interface WorkItemStore {
   getValidationRun(runId: string): ValidationRun | undefined;
   getValidationRunForAttempt(attemptId: string): ValidationRun | undefined;
   recordRecoveryDecision(input: RecordRecoveryDecisionInput, options: PrivilegedTransitionOptions): RecoveryRecord;
+  /** Binds the execution unit observed for an attempt to its current lease and fencing epoch. */
+  recordExecutionScope(input: RecordExecutionScopeInput, options: PrivilegedTransitionOptions): AttemptExecutionScope;
+  /** Records verified cleanup of that unit. Releases the retry fence for the attempt. Idempotent. */
+  recordVerifiedCleanup(
+    input: RecordVerifiedCleanupInput,
+    options: PrivilegedTransitionOptions
+  ): AttemptCleanupEvidence;
+  /** The attempt that currently holds the retry fence for a work item, if any. Read-only. */
+  unprovenExecutionAttemptId(workItemId: string): string | undefined;
   getRecoveryDecisionForAttempt(attemptId: string): RecoveryRecord | undefined;
   recordPublication(input: RecordPublicationInput, options: PrivilegedTransitionOptions): PublicationRecord;
   recordPublicationBlocked(
@@ -3389,6 +3461,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
       if (!current || current.planHash !== parsed.planHash) {
         throw new ControlStackError("execution_plan_not_current", "attempts must bind to the current execution plan");
       }
+      // Every claim path creates its attempt here, so this is the single gate for replacement attempts.
+      const unproven = this.unprovenExecutionAttemptId(parsed.workItemId);
+      if (unproven) throw unprovenExecutionError(unproven);
       const maxAttempt = this.db
         .prepare(`SELECT MAX(attempt_number) AS n FROM execution_attempts WHERE work_item_id = ?`)
         .get(parsed.workItemId) as { n: number | null };
@@ -4375,6 +4450,172 @@ export class SqliteWorkItemStore implements WorkItemStore {
         })
       )
     });
+  }
+
+  unprovenExecutionAttemptId(workItemId: string): string | undefined {
+    const row = this.db.prepare(UNPROVEN_EXECUTION_SQL).get(workItemId, ...FENCE_HOLDING_ATTEMPT_STATUSES) as
+      { attemptId: string } | undefined;
+    return row?.attemptId;
+  }
+
+  recordExecutionScope(input: RecordExecutionScopeInput, options: PrivilegedTransitionOptions): AttemptExecutionScope {
+    requirePrivilegedTransition(options, "record_execution_scope");
+    const parsed = recordExecutionScopeInputSchema.parse(input);
+    return this.write(() => {
+      const attempt = this.getAttemptRowForFence(parsed.attemptId, parsed.workItemId);
+      // The scope must be bound to the attempt's latest lease epoch and to that exact lease row.
+      if (attempt.current_fencing_epoch !== parsed.fencingEpoch) {
+        throw new ControlStackError(
+          "execution_scope_binding_mismatch",
+          "scope is not bound to the current fencing epoch"
+        );
+      }
+      const lease = this.db
+        .prepare(
+          `SELECT lease_id FROM attempt_leases WHERE attempt_id = ? AND work_item_id = ? AND lease_id = ? AND fencing_epoch = ?`
+        )
+        .get(parsed.attemptId, parsed.workItemId, parsed.leaseId, parsed.fencingEpoch);
+      if (!lease) {
+        throw new ControlStackError("execution_scope_binding_mismatch", "scope lease does not belong to this attempt");
+      }
+      const existing = this.db
+        .prepare(`SELECT * FROM attempt_execution_scopes WHERE attempt_id = ?`)
+        .get(parsed.attemptId) as unknown as AttemptExecutionScopeRow | undefined;
+      if (existing) {
+        if (
+          existing.lease_id === parsed.leaseId &&
+          existing.fencing_epoch === parsed.fencingEpoch &&
+          existing.unit_name === parsed.unitName
+        ) {
+          return { value: rowToAttemptExecutionScope(existing), events: [] };
+        }
+        throw new ControlStackError("execution_scope_contradiction", "attempt already has a different execution scope");
+      }
+      const recordedAt = (parsed.now ?? new Date()).toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO attempt_execution_scopes (attempt_id, work_item_id, lease_id, fencing_epoch, unit_name, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .run(parsed.attemptId, parsed.workItemId, parsed.leaseId, parsed.fencingEpoch, parsed.unitName, recordedAt);
+      const scope = rowToAttemptExecutionScope({
+        attempt_id: parsed.attemptId,
+        work_item_id: parsed.workItemId,
+        lease_id: parsed.leaseId,
+        fencing_epoch: parsed.fencingEpoch,
+        unit_name: parsed.unitName,
+        recorded_at: recordedAt
+      });
+      const event = this.appendAuditEvent(
+        createEvent(
+          "attempt_execution_scope.recorded",
+          { ...scope },
+          {
+            "work_item.id": parsed.workItemId,
+            "attempt.id": parsed.attemptId,
+            "lease.id": parsed.leaseId
+          }
+        )
+      );
+      return { value: scope, events: [event] };
+    });
+  }
+
+  recordVerifiedCleanup(
+    input: RecordVerifiedCleanupInput,
+    options: PrivilegedTransitionOptions
+  ): AttemptCleanupEvidence {
+    requirePrivilegedTransition(options, "record_verified_cleanup");
+    const parsed = recordVerifiedCleanupInputSchema.parse(input);
+    return this.write(() => {
+      const attempt = this.getAttemptRowForFence(parsed.attemptId, parsed.workItemId);
+      // A live attempt is still executing. Its scope cannot be evidenced as cleaned up.
+      if ((LIVE_ATTEMPT_STATUSES as readonly string[]).includes(attempt.status)) {
+        throw new ControlStackError("attempt_still_live", "a live attempt cannot be evidenced as cleaned up");
+      }
+      const scope = this.db
+        .prepare(`SELECT * FROM attempt_execution_scopes WHERE attempt_id = ?`)
+        .get(parsed.attemptId) as unknown as AttemptExecutionScopeRow | undefined;
+      if (!scope) {
+        throw new ControlStackError("execution_scope_missing", "no execution scope is recorded for this attempt");
+      }
+      if (
+        scope.lease_id !== parsed.leaseId ||
+        scope.fencing_epoch !== parsed.fencingEpoch ||
+        scope.unit_name !== parsed.unitName
+      ) {
+        throw new ControlStackError(
+          "cleanup_evidence_binding_mismatch",
+          "cleanup evidence does not match the recorded attempt, lease, epoch and execution unit"
+        );
+      }
+      const existing = this.db
+        .prepare(`SELECT * FROM attempt_cleanup_evidence WHERE attempt_id = ?`)
+        .get(parsed.attemptId) as unknown as AttemptCleanupEvidenceRow | undefined;
+      if (existing) {
+        if (
+          existing.evidence_hash === parsed.evidenceHash &&
+          existing.effects_disposition === parsed.effectsDisposition &&
+          existing.effects_evidence_hash === parsed.effectsEvidenceHash
+        ) {
+          return { value: rowToAttemptCleanupEvidence(existing), events: [] };
+        }
+        throw new ControlStackError("cleanup_evidence_contradiction", "attempt already has different cleanup evidence");
+      }
+      const recordedAt = (parsed.now ?? new Date()).toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO attempt_cleanup_evidence
+           (attempt_id, work_item_id, lease_id, fencing_epoch, unit_name, verdict, evidence_hash,
+            effects_disposition, effects_evidence_hash, observed_at, recorded_at)
+           VALUES (?, ?, ?, ?, ?, 'verified', ?, ?, ?, ?, ?)`
+        )
+        .run(
+          parsed.attemptId,
+          parsed.workItemId,
+          parsed.leaseId,
+          parsed.fencingEpoch,
+          parsed.unitName,
+          parsed.evidenceHash,
+          parsed.effectsDisposition,
+          parsed.effectsEvidenceHash,
+          parsed.observedAt,
+          recordedAt
+        );
+      const evidence = rowToAttemptCleanupEvidence({
+        attempt_id: parsed.attemptId,
+        work_item_id: parsed.workItemId,
+        lease_id: parsed.leaseId,
+        fencing_epoch: parsed.fencingEpoch,
+        unit_name: parsed.unitName,
+        verdict: "verified",
+        evidence_hash: parsed.evidenceHash,
+        effects_disposition: parsed.effectsDisposition,
+        effects_evidence_hash: parsed.effectsEvidenceHash,
+        observed_at: parsed.observedAt,
+        recorded_at: recordedAt
+      });
+      const event = this.appendAuditEvent(
+        createEvent(
+          "attempt_cleanup.verified",
+          { ...evidence },
+          {
+            "work_item.id": parsed.workItemId,
+            "attempt.id": parsed.attemptId,
+            "lease.id": parsed.leaseId
+          }
+        )
+      );
+      return { value: evidence, events: [event] };
+    });
+  }
+
+  private getAttemptRowForFence(attemptId: string, workItemId: string): ExecutionAttemptRow {
+    const attempt = this.db
+      .prepare(`SELECT * FROM execution_attempts WHERE attempt_id = ? AND work_item_id = ?`)
+      .get(attemptId, workItemId) as unknown as ExecutionAttemptRow | undefined;
+    if (!attempt) throw new ControlStackError("attempt_not_found", "no such execution attempt");
+    return attempt;
   }
 
   recordRecoveryDecision(input: RecordRecoveryDecisionInput, options: PrivilegedTransitionOptions): RecoveryRecord {
@@ -8892,6 +9133,21 @@ export class SqliteWorkItemStore implements WorkItemStore {
       }
       if (lineageType === "retry" && !overrides.retryReason) {
         throw new ControlStackError("invalid_retry_request", "retry reason is required");
+      }
+      if (lineageType === "retry") {
+        // Retry is the other replacement path: it creates a fresh work item from the source.
+        const unproven = this.unprovenExecutionAttemptId(source.id);
+        if (unproven) throw unprovenExecutionError(unproven);
+        // One retry in flight per source. Writes are serialized, so the check and insert are atomic.
+        const inFlight = this.db
+          .prepare(
+            `SELECT id FROM work_items
+             WHERE source_work_item_id = ? AND lineage_type = 'retry'
+               AND status NOT IN ('succeeded', 'failed', 'cancelled', 'rejected')
+             LIMIT 1`
+          )
+          .get(source.id);
+        if (inFlight) throw retryInFlightError(source.id);
       }
       const created = createWorkItem({
         title: overrides.title ?? source.title,
