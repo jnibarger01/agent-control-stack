@@ -2,9 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stableHash } from "@agent-control-stack/shared";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { Worker } from "node:worker_threads";
 import { SqliteWorkItemStore, defaultExecutionPlanForWorkItem } from "./index.js";
+import { retryFenceModeFromEnvironment } from "./retry-fence.js";
 
 const raceWorkerUrl = new URL("./concurrency-race-worker.ts", import.meta.url);
 
@@ -165,6 +166,63 @@ let directory: string | undefined;
 afterEach(() => {
   if (directory) rmSync(directory, { recursive: true, force: true });
   directory = undefined;
+});
+
+// The fence is off by default (ACS_RETRY_FENCE unset). The enforcement suites below run with it on; every store in
+// this file, including the race workers' (which inherit the environment), is opened in enforce mode.
+const previousFenceMode = process.env.ACS_RETRY_FENCE;
+beforeAll(() => {
+  process.env.ACS_RETRY_FENCE = "enforce";
+});
+afterAll(() => {
+  if (previousFenceMode === undefined) delete process.env.ACS_RETRY_FENCE;
+  else process.env.ACS_RETRY_FENCE = previousFenceMode;
+});
+
+describe("retry fence mode (ACS_RETRY_FENCE)", () => {
+  it("is off when unset or off, enforce when enforce, and refuses anything else", () => {
+    expect(retryFenceModeFromEnvironment({})).toBe("off");
+    expect(retryFenceModeFromEnvironment({ ACS_RETRY_FENCE: "off" })).toBe("off");
+    expect(retryFenceModeFromEnvironment({ ACS_RETRY_FENCE: " enforce " })).toBe("enforce");
+    expect(codeOf(() => retryFenceModeFromEnvironment({ ACS_RETRY_FENCE: "on" }))).toBe("invalid_configuration");
+  });
+
+  it("refuses an invalid mode when the store opens", () => {
+    const saved = process.env.ACS_RETRY_FENCE;
+    process.env.ACS_RETRY_FENCE = "Enforce!";
+    const scratch = mkdtempSync(join(tmpdir(), "acs-retry-fence-mode-"));
+    try {
+      expect(codeOf(() => new SqliteWorkItemStore(join(scratch, "control.db")))).toBe("invalid_configuration");
+    } finally {
+      process.env.ACS_RETRY_FENCE = saved;
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("off: an unproven attempt refuses nothing, as before the fence", () => {
+    const f = unknownAttemptFixture();
+    directory = f.directory;
+    const off = new SqliteWorkItemStore(f.dbPath, { retryFence: "off" });
+    try {
+      expect(off.unprovenExecutionAttemptId(f.workItem.id)).toBeDefined();
+      expect(codeOf(() => off.retryWorkItem(f.workItem.id, { actor: "user", reason: "try again" }))).toBeUndefined();
+    } finally {
+      off.close();
+    }
+  });
+
+  it("enforce by option: the same database refuses the retry", () => {
+    const f = unknownAttemptFixture();
+    directory = f.directory;
+    const enforce = new SqliteWorkItemStore(f.dbPath, { retryFence: "enforce" });
+    try {
+      expect(codeOf(() => enforce.retryWorkItem(f.workItem.id, { actor: "user", reason: "try again" }))).toBe(
+        "execution_fence_held"
+      );
+    } finally {
+      enforce.close();
+    }
+  });
 });
 
 describe("retry fence: unproven execution blocks replacement attempts", () => {
@@ -336,10 +394,9 @@ describe("retry fence: unproven execution blocks replacement attempts", () => {
       effectsEvidenceHash: undefined
     };
     expect(() =>
-      f.store.recordVerifiedCleanup(
-        cleanupOnly as unknown as ReturnType<typeof evidenceInput>,
-        { via: "domain_service" }
-      )
+      f.store.recordVerifiedCleanup(cleanupOnly as unknown as ReturnType<typeof evidenceInput>, {
+        via: "domain_service"
+      })
     ).toThrow();
     expect(
       codeOf(() =>
