@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { verifyAuditChain, type AuditChainEvent } from "./audit-chain.js";
-import { controlPlaneMigrations } from "./migration.js";
+import { controlPlaneMigrations, forwardCompatibleMigrations } from "./migration.js";
 
 export type DatabaseHealthCheck = { ok: true } | { ok: false; code: string };
 
@@ -76,11 +76,11 @@ function migrationHealth(db: DatabaseSync): DatabaseHealthCheck {
     const rows = db
       .prepare("SELECT version, name, filename, checksum FROM schema_migrations ORDER BY version ASC")
       .all() as Array<{ version: number; name: string; filename: string; checksum: string }>;
-    if (rows.length !== expected.length) {
-      return failed(rows.length < expected.length ? "migration_missing" : "migration_mismatch");
-    }
+    const shipped = new Set(expected.map((migration) => migration.version));
+    const known = rows.filter((row) => shipped.has(row.version));
+    if (known.length < expected.length) return failed("migration_missing");
     for (let index = 0; index < expected.length; index += 1) {
-      const actual = rows[index];
+      const actual = known[index];
       const migration = expected[index];
       if (
         !actual ||
@@ -89,6 +89,23 @@ function migrationHealth(db: DatabaseSync): DatabaseHealthCheck {
         actual.name !== migration.name ||
         actual.filename !== migration.filename ||
         actual.checksum !== migration.checksum
+      ) {
+        return failed("migration_mismatch");
+      }
+    }
+    // Rows this release does not ship are accepted only as exact forward-compatible migrations above every shipped
+    // version. Anything else (an unknown version, a gap filled by another lineage, a different checksum) is a mismatch.
+    const highestShipped = Math.max(0, ...shipped);
+    const forwardCompatible = forwardCompatibleMigrations();
+    for (const row of rows) {
+      if (shipped.has(row.version)) continue;
+      const compatible = forwardCompatible.find((entry) => entry.version === row.version);
+      if (
+        row.version <= highestShipped ||
+        !compatible ||
+        compatible.name !== row.name ||
+        compatible.filename !== row.filename ||
+        compatible.checksum !== row.checksum
       ) {
         return failed("migration_mismatch");
       }
