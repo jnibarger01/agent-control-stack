@@ -14,7 +14,9 @@ import {
   type SandboxCommandProfile,
   type SandboxExecuteOptions,
   type SandboxExecutionObservation,
-  type SandboxExecutionRequest
+  type SandboxExecutionRequest,
+  recordScopeBeforeLaunch,
+  type SandboxScopeRecorder
 } from "./contracts.js";
 import {
   RUST_SUPERVISOR_BACKEND_TAG,
@@ -44,6 +46,8 @@ export interface LinuxSandboxOptions {
   gitPath?: string;
   hostCommandRunner?: HostCommandRunner;
   unitNameFactory?: (attemptId: string) => string;
+  /** Records each allocated unit before launch; a failure refuses the launch. */
+  scopeRecorder?: SandboxScopeRecorder;
   now?: () => Date;
   /** Pinned for the lifetime of the backend instance. Defaults to the process environment. */
   scopeSupervisor?: ScopeSupervisorSelection;
@@ -83,6 +87,7 @@ interface ResolvedLinuxSandboxOptions {
   gitPath: string;
   hostCommandRunner: HostCommandRunner;
   unitNameFactory: (attemptId: string) => string;
+  scopeRecorder: SandboxScopeRecorder | undefined;
   now: () => Date;
   scopeSupervisor: ScopeSupervisorSelection;
 }
@@ -131,6 +136,17 @@ export class BubblewrapSystemdSandbox implements SandboxBackend {
       throw new ControlStackError("sandbox_cancelled", "sandbox request was cancelled before process creation");
     }
     const unitName = validatedUnitName(this.options.unitNameFactory(request.attemptId));
+    await recordScopeBeforeLaunch(
+      this.options.scopeRecorder,
+      {
+        workItemId: request.workItemId,
+        attemptId: request.attemptId,
+        leaseId: request.leaseId,
+        fencingToken: request.fencingToken,
+        unitName
+      },
+      "sandbox_scope_unrecorded"
+    );
     const bubblewrap = buildBubblewrapInvocation(request, authority.canonicalWorkspacePath, this.options);
     const systemd = buildSystemdScopeInvocation(request, bubblewrap, unitName, this.options);
 
@@ -451,6 +467,7 @@ function resolveOptions(options: LinuxSandboxOptions): ResolvedLinuxSandboxOptio
     gitPath: options.gitPath ?? "/usr/bin/git",
     hostCommandRunner: options.hostCommandRunner ?? runHostCommand,
     unitNameFactory: options.unitNameFactory ?? defaultUnitName,
+    scopeRecorder: options.scopeRecorder,
     now: options.now ?? (() => new Date()),
     scopeSupervisor: options.scopeSupervisor ?? scopeSupervisorFromEnvironment()
   };

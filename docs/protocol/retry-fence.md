@@ -17,6 +17,27 @@ Rollout (docs/migrations/production-cutover-plan.md, B1 then B3): ship with the 
 accumulate for every new attempt, provide the operator route for recording verified cleanup evidence, then set
 `enforce`. Rolling back the mode is setting `off` and restarting; stored rows are unaffected.
 
+## Scope recording (slice B1-wire)
+
+Both sandbox backends (`createLinuxSandbox`, `createEngineIsolation`) accept a `scopeRecorder`. After the authority
+receipt is verified and the unit name is allocated, and before anything is created on the host, the sandbox calls
+`record({ workItemId, attemptId, leaseId, fencingToken, unitName })`. A recorder failure refuses the launch
+(`sandbox_scope_unrecorded`, `engine_isolation_scope_unrecorded`) without echoing its detail, so no unit is created
+without a record. `storeBackedScopeRecorder(store)` writes the scope through `recordExecutionScope`, binding
+`fencingEpoch` to the request's `fencingToken`; the command broker uses it by default, and the CLI and Codex engine
+adapters pass a `scopeRecorder` option through to engine isolation.
+
+Evidence: live tests on Linux (`ACS_SANDBOX_INTEGRATION=1`) show the recorder receives the real unit while it is still
+inactive, and that a failing recorder leaves no unit and no command side effect; store tests show the row is bound to
+the current lease and epoch and that stale or foreign bindings are refused.
+
+**Open before `enforce` (needs a protocol decision).** No application in this repository launches attempts through the
+sandbox today: `apps/worker` runs `executeSandboxed`, a dry-run simulation. Attempts that end `unknown` in production
+come from expired leases and never had an execution unit. Under the current protocol such an attempt can never be
+released (`execution_scope_missing`), so enforcing the fence would block it permanently. The protocol needs an
+explicit, evidenced form for "this attempt never allocated an execution unit" before B3, and the operator route
+(human-triggered, machine-verified with `verifyScopeCleanup`) should be built together with it.
+
 ## Problem
 
 An attempt whose outcome is uncertain (`unknown`, `quarantined`) may still have side effects: a process may still run, or its workspace may be unreleased. Before this change the store did not check that when it created a replacement attempt or a retry.

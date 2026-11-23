@@ -333,6 +333,81 @@ describe.runIf(runIntegration)("Bubblewrap Linux containment", () => {
   }, 20_000);
 });
 
+describe.runIf(runIntegration)("execution scope recording (retry fence, slice B1-wire)", () => {
+  it("records the real unit, bound to the lease and fencing token, before the unit exists", async () => {
+    const fixture = createFixture();
+    const unitName = "acs-sandbox-scope-record-evidence.scope";
+    try {
+      writeFixtureScript(fixture.workspace, `console.log("ran");`);
+      const request = fixtureRequest(fixture.workspace, "scope_record");
+      const recorded: Array<{ binding: unknown; stateAtRecord: string }> = [];
+      const result = await createLinuxSandbox({
+        authorityVerifier: fixtureAuthority(request),
+        unitNameFactory: () => unitName,
+        scopeRecorder: {
+          record(binding) {
+            let state: string;
+            try {
+              state = execFileSync("systemctl", ["--user", "is-active", unitName], { encoding: "utf8" }).trim();
+            } catch (error) {
+              state = String((error as { stdout?: string }).stdout ?? "").trim();
+            }
+            recorded.push({ binding, stateAtRecord: state });
+          }
+        }
+      }).execute(request);
+      expect(recorded).toEqual([
+        {
+          binding: {
+            workItemId: request.workItemId,
+            attemptId: request.attemptId,
+            leaseId: request.leaseId,
+            fencingToken: request.fencingToken,
+            unitName
+          },
+          stateAtRecord: expect.stringMatching(/^(inactive|unknown)$/u)
+        }
+      ]);
+      expect(result).toMatchObject({ observedSuccess: true, cleanup: "verified" });
+    } finally {
+      rmSync(fixture.parent, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("refuses to launch when the unit cannot be recorded, and the command never runs", async () => {
+    const fixture = createFixture();
+    const unitName = "acs-sandbox-scope-unrecorded-evidence.scope";
+    try {
+      writeFixtureScript(
+        fixture.workspace,
+        `import { writeFileSync } from "node:fs"; writeFileSync("ran.marker", "ran");`
+      );
+      const request = fixtureRequest(fixture.workspace, "scope_unrecorded");
+      const execution = createLinuxSandbox({
+        authorityVerifier: fixtureAuthority(request),
+        unitNameFactory: () => unitName,
+        scopeRecorder: {
+          record() {
+            throw new Error("store unavailable: /private/path/control.db");
+          }
+        }
+      }).execute(request);
+      await expect(execution).rejects.toMatchObject({ code: "sandbox_scope_unrecorded" });
+      await expect(execution).rejects.not.toMatchObject({ message: expect.stringContaining("/private/path") });
+      expect(existsSync(join(fixture.workspace, "ran.marker"))).toBe(false);
+      let state = "";
+      try {
+        state = execFileSync("systemctl", ["--user", "is-active", unitName], { encoding: "utf8" }).trim();
+      } catch (error) {
+        state = String((error as { stdout?: string }).stdout ?? "").trim();
+      }
+      expect(state).toMatch(/^(inactive|unknown)$/u);
+    } finally {
+      rmSync(fixture.parent, { recursive: true, force: true });
+    }
+  }, 20_000);
+});
+
 describe.runIf(runIntegration && existsSync(defaultRustSupervisorPath))("Rust scope supervisor live parity", () => {
   const cases: Array<[string, string, Partial<SandboxExecutionRequest["limits"]>, number | undefined]> = [
     ["exit", `console.log("parity-ok"); process.stderr.write("err");`, {}, undefined],

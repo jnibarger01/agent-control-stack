@@ -56,6 +56,12 @@ a recorded scope. Before B3, slice **B1-wire** must:
 
 The fence mode switch is in place (`ACS_RETRY_FENCE`, default `off`; `docs/protocol/retry-fence.md`).
 
+Update (2026-11-23): scope recording before launch is wired in both sandboxes and the engine adapters
+(`docs/protocol/retry-fence.md`, "Scope recording"). Still open before B3: no app launches through the sandbox yet
+(the worker runs a dry-run simulation), so production `unknown` attempts have no unit and cannot be released under
+the current protocol. That needs a protocol decision on evidence for attempts that never allocated a unit, plus the
+operator route.
+
 ## Rollback without losing post-cutover writes
 
 Every step above rolls back by redeploying the previous binary or unsetting a variable. None restores a database.

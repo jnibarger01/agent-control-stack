@@ -7,7 +7,8 @@ import {
   type EngineIsolationAuthorityVerifier,
   type EngineIsolationObservation,
   type EngineIsolationRequest,
-  type EngineRuntimeMount
+  type EngineRuntimeMount,
+  type SandboxScopeRecorder
 } from "@agent-control-stack/sandbox";
 import { engineTaskSchema, type EngineAdapter, type EngineOutcome, type EngineTask } from "./types.js";
 
@@ -20,7 +21,9 @@ export interface CliEngineAdapterOptions {
   binaryPath?: string;
   credentialSource?: (envName: string) => string | undefined;
   buildArgs?: (prompt: string) => string[];
-  isolationFactory?: (options: { authorityVerifier: EngineIsolationAuthorityVerifier; runtimeMounts?: EngineRuntimeMount[] }) => EngineIsolation;
+  isolationFactory?: (options: { authorityVerifier: EngineIsolationAuthorityVerifier; runtimeMounts?: EngineRuntimeMount[]; scopeRecorder?: SandboxScopeRecorder }) => EngineIsolation;
+  /** Records each engine unit before launch (retry fence); see `storeBackedScopeRecorder`. */
+  scopeRecorder?: SandboxScopeRecorder;
   /**
    * Egress allowlist used when a task leaves `egressAllowlist` empty.
    * Every adapter must default to its own provider's API endpoint - a
@@ -51,7 +54,8 @@ export class CliEngineAdapter implements EngineAdapter {
     this.credentialSource = options.credentialSource ?? ((name) => process.env[name]);
     this.isolation = (options.isolationFactory ?? createEngineIsolation)({
       authorityVerifier: options.authorityVerifier,
-      runtimeMounts: options.runtimeMounts
+      runtimeMounts: options.runtimeMounts,
+      scopeRecorder: options.scopeRecorder
     });
   }
 

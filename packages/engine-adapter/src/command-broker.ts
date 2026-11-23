@@ -12,7 +12,8 @@ import {
   type SandboxBackend,
   type SandboxCommandProfile,
   type SandboxExecutionObservation,
-  type SandboxExecutionRequest
+  type SandboxExecutionRequest,
+  type SandboxScopeRecorder
 } from "@agent-control-stack/sandbox";
 import { ControlStackError, createId } from "@agent-control-stack/shared";
 import type { CommandAuthority } from "@agent-control-stack/work-items";
@@ -75,6 +76,14 @@ export interface CommandAuthorityStore {
     fencingToken: number;
     workspaceAllocationId: string;
   }): CommandAuthority | undefined;
+  /**
+   * Durably binds an allocated execution unit to its attempt, lease and fencing epoch (retry fence). When present,
+   * the broker's default sandbox records every unit before launch and refuses to launch one it could not record.
+   */
+  recordExecutionScope?(
+    input: { attemptId: string; workItemId: string; leaseId: string; fencingEpoch: number; unitName: string },
+    options: { via: "domain_service" }
+  ): unknown;
 }
 
 /**
@@ -111,7 +120,12 @@ export class CommandBroker {
   private readonly evaluate: (context: PolicyContext) => PolicyDecision;
 
   constructor(options: CommandBrokerOptions) {
-    this.sandbox = options.sandbox ?? createLinuxSandbox({ authorityVerifier: storeBackedVerifier(options.store) });
+    this.sandbox =
+      options.sandbox ??
+      createLinuxSandbox({
+        authorityVerifier: storeBackedVerifier(options.store),
+        scopeRecorder: storeBackedScopeRecorder(options.store)
+      });
     this.evaluate = options.evaluate ?? evaluatePolicy;
   }
 
@@ -190,6 +204,28 @@ function buildSandboxRequest(request: CommandRequest, actionHash: string): Sandb
  * so a lease that expires or is revoked between policy evaluation and
  * process launch is refused rather than honored.
  */
+/** Records each allocated unit in the store before launch, or undefined when the store cannot record scopes. */
+export function storeBackedScopeRecorder(
+  store: Pick<CommandAuthorityStore, "recordExecutionScope">
+): SandboxScopeRecorder | undefined {
+  const record = store.recordExecutionScope?.bind(store);
+  if (!record) return undefined;
+  return {
+    record(binding) {
+      record(
+        {
+          attemptId: binding.attemptId,
+          workItemId: binding.workItemId,
+          leaseId: binding.leaseId,
+          fencingEpoch: binding.fencingToken,
+          unitName: binding.unitName
+        },
+        { via: "domain_service" }
+      );
+    }
+  };
+}
+
 export function storeBackedVerifier(store: CommandAuthorityStore): SandboxAuthorityVerifier {
   return {
     async verify(request: SandboxExecutionRequest): Promise<SandboxAuthorityReceipt> {

@@ -1,5 +1,6 @@
 import { isAbsolute, normalize } from "node:path";
 import { z } from "zod";
+import { ControlStackError } from "@agent-control-stack/shared";
 
 export const sandboxCommandProfiles = [
   "npm-test",
@@ -193,4 +194,36 @@ export interface SandboxBackend {
   readonly name: "bubblewrap-systemd-v1";
   preflight(input: unknown): Promise<void>;
   execute(input: unknown, options?: SandboxExecuteOptions): Promise<SandboxExecutionObservation>;
+}
+
+/** The execution unit a sandbox allocated for one attempt, bound to the lease and fencing token that authorized it. */
+export interface SandboxScopeBinding {
+  workItemId: string;
+  attemptId: string;
+  leaseId: string;
+  fencingToken: number;
+  unitName: string;
+}
+
+/**
+ * Records the allocated execution unit durably before the sandbox creates it, so the unit stays known if the worker
+ * dies mid-run (retry fence release evidence binds to it). A recorder that throws refuses the launch: no unit is ever
+ * created without a record.
+ */
+export interface SandboxScopeRecorder {
+  record(binding: SandboxScopeBinding): Promise<void> | void;
+}
+
+/** Calls the recorder, mapping any failure to a launch refusal without echoing internal detail. */
+export async function recordScopeBeforeLaunch(
+  recorder: SandboxScopeRecorder | undefined,
+  binding: SandboxScopeBinding,
+  code: string
+): Promise<void> {
+  if (!recorder) return;
+  try {
+    await recorder.record(binding);
+  } catch {
+    throw new ControlStackError(code, "the execution unit could not be recorded, so it was not created");
+  }
 }

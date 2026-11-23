@@ -3,7 +3,8 @@ import {
   sandboxAuthorityReceiptSchema,
   sandboxExecutionObservationSchema,
   sandboxExecutionRequestSchema,
-  type SandboxExecutionRequest
+  type SandboxExecutionRequest,
+  recordScopeBeforeLaunch
 } from "./contracts.js";
 
 export function validSandboxRequest(overrides: Partial<SandboxExecutionRequest> = {}): SandboxExecutionRequest {
@@ -98,5 +99,48 @@ describe("sandbox contracts", () => {
         enforcedLimits: validSandboxRequest().limits
       })
     ).toThrow("success requires a known zero exit");
+  });
+});
+
+describe("recordScopeBeforeLaunch", () => {
+  const binding = {
+    workItemId: "wrk_1",
+    attemptId: "attempt_1",
+    leaseId: "lease_1",
+    fencingToken: 3,
+    unitName: "acs-sandbox-attempt_1-0a1b2c3d.scope"
+  };
+
+  it("does nothing without a recorder", async () => {
+    await expect(recordScopeBeforeLaunch(undefined, binding, "sandbox_scope_unrecorded")).resolves.toBeUndefined();
+  });
+
+  it("passes the exact binding to the recorder and waits for it", async () => {
+    const seen: unknown[] = [];
+    await recordScopeBeforeLaunch(
+      {
+        async record(value) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          seen.push(value);
+        }
+      },
+      binding,
+      "sandbox_scope_unrecorded"
+    );
+    expect(seen).toEqual([binding]);
+  });
+
+  it("maps any recorder failure to the given code without echoing its detail", async () => {
+    const attempt = recordScopeBeforeLaunch(
+      {
+        record() {
+          throw new Error("SQLITE_BUSY at /home/operator/.acs/control.db");
+        }
+      },
+      binding,
+      "engine_isolation_scope_unrecorded"
+    );
+    await expect(attempt).rejects.toMatchObject({ code: "engine_isolation_scope_unrecorded" });
+    await expect(attempt).rejects.not.toMatchObject({ message: expect.stringContaining("/home/operator") });
   });
 });

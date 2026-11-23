@@ -7,7 +7,8 @@ import {
   type EngineIsolationAuthorityVerifier,
   type EngineIsolationObservation,
   type EngineIsolationRequest,
-  type EngineRuntimeMount
+  type EngineRuntimeMount,
+  type SandboxScopeRecorder
 } from "@agent-control-stack/sandbox";
 import { type EngineAdapter, type EngineOutcome, type EngineTask, engineTaskSchema } from "./types.js";
 
@@ -27,7 +28,10 @@ export interface CodexEngineAdapterOptions {
   isolationFactory?: (options: {
     authorityVerifier: EngineIsolationAuthorityVerifier;
     runtimeMounts?: EngineRuntimeMount[];
+    scopeRecorder?: SandboxScopeRecorder;
   }) => EngineIsolation;
+  /** Records each engine unit before launch (retry fence); see `storeBackedScopeRecorder`. */
+  scopeRecorder?: SandboxScopeRecorder;
 }
 
 const DEFAULT_CODEX_SANDBOX_MODE = "workspace-write";
@@ -64,7 +68,8 @@ export class CodexEngineAdapter implements EngineAdapter {
     const factory = options.isolationFactory ?? createEngineIsolation;
     this.isolation = factory({
       authorityVerifier: options.authorityVerifier,
-      runtimeMounts: options.runtimeMounts
+      runtimeMounts: options.runtimeMounts,
+      scopeRecorder: options.scopeRecorder
     });
   }
 

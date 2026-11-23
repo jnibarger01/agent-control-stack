@@ -26,6 +26,7 @@ import {
   superviseWithRust,
   type ScopeSupervisorSelection
 } from "./rust-supervisor.js";
+import { recordScopeBeforeLaunch, type SandboxScopeRecorder } from "./contracts.js";
 import { requireRustEgressRelay, startRustEgressRelay } from "./rust-egress-relay.js";
 import {
   boundedMessage,
@@ -73,6 +74,8 @@ export interface EngineIsolationOptions {
   runtimeDir?: string;
   hostCommandRunner?: HostCommandRunner;
   unitNameFactory?: (attemptId: string) => string;
+  /** Records each allocated unit before launch; a failure refuses the launch. */
+  scopeRecorder?: SandboxScopeRecorder;
   now?: () => Date;
   /** Pinned for the lifetime of the backend instance. Defaults to the process environment. */
   scopeSupervisor?: ScopeSupervisorSelection;
@@ -88,6 +91,7 @@ interface ResolvedEngineOptions {
   runtimeDir: string;
   hostCommandRunner: HostCommandRunner;
   unitNameFactory: (attemptId: string) => string;
+  scopeRecorder: SandboxScopeRecorder | undefined;
   now: () => Date;
   scopeSupervisor: ScopeSupervisorSelection;
 }
@@ -139,6 +143,17 @@ export class EngineIsolationBackend implements EngineIsolation {
     }
 
     const unitName = validatedEngineUnitName(this.options.unitNameFactory(request.attemptId));
+    await recordScopeBeforeLaunch(
+      this.options.scopeRecorder,
+      {
+        workItemId: request.workItemId,
+        attemptId: request.attemptId,
+        leaseId: request.leaseId,
+        fencingToken: request.fencingToken,
+        unitName
+      },
+      "engine_isolation_scope_unrecorded"
+    );
     const runtimeDir = mkdtempSync(join(this.options.runtimeDir, "acs-engine-"));
     const egressDecisions: EgressDecision[] = [];
     let proxy: EgressProxyHandle | undefined;
@@ -522,6 +537,7 @@ function resolveOptions(options: EngineIsolationOptions): ResolvedEngineOptions 
     runtimeDir: options.runtimeDir ?? tmpdir(),
     hostCommandRunner: options.hostCommandRunner ?? runHostCommand,
     unitNameFactory: options.unitNameFactory ?? defaultEngineUnitName,
+    scopeRecorder: options.scopeRecorder,
     now: options.now ?? (() => new Date()),
     scopeSupervisor: options.scopeSupervisor ?? scopeSupervisorFromEnvironment()
   };
