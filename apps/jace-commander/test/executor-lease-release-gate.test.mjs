@@ -18,12 +18,26 @@ import { JC_EXIT } from '../dist/mcp-http-client.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const app = path.resolve(here, '..');
-const repoNodeModules = path.resolve(app, '..', '..', 'node_modules');
+// Copy-out runs (jc:verify-release, jc:verify-independence) install runtime
+// dependencies into the app itself; in the monorepo they are hoisted to the
+// workspace root. Use whichever holds every runtime dependency.
+const runtimeDeps = Object.keys(JSON.parse(fs.readFileSync(path.join(app, 'package.json'), 'utf8')).dependencies ?? {});
+const nodeModules = [path.join(app, 'node_modules'), path.resolve(app, '..', '..', 'node_modules')]
+  .find((dir) => runtimeDeps.every((dep) => fs.existsSync(path.join(dir, dep))));
 const COMMIT = '0c0ffee5ab1e';
 
 let failures = 0;
 const cases = [];
 const test = (name, fn) => cases.push([name, fn]);
+
+/** Copies the built app to `dir` (dist + package.json) with its dependencies linked in. */
+function stageBuild(dir) {
+  assert.ok(nodeModules, `no node_modules holds the runtime dependencies (${runtimeDeps.join(', ')})`);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.cpSync(path.join(app, 'dist'), path.join(dir, 'dist'), { recursive: true });
+  fs.copyFileSync(path.join(app, 'package.json'), path.join(dir, 'package.json'));
+  fs.symlinkSync(nodeModules, path.join(dir, 'node_modules'));
+}
 
 function managedEnv(base) {
   const { publicKey } = generateKeyPairSync('ed25519');
@@ -57,8 +71,12 @@ function serve(entrypoint, env, until) {
 
 test('REGRESSION: a managed serve from the development checkout refuses and never writes the lease', async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'jc-gate-dev-'));
+  // A checkout-shaped copy, so the case holds wherever the suite runs from
+  // (jc:verify-release runs it from inside an installed release).
+  const checkout = path.join(base, 'checkout', 'apps', 'jace-commander');
+  stageBuild(checkout);
   const env = managedEnv(base);
-  const result = await serve(path.join(app, 'dist', 'cli.js'), env);
+  const result = await serve(path.join(checkout, 'dist', 'cli.js'), env);
   assert.equal(result.running, false, result.stderr);
   assert.equal(result.code, JC_EXIT.authorityUnavailable, result.stderr);
   assert.match(result.stderr, /requires a verified installed release \(not-an-installed-release/u, result.stderr);
@@ -69,10 +87,7 @@ test('REGRESSION: a managed serve from the development checkout refuses and neve
 test('the same build staged as an installed release acquires the lease bound to its commit', async () => {
   const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'jc-gate-rel-')));
   const rel = path.join(base, 'releases', `1.0.0-${COMMIT}`);
-  fs.mkdirSync(rel, { recursive: true });
-  fs.cpSync(path.join(app, 'dist'), path.join(rel, 'dist'), { recursive: true });
-  fs.copyFileSync(path.join(app, 'package.json'), path.join(rel, 'package.json'));
-  fs.symlinkSync(repoNodeModules, path.join(rel, 'node_modules'));
+  stageBuild(rel);
   fs.writeFileSync(path.join(rel, 'RELEASE.json'), JSON.stringify({ version: '1.0.0', commit: COMMIT }));
   fs.symlinkSync(rel, path.join(base, 'current'));
   const env = managedEnv(base);
