@@ -1,6 +1,6 @@
 import { lazy, Suspense } from "react";
 import { Route, Routes, useLocation, useParams } from "react-router";
-import { LiveProvider, useAudit, useAgent, useAgents, useApprovals, useConnector, useConnectors, useExecution, useExecutor, useExecutors, useOverview, useQueue, useStreamState, useTrace } from "./data/live";
+import { LiveProvider, useAudit, useFactoryBacklog, useAgent, useAgents, useApprovals, useConnector, useConnectors, useExecution, useExecutor, useExecutors, useOverview, useQueue, useStreamState, useTrace } from "./data/live";
 import type { EventSourceFactory } from "./data/stream";
 import { clockTime } from "./design/format";
 import { EmptyState } from "./design/primitives";
@@ -14,6 +14,7 @@ import { MetricsPage } from "./features/metrics/MetricsPage";
 import { PolicyPage } from "./features/policy/PolicyPage";
 import { SystemPage } from "./features/system/SystemPage";
 import { QueuePage } from "./features/queue/QueuePage";
+import { FactoryPage } from "./features/factory/FactoryPage";
 import { TracePage } from "./features/trace/TracePage";
 import { Shell } from "./shell/Shell";
 import { abbrUiEnabled } from "./features/black-box/flag";
@@ -28,6 +29,10 @@ function CommandRoute() {
 function QueueRoute() {
   const query = useQueue();
   return <QueryBoundary query={query} what="Work queue">{(data) => <QueuePage data={data} />}</QueryBoundary>;
+}
+function FactoryRoute() {
+  const query = useFactoryBacklog();
+  return <QueryBoundary query={query} what="AI Factory backlog">{(data) => <FactoryPage data={data} />}</QueryBoundary>;
 }
 function ApprovalsRoute() {
   const query = useApprovals();
@@ -115,6 +120,7 @@ function Frame() {
         <Route path="/queue" element={<QueueRoute />} />
         <Route path="/queue/:id" element={<TraceRoute />} />
         <Route path="/approvals" element={<ApprovalsRoute />} />
+        <Route path="/factory" element={<FactoryRoute />} />
         <Route path="/execution" element={<ExecutionRoute />} />
         <Route path="/metrics" element={<MetricsRoute />} />
         <Route path="/audit" element={<AuditPage />} />

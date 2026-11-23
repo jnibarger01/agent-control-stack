@@ -45,6 +45,8 @@ ADR status values:
 | [0030](0030-device-bound-refresh-and-recovery-envelopes.md)              | Device-bound refresh proof-of-possession and encrypted recovery envelopes                 | Accepted (in `acs-device-auth-reliability`) |
 | [0031](0031-jace-cli-auth-v2.md)                                         | JACE CLI AUTH V2 (DPoP, OS credential storage, and RFC 8628 `/jc` login)                  | Accepted                            |
 
+| [0030](0030-ai-factory-demand-management-layer.md) | AI Factory demand and evidence workflow within ACS | Proposed |
+
 ## Decision rules
 
 1. If a decision affects privilege, auditability, approval, or remote exposure, create an ADR before implementation.
