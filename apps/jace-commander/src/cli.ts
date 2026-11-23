@@ -45,6 +45,7 @@ import readline from 'node:readline/promises';
 import { JC_TOOLS } from './tool-descriptors.js';
 import { VERSION } from './version.js';
 import { sandboxPolicyFromEnv, sandboxSelfTest } from './sandbox.js';
+import { startJcHttpServer } from './http-transport.js';
 
 type Out = { json: boolean; stdout: (text: string) => void; stderr: (text: string) => void };
 
@@ -270,6 +271,18 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
         return JC_EXIT.invalidArguments;
       }
       const mode: JcPreset = rest.includes('--standalone') ? 'standalone' : (requested ?? 'managed');
+      const transport = flagValue(rest, '--transport') ?? 'stdio';
+      if (transport !== 'stdio' && transport !== 'http') {
+        out.stderr(`jace-commander: unknown transport ${JSON.stringify(transport)} (expected stdio, http)`);
+        return JC_EXIT.invalidArguments;
+      }
+      const httpHost = flagValue(rest, '--http-host') ?? config.httpHost;
+      const httpPortRaw = flagValue(rest, '--http-port');
+      const httpPort = httpPortRaw === undefined ? config.httpPort : Number(httpPortRaw);
+      if (transport === 'http' && (!Number.isInteger(httpPort) || httpPort < 1 || httpPort > 65535)) {
+        out.stderr('jace-commander: --http-port must be an integer in [1, 65535]');
+        return JC_EXIT.invalidArguments;
+      }
       if (mode === 'managed' && (!config.acsPublicKey || !config.acsKeyId)) {
         // Fail closed at startup rather than rejecting every call later.
         out.stderr('jace-commander: managed mode requires JC_ACS_PUBLIC_KEY and JC_ACS_KEY_ID (or pass --standalone for read-only local development, or --preset local)');
@@ -289,6 +302,16 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
           return JC_EXIT.authorityUnavailable;
         }
       }
+      let held: HeldExecutorLease | undefined;
+      let httpClose: (() => Promise<void>) | undefined;
+      let stopping = false;
+      const shutdown = async (code: number) => {
+        if (stopping) return;
+        stopping = true;
+        try { await httpClose?.(); } catch { /* ignore */ }
+        try { held?.release(); } catch { /* ignore */ }
+        process.exit(code);
+      };
       if (executorLeaseRequired(mode)) {
         // The managed executor claims the ACS singleton slot before serving any tool.
         // A duplicate, unreadable or unidentifiable lease refuses at once; a transient
@@ -312,7 +335,7 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
             readIdentity: readLinuxProcessIdentity,
             onLost: (reason) => {
               out.stderr(`jace-commander: executor lease lost (${reason}); stopping to fail closed`);
-              process.exit(JC_EXIT.authorityUnavailable);
+              void shutdown(JC_EXIT.authorityUnavailable);
             },
           });
           if (attempt.ok) {
@@ -328,15 +351,34 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
           await new Promise((resolve) => setTimeout(resolve, 1000));
         }
         if (!lease) return JC_EXIT.authorityUnavailable;
-        const held = lease;
-        const stop = (code: number) => {
-          held.release();
-          process.exit(code);
-        };
-        process.once('SIGTERM', () => stop(0));
-        process.once('SIGINT', () => stop(0));
+        held = lease;
+        process.once('SIGTERM', () => { void shutdown(0); });
+        process.once('SIGINT', () => { void shutdown(0); });
         out.stderr(`jace-commander: holding executor lease as pid ${process.pid} (release ${identity.releaseCommit})`);
+      } else {
+        process.once('SIGTERM', () => { void shutdown(0); });
+        process.once('SIGINT', () => { void shutdown(0); });
       }
+
+      if (transport === 'http') {
+        if ((mode === 'managed' || mode === 'local') && !config.gatewayAttestationToken) {
+          out.stderr('jace-commander: native HTTP transport in managed/local mode requires DC_GATEWAY_EXECUTION_TOKEN (or JC_GATEWAY_ATTESTATION_TOKEN)');
+          return JC_EXIT.authorityUnavailable;
+        }
+        const http = await startJcHttpServer({
+          config,
+          mode,
+          host: httpHost,
+          port: httpPort,
+          attestationToken: config.gatewayAttestationToken,
+          requireAttestation: mode === 'managed' || mode === 'local',
+        });
+        httpClose = http.close;
+        out.stderr(`jace-commander: serving Streamable HTTP MCP at ${http.url}`);
+        await new Promise<void>(() => {});
+        return -1;
+      }
+
       const server = createJcServer(config, mode);
       await server.connect(new StdioServerTransport());
       return -1; // keep running

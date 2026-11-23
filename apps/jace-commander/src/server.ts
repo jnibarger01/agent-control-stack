@@ -74,6 +74,7 @@ import {
 import { JC_TOOLS } from './tool-descriptors.js';
 import { captureGuiScreenshot, executeGuiAction, GuiError } from './gui.js';
 export { JC_TOOLS };
+export { toolRegistryJson, getToolRegistry, getToolByName, JC_TOOL_REGISTRY, listToolDescriptors } from './tool-registry.js';
 import { VERSION } from './version.js';
 
 export type JcMode = JcPreset;
