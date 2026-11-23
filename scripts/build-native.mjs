@@ -86,8 +86,15 @@ try {
 } catch {
   fail("installed core addon failed to load");
 }
-if (typeof require(coreAddonInstalled).verifyAuditDatabase !== "function" || coreAbi !== 1) {
-  fail(`installed core addon ABI ${coreAbi} does not match the expected version 1`);
+// Keep in step with CORE_ABI_VERSION in packages/shared/src/core-backend.ts.
+const EXPECTED_CORE_ABI = 2;
+const coreAddon = require(coreAddonInstalled);
+if (
+  coreAbi !== EXPECTED_CORE_ABI ||
+  typeof coreAddon.verifyAuditDatabase !== "function" ||
+  typeof coreAddon.verifyAuditDatabaseAfter !== "function"
+) {
+  fail(`installed core addon ABI ${coreAbi} does not match the expected version ${EXPECTED_CORE_ABI}`);
 }
 
 console.log(

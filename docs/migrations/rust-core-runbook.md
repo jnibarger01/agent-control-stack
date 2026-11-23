@@ -21,7 +21,7 @@ cargo test --locked --manifest-path rust/acs-core/Cargo.toml
 `ACS_CORE_BACKEND` is read by `verifyAuditChainFromDatabaseFileWithBackend` in `packages/shared/src/core-backend.ts`.
 
 - unset, empty or `typescript`: the TypeScript verifier. The addon is not loaded.
-- `rust`: the acs_core addon. A missing or ABI-mismatched addon throws `ACS_CORE_ADDON_UNAVAILABLE`. A failing native call throws `ACS_CORE_CALL_FAILED`, with a category only. There is no silent fallback.
+- `rust`: the acs_core addon (ABI 2: full and anchored verification). A missing or ABI-mismatched addon throws `ACS_CORE_ADDON_UNAVAILABLE`. A failing native call throws `ACS_CORE_CALL_FAILED`, with a category only. There is no silent fallback.
 - any other value throws `ACS_CORE_BACKEND_INVALID`.
 
 The Rust result is a three-state verdict. See `canonical-hash.md`:
@@ -33,10 +33,10 @@ The Rust result is a three-state verdict. See `canonical-hash.md`:
 
 `acs-audit-verify` has two modes. Both were measured on disposable copies, not inferred.
 
-| Mode | SQLite open | Cold, writable dir | Cold, read-only dir | Warm, read-only dir |
-| --- | --- | --- | --- | --- |
-| default | `SQLITE_OPEN_READ_ONLY`, `SQLITE_OPEN_NO_MUTEX`, `PRAGMA query_only` | verdict; creates `-shm` (32 KiB) and empty `-wal` | **fails** `store` (needs to create `-shm`) | verdict; no new files |
-| `--immutable` | `SQLITE_OPEN_READ_ONLY`, `SQLITE_OPEN_URI`, `immutable=1`, `query_only` | verdict; **no** new files | verdict; no new files | not applicable |
+| Mode          | SQLite open                                                             | Cold, writable dir                                | Cold, read-only dir                        | Warm, read-only dir   |
+| ------------- | ----------------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------ | --------------------- |
+| default       | `SQLITE_OPEN_READ_ONLY`, `SQLITE_OPEN_NO_MUTEX`, `PRAGMA query_only`    | verdict; creates `-shm` (32 KiB) and empty `-wal` | **fails** `store` (needs to create `-shm`) | verdict; no new files |
+| `--immutable` | `SQLITE_OPEN_READ_ONLY`, `SQLITE_OPEN_URI`, `immutable=1`, `query_only` | verdict; **no** new files                         | verdict; no new files                      | not applicable        |
 
 Measured with `scripts/audit-chain-open-evidence.ts` on a copy of the tracked backup (SHA-256 `f3b4a398…`, mode 0644, uid 1000). In every mode the database file's bytes, size, mtime and inode were unchanged. The TypeScript verifier on a cold copy also created `-shm` and `-wal`.
 
@@ -74,3 +74,15 @@ The warm step is a parity precondition. It is not a proof of zero filesystem wri
 - Historical verdicts depend on collation. The Rust verifier tests root and five alternate collations and reports what it can establish. A writer locale outside the tested set can still yield a `failed` verdict; the basis is stated in the verdict.
 - The TypeScript `verifyAuditChain` does not yet classify locale-dependent mismatches. Its `ok: false` on locale-written records is a false corruption claim. This is an open item for the authoritative verifier.
 - `ACS_TEST_CORE_NATIVE=1` tests are opt-in. CI runs them in `.github/workflows/rust.yml`.
+
+## Incremental shadow (slice R1c)
+
+With `ACS_CORE_BACKEND=rust`, the work-item store compares the Rust verdict with its own TypeScript verdict at every
+health inspection. The first comparison reads the whole chain. After an agreed comparison the store keeps an anchor
+(event count, last sequence, head hash), and the next call asks the core to verify only the events after it.
+The core re-validates the anchor (row count through the anchor sequence and the stored hash at it) and falls back to a
+full read when the anchor no longer holds or the tail has any problem. A disagreement or skip clears the anchor.
+
+Limit: the anchored call does not look behind an intact anchor. The TypeScript verification, which stays
+authoritative, reads the whole chain at every inspection, so a change behind the anchor still fails the check.
+`rust/acs-core/tests/incremental.rs` asserts this limit so it cannot change silently.

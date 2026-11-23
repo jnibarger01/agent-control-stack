@@ -18,6 +18,7 @@ import {
   verifyAuditChain,
   type AttributeValue,
   type AuditChainEvent,
+  type AuditChainAnchor,
   type AuditChainVerification,
   type AuditEvent,
   type ControlPlaneInspectionOptions,
@@ -1772,7 +1773,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
   private auditChainVerifiedAtMs = 0;
   private readonly dbPath: string;
   private readonly auditShadowVerifier: CoreVerifier | undefined;
-  private readonly auditShadowCounters = { compared: 0, skipped: 0, failed: 0 };
+  private readonly auditShadowCounters = { compared: 0, incremental: 0, skipped: 0, failed: 0 };
+  /** The last chain prefix both verifiers agreed on; cleared before every shadow call and on any disagreement. */
+  private auditShadowAnchor: AuditChainAnchor | undefined;
   private readinessDatabaseChecks!: Pick<
     StoreHealth["checks"],
     "integrity" | "foreignKeys" | "migrations" | "auditChain"
@@ -9930,7 +9933,13 @@ export class SqliteWorkItemStore implements WorkItemStore {
   }
 
   /** Shadow audit verification counters for this process; `backend` is absent when no shadow is configured. */
-  auditShadowStatus(): { backend: "rust" | undefined; compared: number; skipped: number; failed: number } {
+  auditShadowStatus(): {
+    backend: "rust" | undefined;
+    compared: number;
+    incremental: number;
+    skipped: number;
+    failed: number;
+  } {
     return { backend: this.auditShadowVerifier ? "rust" : undefined, ...this.auditShadowCounters };
   }
 
@@ -9948,9 +9957,17 @@ export class SqliteWorkItemStore implements WorkItemStore {
         this.auditShadowCounters.skipped += 1;
         return { ok: true };
       }
+      // After one full comparison, only the events appended since the last agreed anchor are read by the
+      // shadow (the anchor is re-validated by the core; any problem falls back to a full read). The
+      // authoritative TypeScript verification above still reads the whole chain every time.
+      const anchor = this.auditShadowAnchor;
+      this.auditShadowAnchor = undefined;
       let shadow: CoreVerification;
       try {
-        shadow = verifier.verifyAuditChainFromDatabaseFile(this.dbPath);
+        shadow =
+          anchor && verifier.verifyAuditChainFromDatabaseFileAfter
+            ? verifier.verifyAuditChainFromDatabaseFileAfter(this.dbPath, anchor)
+            : verifier.verifyAuditChainFromDatabaseFile(this.dbPath);
       } catch {
         this.auditShadowCounters.failed += 1;
         return { ok: false, code: "audit_chain_backend_unavailable" };
@@ -9958,16 +9975,24 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const tail = this.db
         .prepare(
           `SELECT (SELECT COUNT(*) FROM audit_events) AS count,
-                  (SELECT event_hash FROM audit_events ORDER BY sequence DESC LIMIT 1) AS head`
+                  (SELECT event_hash FROM audit_events ORDER BY sequence DESC LIMIT 1) AS head,
+                  (SELECT sequence FROM audit_events ORDER BY sequence DESC LIMIT 1) AS sequence`
         )
-        .get() as { count: number; head: string | null };
+        .get() as { count: number; head: string | null; sequence: number | null };
       if (tail.count !== authoritative.eventCount || (tail.head ?? "") !== authoritative.headHash) {
         this.auditShadowCounters.skipped += 1;
         return { ok: true };
       }
       const result = compareAuditShadowVerdict(authoritative, shadow);
-      if (result.ok) this.auditShadowCounters.compared += 1;
-      else this.auditShadowCounters.failed += 1;
+      if (result.ok) {
+        this.auditShadowCounters.compared += 1;
+        if (anchor) this.auditShadowCounters.incremental += 1;
+        if (tail.sequence !== null && tail.head !== null) {
+          this.auditShadowAnchor = { eventCount: tail.count, sequence: tail.sequence, headHash: tail.head };
+        }
+      } else {
+        this.auditShadowCounters.failed += 1;
+      }
       return result;
     };
   }

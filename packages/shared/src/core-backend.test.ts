@@ -69,7 +69,20 @@ describe("audit verification backend selection", () => {
     const path = copyHistorical();
     const verifier = createCoreVerifier({
       env: { ACS_CORE_BACKEND: "rust" },
-      loadNative: () => ({ coreAbiVersion: () => 2, verifyAuditDatabase: () => "{}" })
+      loadNative: () => ({
+        coreAbiVersion: () => 1,
+        verifyAuditDatabase: () => "{}",
+        verifyAuditDatabaseAfter: () => "{}"
+      })
+    });
+    expect(codeOf(() => verifier.verifyAuditChainFromDatabaseFile(path))).toBe("ACS_CORE_ADDON_UNAVAILABLE");
+  });
+
+  it("negative, rust: an addon without anchored verification fails closed", () => {
+    const path = copyHistorical();
+    const verifier = createCoreVerifier({
+      env: { ACS_CORE_BACKEND: "rust" },
+      loadNative: () => ({ coreAbiVersion: () => 2, verifyAuditDatabase: () => "{}" }) as unknown as NativeCore
     });
     expect(codeOf(() => verifier.verifyAuditChainFromDatabaseFile(path))).toBe("ACS_CORE_ADDON_UNAVAILABLE");
   });
@@ -79,8 +92,11 @@ describe("audit verification backend selection", () => {
     const verifier = createCoreVerifier({
       env: { ACS_CORE_BACKEND: "rust" },
       loadNative: () => ({
-        coreAbiVersion: () => 1,
+        coreAbiVersion: () => 2,
         verifyAuditDatabase: () => {
+          throw new Error("malformed_payload");
+        },
+        verifyAuditDatabaseAfter: () => {
           throw new Error("malformed_payload");
         }
       })
@@ -99,9 +115,16 @@ describe("audit verification backend selection", () => {
     const verdict = { ok: true, eventCount: 2, headHash: "ab" };
     const verifier = createCoreVerifier({
       env: { ACS_CORE_BACKEND: "rust" },
-      loadNative: () => ({ coreAbiVersion: () => 1, verifyAuditDatabase: () => JSON.stringify(verdict) })
+      loadNative: () => ({
+        coreAbiVersion: () => 2,
+        verifyAuditDatabase: () => JSON.stringify(verdict),
+        verifyAuditDatabaseAfter: () => JSON.stringify(verdict)
+      })
     });
     expect(verifier.verifyAuditChainFromDatabaseFile("/unused.db")).toEqual(verdict);
+    expect(
+      verifier.verifyAuditChainFromDatabaseFileAfter!("/unused.db", { eventCount: 1, sequence: 1, headHash: "aa" })
+    ).toEqual(verdict);
   });
 });
 
@@ -119,6 +142,29 @@ describe.skipIf(!nativeEnabled)("acs-core addon parity with TypeScript (ACS_TEST
     );
     db.close();
     const native = rust.verifyAuditChainFromDatabaseFile(tampered);
+    expect(native).toEqual(verifyAuditChainFromDatabaseFile(tampered));
+    expect(native.ok).toBe(false);
+  });
+
+  it("anchored verification matches the full TypeScript verdict, and falls back in full on tail damage", () => {
+    const rust = createCoreVerifier({ env: { ACS_CORE_BACKEND: "rust" } });
+    const path = copyHistorical();
+    const db = new DatabaseSync(path);
+    const row = db
+      .prepare("SELECT sequence, event_hash AS headHash FROM audit_events ORDER BY sequence LIMIT 1 OFFSET 3999")
+      .get() as { sequence: number; headHash: string };
+    db.close();
+    const anchor = { eventCount: 4000, sequence: row.sequence, headHash: row.headHash };
+    expect(rust.verifyAuditChainFromDatabaseFileAfter!(path, anchor)).toEqual(verifyAuditChainFromDatabaseFile(path));
+
+    const tampered = join(scratch!, "tampered-tail.db");
+    copyFileSync(path, tampered);
+    const writer = new DatabaseSync(tampered);
+    writer.exec(
+      `UPDATE audit_events SET body = '{"tampered":true}' WHERE sequence = (SELECT sequence FROM audit_events ORDER BY sequence LIMIT 1 OFFSET 4500);`
+    );
+    writer.close();
+    const native = rust.verifyAuditChainFromDatabaseFileAfter!(tampered, anchor);
     expect(native).toEqual(verifyAuditChainFromDatabaseFile(tampered));
     expect(native.ok).toBe(false);
   });
