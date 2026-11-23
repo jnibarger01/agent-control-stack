@@ -2,6 +2,8 @@
 #![deny(unsafe_code)]
 
 mod port;
+#[cfg(test)]
+mod port_cases;
 
 use napi::{Error, Result, Status};
 use napi_derive::napi;

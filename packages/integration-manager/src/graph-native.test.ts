@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { pr } from "./fixtures.test-support.js";
 import { analyzeDependencies, findOverlaps } from "./graph.js";
+import { createGraphSelector, graphBackendFromEnvironment, type NativeGraph } from "./graph-backend.js";
 
 const require = createRequire(import.meta.url);
 const nativeEnabled = process.env.ACS_TEST_INTEGRATION_GRAPH_NATIVE === "1";
@@ -26,20 +27,102 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-it("the public graph uses TypeScript with no backend selected", async () => {
-  vi.stubEnv("ACS_INTEGRATION_GRAPH_BACKEND", undefined);
-  const warning = vi.spyOn(process, "emitWarning");
-  const graph = await import("./graph-backend.js");
-  const prs = [pr({ number: 9 }), pr({ number: 2 })];
-  expect(observed(graph.analyzeDependencies(prs, "main"))).toEqual(observed(analyzeDependencies(prs, "main")));
-  expect([...graph.findOverlaps(prs)]).toEqual([...findOverlaps(prs)]);
-  expect(warning).not.toHaveBeenCalled();
+describe("graph backend selection", () => {
+  it("selects TypeScript when unset, empty or typescript", () => {
+    expect(graphBackendFromEnvironment({})).toBe("typescript");
+    expect(graphBackendFromEnvironment({ ACS_INTEGRATION_GRAPH_BACKEND: "" })).toBe("typescript");
+    expect(graphBackendFromEnvironment({ ACS_INTEGRATION_GRAPH_BACKEND: " typescript " })).toBe("typescript");
+  });
+
+  it("rejects any other selection instead of guessing", () => {
+    expect(() => graphBackendFromEnvironment({ ACS_INTEGRATION_GRAPH_BACKEND: "auto" })).toThrow(
+      expect.objectContaining({ code: "ACS_INTEGRATION_GRAPH_BACKEND_INVALID" })
+    );
+  });
+
+  it("negative, typescript: never loads the addon and returns the TypeScript result", () => {
+    const loadNative = vi.fn(() => {
+      throw new Error("must not load");
+    });
+    const selector = createGraphSelector({ env: {}, loadNative });
+    const prs = [pr({ number: 9 }), pr({ number: 2 })];
+    expect(observed(selector.analyzeDependencies(prs, "main"))).toEqual(observed(analyzeDependencies(prs, "main")));
+    expect([...selector.findOverlaps(prs)]).toEqual([...findOverlaps(prs)]);
+    expect(loadNative).not.toHaveBeenCalled();
+  });
+
+  it("negative, rust: a missing addon throws and never substitutes TypeScript", () => {
+    const selector = createGraphSelector({
+      env: { ACS_INTEGRATION_GRAPH_BACKEND: "rust" },
+      loadNative: () => {
+        throw new Error("Cannot find module 'acs_integration_graph.node' /private/path");
+      }
+    });
+    const prs = [pr({ number: 1 })];
+    expect(() => selector.analyzeDependencies(prs, "main")).toThrow(
+      expect.objectContaining({ code: "ACS_INTEGRATION_GRAPH_ADDON_UNAVAILABLE" })
+    );
+    expect(() => selector.findOverlaps(prs)).toThrow(
+      expect.objectContaining({ code: "ACS_INTEGRATION_GRAPH_ADDON_UNAVAILABLE" })
+    );
+  });
+
+  it("negative, rust: an ABI-mismatched addon fails closed through the real bridge", () => {
+    const { createGraphBridge } = require("../native/bridge.cjs") as {
+      createGraphBridge: (addon: unknown) => NativeGraph;
+    };
+    const selector = createGraphSelector({
+      env: { ACS_INTEGRATION_GRAPH_BACKEND: "rust" },
+      loadNative: () =>
+        createGraphBridge({
+          graphAbiVersion: () => 2,
+          analyzeDependencies: () => undefined,
+          findOverlaps: () => undefined
+        })
+    });
+    expect(() => selector.analyzeDependencies([pr({ number: 1 })], "main")).toThrow(
+      expect.objectContaining({ code: "ACS_INTEGRATION_GRAPH_ADDON_UNAVAILABLE" })
+    );
+  });
+
+  it("negative, rust: a throwing native call fails closed without a result", () => {
+    const selector = createGraphSelector({
+      env: { ACS_INTEGRATION_GRAPH_BACKEND: "rust" },
+      loadNative: () => ({
+        analyzeDependencies: () => {
+          throw new Error("filename and request must stay out of diagnostics");
+        },
+        findOverlaps: () => undefined
+      })
+    });
+    let caught: unknown;
+    try {
+      selector.analyzeDependencies([pr({ number: 1 })], "main");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toEqual(expect.objectContaining({ code: "ACS_INTEGRATION_GRAPH_CALL_FAILED" }));
+    expect(String((caught as Error).message)).not.toContain("filename");
+  });
+
+  it("rust: an input shape outside the native domain uses TypeScript by design", () => {
+    const selector = createGraphSelector({
+      env: { ACS_INTEGRATION_GRAPH_BACKEND: "rust" },
+      loadNative: () => ({
+        analyzeDependencies: () => undefined,
+        findOverlaps: () => undefined
+      })
+    });
+    const prs = [pr({ number: 1 }), pr({ number: 1 })];
+    expect(observed(selector.analyzeDependencies(prs, "main"))).toEqual(observed(analyzeDependencies(prs, "main")));
+    expect([...selector.findOverlaps(prs)]).toEqual([...findOverlaps(prs)]);
+  });
 });
 
 describe.skipIf(!nativeEnabled)("native graph", () => {
   it("preserves map and set iteration order and UTF-16 file ordering", () => {
     const native = strictNative();
-    const files = ["\uE000.ts", "😀.ts", "\uD800.ts", "10.ts", "2.ts"];
+    const files = [".ts", "😀.ts", "\uD800.ts", "10.ts", "2.ts"];
     const prs = [
       pr({ number: 19, baseRef: "branch-20" }),
       pr({ number: 4, baseRef: "branch-3", changedFiles: files }),
@@ -65,9 +148,7 @@ describe.skipIf(!nativeEnabled)("native graph", () => {
     expect([...actual.blockedByCycle]).toEqual([...expected.blockedByCycle]);
 
     const overlaps = findOverlaps(prs);
-    expect(overlaps.get(4)).toEqual([
-      { number: 3, files: ["10.ts", "2.ts", "\uD800.ts", "😀.ts", "😀.ts", "\uE000.ts"] }
-    ]);
+    expect(overlaps.get(4)).toEqual([{ number: 3, files: ["10.ts", "2.ts", "\uD800.ts", "😀.ts", "😀.ts", ".ts"] }]);
     expect([...native.findOverlaps(prs)]).toEqual([...overlaps]);
   });
 
@@ -100,12 +181,11 @@ describe.skipIf(!nativeEnabled)("native graph", () => {
     }
   });
 
-  it("uses the installed addon at the package entry point and falls back with a bounded warning", async () => {
+  it("uses the installed addon at the package entry point and fails closed on a call error", async () => {
     vi.stubEnv("ACS_INTEGRATION_GRAPH_BACKEND", "rust");
     const addon: Graph = require("../native/acs_integration_graph.node");
     const analyze = vi.spyOn(addon, "analyzeDependencies");
     const overlaps = vi.spyOn(addon, "findOverlaps");
-    const warn = vi.spyOn(process, "emitWarning").mockImplementation(() => undefined);
     const graph = await import("./index.js");
     const prs = [pr({ number: 1, changedFiles: ["file"] }), pr({ number: 2, changedFiles: ["file"] })];
     expect(observed(graph.analyzeDependencies(prs, "main"))).toEqual(observed(analyzeDependencies(prs, "main")));
@@ -122,11 +202,8 @@ describe.skipIf(!nativeEnabled)("native graph", () => {
     analyze.mockImplementation(() => {
       throw new Error("filename and request must stay out of diagnostics");
     });
-    expect(observed(graph.analyzeDependencies(prs, "main"))).toEqual(observed(analyzeDependencies(prs, "main")));
-    expect(observed(graph.analyzeDependencies(prs, "main"))).toEqual(observed(analyzeDependencies(prs, "main")));
-    expect(warn).toHaveBeenCalledExactlyOnceWith(
-      "ACS integration graph addon call failed. Using TypeScript for this invocation.",
-      { code: "ACS_INTEGRATION_GRAPH_CALL" }
+    expect(() => graph.analyzeDependencies(prs, "main")).toThrow(
+      expect.objectContaining({ code: "ACS_INTEGRATION_GRAPH_CALL_FAILED" })
     );
   });
 });

@@ -4,22 +4,25 @@
 
 Default installs use TypeScript. The pilot was built on Linux x86-64 with glibc and tested on Node 24.16.0. The crate uses Node-API 6 through napi-rs 3 and ACS graph ABI version 1. The measured ELF references glibc symbol versions through 2.34. [Verification evidence](rust-pilot-evidence.md)
 
-Install Rust Anything 1.5.1 on the build machine if needed. Build with the committed Cargo lockfile. Run from the repository root.
+Build with the committed Cargo lockfile and the pinned toolchain in `rust-toolchain.toml`. Run from the repository root. The build is explicit and never runs on install.
 
 ```sh
-cargo install --locked rust-anything --version 1.5.1
 npm ci
-npm run build
-cargo build --locked --release --manifest-path rust/integration-graph/Cargo.toml
-rust-anything build rust/integration-graph
-rust-anything diff rust/integration-graph
-rust-anything gate rust/integration-graph
-install -m 0644 rust/integration-graph/acs_integration_graph.node packages/integration-manager/native/acs_integration_graph.node
+npm run build:native
 ACS_TEST_INTEGRATION_GRAPH_NATIVE=1 ACS_INTEGRATION_GRAPH_BACKEND=rust npm run test:vitest -- packages/integration-manager
 node rust/integration-graph/package-smoke.mjs
 ```
 
-For a local or staging canary, launch the ACS command that uses the Integration Manager with `ACS_INTEGRATION_GRAPH_BACKEND=rust`. The selector applies to the package exports and reconciliation. The result remains a read-only assessment. Duplicate or out-of-range PR numbers and unsupported shapes use TypeScript. Load and call failures produce `ACS_INTEGRATION_GRAPH_LOAD` or `ACS_INTEGRATION_GRAPH_CALL` warnings without graph contents. Each warning category is emitted at most once per loaded selector instance. A failed load is cached for the lifetime of that instance.
+`npm run build:native` builds `rust/integration-graph`, copies the addon into `packages/integration-manager/native/`, and verifies its ABI against the TypeScript bridge before reporting success. It fails on any platform other than Linux x64 glibc. The Rust Anything CLI is no longer required.
+
+For a local or staging canary, launch the ACS command that uses the Integration Manager with `ACS_INTEGRATION_GRAPH_BACKEND=rust`. The selector applies to the package exports and reconciliation. The result remains a read-only assessment.
+
+Behavior with `ACS_INTEGRATION_GRAPH_BACKEND=rust` (fail closed):
+
+- A missing, unreadable or ABI-mismatched addon throws `ACS_INTEGRATION_GRAPH_ADDON_UNAVAILABLE`. There is no TypeScript substitute. Every call fails until the process is fixed or the variable is unset.
+- A native call that throws raises `ACS_INTEGRATION_GRAPH_CALL_FAILED`. No result is substituted.
+- Duplicate or out-of-range PR numbers and unsupported shapes return no native result by design. They use TypeScript, and that is recorded as the documented domain boundary, not as a failure.
+- Any value other than `typescript`, `rust` or empty throws `ACS_INTEGRATION_GRAPH_BACKEND_INVALID`.
 
 ## Artifact layout and portability
 
@@ -40,8 +43,8 @@ rust-anything bench rust/integration-graph
 node rust/integration-graph/benchmark.mjs
 ```
 
-The corpus uses synthetic PR projections to cover the supported native domain. Vitest exercises unsupported inputs separately through the fallback. Keep ordered comparisons enabled. Generated shadow output is for synthetic QA because its default reporter can include input data.
+The corpus uses synthetic PR projections to cover the supported native domain. Vitest exercises unsupported inputs separately. Those inputs return no native result by design and use the TypeScript domain boundary described above, not a failure path. Keep ordered comparisons enabled. Generated shadow output is for synthetic QA because its default reporter can include input data.
 
 ## Rollback
 
-Unset `ACS_INTEGRATION_GRAPH_BACKEND` and restart the affected process through its normal service procedure. The fresh process selects TypeScript. No state migration is required. The native artifact is optional in subsequent packages. A native process abort follows the existing supervisor restart and recovery process.
+Unset `ACS_INTEGRATION_GRAPH_BACKEND` and restart the affected process through its normal service procedure. The fresh process selects TypeScript. No state migration is required. The addon is required only while `ACS_INTEGRATION_GRAPH_BACKEND=rust` is set. With the variable unset, the process never loads it, so a missing addon is not an error. A native process abort follows the existing supervisor restart and recovery process.
