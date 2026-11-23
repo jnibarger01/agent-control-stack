@@ -320,8 +320,17 @@ pub fn verify_chain(events: &[AuditEvent]) -> Result<Verdict, LegacyError> {
 /// reproduce under root (or holds an unsupported value): the caller then runs the full classification
 /// over the whole chain, which yields exactly the reference verdict.
 fn verify_chain_root_only(events: &[AuditEvent]) -> Result<Option<Verdict>, LegacyError> {
-    let event_count = events.len();
-    let mut previous = String::new();
+    verify_root_only_from(events, 0, String::new())
+}
+
+/// `verify_chain_root_only` over events that continue a prefix of `base_count` events ending in
+/// `previous`.
+fn verify_root_only_from(
+    events: &[AuditEvent],
+    base_count: usize,
+    mut previous: String,
+) -> Result<Option<Verdict>, LegacyError> {
+    let event_count = base_count + events.len();
     for event in events {
         if event.previous_hash != previous {
             return Ok(Some(Verdict::Failed {
@@ -460,6 +469,38 @@ pub enum OpenMode {
 }
 
 /// Read-only verification of an entire database file.
+/// A verified prefix of the chain: its event count, the sequence of its last event and that
+/// event's hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Anchor {
+    pub event_count: usize,
+    pub sequence: i64,
+    pub head_hash: String,
+}
+
+/// Verifies only the events after `anchor`, when the anchor still holds: the database has exactly
+/// `event_count` rows through `sequence`, and the row at `sequence` stores `head_hash`. Returns the
+/// same verdict as `verify_database` whenever the anchored prefix is unchanged. Otherwise, and at
+/// any linkage or hash problem in the tail, it runs the full verification, so a non-`Ok` verdict
+/// is always the full reference verdict. A change inside the prefix that keeps the anchor row is not
+/// detected here; the authoritative TypeScript verification reads the whole chain.
+pub fn verify_database_after(path: &Path, anchor: &Anchor) -> Result<Verdict, AuditError> {
+    let store = Store::open_read_only(path)?;
+    let (count, hash) = store.audit_prefix(anchor.sequence)?;
+    let anchored = usize::try_from(count).ok() == Some(anchor.event_count)
+        && hash.as_deref() == Some(anchor.head_hash.as_str());
+    if anchored {
+        let tail = events_from_rows(store.audit_rows_after(anchor.sequence)?)?;
+        if let Some(verdict @ Verdict::Ok { .. }) =
+            verify_root_only_from(&tail, anchor.event_count, anchor.head_hash.clone())?
+        {
+            return Ok(verdict);
+        }
+    }
+    let events = events_from_rows(store.audit_rows()?)?;
+    Ok(verify_chain(&events)?)
+}
+
 pub fn verify_database(path: &Path) -> Result<Verdict, AuditError> {
     verify_database_with(path, OpenMode::ReadOnly)
 }

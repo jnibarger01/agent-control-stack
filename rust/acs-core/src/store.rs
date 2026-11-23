@@ -105,11 +105,16 @@ impl Store {
 
     /// All audit rows in ascending sequence order, matching `readAuditChainEvents` in TypeScript.
     pub fn audit_rows(&self) -> Result<Vec<AuditRow>, StoreError> {
+        self.audit_rows_after(i64::MIN)
+    }
+
+    /// Audit rows with `sequence > after`, in ascending sequence order.
+    pub fn audit_rows_after(&self, after: i64) -> Result<Vec<AuditRow>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT sequence, id, name, time_unix_nano, attributes, body, previous_hash, event_hash \
-             FROM audit_events ORDER BY sequence ASC",
+             FROM audit_events WHERE sequence > ?1 ORDER BY sequence ASC",
         )?;
-        let rows = statement.query_map([], |row| {
+        let rows = statement.query_map([after], |row| {
             Ok(AuditRow {
                 sequence: row.get(0)?,
                 id: row.get(1)?,
@@ -122,5 +127,14 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// The number of audit rows with `sequence <= through`, and the stored hash at `through`.
+    pub fn audit_prefix(&self, through: i64) -> Result<(i64, Option<String>), StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT (SELECT COUNT(*) FROM audit_events WHERE sequence <= ?1), \
+                    (SELECT event_hash FROM audit_events WHERE sequence = ?1)",
+        )?;
+        Ok(statement.query_row([through], |row| Ok((row.get(0)?, row.get(1)?)))?)
     }
 }

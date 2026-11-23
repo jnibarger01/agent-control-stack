@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   CoreBackendError,
   createCoreVerifier,
+  type AuditChainAnchor,
   type CoreVerification,
   type CoreVerifier
 } from "@agent-control-stack/shared";
@@ -72,7 +73,13 @@ describe("audit shadow verification (slice R1)", () => {
     delete process.env.ACS_CORE_BACKEND;
     try {
       const store = open(dbPath());
-      expect(store.auditShadowStatus()).toEqual({ backend: undefined, compared: 0, skipped: 0, failed: 0 });
+      expect(store.auditShadowStatus()).toEqual({
+        backend: undefined,
+        compared: 0,
+        incremental: 0,
+        skipped: 0,
+        failed: 0
+      });
       expect(store.health().ok).toBe(true);
     } finally {
       if (previous === undefined) delete process.env.ACS_CORE_BACKEND;
@@ -195,6 +202,54 @@ describe("audit shadow verification (slice R1)", () => {
   });
 });
 
+describe("incremental audit shadow (slice R1c)", () => {
+  function recording(disagreeAfter = Infinity) {
+    const typescriptFile = createCoreVerifier({ env: {} });
+    const calls: Array<{ kind: "full" | "after"; anchor?: AuditChainAnchor }> = [];
+    const verifier: CoreVerifier = {
+      verifyAuditChainFromDatabaseFile(path) {
+        calls.push({ kind: "full" });
+        return typescriptFile.verifyAuditChainFromDatabaseFile(path);
+      },
+      verifyAuditChainFromDatabaseFileAfter(path, anchor) {
+        calls.push({ kind: "after", anchor });
+        const verdict = typescriptFile.verifyAuditChainFromDatabaseFile(path);
+        return calls.length > disagreeAfter ? { ...verdict, headHash: "e".repeat(64) } : verdict;
+      }
+    };
+    return { verifier, calls };
+  }
+
+  it("reads in full once, then anchors on the agreed head", () => {
+    const { verifier, calls } = recording();
+    const store = open(dbPath(), verifier);
+    // The store opens on an empty chain, which gives no anchor; the first inspection after a write reads in
+    // full and anchors, and later inspections read only the tail.
+    const results = [];
+    for (let round = 0; round < 3; round += 1) {
+      seed(store);
+      results.push(store.health().ok);
+    }
+    expect(results).toEqual([true, true, true]);
+    expect(calls[0]?.kind).toBe("full");
+    const anchored = calls.filter((call) => call.kind === "after");
+    expect(anchored.length).toBeGreaterThanOrEqual(2);
+    expect(anchored.at(-1)!.anchor!.eventCount).toBeLessThan(store.verifyAuditChain().eventCount);
+    expect(store.auditShadowStatus().incremental).toBeGreaterThanOrEqual(2);
+  });
+
+  it("drops the anchor after a disagreement, so the next comparison is a full read", () => {
+    const { verifier, calls } = recording(2);
+    const store = open(dbPath(), verifier);
+    seed(store);
+    store.health();
+    expect(store.health().checks.auditChain).toEqual({ ok: false, code: "audit_chain_backend_disagreement" });
+    calls.length = 0;
+    store.health();
+    expect(calls[0]?.kind).toBe("full");
+  });
+});
+
 describe.skipIf(process.env.ACS_TEST_CORE_NATIVE !== "1")(
   "audit shadow with the compiled Rust core (ACS_TEST_CORE_NATIVE=1)",
   () => {
@@ -207,6 +262,24 @@ describe.skipIf(process.env.ACS_TEST_CORE_NATIVE !== "1")(
       expect(store.auditShadowStatus()).toMatchObject({ backend: "rust", failed: 0 });
       expect(store.auditShadowStatus().compared).toBeGreaterThanOrEqual(2);
 
+      const tamper = new DatabaseSync(path);
+      tamper.exec(
+        "UPDATE audit_events SET body = '{\"tampered\":true}' WHERE sequence = (SELECT MAX(sequence) FROM audit_events)"
+      );
+      tamper.close();
+      expect(store.health().checks.auditChain.ok).toBe(false);
+    });
+
+    it("compares incrementally against the compiled core across writes and still fails closed on tail damage", () => {
+      const path = dbPath();
+      const store = open(path, createCoreVerifier({ env: { ACS_CORE_BACKEND: "rust" } }));
+      for (let round = 0; round < 4; round += 1) {
+        seed(store);
+        expect(store.health().checks.auditChain).toEqual({ ok: true });
+      }
+      expect(store.auditShadowStatus()).toMatchObject({ backend: "rust", failed: 0, skipped: 0 });
+      expect(store.auditShadowStatus().incremental).toBeGreaterThanOrEqual(3);
+      seed(store);
       const tamper = new DatabaseSync(path);
       tamper.exec(
         "UPDATE audit_events SET body = '{\"tampered\":true}' WHERE sequence = (SELECT MAX(sequence) FROM audit_events)"
