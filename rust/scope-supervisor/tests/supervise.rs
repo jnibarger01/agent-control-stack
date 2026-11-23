@@ -511,3 +511,68 @@ fn stdin_is_delivered_and_must_be_canonical_base64() {
     );
     assert_eq!(decode(&obs["stdout"]), b"done\n");
 }
+
+/// A control frame of exactly `total` bytes, counting its newline, padded with
+/// trailing JSON whitespace. Limit: 1,024 bytes including LF.
+fn padded_cancel(total: usize) -> Vec<u8> {
+    let value = json!({"version": 2, "sessionId": SESSION, "fencingToken": 7, "seq": 1, "event": {"type": "cancel"}});
+    let mut bytes = serde_json::to_vec(&value).unwrap();
+    assert!(
+        total > bytes.len() + 1,
+        "frame too small for the cancel body"
+    );
+    bytes.extend(std::iter::repeat_n(b' ', total - 1 - bytes.len()));
+    bytes.push(b'\n');
+    assert_eq!(bytes.len(), total);
+    bytes
+}
+
+#[test]
+fn control_frame_limit_is_exact_including_the_newline() {
+    let fixture = Fixture::new("inactive");
+    let (obs, _) = exchange(
+        &start_frame(&fixture, "sleep 30", 10_000, 4096),
+        &[&padded_cancel(1024)],
+        false,
+    );
+    assert_eq!(obs["trigger"], "cancelled");
+    assert_eq!(
+        obs["protocolViolation"],
+        Value::Null,
+        "1,024 bytes with LF is within the limit"
+    );
+
+    assert_eq!(
+        violation(&padded_cancel(1025)),
+        "control_frame_invalid",
+        "1,025 bytes with LF exceeds the limit"
+    );
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn oversized_stdin_is_rejected_before_launch() {
+    // One byte over the 4 MiB stdin bound, base64 encoded. The frame itself stays under the request bound.
+    let oversized = base64_encode(&vec![b'a'; 4 * 1024 * 1024 + 1]);
+    assert_eq!(rejected(|s| s["stdin"] = json!(oversized)), "stdin_invalid");
+}
