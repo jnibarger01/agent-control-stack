@@ -1702,7 +1702,7 @@ describe("gateway MCP transport", () => {
           security: { max_output_bytes: 256, command_timeout_ms: 5_000 },
           agents: [
             {
-              id: "fixture-agent",
+              id: "opencode",
               command: "node",
               args: ["-e", "process.stdout.write('fixture-response:' + process.argv.at(-1))"],
               permission_mode: "read-only"
@@ -1781,7 +1781,7 @@ describe("gateway MCP transport", () => {
           }
           const functionName = String((tool.function as Record<string, unknown>).name);
           const argumentsValue = JSON.stringify({
-            agent: "fixture-agent",
+            agent: "opencode",
             prompt: "OpenCode real CLI check",
             cwd: allowed,
             timeoutSeconds: 5,
@@ -1834,10 +1834,18 @@ describe("gateway MCP transport", () => {
           },
           model: "fixture/fixture-model",
           mcp: {
-            "acs-gateway": {
-              type: "remote",
-              url: "PLACEHOLDER",
-              headers: { Authorization: "Bearer deterministic-opencode-token" }
+            servers: {
+              "acs-gateway": {
+                type: "remote",
+                url: "PLACEHOLDER",
+                headers: { Authorization: "Bearer deterministic-opencode-token" },
+                // OpenCode 2.x reaches MCP tools through Code Mode (`execute`) by default. The contract under test is
+                // the native tool-call path, so keep the gateway's tools on the provider tool list.
+                codemode: false,
+                // The gateway publishes OAuth protected-resource metadata. This fixture authenticates with the static
+                // local bearer header, so OpenCode's OAuth discovery stays off.
+                oauth: false
+              }
             }
           }
         })
@@ -1858,12 +1866,12 @@ describe("gateway MCP transport", () => {
         const gatewayAddress = app.server.address();
         if (!gatewayAddress || typeof gatewayAddress === "string") throw new Error("gateway did not expose a socket");
         const config = JSON.parse(readFileSync(opencodeConfigPath, "utf8")) as Record<string, unknown>;
-        (config.mcp as Record<string, Record<string, unknown>>)["acs-gateway"].url =
+        (config.mcp as { servers: Record<string, Record<string, unknown>> }).servers["acs-gateway"].url =
           `http://127.0.0.1:${gatewayAddress.port}/mcp`;
         writeFileSync(opencodeConfigPath, JSON.stringify(config));
         opencodeProcess = spawn(
           opencodeExecutable!,
-          ["run", "--pure", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
+          ["run", "--standalone", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
           {
             cwd: allowed,
             env: opencodeE2eEnvironment(dir, opencodeConfigPath),
@@ -1883,15 +1891,13 @@ describe("gateway MCP transport", () => {
         expect(modelRequests.some((request) => Array.isArray(request.tools))).toBe(true);
         const invalidConfig = JSON.parse(readFileSync(opencodeConfigPath, "utf8")) as Record<string, unknown>;
         (
-          (invalidConfig.mcp as Record<string, Record<string, unknown>>)["acs-gateway"].headers as Record<
-            string,
-            string
-          >
+          (invalidConfig.mcp as { servers: Record<string, Record<string, unknown>> }).servers["acs-gateway"]
+            .headers as Record<string, string>
         )["Authorization"] = "Bearer invalid-opencode-token";
         writeFileSync(opencodeConfigPath, JSON.stringify(invalidConfig));
         invalidRun = spawn(
           opencodeExecutable!,
-          ["run", "--pure", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
+          ["run", "--standalone", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
           {
             cwd: allowed,
             env: opencodeE2eEnvironment(dir, opencodeConfigPath),
@@ -2215,7 +2221,10 @@ describe("gateway MCP transport", () => {
           hermesFixture.launcher,
           [
             "--ignore-rules",
-            "--no-restore-cwd",
+            // Hermes 0.23 runs one-shot prompts through its gateway, which rejects --no-restore-cwd and pins the
+            // working directory with --in instead.
+            "--in",
+            allowed,
             "-z",
             "Run the explicitly registered ACS fixture agent and report its result."
           ],
