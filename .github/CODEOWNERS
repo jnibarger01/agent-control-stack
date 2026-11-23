@@ -2,3 +2,7 @@
 # docs/releases/sandbox-real-execution-gate.md before live exec is enabled.
 /packages/sandbox/ @jnibarger01
 /docs/releases/sandbox-real-execution-gate.md @jnibarger01
+
+# Workflows, CODEOWNERS and repository automation need owner review. "Require review from Code Owners" on main only
+# protects a path that is listed here; the PR merge classifier also checks for this entry.
+/.github/ @jnibarger01
