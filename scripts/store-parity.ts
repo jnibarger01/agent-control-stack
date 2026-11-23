@@ -1,6 +1,7 @@
 #!/usr/bin/env -S npx tsx
 /**
- * Parity check for the read-only Rust work-item reader (rust/acs-core, bin acs-work-items-dump), Phase 1 slice P1.1.
+ * Parity check for the read-only Rust store readers (rust/acs-core, bin acs-store-dump), Phase 1:
+ * work items (P1.1, TypeScript `get(id)`) and execution attempts (P1.2, TypeScript `getAttempt(id)`).
  *
  * For each database (copies only; the originals are never opened for writing):
  *   1. opens it once with the TypeScript store (which applies migrations to the copy), then closes it;
@@ -12,7 +13,7 @@
  * Databases: every path given with --db (e.g. a production copy), plus a generated adversarial fixture that covers
  * the normalization rules (unknown keys, defaults, omitted falsy fields, strict metadata, enum and length limits).
  *
- * Usage: npx tsx scripts/work-items-parity.ts [--bin <path>] [--db <path>]... [--keep]
+ * Usage: npx tsx scripts/store-parity.ts [--bin <path>] [--db <path>]... [--keep]
  * Exit 0: every row agreed. Exit 1: any disagreement.
  */
 import { spawnSync } from "node:child_process";
@@ -22,11 +23,11 @@ import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { applyControlPlaneMigrations } from "@agent-control-stack/shared";
-import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
+import { SqliteWorkItemStore, defaultExecutionPlanForWorkItem } from "@agent-control-stack/work-items";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const args = process.argv.slice(2);
-const bin = valueOf("--bin") ?? join(root, "rust/acs-core/target/release/acs-work-items-dump");
+const bin = valueOf("--bin") ?? join(root, "rust/acs-core/target/release/acs-store-dump");
 const keep = args.includes("--keep");
 const databases = args.flatMap((arg, index) => (arg === "--db" ? [args[index + 1]!] : []));
 
@@ -37,17 +38,24 @@ function valueOf(flag: string): string | undefined {
 
 type Side = { text: string } | { error: string };
 
-function typescriptSide(store: SqliteWorkItemStore, id: string): Side {
+type Kind = "work-items" | "attempts";
+
+const KINDS: Record<Kind, { table: string; idColumn: string; read: (store: SqliteWorkItemStore, id: string) => unknown }> = {
+  "work-items": { table: "work_items", idColumn: "id", read: (store, id) => store.get(id) },
+  attempts: { table: "execution_attempts", idColumn: "attempt_id", read: (store, id) => store.getAttempt(id) }
+};
+
+function typescriptSide(store: SqliteWorkItemStore, kind: Kind, id: string): Side {
   try {
-    const item = store.get(id);
+    const item = KINDS[kind].read(store, id);
     return item ? { text: JSON.stringify(item) } : { error: "missing" };
   } catch {
     return { error: "invalid" };
   }
 }
 
-function rustSides(path: string): Map<string, Side> {
-  const run = spawnSync(bin, [path], { encoding: "utf8", maxBuffer: 1 << 30 });
+function rustSides(kind: Kind, path: string): Map<string, Side> {
+  const run = spawnSync(bin, [kind, path], { encoding: "utf8", maxBuffer: 1 << 30 });
   if (run.status !== 0) throw new Error(`rust dump failed (${run.status}): ${run.stderr.slice(0, 200)}`);
   const sides = new Map<string, Side>();
   for (const line of run.stdout.split("\n").filter(Boolean)) {
@@ -60,16 +68,25 @@ function rustSides(path: string): Map<string, Side> {
 function compare(label: string, path: string): number {
   const opened = new SqliteWorkItemStore(path, { auditShadowVerifier: null });
   opened.close();
-  const rust = rustSides(path);
+  let failures = 0;
+  for (const kind of Object.keys(KINDS) as Kind[]) failures += compareKind(label, kind, path);
+  return failures;
+}
+
+function compareKind(label: string, kind: Kind, path: string): number {
+  const rust = rustSides(kind, path);
   const store = new SqliteWorkItemStore(path, { auditShadowVerifier: null });
   const db = new DatabaseSync(path, { readOnly: true });
-  const ids = (db.prepare("SELECT id FROM work_items ORDER BY id ASC").all() as Array<{ id: string }>).map((r) => r.id);
+  const { table, idColumn } = KINDS[kind];
+  const ids = (db.prepare(`SELECT ${idColumn} AS id FROM ${table} ORDER BY ${idColumn} ASC`).all() as Array<{ id: string }>).map(
+    (r) => r.id
+  );
   db.close();
   let failures = 0;
   let items = 0;
   let rejected = 0;
   for (const id of ids) {
-    const ts = typescriptSide(store, id);
+    const ts = typescriptSide(store, kind, id);
     const rs = rust.get(id) ?? { error: "absent from rust dump" };
     const agree = "text" in ts && "text" in rs ? ts.text === rs.text : "error" in ts && "error" in rs && ts.error === rs.error;
     if ("text" in ts) items += 1;
@@ -77,7 +94,7 @@ function compare(label: string, path: string): number {
     if (!agree) {
       failures += 1;
       if (failures <= 5) {
-        console.log(`MISMATCH ${label} ${id}`);
+        console.log(`MISMATCH ${label} ${kind} ${id}`);
         console.log(`  ts:   ${"text" in ts ? ts.text.slice(0, 400) : `error ${ts.error}`}`);
         console.log(`  rust: ${"text" in rs ? rs.text.slice(0, 400) : `error ${rs.error}`}`);
       }
@@ -85,7 +102,7 @@ function compare(label: string, path: string): number {
   }
   store.close();
   console.log(
-    `${failures === 0 ? "PASS" : "FAIL"}  ${label}  rows=${ids.length} items=${items} rejectedByBoth=${failures === 0 ? rejected : "-"} mismatches=${failures}`
+    `${failures === 0 ? "PASS" : "FAIL"}  ${label}  ${kind}  rows=${ids.length} items=${items} rejectedByBoth=${failures === 0 ? rejected : "-"} mismatches=${failures}`
   );
   return failures;
 }
@@ -153,6 +170,57 @@ function adversarialFixture(path: string): void {
   console.log(`adversarial fixture: ${rows.length - skipped.length} rows written; refused by schema constraints: ${skipped.join(", ") || "none"}`);
 }
 
+/** Real attempts created through the store, then overwritten with edge-case values a foreign writer could leave. */
+function adversarialAttempts(path: string): void {
+  const store = new SqliteWorkItemStore(path, { auditShadowVerifier: null });
+  const hex = (seed: string) => seed.repeat(64).slice(0, 64);
+  const variants: Array<[string, string, string | number | null]> = [
+    ["created_at", "created_at", "2026-11-23T08:30:26.123456789+05:30"],
+    ["leap_day", "created_at", "2024-02-29T00:00:00Z"],
+    ["non_leap_day", "created_at", "2026-02-29T00:00:00Z"],
+    ["compact_offset", "updated_at", "2026-11-23T08:30:26+0530"],
+    ["no_zone", "updated_at", "2026-11-23T08:30:26"],
+    ["hour_24", "started_at", "2026-11-23T24:00:00Z"],
+    ["empty_worker", "claimed_by_worker_id", ""],
+    ["bad_worker", "claimed_by_worker_id", "_worker"],
+    ["protocol", "protocol_version", "acs.worker.v1"],
+    ["epoch_negative", "current_fencing_epoch", -1],
+    ["upper_hash", "input_hash", "A".repeat(64)],
+    ["plain", "status", "pending"]
+  ];
+  const skipped: string[] = [];
+  for (const [label, column, value] of variants) {
+    const workItem = store.create({
+      title: `attempt fixture ${label}`,
+      requester: "user",
+      requesterSubject: "actor-user",
+      intent: "attempt parity",
+      target: { cwd: "/repo", files: [] },
+      requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["a"], write: false } }],
+      risk: "low"
+    });
+    const plan = store.createExecutionPlan({
+      workItemId: workItem.id,
+      definition: defaultExecutionPlanForWorkItem(workItem),
+      createdByActorId: "actor-user"
+    });
+    const attempt = store.createAttempt(
+      { workItemId: workItem.id, planHash: plan.planHash, inputHash: hex("b") },
+      { via: "domain_service" }
+    );
+    const db = new DatabaseSync(path);
+    try {
+      db.prepare(`UPDATE execution_attempts SET ${column} = ? WHERE attempt_id = ?`).run(value, attempt.attemptId);
+    } catch {
+      skipped.push(label);
+    } finally {
+      db.close();
+    }
+  }
+  store.close();
+  console.log(`adversarial attempts: ${variants.length - skipped.length} edge values written; refused by schema/triggers: ${skipped.join(", ") || "none"}`);
+}
+
 if (!existsSync(bin)) {
   console.error(`missing ${bin}; build rust/acs-core first`);
   process.exit(1);
@@ -162,6 +230,7 @@ let failures = 0;
 try {
   const fixture = join(work, "adversarial.db");
   adversarialFixture(fixture);
+  adversarialAttempts(fixture);
   failures += compare("adversarial-fixture", fixture);
   for (const [index, source] of databases.entries()) {
     // Never open the source itself: copy the file and any WAL into scratch first, then compact the copy.

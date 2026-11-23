@@ -59,8 +59,8 @@ jobs:
       - name: Audit chain parity (Rust verifier against TypeScript, read-only)
         run: npm run test:audit-chain-parity
 
-      - name: Work-item reader parity (Rust vs TypeScript)
-        run: npm run test:work-items-parity
+      - name: Store reader parity (Rust vs TypeScript; work items, attempts)
+        run: npm run test:store-parity
 
       - name: Audit verification suite with the Rust core selected
         env:

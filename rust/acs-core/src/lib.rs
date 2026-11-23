@@ -5,8 +5,10 @@
 //! `scripts/audit-chain-parity.ts` and by `contracts/canonical-hash/v2.golden.json`.
 #![forbid(unsafe_code)]
 
+pub mod attempts;
 pub mod audit;
 pub mod canonical;
 pub mod legacy;
 pub mod store;
 pub mod work_items;
+pub mod zod;

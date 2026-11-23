@@ -162,6 +162,42 @@ impl Store {
         Ok(rows.next().transpose()?)
     }
 
+    /// The `execution_attempts` row with this id, if any.
+    pub fn attempt_row(&self, attempt_id: &str) -> Result<Option<AttemptRow>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT attempt_id, work_item_id, plan_id, plan_hash, attempt_number, protocol_version, input_hash, \
+                    status, current_fencing_epoch, claimed_by_worker_id, started_at, created_at, updated_at \
+             FROM execution_attempts WHERE attempt_id = ?1",
+        )?;
+        let mut rows = statement.query_map([attempt_id], |row| {
+            Ok(AttemptRow {
+                attempt_id: row.get(0)?,
+                work_item_id: row.get(1)?,
+                plan_id: row.get(2)?,
+                plan_hash: row.get(3)?,
+                attempt_number: row.get(4)?,
+                protocol_version: row.get(5)?,
+                input_hash: row.get(6)?,
+                status: row.get(7)?,
+                current_fencing_epoch: row.get(8)?,
+                claimed_by_worker_id: row.get(9)?,
+                started_at: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
+            })
+        })?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// Every attempt id, in ascending order.
+    pub fn attempt_ids(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT attempt_id FROM execution_attempts ORDER BY attempt_id ASC")?;
+        let ids = statement.query_map([], |row| row.get(0))?;
+        Ok(ids.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Every work item id, in ascending order.
     pub fn work_item_ids(&self) -> Result<Vec<String>, StoreError> {
         let mut statement = self
@@ -200,6 +236,24 @@ pub struct WorkItemRow {
     pub retry_reason: Option<String>,
     pub retry_sequence: Option<i64>,
     pub root_work_item_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One `execution_attempts` row, as stored (the columns the attempt view reads).
+#[derive(Debug, Clone)]
+pub struct AttemptRow {
+    pub attempt_id: String,
+    pub work_item_id: String,
+    pub plan_id: String,
+    pub plan_hash: String,
+    pub attempt_number: i64,
+    pub protocol_version: String,
+    pub input_hash: String,
+    pub status: String,
+    pub current_fencing_epoch: i64,
+    pub claimed_by_worker_id: Option<String>,
+    pub started_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
