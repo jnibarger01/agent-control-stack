@@ -56,6 +56,37 @@ source tree. Linux, Node >= 24.16,
 - `standalone` (read-only) and `local` presets remain explicit compatibility
   modes; the managed bridge refuses both and `--standalone`.
 
+## CLI Authentication (`jace auth`, V2)
+
+The CLI (`jace`, `jc`, or `jace-commander`) authenticates to `/jc/mcp` using OAuth 2.1 + RFC 9449 DPoP (`EdDSA` / Ed25519 via `node:crypto`, zero native keyring dependencies; see [ADR 0031](../../docs/adr/0031-jace-cli-auth-v2.md)).
+
+### Commands
+
+```sh
+jace auth login [--device] [--no-browser] [--mcp-url <url>] [--label <name>]
+jace auth status [--json]
+jace auth refresh
+jace auth logout
+jace auth devices [--json]
+jace auth revoke <device-id>
+```
+
+- **Browser flow (default):** Authorization Code + PKCE `S256`, `state`, RFC 9207 `iss` verification, RFC 8252 `127.0.0.1` loopback callback, and `dpop_jkt` key binding (`client_id=jace-commander-cli`, non-privileged `scope=mcp`).
+- **Headless flow (`--device` / `--no-browser`):** RFC 8628 device authorization against `/jc/oauth/device/code` + `/jc/oauth/token` with DPoP proof-of-possession.
+- **`jace auth status [--json]`:** Displays non-secret metadata only (`sub`, `device_id`, `jkt`, `expires_at`, `issuer`, `audience`, `storage_backend`, `auth_mode`).
+- **`jace auth logout`:** Clears local credentials and local device keypair only; remote devices remain registered on `/jc` until revoked with `jace auth revoke <device-id>`.
+- **Legacy override (`JC_MCP_TOKEN`):** Explicitly enables `legacy-bearer-env` mode for CI/service automation; never persisted to `SecretStore`, and stored DPoP credentials never auto-downgrade to `Bearer`.
+
+### Credential storage, locking, and crash recovery
+
+- **OS keyrings (`SecretStore`, `JC_SECRET_BACKEND=auto|keyring|encrypted|file`):**
+  - Linux: `SecretServiceStore` (`linux-secret-service` via `secret-tool`, with `KWalletStore` `linux-kwallet` via `kwallet-query` fallback).
+  - macOS: `KeychainStore` (`macos-keychain` via `security`).
+  - Windows: `WindowsCredentialStore` (`windows-dpapi` via PowerShell DPAPI).
+- **Headless encrypted fallback (`EncryptedFileStore` / `encrypted-file`):** When no OS keyring is available (CI, containers, SSH without D-Bus), secrets are encrypted with AES-256-GCM (`0700` `JC_STATE_DIR`, `0600` files, `O_EXCL` + `fsync` + `rename`). Key material is kept separate from ciphertext via `JC_KEYRING_PASSPHRASE`, `JC_KEYRING_KEY_FILE`, or an OS-restricted headless key path — never plaintext fallback.
+- **Cross-process safety:** `<stateDir>/auth.lock` (`O_CREAT | O_EXCL` + `linkSync`) and a `0600` pre-send `pending-refresh.json` journal (`refresh_request_id`) serialize concurrent CLI refreshes and recover cleanly if a process crashes mid-rotation.
+- **Migration & rollback:** See [docs/runbooks/jace-cli-auth-v2-migration.md](../../docs/runbooks/jace-cli-auth-v2-migration.md).
+
 ## Workload isolation
 
 Every workload (`run_command`, `start_terminal_session` / `interact_with_process`,

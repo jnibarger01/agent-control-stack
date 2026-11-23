@@ -3,6 +3,23 @@ import { createServer } from "node:http";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { loadRuntimeConfig, type RuntimeConfig } from "./config.js";
 
+export {
+  CorruptCredentialsError,
+  credentialsPath,
+  readCredentials,
+  type StoredCredentials,
+  type StoredSession
+} from "./auth/credential-store.js";
+export {
+  DEFAULT_REFRESH_THRESHOLD_MS,
+  RefreshSessionError,
+  refreshSession,
+  signRefreshProof,
+  type RefreshFailureReason,
+  type RefreshSessionOptions,
+  type RefreshSessionResult
+} from "./auth/refresh.js";
+
 export type RuntimeComponentName =
   "gateway" | "controlPlane" | "scheduler" | "actorDiscovery" | "executionWorker" | "reconciler";
 export type RuntimeComponentState = "starting" | "ready" | "degraded" | "stopped";

@@ -131,6 +131,40 @@ test('metadata must match its client_id, be public, and use allowed redirects', 
   assert.throws(() => parseClientMetadata(id, []), /JSON object/);
 });
 
+test('Claude CIMD metadata shape is accepted (JWT bearer advertised but not issued)', () => {
+  const id = 'https://claude.ai/oauth/mcp-oauth-client-metadata';
+  const doc = {
+    client_id: id,
+    client_name: 'Claude',
+    redirect_uris: ['https://claude.ai/api/mcp/auth_callback'],
+    grant_types: ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:jwt-bearer'],
+    response_types: ['code'],
+    token_endpoint_auth_method: 'none',
+  };
+  assert.deepEqual(parseClientMetadata(id, doc), {
+    redirect_uris: ['https://claude.ai/api/mcp/auth_callback'],
+    token_endpoint_auth_method: 'none',
+    grant_types: ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:jwt-bearer'],
+  });
+});
+
+test('malformed or unsupported advertised grant types are rejected', () => {
+  const id = 'https://app.example.com/client.json';
+  const ok = { client_id: id, redirect_uris: ['https://app.example.com/cb'] };
+  for (const grants of [
+    [],
+    ['authorization_code', 'client_credentials'],
+    ['authorization_code', 'urn:ietf:params:oauth:grant-type:device_code'],
+    ['authorization_code', 1],
+    ['authorization_code', null],
+    [Symbol.for('x')], // not a string
+    Array(21).fill('authorization_code'),
+  ]) {
+    assert.throws(() => parseClientMetadata(id, { ...ok, grant_types: grants }), /grant_types/, `expected rejection for ${JSON.stringify(grants)}`);
+  }
+  assert.throws(() => parseClientMetadata(id, { ...ok, grant_types: ['authorization_code', {}] }), /grant_types/);
+});
+
 test('registrable redirects: https or loopback http only, no fragments or userinfo', () => {
   assert.equal(isAllowedRedirectUri('https://chatgpt.example/cb'), true);
   assert.equal(isAllowedRedirectUri('http://127.0.0.1:53000/cb'), true);
