@@ -67,7 +67,28 @@ fn session(mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
     Err(protocol_error())
 }
 
+/// Marks every descriptor inherited from the parent, other than stdin, stdout and stderr, close-on-exec.
+///
+/// Descriptors this process opens are already close-on-exec, but ones the parent left open without the flag would
+/// otherwise reach every workload and host probe this helper spawns (seen on CI runners). The helper communicates only
+/// over stdin and stdout, so it needs none of them after exec. Runs before any thread or child exists.
+fn seal_inherited_descriptors() {
+    use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+    let Ok(entries) = std::fs::read_dir("/proc/self/fd") else {
+        return;
+    };
+    let descriptors: Vec<i32> = entries
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|&fd| fd > 2)
+        .collect();
+    for fd in descriptors {
+        // The directory handle used for the listing is already closed or close-on-exec; errors are ignored.
+        let _ = fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
+    }
+}
+
 fn main() -> ExitCode {
+    seal_inherited_descriptors();
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let result = match args.as_slice() {
         // Protocol v1: termination decisions only, used by the parity harness.
