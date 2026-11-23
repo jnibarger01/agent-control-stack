@@ -13,6 +13,7 @@
 //!   `UnsupportedNumber`. Their formatting would need the ECMAScript number algorithm, and the
 //!   verifier reports such records as unsupported rather than as corrupt.
 
+use std::cmp::Ordering;
 use std::sync::OnceLock;
 
 use icu_collator::options::{AlternateHandling, CollatorOptions, Strength};
@@ -78,7 +79,7 @@ pub fn legacy_canonical_json(value: &Value) -> Result<String, LegacyError> {
 /// `canonicalJson` (v1) under the collation identified by `tag` (one of `LOCALES`).
 pub fn legacy_canonical_json_in(value: &Value, tag: &str) -> Result<String, LegacyError> {
     let mut out = String::new();
-    encode(value, "$", collator(tag)?, &mut out)?;
+    encode(value, &JsonPath::Root, collator(tag)?, &mut out)?;
     Ok(out)
 }
 
@@ -90,13 +91,105 @@ pub fn legacy_stable_hash(value: &Value) -> Result<String, LegacyError> {
 /// `stableHash` (v1) under the collation identified by `tag`.
 pub fn legacy_stable_hash_in(value: &Value, tag: &str) -> Result<String, LegacyError> {
     let canonical = legacy_canonical_json_in(value, tag)?;
-    let digest = Sha256::digest(canonical.as_bytes());
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+    Ok(hex(&Sha256::digest(canonical.as_bytes())))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        text.push(DIGITS[usize::from(byte >> 4)] as char);
+        text.push(DIGITS[usize::from(byte & 0x0f)] as char);
+    }
+    text
+}
+
+/// Bit `li` (for `li` in `1..LOCALES.len()`) is set when some object in `value` may order its keys
+/// differently under `LOCALES[li]` than under root. An unset bit is exact: that collation produces the
+/// same v1 canonical text as root, so the same hash. A set bit may be a false positive (root ties, or an
+/// alternate tie or reversal), which only means the caller computes that collation in full.
+///
+/// Why an unset bit is exact: the root stable sort yields keys k1..kn. If root and the alternate both
+/// compare every adjacent pair as strictly `Less`, the order is strictly increasing under the
+/// alternate, so its stable sort of any insertion order yields the same k1..kn. The later array-index
+/// partition depends only on that order and the keys, so the emitted text is identical.
+pub fn collation_sensitive_locales(value: &Value) -> Result<u32, LegacyError> {
+    let root = collator(LOCALES[0])?;
+    let mut alternates = Vec::with_capacity(LOCALES.len() - 1);
+    for &tag in &LOCALES[1..] {
+        alternates.push(collator(tag)?);
+    }
+    let all: u32 = ((1u32 << LOCALES.len()) - 1) & !1;
+    let mut mask = 0u32;
+    sensitivity(value, root, &alternates, all, &mut mask);
+    Ok(mask)
+}
+
+fn sensitivity(
+    value: &Value,
+    root: &CollatorBorrowed<'_>,
+    alternates: &[&CollatorBorrowed<'_>],
+    all: u32,
+    mask: &mut u32,
+) {
+    if *mask == all {
+        return;
+    }
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                sensitivity(item, root, alternates, all, mask);
+            }
+        }
+        Value::Object(members) => {
+            if members.len() > 1 {
+                let mut keys: Vec<&String> = members.keys().collect();
+                keys.sort_by(|left, right| root.compare(left, right));
+                let root_strict = keys
+                    .windows(2)
+                    .all(|pair| root.compare(pair[0], pair[1]) == Ordering::Less);
+                for (offset, alternate) in alternates.iter().enumerate() {
+                    let bit = 1u32 << (offset + 1);
+                    if *mask & bit != 0 {
+                        continue;
+                    }
+                    if !root_strict
+                        || !keys
+                            .windows(2)
+                            .all(|pair| alternate.compare(pair[0], pair[1]) == Ordering::Less)
+                    {
+                        *mask |= bit;
+                    }
+                }
+            }
+            for member in members.values() {
+                sensitivity(member, root, alternates, all, mask);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The JSON path of the value being encoded, rendered only when an error needs it.
+enum JsonPath<'a> {
+    Root,
+    Index(&'a JsonPath<'a>, usize),
+    Key(&'a JsonPath<'a>, &'a str),
+}
+
+impl JsonPath<'_> {
+    fn render(&self) -> String {
+        match self {
+            Self::Root => "$".to_owned(),
+            Self::Index(parent, index) => format!("{}[{index}]", parent.render()),
+            Self::Key(parent, key) => format!("{}.{key}", parent.render()),
+        }
+    }
 }
 
 fn encode(
     value: &Value,
-    path: &str,
+    path: &JsonPath<'_>,
     collator: &CollatorBorrowed<'_>,
     out: &mut String,
 ) -> Result<(), LegacyError> {
@@ -112,7 +205,7 @@ fn encode(
                 if index > 0 {
                     out.push(',');
                 }
-                encode(item, &format!("{path}[{index}]"), collator, out)?;
+                encode(item, &JsonPath::Index(path, index), collator, out)?;
             }
             out.push(']');
         }
@@ -133,7 +226,7 @@ fn encode(
                 }
                 quote(key, out);
                 out.push(':');
-                encode(member, &format!("{path}.{key}"), collator, out)?;
+                encode(member, &JsonPath::Key(path, key), collator, out)?;
             }
             out.push('}');
         }
@@ -152,11 +245,11 @@ fn array_index(key: &str) -> Option<u32> {
     key.parse::<u32>().ok().filter(|&index| index < u32::MAX)
 }
 
-fn integer_text(number: &serde_json::Number, path: &str) -> Result<String, LegacyError> {
+fn integer_text(number: &serde_json::Number, path: &JsonPath<'_>) -> Result<String, LegacyError> {
     match number.as_i64() {
         Some(integer) if integer.unsigned_abs() <= MAX_SAFE_INTEGER as u64 => {
             Ok(integer.to_string())
         }
-        _ => Err(LegacyError::UnsupportedNumber(path.to_owned())),
+        _ => Err(LegacyError::UnsupportedNumber(path.render())),
     }
 }

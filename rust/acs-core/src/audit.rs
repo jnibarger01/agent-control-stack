@@ -11,7 +11,10 @@ use std::path::Path;
 
 use serde_json::{Map, Number, Value, json};
 
-use crate::legacy::{LOCALES, LegacyError, legacy_canonical_json_in, legacy_stable_hash_in};
+use crate::legacy::{
+    LOCALES, LegacyError, collation_sensitive_locales, legacy_canonical_json_in,
+    legacy_stable_hash_in,
+};
 use crate::store::{AuditRow, Store, StoreError};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -191,8 +194,14 @@ struct Reproduction {
     root_writer_supported: bool,
 }
 
-fn reproduce(events: &[AuditEvent]) -> Result<Reproduction, LegacyError> {
-    // hashes[li][i]: the recomputed hash under collation li, or None outside the supported domain.
+/// `hashes[li][i]`: the recomputed hash of event `i` under collation `li`, or `None` outside the supported
+/// domain; `unsupported[i]`: the path reported for an unsupported value.
+type HashMatrix = (Vec<Vec<Option<String>>>, Vec<Option<String>>);
+
+/// The reference computation: every event hashed under every collation. Kept to prove `hash_matrix`
+/// equal to it; the verifier uses `hash_matrix`.
+#[cfg(test)]
+fn hash_matrix_reference(events: &[AuditEvent]) -> Result<HashMatrix, LegacyError> {
     let mut hashes: Vec<Vec<Option<String>>> = vec![vec![None; events.len()]; LOCALES.len()];
     let mut unsupported = vec![None; events.len()];
     for (li, &locale) in LOCALES.iter().enumerate() {
@@ -204,6 +213,47 @@ fn reproduce(events: &[AuditEvent]) -> Result<Reproduction, LegacyError> {
             }
         }
     }
+    Ok((hashes, unsupported))
+}
+
+/// Same result as `hash_matrix_reference`. An alternate collation is hashed only where it may order some
+/// object's keys differently from root (`collation_sensitive_locales`); elsewhere its hash is root's.
+/// An event with an unsupported value takes the reference path, so its reported path is unchanged
+/// (the last collation that reported one).
+fn hash_matrix(events: &[AuditEvent]) -> Result<HashMatrix, LegacyError> {
+    let mut hashes: Vec<Vec<Option<String>>> = vec![vec![None; events.len()]; LOCALES.len()];
+    let mut unsupported = vec![None; events.len()];
+    for (i, event) in events.iter().enumerate() {
+        let covered = covered_value(event);
+        let root = match legacy_stable_hash_in(&covered, LOCALES[0]) {
+            Ok(hash) => hash,
+            Err(LegacyError::UnsupportedNumber(_)) => {
+                for (li, &locale) in LOCALES.iter().enumerate() {
+                    match legacy_stable_hash_in(&covered, locale) {
+                        Ok(hash) => hashes[li][i] = Some(hash),
+                        Err(LegacyError::UnsupportedNumber(path)) => unsupported[i] = Some(path),
+                        Err(other) => return Err(other),
+                    }
+                }
+                continue;
+            }
+            Err(other) => return Err(other),
+        };
+        let sensitive = collation_sensitive_locales(&covered)?;
+        for (li, &locale) in LOCALES.iter().enumerate().skip(1) {
+            hashes[li][i] = Some(if sensitive & (1 << li) != 0 {
+                legacy_stable_hash_in(&covered, locale)?
+            } else {
+                root.clone()
+            });
+        }
+        hashes[0][i] = Some(root);
+    }
+    Ok((hashes, unsupported))
+}
+
+fn reproduce(events: &[AuditEvent]) -> Result<Reproduction, LegacyError> {
+    let (hashes, unsupported) = hash_matrix(events)?;
     let reproduced: Vec<Vec<bool>> = hashes
         .iter()
         .map(|column| {
@@ -258,6 +308,47 @@ fn reproduce(events: &[AuditEvent]) -> Result<Reproduction, LegacyError> {
 ///    (root reproduces more records than any alternate) or when the record's canonical text is the
 ///    same under every tested collation. Otherwise `Indeterminate`.
 pub fn verify_chain(events: &[AuditEvent]) -> Result<Verdict, LegacyError> {
+    match verify_chain_root_only(events)? {
+        Some(verdict) => Ok(verdict),
+        None => verify_chain_classified(events),
+    }
+}
+
+/// The common case without alternate collations. Alternate collations only classify an event whose
+/// hash does not reproduce under root, so while every event links and reproduces under root the
+/// verdict is the same as `verify_chain_classified`. Returns `None` at the first event that does not
+/// reproduce under root (or holds an unsupported value): the caller then runs the full classification
+/// over the whole chain, which yields exactly the reference verdict.
+fn verify_chain_root_only(events: &[AuditEvent]) -> Result<Option<Verdict>, LegacyError> {
+    let event_count = events.len();
+    let mut previous = String::new();
+    for event in events {
+        if event.previous_hash != previous {
+            return Ok(Some(Verdict::Failed {
+                event_count,
+                head_hash: previous.clone(),
+                failure: Failure {
+                    sequence: event.sequence,
+                    reason: "previous_hash_mismatch",
+                    expected: previous,
+                    actual: event.previous_hash.clone(),
+                },
+            }));
+        }
+        match legacy_stable_hash_in(&covered_value(event), LOCALES[0]) {
+            Ok(hash) if hash == event.event_hash => previous = hash,
+            Ok(_) | Err(LegacyError::UnsupportedNumber(_)) => return Ok(None),
+            Err(other) => return Err(other),
+        }
+    }
+    Ok(Some(Verdict::Ok {
+        event_count,
+        head_hash: previous,
+    }))
+}
+
+/// The full verification with locale classification (the reference behavior).
+fn verify_chain_classified(events: &[AuditEvent]) -> Result<Verdict, LegacyError> {
     let event_count = events.len();
     let reproduction = reproduce(events)?;
     let mut previous = String::new();
@@ -381,4 +472,195 @@ pub fn verify_database_with(path: &Path, mode: OpenMode) -> Result<Verdict, Audi
     };
     let events = events_from_rows(store.audit_rows()?)?;
     Ok(verify_chain(&events)?)
+}
+
+#[cfg(test)]
+mod hash_matrix_equivalence {
+    //! Slice R1b acceptance: the fast hash matrix equals the reference on every input, including keys
+    //! whose order differs between the tested collations, ties, array-index keys and unsupported values.
+
+    use super::{
+        AuditEvent, Verdict, covered_value, hash_matrix, hash_matrix_reference, verify_chain,
+        verify_chain_classified,
+    };
+    use crate::legacy::{LOCALES, legacy_stable_hash_in};
+    use serde_json::{Map, Value, json};
+
+    /// Keys that reorder under at least one of tr, sv, da, lt, hu, plus ties and array indices.
+    const KEYS: &[&str] = &[
+        "I", "i", "ı", "İ", "Ia", "ia", "aa", "å", "ab", "ä", "ae", "z", "zz", "ö", "o", "oz", "w",
+        "v", "vb", "wa", "cs", "c", "cz", "d", "dz", "dzs", "gy", "g", "y", "j", "ch", "h", "0",
+        "1", "10", "2", "01", "_", "-", "A", "a", "a ", "ǅ", "ß", "ss",
+    ];
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0 >> 33
+        }
+        fn below(&mut self, n: u64) -> usize {
+            usize::try_from(self.next() % n).unwrap_or(0)
+        }
+    }
+
+    fn value(rng: &mut Lcg, depth: u32) -> Value {
+        match rng.below(if depth >= 3 { 4 } else { 7 }) {
+            0 => Value::from(rng.below(1000) as i64 - 500),
+            1 => Value::from(KEYS[rng.below(KEYS.len() as u64)]),
+            2 => Value::Bool(rng.below(2) == 0),
+            3 if rng.below(40) == 0 => json!(1.5),
+            3 => Value::Null,
+            4 | 5 => {
+                let mut members = Map::new();
+                for _ in 0..rng.below(7) {
+                    members.insert(
+                        KEYS[rng.below(KEYS.len() as u64)].to_owned(),
+                        value(rng, depth + 1),
+                    );
+                }
+                Value::Object(members)
+            }
+            _ => Value::Array((0..rng.below(4)).map(|_| value(rng, depth + 1)).collect()),
+        }
+    }
+
+    fn event(sequence: i64, attributes: Value, body: Value) -> AuditEvent {
+        AuditEvent {
+            sequence,
+            id: format!("evt-{sequence}"),
+            name: "fixture.r1b".into(),
+            time_unix_nano: "1790000000000000000".into(),
+            attributes,
+            body,
+            previous_hash: String::new(),
+            event_hash: String::new(),
+        }
+    }
+
+    #[test]
+    fn equals_reference_on_generated_collation_sensitive_events() {
+        let mut rng = Lcg(0x5eed_acc0_2026_1122);
+        let events: Vec<AuditEvent> = (0..3000)
+            .map(|sequence| event(sequence, value(&mut rng, 0), value(&mut rng, 0)))
+            .collect();
+        let fast = hash_matrix(&events).expect("fast matrix");
+        let reference = hash_matrix_reference(&events).expect("reference matrix");
+        assert_eq!(fast, reference);
+        // The corpus must actually exercise collation-sensitive and unsupported records.
+        let differing = (0..events.len())
+            .filter(|&i| (1..reference.0.len()).any(|li| reference.0[li][i] != reference.0[0][i]))
+            .count();
+        let unsupported = reference.1.iter().filter(|path| path.is_some()).count();
+        assert!(
+            differing > 100,
+            "only {differing} collation-sensitive events"
+        );
+        assert!(unsupported > 10, "only {unsupported} unsupported events");
+    }
+
+    #[test]
+    fn equals_reference_on_the_locale_fixtures() {
+        let text = include_str!("../tests/fixtures/locale-chains.json");
+        let fixtures: Value = serde_json::from_str(text).expect("fixtures parse");
+        let events: Vec<AuditEvent> = fixtures["events"]
+            .as_object()
+            .expect("events object")
+            .values()
+            .map(|fixture| AuditEvent {
+                sequence: fixture["sequence"].as_i64().unwrap_or(0),
+                id: fixture["id"].as_str().unwrap_or_default().to_owned(),
+                name: fixture["name"].as_str().unwrap_or_default().to_owned(),
+                time_unix_nano: fixture["timeUnixNano"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                attributes: fixture["attributes"].clone(),
+                body: fixture["body"].clone(),
+                previous_hash: fixture["previousHash"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                event_hash: fixture["eventHash"].as_str().unwrap_or_default().to_owned(),
+            })
+            .collect();
+        assert!(events.len() >= 4);
+        assert_eq!(
+            hash_matrix(&events).expect("fast"),
+            hash_matrix_reference(&events).expect("reference")
+        );
+    }
+
+    /// A correctly linked chain whose hashes are written under `writer` collation for each event.
+    fn chain(rng: &mut Lcg, len: i64, writer: impl Fn(i64) -> &'static str) -> Vec<AuditEvent> {
+        let mut previous = String::new();
+        let mut events = Vec::new();
+        for sequence in 1..=len {
+            let mut event = event(sequence, value(rng, 0), value(rng, 0));
+            event.previous_hash = previous.clone();
+            event.event_hash = legacy_stable_hash_in(&covered_value(&event), writer(sequence))
+                .unwrap_or_else(|_| "unsupported".to_owned());
+            previous = event.event_hash.clone();
+            events.push(event);
+        }
+        events
+    }
+
+    #[test]
+    fn fast_verdict_equals_classified_verdict_on_valid_and_damaged_chains() {
+        let mut rng = Lcg(0x00c0_ffee_2026_1122);
+        let mut kinds = std::collections::BTreeMap::<&'static str, usize>::new();
+        for round in 0..400 {
+            let len = 1 + i64::try_from(rng.below(25)).unwrap_or(0);
+            let mut events = chain(&mut rng, len, |_| LOCALES[0]);
+            let k = rng.below(events.len() as u64);
+            match round % 7 {
+                0 => {}
+                1 => events[k].body = json!({ "tampered": round }),
+                2 => events[k].event_hash = "0".repeat(64),
+                3 => events[k].previous_hash = "f".repeat(64),
+                4 => events[k].attributes = json!({ "ratio": 0.25 }),
+                5 => {
+                    // One event written under an alternate collation, re-linked after it.
+                    let locale = LOCALES[1 + rng.below(LOCALES.len() as u64 - 1)];
+                    if let Ok(hash) = legacy_stable_hash_in(&covered_value(&events[k]), locale) {
+                        events[k].event_hash = hash;
+                    }
+                    for i in k + 1..events.len() {
+                        events[i].previous_hash = events[i - 1].event_hash.clone();
+                        if let Ok(hash) =
+                            legacy_stable_hash_in(&covered_value(&events[i]), LOCALES[0])
+                        {
+                            events[i].event_hash = hash;
+                        }
+                    }
+                }
+                _ => {
+                    events = chain(&mut rng, len, |sequence| {
+                        LOCALES[usize::try_from(sequence).unwrap_or(0) % LOCALES.len()]
+                    })
+                }
+            }
+            let fast = verify_chain(&events).expect("fast verdict");
+            let classified = verify_chain_classified(&events).expect("classified verdict");
+            assert_eq!(fast, classified, "round {round}");
+            *kinds
+                .entry(match fast {
+                    Verdict::Ok { .. } => "ok",
+                    Verdict::Failed { .. } => "failed",
+                    Verdict::Indeterminate { .. } => "indeterminate",
+                })
+                .or_default() += 1;
+        }
+        // Every verdict kind must be exercised, so equality is not vacuous.
+        for kind in ["ok", "failed", "indeterminate"] {
+            assert!(
+                kinds.get(kind).copied().unwrap_or(0) >= 10,
+                "{kind}: {kinds:?}"
+            );
+        }
+    }
 }
