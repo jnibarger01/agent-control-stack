@@ -6,6 +6,9 @@ import {
   ControlStackError,
   applyControlPlaneMigrations,
   auditEventHash,
+  compareAuditShadowVerdict,
+  coreBackendFromEnvironment,
+  createCoreVerifier,
   createId,
   createEvent,
   inspectControlPlaneDatabase,
@@ -16,7 +19,10 @@ import {
   type AttributeValue,
   type AuditChainEvent,
   type AuditChainVerification,
-  type AuditEvent
+  type AuditEvent,
+  type ControlPlaneInspectionOptions,
+  type CoreVerification,
+  type CoreVerifier
 } from "@agent-control-stack/shared";
 import {
   advisorAuditView,
@@ -1243,6 +1249,11 @@ function validateAdminModeTtl(value: number): number {
 
 export interface SqliteWorkItemStoreOptions {
   /**
+   * Shadow audit verifier. Defaults to the Rust core when ACS_CORE_BACKEND=rust, otherwise none. The TypeScript
+   * verdict stays authoritative; a shadow disagreement fails the audit health check closed.
+   */
+  auditShadowVerifier?: CoreVerifier | null;
+  /**
    * Resolves a reviewer credential id (the `<id>` in `acs-credential:<id>`) to a configured credential. Review
    * findings may only record a verifier engine that resolves; without a resolver no engine can be recorded.
    */
@@ -1759,6 +1770,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
   // A cached audit result alone is not authority to write after another SQLite writer changes the DB.
   private auditChainVerifiedDataVersion = -1;
   private auditChainVerifiedAtMs = 0;
+  private readonly dbPath: string;
+  private readonly auditShadowVerifier: CoreVerifier | undefined;
+  private readonly auditShadowCounters = { compared: 0, skipped: 0, failed: 0 };
   private readinessDatabaseChecks!: Pick<
     StoreHealth["checks"],
     "integrity" | "foreignKeys" | "migrations" | "auditChain"
@@ -1786,6 +1800,12 @@ export class SqliteWorkItemStore implements WorkItemStore {
     this.traceInstance = traceProducer.instance;
     this.releaseSha = traceProducer.releaseSha;
     mkdirSync(dirname(dbPath), { recursive: true });
+    this.dbPath = dbPath;
+    // Selection errors (an invalid ACS_CORE_BACKEND) surface here, before the database is opened.
+    this.auditShadowVerifier =
+      options.auditShadowVerifier === null
+        ? undefined
+        : (options.auditShadowVerifier ?? (coreBackendFromEnvironment() === "rust" ? createCoreVerifier() : undefined));
     this.db = new DatabaseSync(dbPath);
     this.leaseMs = options.leaseMs ?? 5 * 60 * 1000;
     this.reviewerCredentialExists = options.reviewerCredentialExists;
@@ -1828,7 +1848,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
         // Capture the version *before* verification so a concurrent commit cannot be
         // silently covered by a newer version without itself being checked.
         this.auditChainVerifiedDataVersion = this.readAuditDataVersion();
-        const initialHealth = inspectControlPlaneDatabase(this.db);
+        const initialHealth = inspectControlPlaneDatabase(this.db, {
+          auditShadow: this.auditShadowFor()
+        });
         this.auditChainValid = initialHealth.checks.auditChain.ok;
         this.readinessDatabaseChecks = { ...initialHealth.checks };
         this.auditChainVerifiedAtMs = Date.now();
@@ -6491,7 +6513,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     // The data version belongs to the state BEFORE inspection. A concurrent
     // database commit during the inspection must force revalidation on write.
     const version = this.readAuditDataVersion();
-    const database = inspectControlPlaneDatabase(this.db);
+    const database = inspectControlPlaneDatabase(this.db, { auditShadow: this.auditShadowFor() });
     this.auditChainValid = database.checks.auditChain.ok;
     this.readinessDatabaseChecks = { ...database.checks };
     this.auditChainVerifiedDataVersion = version;
@@ -9905,6 +9927,49 @@ export class SqliteWorkItemStore implements WorkItemStore {
     } catch {
       // Reporting is best effort and must never affect the approval.
     }
+  }
+
+  /** Shadow audit verification counters for this process; `backend` is absent when no shadow is configured. */
+  auditShadowStatus(): { backend: "rust" | undefined; compared: number; skipped: number; failed: number } {
+    return { backend: this.auditShadowVerifier ? "rust" : undefined, ...this.auditShadowCounters };
+  }
+
+  /**
+   * Builds the shadow comparison for one inspection. The comparison is skipped, and counted, when this connection
+   * holds an open transaction, or when the audit tail (row count and last event hash) no longer matches the
+   * authoritative verdict after the shadow read: the two reads would not cover the same committed audit data.
+   * PRAGMA data_version is not used here because a read-only connection opening the WAL database bumps it.
+   */
+  private auditShadowFor(): ControlPlaneInspectionOptions["auditShadow"] {
+    const verifier = this.auditShadowVerifier;
+    if (!verifier) return undefined;
+    return (authoritative) => {
+      if (this.transactionDepth > 0) {
+        this.auditShadowCounters.skipped += 1;
+        return { ok: true };
+      }
+      let shadow: CoreVerification;
+      try {
+        shadow = verifier.verifyAuditChainFromDatabaseFile(this.dbPath);
+      } catch {
+        this.auditShadowCounters.failed += 1;
+        return { ok: false, code: "audit_chain_backend_unavailable" };
+      }
+      const tail = this.db
+        .prepare(
+          `SELECT (SELECT COUNT(*) FROM audit_events) AS count,
+                  (SELECT event_hash FROM audit_events ORDER BY sequence DESC LIMIT 1) AS head`
+        )
+        .get() as { count: number; head: string | null };
+      if (tail.count !== authoritative.eventCount || (tail.head ?? "") !== authoritative.headHash) {
+        this.auditShadowCounters.skipped += 1;
+        return { ok: true };
+      }
+      const result = compareAuditShadowVerdict(authoritative, shadow);
+      if (result.ok) this.auditShadowCounters.compared += 1;
+      else this.auditShadowCounters.failed += 1;
+      return result;
+    };
   }
 
   private readAuditDataVersion(): number {
