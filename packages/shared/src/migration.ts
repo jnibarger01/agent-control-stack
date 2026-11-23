@@ -154,7 +154,9 @@ const migrationFiles = [
   // 075 remains reserved for separately integrating ARES / JC context-pack work.
   { version: 76, name: "jace_commander_native_tools", filename: "076_jace_commander_native_tools.sql" },
   { version: 77, name: "jace_mem_capability_issuances", filename: "077_jace_mem_capability_issuances.sql" },
-  { version: 78, name: "jc_native_gui_tools", filename: "078_jc_native_gui_tools.sql" }
+  { version: 78, name: "jc_native_gui_tools", filename: "078_jc_native_gui_tools.sql" },
+  // 079–082 are reserved for JCA2 device auth and the JC kernel witness (docs/migrations/reservations.md).
+  { version: 83, name: "retry_fence_cleanup_evidence", filename: "083_retry_fence_cleanup_evidence.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
