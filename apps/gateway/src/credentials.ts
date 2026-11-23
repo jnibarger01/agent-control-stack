@@ -23,6 +23,20 @@ export const gatewayCredentialSchema = z.object({
   expiresAt: z.string().datetime({ offset: true }).optional(),
   status: z.enum(["active", "revoked"]).optional()
 });
+/** Canonical collection contract shared by production preflight and runtime auth. */
+export const gatewayCredentialsSchema = gatewayCredentialSchema
+  .array()
+  .min(1)
+  .superRefine((credentials, context) => {
+    const ids = new Set<string>();
+    for (const [index, credential] of credentials.entries()) {
+      if (ids.has(credential.id)) {
+        context.addIssue({ code: "custom", path: [index, "id"], message: "duplicate gateway credential id" });
+      }
+      ids.add(credential.id);
+    }
+  });
+
 export type GatewayCredential = z.infer<typeof gatewayCredentialSchema>;
 export interface DeviceAccessIdentityInfo {
   deviceId: string;

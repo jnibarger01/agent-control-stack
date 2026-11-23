@@ -1,5 +1,6 @@
 import { accessSync, constants, existsSync } from "node:fs";
 import { dirname } from "node:path";
+import { gatewayCredentialsSchema } from "./credentials.js";
 
 export interface ProductionConfigIssue {
   key: string;
@@ -79,45 +80,12 @@ function validateCredentials(env: NodeJS.ProcessEnv, issues: ProductionConfigIss
     return;
   }
 
-  if (!Array.isArray(parsed) || parsed.length === 0) {
-    issues.push({
-      key: "ACS_GATEWAY_CREDENTIALS_JSON",
-      message: "must be a non-empty JSON array of credentials"
-    });
-    return;
-  }
-
-  for (const [index, entry] of parsed.entries()) {
-    if (!entry || typeof entry !== "object") {
+  const result = gatewayCredentialsSchema.safeParse(parsed);
+  if (!result.success) {
+    for (const issue of result.error.issues) {
       issues.push({
         key: "ACS_GATEWAY_CREDENTIALS_JSON",
-        message: `entry ${index} must be an object`
-      });
-      continue;
-    }
-    const credential = entry as Record<string, unknown>;
-    if (typeof credential.id !== "string" || credential.id.length === 0) {
-      issues.push({
-        key: "ACS_GATEWAY_CREDENTIALS_JSON",
-        message: `entry ${index} requires a non-empty id`
-      });
-    }
-    if (typeof credential.token !== "string" || credential.token.length < 32) {
-      issues.push({
-        key: "ACS_GATEWAY_CREDENTIALS_JSON",
-        message: `entry ${index} requires a token of at least 32 characters`
-      });
-    }
-    if (typeof credential.actor !== "string" || credential.actor.length === 0) {
-      issues.push({
-        key: "ACS_GATEWAY_CREDENTIALS_JSON",
-        message: `entry ${index} requires a non-empty actor`
-      });
-    }
-    if (typeof credential.actorId !== "string" || credential.actorId.length === 0) {
-      issues.push({
-        key: "ACS_GATEWAY_CREDENTIALS_JSON",
-        message: `entry ${index} requires a non-empty actorId`
+        message: `${issue.path.length ? `entry ${issue.path.join(".")}` : "credentials"} is invalid: ${issue.message}`
       });
     }
   }
