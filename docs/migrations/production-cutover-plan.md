@@ -42,6 +42,20 @@ Mixed-version tests required before B1 (none exist yet):
 - B1 code on a B0 database: migration applies once and is idempotent across restart.
 - B0 code on a database with a **different** 083 (wrong checksum) or an unlisted 084: readiness 503.
 
+Finding (2026-11-22): no production code path calls `recordExecutionScope` or `recordVerifiedCleanup` yet. With the
+fence enforced, an attempt that ends `unknown` could never be released, because evidence can only be recorded against
+a recorded scope. Before B3, slice **B1-wire** must:
+
+- record the execution scope in the worker before the sandbox launches the attempt's unit (the unit name is derived
+  from the attempt id), bound to the current lease and fencing epoch, so a worker crash still leaves the scope known;
+- record verified cleanup automatically when the sandbox observation reports `cleanup: verified`;
+- add the operator route for the remaining cases. It must be human-triggered and machine-verified: the gateway runs
+  the sandbox's `verifyScopeCleanup` on the recorded unit and records evidence only on `verified`. An operator can
+  never assert cleanup by themselves. The operator states the effects disposition, and that statement is hashed
+  into `effectsEvidenceHash`.
+
+The fence mode switch is in place (`ACS_RETRY_FENCE`, default `off`; `docs/protocol/retry-fence.md`).
+
 ## Rollback without losing post-cutover writes
 
 Every step above rolls back by redeploying the previous binary or unsetting a variable. None restores a database.
