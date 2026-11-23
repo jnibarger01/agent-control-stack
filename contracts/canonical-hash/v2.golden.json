@@ -1,0 +1,181 @@
+{
+  "schema": "acs.canonical-hash.golden.v2",
+  "prefix": "acs-canonical-json/v2\n",
+  "cases": [
+    {
+      "id": "empty-object",
+      "input": {},
+      "canonical": "{}",
+      "sha256": "9ed9eb3aa9ffa923884d3b0191e0a1ecb755059e6911acafdc16a756805f87b6"
+    },
+    {
+      "id": "empty-array",
+      "input": [],
+      "canonical": "[]",
+      "sha256": "dc9724cad85f7b3153e4b6e078468060a37113898e004342f02feab644e83dc8"
+    },
+    {
+      "id": "null",
+      "input": null,
+      "canonical": "null",
+      "sha256": "9ffedd03c46b246b1df43a73cb976298a5fb2f8e066abcb44c66e6e208ec1d59"
+    },
+    {
+      "id": "boolean-true",
+      "input": true,
+      "canonical": "true",
+      "sha256": "3f0090fcd834081071e50eb13a28923ec10c9e8e8aea95f40bcf4dbfb0096a9c"
+    },
+    {
+      "id": "string-plain",
+      "input": "acs",
+      "canonical": "\"acs\"",
+      "sha256": "e2e0217ee9dfe9973552f70710f14ad971a2d095a47a20b2de7c3ce73cd0a09c"
+    },
+    {
+      "id": "top-level-integer",
+      "input": 42,
+      "canonical": "42",
+      "sha256": "a5a77746527c099135cabb50009a16c6f3facce2ad3675c518760a3cf2b8cce2"
+    },
+    {
+      "id": "keys-ascii-case-and-punctuation",
+      "input": {
+        "0": 6,
+        "b": 1,
+        "B": 2,
+        "a": 3,
+        "A": 4,
+        "_": 5
+      },
+      "canonical": "{\"0\":6,\"A\":4,\"B\":2,\"_\":5,\"a\":3,\"b\":1}",
+      "sha256": "c7513a2be05af5deeae8779a3dc51be26ac3eca97149506493f5787b6932c3e8"
+    },
+    {
+      "id": "keys-integer-like-are-not-numeric",
+      "input": {
+        "2": 3,
+        "9": 2,
+        "10": 1,
+        "x": 4
+      },
+      "canonical": "{\"10\":1,\"2\":3,\"9\":2,\"x\":4}",
+      "sha256": "194b40b7366f5de02badb096d3ed23df2fc67f4be72840a8c7fd431484ac022d"
+    },
+    {
+      "id": "keys-non-ascii-and-supplementary",
+      "input": {
+        "z": 1,
+        "ä": 2,
+        "a": 3,
+        "é": 4,
+        "é": 5,
+        "😀": 6,
+        "": 7,
+        "ß": 8,
+        "ＡＢ": 9
+      },
+      "canonical": "{\"a\":3,\"é\":5,\"z\":1,\"ß\":8,\"ä\":2,\"é\":4,\"\":7,\"ＡＢ\":9,\"😀\":6}",
+      "sha256": "97612684669c034d685d753bd60117b0c32dc4f95c78f6418c74f53b287b0348"
+    },
+    {
+      "id": "string-escapes",
+      "input": {
+        "s": "q\" bs\\ tab\t nl\n cr\r ff\f bs\b ctl\u0001 us\u001f del sep  emoji😀 ünï"
+      },
+      "canonical": "{\"s\":\"q\\\" bs\\\\ tab\\t nl\\n cr\\r ff\\f bs\\b ctl\\u0001 us\\u001f del sep  emoji😀 ünï\"}",
+      "sha256": "9871b4a4dacfc549fd571285baade7f8b407c9201e583eef56cc3d5607e1815f"
+    },
+    {
+      "id": "key-escapes",
+      "input": {
+        "quo\"te": 1,
+        "back\\slash": 2,
+        "tab\tkey": 3
+      },
+      "canonical": "{\"back\\\\slash\":2,\"quo\\\"te\":1,\"tab\\tkey\":3}",
+      "sha256": "89e0b09732f1dab5c1f74cb14dccba3b2c2d5d9343c7fbed6ad894546c0ca027"
+    },
+    {
+      "id": "top-level-string-controls",
+      "input": "\u0000\u001b",
+      "canonical": "\"\\u0000\\u001b\"",
+      "sha256": "0e2ba0eea63e077cd2d3e59e1fac4c931f882d2946465ee70557bfe5a0136c9c"
+    },
+    {
+      "id": "numbers-safe-integers",
+      "input": [
+        0,
+        0,
+        1,
+        -1,
+        9007199254740991,
+        -9007199254740991,
+        1,
+        2000
+      ],
+      "canonical": "[0,0,1,-1,9007199254740991,-9007199254740991,1,2000]",
+      "sha256": "c2503f6e4a3a32e7d73fae50b1bdeae3fc80c171b063095e8210d399c24f0988"
+    },
+    {
+      "id": "nested-structures",
+      "input": {
+        "a": [
+          {
+            "y": 1,
+            "x": [
+              null,
+              true,
+              false,
+              "s"
+            ]
+          },
+          []
+        ],
+        "b": {},
+        "c": [
+          [],
+          [
+            {}
+          ]
+        ]
+      },
+      "canonical": "{\"a\":[{\"x\":[null,true,false,\"s\"],\"y\":1},[]],\"b\":{},\"c\":[[],[{}]]}",
+      "sha256": "899501e8a9585892755f9075c62f8dc9de4a474cccfe9ffbbc46f686c378f588"
+    },
+    {
+      "id": "array-unicode-strings",
+      "input": [
+        "",
+        "\u0000",
+        "😀",
+        "é"
+      ],
+      "canonical": "[\"\",\"\\u0000\",\"😀\",\"é\"]",
+      "sha256": "aa5940376549889d8303859a050dd6c812306ea9c40c38d62e1725ed01cc55dd"
+    },
+    {
+      "id": "domain-separated",
+      "domain": "acs:test:v2",
+      "input": {
+        "schemaVersion": "example.v1",
+        "nested": {
+          "b": 2,
+          "a": 1
+        }
+      },
+      "canonical": "{\"nested\":{\"a\":1,\"b\":2},\"schemaVersion\":\"example.v1\"}",
+      "sha256": "39e2cbfbeeadbdfcfae9ac8b02c5040638b1d1f03af37dc95ea01445648d0889"
+    },
+    {
+      "id": "domain-separated-non-ascii",
+      "domain": "acs:test:v2",
+      "input": {
+        "ä": "å",
+        "a": "b"
+      },
+      "canonical": "{\"a\":\"b\",\"ä\":\"å\"}",
+      "sha256": "1fc10cea2f1afeaff48aa1acdf891f6cd8ae99dbc438fbce2f6222b7fc364006"
+    }
+  ]
+}

@@ -1,0 +1,195 @@
+{
+  "schema": "acs.locale-chain-fixtures.v1",
+  "note": "Each event is hashed by packages/shared auditEventHash under the named process locale (LANG). Oracle for rust/acs-core locale classification.",
+  "events": {
+    "en.trWriter": {
+      "locale": "en_US.UTF-8",
+      "sequence": 1,
+      "id": "fixture-trWriter",
+      "name": "fixture.locale",
+      "timeUnixNano": "1790000000000000000",
+      "attributes": {
+        "I": 1,
+        "i": 2
+      },
+      "body": {
+        "note": "tr"
+      },
+      "previousHash": "",
+      "eventHash": "ef8b75e010179d57e9f6577542ff49247db230e416e13c6c9c37d5d702d02d1f"
+    },
+    "en.svWriter": {
+      "locale": "en_US.UTF-8",
+      "sequence": 1,
+      "id": "fixture-svWriter",
+      "name": "fixture.locale",
+      "timeUnixNano": "1790000000000000000",
+      "attributes": {
+        "ä": 1,
+        "z": 2
+      },
+      "body": {
+        "note": "sv"
+      },
+      "previousHash": "",
+      "eventHash": "ab42659acca8faf4f0e052c73d83beb442aa7f6614ea2388df98eccb201b9326"
+    },
+    "en.invariant": {
+      "locale": "en_US.UTF-8",
+      "sequence": 1,
+      "id": "fixture-invariant",
+      "name": "fixture.locale",
+      "timeUnixNano": "1790000000000000000",
+      "attributes": {
+        "tampered": true,
+        "b": 1
+      },
+      "body": {
+        "note": "ascii"
+      },
+      "previousHash": "",
+      "eventHash": "b1f70a83d026f7c9f3e5d9d348748ec23ee58ffc1f9aa845fcc9638919f3b204"
+    },
+    "en.floatWriter": {
+      "locale": "en_US.UTF-8",
+      "sequence": 1,
+      "id": "fixture-floatWriter",
+      "name": "fixture.locale",
+      "timeUnixNano": "1790000000000000000",
+      "attributes": {
+        "f": 0.5
+      },
+      "body": {
+        "note": "float"
+      },
+      "previousHash": "",
+      "eventHash": "464e5546ea2f08b14072115ea1fadbee37d6fb4cbd7d2b2d84f97434229f7d62"
+    },
+    "tr.trWriter": {
+      "locale": "tr_TR.UTF-8",
+      "sequence": 1,
+      "id": "fixture-trWriter",
+      "name": "fixture.locale",
+      "timeUnixNano": "1790000000000000000",
+      "attributes": {
+        "I": 1,
+        "i": 2
+      },
+      "body": {
+        "note": "tr"
+      },
+      "previousHash": "",
+      "eventHash": "e7b0d877a0eaf13217433390738883e68a752d90cd450c58ad469426b07a4c20"
+    },
+    "tr.svWriter": {
+      "locale": "tr_TR.UTF-8",
+      "sequence": 1,
+      "id": "fixture-svWriter",
+      "name": "fixture.locale",
+      "timeUnixNano": "1790000000000000000",
+      "attributes": {
+        "ä": 1,
+        "z": 2
+      },
+      "body": {
+        "note": "sv"
+      },
+      "previousHash": "",
+      "eventHash": "ab42659acca8faf4f0e052c73d83beb442aa7f6614ea2388df98eccb201b9326"
+    },
+    "tr.invariant": {
+      "locale": "tr_TR.UTF-8",
+      "sequence": 1,
+      "id": "fixture-invariant",
+      "name": "fixture.locale",
+      "timeUnixNano": "1790000000000000000",
+      "attributes": {
+        "tampered": true,
+        "b": 1
+      },
+      "body": {
+        "note": "ascii"
+      },
+      "previousHash": "",
+      "eventHash": "b1f70a83d026f7c9f3e5d9d348748ec23ee58ffc1f9aa845fcc9638919f3b204"
+    },
+    "tr.floatWriter": {
+      "locale": "tr_TR.UTF-8",
+      "sequence": 1,
+      "id": "fixture-floatWriter",
+      "name": "fixture.locale",
+      "timeUnixNano": "1790000000000000000",
+      "attributes": {
+        "f": 0.5
+      },
+      "body": {
+        "note": "float"
+      },
+      "previousHash": "",
+      "eventHash": "464e5546ea2f08b14072115ea1fadbee37d6fb4cbd7d2b2d84f97434229f7d62"
+    },
+    "sv.trWriter": {
+      "locale": "sv_SE.UTF-8",
+      "sequence": 1,
+      "id": "fixture-trWriter",
+      "name": "fixture.locale",
+      "timeUnixNano": "1790000000000000000",
+      "attributes": {
+        "I": 1,
+        "i": 2
+      },
+      "body": {
+        "note": "tr"
+      },
+      "previousHash": "",
+      "eventHash": "ef8b75e010179d57e9f6577542ff49247db230e416e13c6c9c37d5d702d02d1f"
+    },
+    "sv.svWriter": {
+      "locale": "sv_SE.UTF-8",
+      "sequence": 1,
+      "id": "fixture-svWriter",
+      "name": "fixture.locale",
+      "timeUnixNano": "1790000000000000000",
+      "attributes": {
+        "ä": 1,
+        "z": 2
+      },
+      "body": {
+        "note": "sv"
+      },
+      "previousHash": "",
+      "eventHash": "5fc86d960b601c8b9abf327e387b07d0e1d8e9b4a5102462a74bf157f459cd1b"
+    },
+    "sv.invariant": {
+      "locale": "sv_SE.UTF-8",
+      "sequence": 1,
+      "id": "fixture-invariant",
+      "name": "fixture.locale",
+      "timeUnixNano": "1790000000000000000",
+      "attributes": {
+        "tampered": true,
+        "b": 1
+      },
+      "body": {
+        "note": "ascii"
+      },
+      "previousHash": "",
+      "eventHash": "b1f70a83d026f7c9f3e5d9d348748ec23ee58ffc1f9aa845fcc9638919f3b204"
+    },
+    "sv.floatWriter": {
+      "locale": "sv_SE.UTF-8",
+      "sequence": 1,
+      "id": "fixture-floatWriter",
+      "name": "fixture.locale",
+      "timeUnixNano": "1790000000000000000",
+      "attributes": {
+        "f": 0.5
+      },
+      "body": {
+        "note": "float"
+      },
+      "previousHash": "",
+      "eventHash": "464e5546ea2f08b14072115ea1fadbee37d6fb4cbd7d2b2d84f97434229f7d62"
+    }
+  }
+}

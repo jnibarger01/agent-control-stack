@@ -1,0 +1,124 @@
+name: rust
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The toolchain is pinned by rust-toolchain.toml. rustup on the runner installs it on first use.
+      - name: Show pinned toolchain
+        run: rustup show active-toolchain && cargo --version
+
+      - name: Format
+        run: |
+          for crate in integration-graph scope-supervisor acs-core acs-core-node; do
+            cargo fmt --check --manifest-path "rust/${crate}/Cargo.toml"
+          done
+
+      - name: Clippy (deny warnings)
+        run: |
+          for crate in integration-graph scope-supervisor acs-core acs-core-node; do
+            cargo clippy --locked --all-targets --manifest-path "rust/${crate}/Cargo.toml" -- -D warnings
+          done
+
+      - name: Cargo tests
+        run: |
+          for crate in integration-graph scope-supervisor acs-core; do
+            cargo test --locked --manifest-path "rust/${crate}/Cargo.toml"
+          done
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.16.0
+          cache: npm
+
+      - name: Pin npm
+        run: npm install --global npm@11.17.0
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Explicit build step. No postinstall builds the addon.
+      - name: Build native artifacts
+        run: npm run build:native
+
+      - name: Audit chain parity (Rust verifier against TypeScript, read-only)
+        run: npm run test:audit-chain-parity
+
+      - name: Audit verification suite with the Rust core selected
+        env:
+          ACS_CORE_BACKEND: rust
+          ACS_TEST_CORE_NATIVE: "1"
+        run: npm run test:vitest -- packages/shared/src/core-backend.test.ts
+
+      - name: Integration graph suite with the Rust backend
+        env:
+          ACS_INTEGRATION_GRAPH_BACKEND: rust
+          ACS_TEST_INTEGRATION_GRAPH_NATIVE: "1"
+        run: npm run test:vitest -- packages/integration-manager
+
+      # Sandbox unit tests with the Rust supervisor selected. The live sandbox suite needs a
+      # systemd host with bubblewrap and is not run on GitHub-hosted runners; it is not claimed here.
+      - name: Sandbox unit suite with the Rust supervisor selected
+        env:
+          ACS_SANDBOX_SUPERVISOR_BACKEND: rust
+        run: npm run test:vitest -- packages/sandbox
+
+      # Compiled-helper tests run the built acs-scope-supervisor binary with fake systemctl and
+      # launcher scripts. They need no systemd and no bubblewrap, so they run on hosted runners.
+      - name: Compiled scope-supervisor helper tests
+        env:
+          ACS_TEST_SCOPE_SUPERVISOR: "1"
+          ACS_SANDBOX_SUPERVISOR_BACKEND: rust
+        run: npm run test:vitest -- packages/sandbox/src/rust-supervisor.test.ts
+
+  # Separate acceptance gate. Live systemd and bubblewrap tests need a host with user-scope systemd,
+  # cgroup v2 and bwrap. They never run on hosted runners and never run on pull requests.
+  live-systemd:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, linux, systemd]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.16.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build native artifacts
+        run: npm run build:native
+
+      - name: Live sandbox suite, TypeScript backend
+        env:
+          ACS_SANDBOX_INTEGRATION: "1"
+        run: npm run test:vitest -- packages/sandbox/src/linux.integration.test.ts
+
+      - name: Live sandbox suite, Rust supervisor
+        env:
+          ACS_SANDBOX_INTEGRATION: "1"
+          ACS_SANDBOX_SUPERVISOR_BACKEND: rust
+          ACS_TEST_SCOPE_SUPERVISOR: "1"
+        run: npm run test:vitest -- packages/sandbox/src/linux.integration.test.ts
