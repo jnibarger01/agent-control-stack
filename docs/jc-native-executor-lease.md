@@ -32,11 +32,20 @@ widened to other ACS release roots.
 
 ## Lifecycle
 
-- **Acquire** (`startManagedJcExecutorLease`, `apps/jace-commander/src/executor-lease.ts`):
-  only in `managed` mode, before any tool is served. Refused unless the
-  entrypoint is an installed release (`RELEASE.json` with a git-SHA commit).
-- **Renew**: every 10s while the process lives. Losing the record is reported
-  through `onLost`, and the process stops serving.
+- **Acquire** (`holdJcExecutorLease` / `acquireJcExecutorLease`, `apps/jace-commander/src/executor-lease.ts`):
+  only in `managed` mode, before any tool is served. `serve` first calls
+  `verifyJcReleaseIdentity` and refuses to start unless the entrypoint is an
+  installed release: `<prefix>/{current|releases/<id>}/dist/cli.js`, where the
+  root resolves to a real directory inside the real `<prefix>/releases`, its
+  `dist/cli.js` resolves inside that directory, nothing is under `node_modules`,
+  and `RELEASE.json` is a regular file whose `commit` is 7 to 40 lowercase hex
+  digits. A development checkout, a `current` link pointed at a checkout, or a
+  placeholder commit (`unknown`, `unreleased`) is refused with a named reason;
+  there is no fallback identity. `acquireJcExecutorLease` also refuses
+  (`release-unverified`) any lease whose commit is not a git commit id.
+- **Renew**: every 60s while the process lives (the 10s figure is the dead-PID
+  takeover grace). Losing the record is reported through `onLost`, and the
+  process stops serving.
 - **Release**: on `exit` and on SIGTERM/SIGINT/SIGHUP. A release never deletes a
   lease that another owner has since written.
 - **Takeover**: a dead or identity-mismatched holder is taken over only after the
