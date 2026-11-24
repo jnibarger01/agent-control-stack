@@ -32,6 +32,11 @@ export function allowedPublicRoute(method, rawUrl, body = '', jcResource) {
   if (method === 'POST' && pathname === '/jc/device') {
     return params.size === 0;
   }
+  // OpenID Provider redirect (Jace Auth owner consent). Only the standard authorization-response parameters.
+  if (method === 'GET' && pathname === '/jc/device/callback') {
+    const allowed = new Set(['code', 'state', 'error', 'error_description', 'iss']);
+    return params.size > 0 && params.size <= 5 && [...params.keys()].every((k) => allowed.has(k));
+  }
   if (method === 'POST' && (pathname === '/jc/oauth/device/code' || pathname === '/jc/oauth/token')) {
     return params.size === 0 ||
       (unique(params, 'oauth_lane') === 'jc' && unique(params, 'resource') === jcResource);

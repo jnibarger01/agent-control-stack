@@ -43,9 +43,19 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
 
   app.addContentTypeParser("application/x-www-form-urlencoded", { parseAs: "string" }, (_request, body, done) => {
     try {
-      done(null, Object.fromEntries(new URLSearchParams(body as string)));
+      const fields: Record<string, string> = {};
+      for (const [key, value] of new URLSearchParams(body as string)) {
+        // RFC 6749 section 3.2: a parameter MUST NOT be included more than once. Fail closed instead of letting
+        // the first or last duplicate silently pick (for example) approve over deny.
+        if (Object.hasOwn(fields, key)) {
+          done(Object.assign(new Error(`duplicate form field: ${key.slice(0, 32)}`), { statusCode: 400 }), undefined);
+          return;
+        }
+        fields[key] = value;
+      }
+      done(null, fields);
     } catch (error) {
-      done(error as Error, undefined);
+      done(Object.assign(error as Error, { statusCode: 400 }), undefined);
     }
   });
 

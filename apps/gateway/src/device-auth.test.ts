@@ -224,6 +224,45 @@ describe("device authorization HTTP surface", () => {
     }
   });
 
+  it("rejects duplicated form fields (RFC 6749 section 3.2) and never lets a repeated action or user_code pick approve", async () => {
+    const app = await buildTestApp();
+    try {
+      const issue = await app.inject({
+        method: "POST",
+        url: "/oauth/device/code",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({ client_id: "acs-cli", device_public_key: devicePublicKeyPem })
+      });
+      const { user_code: userCode } = issue.json();
+      const auth = { authorization: `Bearer ${testAuth.token}`, "content-type": "application/x-www-form-urlencoded" };
+      const decide = (payload: string) => app.inject({ method: "POST", url: "/device/verify", headers: auth, payload });
+
+      // deny first, approve last: a last-wins parser would approve.
+      const dupAction = await decide(`user_code=${encodeURIComponent(userCode)}&action=deny&action=approve`);
+      expect(dupAction.statusCode).toBe(400);
+      // approve first, deny last: a first-wins parser would approve.
+      const dupAction2 = await decide(`user_code=${encodeURIComponent(userCode)}&action=approve&action=deny`);
+      expect(dupAction2.statusCode).toBe(400);
+      // the code a different user_code would have been decided against
+      const dupCode = await decide(`user_code=AAAA-BBBB&user_code=${encodeURIComponent(userCode)}&action=approve`);
+      expect(dupCode.statusCode).toBe(400);
+      // Duplicated protocol fields on the other form endpoints fail closed too.
+      const dupClient = await app.inject({
+        method: "POST",
+        url: "/oauth/device/code",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: `client_id=acs-cli&client_id=other&device_public_key=${encodeURIComponent(devicePublicKeyPem)}`
+      });
+      expect(dupClient.statusCode).toBe(400);
+
+      // None of the rejected requests decided the code: a single-valued approve still works afterwards.
+      const ok = await decide(`user_code=${encodeURIComponent(userCode)}&action=approve`);
+      expect(ok.statusCode).toBe(200);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("rejects device token polling without proof of possession", async () => {
     const app = await buildTestApp();
     try {

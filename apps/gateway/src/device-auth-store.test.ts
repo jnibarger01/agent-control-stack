@@ -179,6 +179,33 @@ describe("DeviceAuthStore", () => {
     expect(store.approve(issued.userCode, "operator-1", later)).toEqual({ ok: false, error: "expired" });
   });
 
+  it("an approved but unredeemed code expires at its TTL and can no longer be exchanged for tokens", () => {
+    ({ directory, workItems, store } = setup());
+    const start = new Date("2026-01-01T00:00:00.000Z");
+    const issued = requestCode(store, { now: start });
+    if (!issued.ok) throw new Error("setup failed");
+    // Approved well inside the TTL, never polled.
+    expect(store.approve(issued.userCode, "operator-1", new Date(start.getTime() + 60_000))).toEqual({ ok: true });
+    // Redeeming after expires_at must fail closed, never mint tokens.
+    const later = new Date(start.getTime() + 16 * 60 * 1000);
+    expect(store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode), later)).toEqual({ status: "expired_token" });
+    // Still expired on a repeat poll, and still not redeemable at any later time.
+    expect(store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode), new Date(later.getTime() + 3_600_000))).toEqual({
+      status: "expired_token"
+    });
+  });
+
+  it("an approved code redeemed inside its TTL still succeeds exactly once", () => {
+    ({ directory, workItems, store } = setup());
+    const start = new Date("2026-01-01T00:00:00.000Z");
+    const issued = requestCode(store, { now: start });
+    if (!issued.ok) throw new Error("setup failed");
+    expect(store.approve(issued.userCode, "operator-1", new Date(start.getTime() + 60_000))).toEqual({ ok: true });
+    const inside = new Date(start.getTime() + 14 * 60 * 1000);
+    expect(store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode), inside).status).toBe("success");
+    expect(store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode), inside)).toEqual({ status: "invalid_grant" });
+  });
+
   it("denies a pending authorization and reports access_denied on poll", () => {
     ({ directory, workItems, store } = setup());
     const issued = requestCode(store);

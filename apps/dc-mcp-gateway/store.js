@@ -155,6 +155,18 @@ export function createGatewayStore(dbPath, { signingKey = '', recoveryKey = '' }
     CREATE INDEX IF NOT EXISTS idx_jc_rt_device ON jc_refresh_tokens(device_id);
   `);
 
+  // Verified-owner columns (Jace Auth consent). Added in place so existing databases keep working. A NULL owner means
+  // a legacy device enrolled through the shared passphrase: it is its own namespace and is never visible to, or
+  // manageable by, a verified owner (and vice versa). See docs/runbooks/jace-cli-auth-v2-migration.md.
+  function ensureColumn(table, column, type) {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+    if (!cols.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  }
+  for (const table of ['jc_device_codes', 'jc_devices', 'jc_refresh_tokens']) {
+    ensureColumn(table, 'owner_iss', 'TEXT');
+    ensureColumn(table, 'owner_sub', 'TEXT');
+  }
+
   const recKey = deriveRecoveryKey(signingKey, recoveryKey);
 
   function withImmediateTx(fn) {
@@ -242,7 +254,7 @@ export function createGatewayStore(dbPath, { signingKey = '', recoveryKey = '' }
     return false;
   }
 
-  function ensureActiveDeviceTx({ sub, clientId, jkt, label, nowSec }) {
+  function ensureActiveDeviceTx({ sub, clientId, jkt, label, nowSec, ownerIss = null, ownerSub = null }) {
     const revoked = db
       .prepare("SELECT 1 AS hit FROM jc_devices WHERE jkt = ? AND status = 'revoked' LIMIT 1")
       .get(jkt);
@@ -250,9 +262,9 @@ export function createGatewayStore(dbPath, { signingKey = '', recoveryKey = '' }
 
     const existing = db
       .prepare(
-        "SELECT device_id FROM jc_devices WHERE sub = ? AND client_id = ? AND jkt = ? AND status = 'active' LIMIT 1",
+        "SELECT device_id FROM jc_devices WHERE sub = ? AND client_id = ? AND jkt = ? AND status = 'active' AND owner_iss IS ? AND owner_sub IS ? LIMIT 1",
       )
-      .get(sub, clientId, jkt);
+      .get(sub, clientId, jkt, ownerIss, ownerSub);
     if (existing) {
       if (label) {
         db.prepare(
@@ -268,9 +280,9 @@ export function createGatewayStore(dbPath, { signingKey = '', recoveryKey = '' }
     const deviceId = `dev_${crypto.randomBytes(12).toString('base64url')}`;
     db.prepare(
       `INSERT INTO jc_devices
-       (device_id, sub, client_id, jkt, label, status, created_at, last_used_at, last_refreshed_at)
-       VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
-    ).run(deviceId, sub, clientId, jkt, label || clientId, nowSec, nowSec, nowSec);
+       (device_id, sub, client_id, jkt, label, status, created_at, last_used_at, last_refreshed_at, owner_iss, owner_sub)
+       VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)`,
+    ).run(deviceId, sub, clientId, jkt, label || clientId, nowSec, nowSec, nowSec, ownerIss, ownerSub);
     return { ok: true, deviceId };
   }
 
@@ -287,16 +299,18 @@ export function createGatewayStore(dbPath, { signingKey = '', recoveryKey = '' }
     nowSec,
     refreshTtlS,
     inactivityTtlS,
+    ownerIss = null,
+    ownerSub = null,
   }) {
     return withImmediateTx(() => {
-      const dev = ensureActiveDeviceTx({ sub, clientId, jkt, label, nowSec });
+      const dev = ensureActiveDeviceTx({ sub, clientId, jkt, label, nowSec, ownerIss, ownerSub });
       if (!dev.ok) return dev;
       const exp = nowSec + refreshTtlS;
       const inactivityExp = Math.min(exp, nowSec + inactivityTtlS);
       db.prepare(
         `INSERT INTO jc_refresh_tokens
-         (token_hash, family, device_id, client_id, sub, cnf_jkt, scope, resource, issuer, exp, inactivity_exp, active, revoked)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0)`,
+         (token_hash, family, device_id, client_id, sub, cnf_jkt, scope, resource, issuer, exp, inactivity_exp, active, revoked, owner_iss, owner_sub)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`,
       ).run(
         sha256B64u(refreshToken),
         family,
@@ -309,6 +323,8 @@ export function createGatewayStore(dbPath, { signingKey = '', recoveryKey = '' }
         issuer,
         exp,
         inactivityExp,
+        ownerIss,
+        ownerSub,
       );
       return { ok: true, deviceId: dev.deviceId, refreshExpiresAt: exp };
     });
@@ -376,13 +392,15 @@ export function createGatewayStore(dbPath, { signingKey = '', recoveryKey = '' }
           cnf_jkt: row.cnf_jkt,
           device_id: row.device_id,
           family: row.family,
+          owner_iss: row.owner_iss ?? null,
+          owner_sub: row.owner_sub ?? null,
         });
         const newHash = sha256B64u(minted.refresh_token);
         const newInactivityExp = Math.min(row.exp, nowSec + inactivityTtlS);
         db.prepare(
           `INSERT INTO jc_refresh_tokens
-           (token_hash, family, device_id, client_id, sub, cnf_jkt, scope, resource, issuer, exp, inactivity_exp, active, revoked)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0)`,
+           (token_hash, family, device_id, client_id, sub, cnf_jkt, scope, resource, issuer, exp, inactivity_exp, active, revoked, owner_iss, owner_sub)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`,
         ).run(
           newHash,
           row.family,
@@ -395,6 +413,8 @@ export function createGatewayStore(dbPath, { signingKey = '', recoveryKey = '' }
           row.issuer,
           row.exp,
           newInactivityExp,
+          row.owner_iss ?? null,
+          row.owner_sub ?? null,
         );
 
         let recoveryBlob = null;
@@ -510,7 +530,7 @@ export function createGatewayStore(dbPath, { signingKey = '', recoveryKey = '' }
     );
   }
 
-  function decideDeviceCode({ userCode, decision, sub, nowSec }) {
+  function decideDeviceCode({ userCode, decision, sub, nowSec, ownerIss = null, ownerSub = null }) {
     const hash = sha256B64u(normalizeUserCode(userCode));
     return withImmediateTx(() => {
       const row = db.prepare('SELECT * FROM jc_device_codes WHERE user_code_hash = ?').get(hash);
@@ -518,11 +538,10 @@ export function createGatewayStore(dbPath, { signingKey = '', recoveryKey = '' }
         return { ok: false };
       }
       const nextStatus = decision === 'deny' ? 'denied' : 'approved';
-      db.prepare('UPDATE jc_device_codes SET status = ?, sub = ? WHERE device_code_hash = ?').run(
-        nextStatus,
-        nextStatus === 'approved' ? sub : null,
-        row.device_code_hash,
-      );
+      const approved = nextStatus === 'approved';
+      db.prepare(
+        'UPDATE jc_device_codes SET status = ?, sub = ?, owner_iss = ?, owner_sub = ? WHERE device_code_hash = ?',
+      ).run(nextStatus, approved ? sub : null, approved ? ownerIss : null, approved ? ownerSub : null, row.device_code_hash);
       return { ok: true, status: nextStatus, clientId: row.client_id, scope: row.scope };
     });
   }
@@ -574,6 +593,8 @@ export function createGatewayStore(dbPath, { signingKey = '', recoveryKey = '' }
       return {
         ok: true,
         sub: row.sub || 'jacen',
+        owner_iss: row.owner_iss ?? null,
+        owner_sub: row.owner_sub ?? null,
         client_id: row.client_id,
         scope: row.scope,
         resource: row.resource,
@@ -583,13 +604,30 @@ export function createGatewayStore(dbPath, { signingKey = '', recoveryKey = '' }
     });
   }
 
-  function listDevices(sub) {
+  /** Consent-page lookup: the still-pending, unexpired enrollment behind a user code (never the device code). */
+  function findPendingDeviceCode(userCode, nowSec) {
+    const row = db
+      .prepare('SELECT * FROM jc_device_codes WHERE user_code_hash = ?')
+      .get(sha256B64u(normalizeUserCode(userCode)));
+    if (!row || row.status !== 'pending' || row.expires_at < nowSec) return null;
+    return {
+      clientId: row.client_id,
+      scope: row.scope,
+      deviceName: row.device_name,
+      createdAt: row.created_at,
+      expiresAt: row.expires_at,
+      userCodeHash: row.user_code_hash,
+      dpopBound: Boolean(row.dpop_jkt),
+    };
+  }
+
+  function listDevices(sub, { ownerIss = null, ownerSub = null } = {}) {
     const rows = db
       .prepare(
         `SELECT device_id, client_id, jkt, label, created_at, last_used_at, last_refreshed_at, status
-         FROM jc_devices WHERE sub = ? ORDER BY created_at DESC`,
+         FROM jc_devices WHERE sub = ? AND owner_iss IS ? AND owner_sub IS ? ORDER BY created_at DESC`,
       )
-      .all(sub);
+      .all(sub, ownerIss, ownerSub);
     return rows.map((r) => ({
       device_id: r.device_id,
       client_id: r.client_id,
@@ -611,10 +649,15 @@ export function createGatewayStore(dbPath, { signingKey = '', recoveryKey = '' }
     );
   }
 
-  function revokeDevice(deviceId, sub, nowSec) {
+  function revokeDevice(deviceId, sub, nowSec, { ownerIss = null, ownerSub = null } = {}) {
     return withImmediateTx(() => {
-      const dev = db.prepare('SELECT device_id, sub FROM jc_devices WHERE device_id = ?').get(deviceId);
-      if (!dev || dev.sub !== sub) return { found: false };
+      const dev = db
+        .prepare('SELECT device_id, sub, owner_iss, owner_sub FROM jc_devices WHERE device_id = ?')
+        .get(deviceId);
+      // Owner-scoped: another owner's device is indistinguishable from a missing one (404, no existence oracle).
+      if (!dev || dev.sub !== sub || (dev.owner_iss ?? null) !== ownerIss || (dev.owner_sub ?? null) !== ownerSub) {
+        return { found: false };
+      }
       db.prepare("UPDATE jc_devices SET status = 'revoked', revoked_at = ? WHERE device_id = ?").run(
         nowSec,
         deviceId,
@@ -638,6 +681,7 @@ export function createGatewayStore(dbPath, { signingKey = '', recoveryKey = '' }
     createDeviceCode,
     decideDeviceCode,
     pollDeviceCode,
+    findPendingDeviceCode,
     listDevices,
     touchDevice,
     revokeDevice,

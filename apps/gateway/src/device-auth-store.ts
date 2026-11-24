@@ -480,11 +480,21 @@ export class DeviceAuthStore {
     const refreshToken = randomBytes(32).toString("base64url");
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const current = this.stmt(`SELECT status FROM oauth_device_authorizations WHERE id = ?`).get(fresh.id) as {
+      const current = this.stmt(`SELECT status, expires_at FROM oauth_device_authorizations WHERE id = ?`).get(fresh.id) as {
         status: string;
+        expires_at: string;
       };
+      if (current.status === "approved" && Date.parse(current.expires_at) <= now.getTime()) {
+        // Expired between the unlocked check and the write lock: fail closed, never mint.
+        this.stmt(`UPDATE oauth_device_authorizations SET status = 'expired' WHERE id = ? AND status = 'approved'`).run(
+          fresh.id
+        );
+        this.db.exec("COMMIT");
+        return { status: "expired_token" };
+      }
       if (current.status !== "approved") {
         this.db.exec("ROLLBACK");
+        if (current.status === "expired") return { status: "expired_token" };
         return current.status === "denied" ? { status: "access_denied" } : { status: "invalid_grant" };
       }
       this.stmt(`UPDATE oauth_device_authorizations SET status = 'consumed', consumed_at = ? WHERE id = ?`).run(
@@ -907,11 +917,15 @@ export class DeviceAuthStore {
       DeviceAuthorizationRow | undefined;
   }
 
+  /**
+   * RFC 8628 device codes have a hard TTL. It applies to an approved-but-unredeemed code as well as to a pending
+   * one: approval must not turn a 15-minute code into a bearer credential that stays redeemable forever.
+   */
   private expireIfNeeded(row: DeviceAuthorizationRow, now: Date): void {
-    if (row.status === "pending" && Date.parse(row.expires_at) <= now.getTime()) {
-      this.stmt(`UPDATE oauth_device_authorizations SET status = 'expired' WHERE id = ? AND status = 'pending'`).run(
-        row.id
-      );
+    if ((row.status === "pending" || row.status === "approved") && Date.parse(row.expires_at) <= now.getTime()) {
+      this.stmt(
+        `UPDATE oauth_device_authorizations SET status = 'expired' WHERE id = ? AND status IN ('pending', 'approved')`
+      ).run(row.id);
     }
   }
 }

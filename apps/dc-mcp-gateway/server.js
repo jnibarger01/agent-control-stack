@@ -25,6 +25,9 @@ import { dcBridgeReady, jcBridgeReady } from './readiness.js';
 import { REPORTABLE_REFRESH_FAILURES, bearerChallenge, classifyTokenAuth, createAuthEventReporter, dpopChallenge, equalSecrets, resolveRefresh } from './auth-health.js';
 import { SUPPORTED_DPOP_ALGS, createNonceManager, isValidJkt, verifyDpopProof } from './dpop.js';
 import { createGatewayStore, normalizeUserCode } from './store.js';
+import { parseFormStrict } from './strict-form.js';
+import { createFailureThrottle } from './failure-throttle.js';
+import { CONSENT_PAGE_CSP, codeEntryPage, consentPage as ownerConsentPage, createOwnerConsent, messagePage, ownerOidcConfigFromEnv, safeEqual } from './owner-oidc.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -106,6 +109,25 @@ if (JC_LOCAL.error) console.error(`gateway: jc local routing: ${JC_LOCAL.error}`
 if (!GATEWAY_EXECUTION_TOKEN) console.log('gateway: GATEWAY_EXECUTION_TOKEN not set; executor identity attestation disabled (log-once)');
 fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
 const PUBLIC_ORIGIN_CANONICAL = new URL(PUBLIC_ORIGIN).origin;
+// Jace Auth (OIDC) owner consent for /jc/device. Unset = legacy shared-passphrase approval (hardened, but it cannot say who approved).
+let OWNER_OIDC_CFG;
+try { OWNER_OIDC_CFG = ownerOidcConfigFromEnv(process.env, { testMode: EDGE_TEST_MODE }); }
+catch (err) { console.error(`gateway: owner OIDC consent misconfigured: ${err.message}; refusing to start`); process.exit(1); }
+const ownerConsent = OWNER_OIDC_CFG.enabled && JC.enabled
+  ? createOwnerConsent({ config: OWNER_OIDC_CFG, publicOrigin: PUBLIC_ORIGIN_CANONICAL, signingKey: SIGNING_KEY })
+  : null;
+// Failed-approval throttles. Keys identify a caller (owner session id); the legacy passphrase path has no caller identity
+// (the ingress strips X-Forwarded-*), so it only slows repeated failures and never locks anyone out.
+const ownerDecisionThrottle = createFailureThrottle({ max: 5, windowMs: 5 * 60_000, maxKeys: 1000 });
+const legacyPassphraseThrottle = createFailureThrottle({ softDelayMs: 250, windowMs: 60_000, maxKeys: 4 });
+const LEGACY_THROTTLE_KEY = 'shared';
+const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// With owner consent on, a DPoP-bound device may only be enrolled through the owner-verified device flow. The shared-passphrase
+// authorization-code path (jc connect, loopback) would otherwise mint devices with no verified owner. Bearer clients
+// (ChatGPT, Claude) are not devices and are unaffected. The escape hatch is explicit and off by default.
+const OWNER_LEGACY_ENROLLMENT_ALLOWED = process.env.JC_OWNER_OIDC_ALLOW_LEGACY_ENROLLMENT === '1';
+const enrollsDevice = (client, dpopJkt) => Boolean(client?.require_dpop || (dpopJkt !== undefined && dpopJkt !== ''));
+const legacyEnrollmentRefused = (client, dpopJkt) => Boolean(ownerConsent && !OWNER_LEGACY_ENROLLMENT_ALLOWED && enrollsDevice(client, dpopJkt));
 const gatewayStore = createGatewayStore(path.join(DATA_DIR, 'gateway.db'), {
   signingKey: SIGNING_KEY,
   recoveryKey: JC_REFRESH_RECOVERY_KEY,
@@ -438,6 +460,7 @@ async function handleAuthorize(req, res, q, laneHint = null) {
     return redirect(res, u.toString());
   };
   if (!lane) return fail('invalid_target', 'unknown resource');
+  if (legacyEnrollmentRefused(client, dpop_jkt)) return fail('access_denied', 'device enrollment requires owner sign-in; use the device login flow');
   if (client.builtin && client.oauth_lane === 'jc' && lane.name !== 'jc') return fail('invalid_target', 'client restricted to jc lane');
   if (response_type !== 'code') return fail('unsupported_response_type', 'response_type must be code');
   if (client.require_state && !state) return fail('invalid_request', 'state is required');
@@ -455,12 +478,19 @@ async function handleConsent(req, res, body, laneHint = null) {
   const params = Object.fromEntries(new URLSearchParams(body.toString('utf8')).entries());
   const { client_id, redirect_uri, scope, state, code_challenge, code_challenge_method, dpop_jkt, device_name } = params;
   const pass = params.passphrase || '';
+  const consentDelay = legacyPassphraseThrottle.delayMs(LEGACY_THROTTLE_KEY);
+  if (consentDelay > 0) await sleepMs(consentDelay);
   const passOk = pass.length > 0 && crypto.timingSafeEqual(
     Buffer.from(crypto.createHash('sha256').update(pass).digest()),
     Buffer.from(crypto.createHash('sha256').update(CONSENT_PASSPHRASE).digest()));
-  if (!passOk) return send(res, 401, denyPage('Invalid consent passphrase.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  if (!passOk) {
+    legacyPassphraseThrottle.fail(LEGACY_THROTTLE_KEY);
+    return send(res, 401, denyPage('Invalid consent passphrase.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  }
+  legacyPassphraseThrottle.clear(LEGACY_THROTTLE_KEY);
   const client = await resolveClient(client_id);
   if (!client || !validRedirect(client, redirect_uri)) return send(res, 400, denyPage('Invalid client/redirect.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  if (legacyEnrollmentRefused(client, dpop_jkt)) return send(res, 403, denyPage('Device enrollment requires owner sign-in. Use the device login flow.'), { 'Content-Type': 'text/html; charset=utf-8' });
   const lane = laneHint || laneForClientResource(client, params.resource);
   if (!lane) return send(res, 400, denyPage('Unknown resource.'), { 'Content-Type': 'text/html; charset=utf-8' });
   if (client.builtin && client.oauth_lane === 'jc' && lane.name !== 'jc') return send(res, 400, denyPage('Client restricted to jc lane.'), { 'Content-Type': 'text/html; charset=utf-8' });
@@ -504,7 +534,14 @@ function issueTokens(grant, lane = DC_OAUTH_LANE, family = randId().slice(0, 12)
   return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TTL_S, refresh_token: rjti, scope: grant.scope };
 }
 
-function mintDpopResponse({ sub, client_id, scope, lane, jkt, device_id, accessTtlS }) {
+/** Owner scope of a verified token: the (iss, sub) pair recorded at enrollment. Legacy tokens carry none (null namespace). */
+function ownerScope(payload) {
+  return typeof payload?.oiss === 'string' && typeof payload?.osub === 'string'
+    ? { ownerIss: payload.oiss, ownerSub: payload.osub }
+    : { ownerIss: null, ownerSub: null };
+}
+
+function mintDpopResponse({ sub, client_id, scope, lane, jkt, device_id, accessTtlS, owner_iss = null, owner_sub = null }) {
   const t = now();
   const jti = randId();
   const access = signJwt({
@@ -518,6 +555,7 @@ function mintDpopResponse({ sub, client_id, scope, lane, jkt, device_id, accessT
     jti,
     cnf: { jkt },
     ...(device_id ? { did: device_id } : {}),
+    ...(owner_iss && owner_sub ? { oiss: owner_iss, osub: owner_sub } : {}),
   });
   const refreshToken = randId();
   return {
@@ -719,11 +757,11 @@ async function handleToken(req, res, body, laneHint = null, pathname = '/token')
         nowSec: now(),
         inactivityTtlS: INACTIVITY_TTL_S,
         recoveryTtlS: RECOVERY_TTL_S,
-        mintTokens: ({ sub, client_id: cid, scope, resource: rRes, issuer: rIss, cnf_jkt, device_id }) => {
+        mintTokens: ({ sub, client_id: cid, scope, resource: rRes, issuer: rIss, cnf_jkt, device_id, owner_iss, owner_sub }) => {
           const lane = rRes === JC_RESOURCE && rIss === JC_ISSUER ? JC_OAUTH_LANE : DC_OAUTH_LANE;
           const cDef = BUILTIN_CLIENTS[cid];
           const accessTtlS = cDef?.access_ttl_s || ACCESS_TTL_S;
-          return mintDpopResponse({ sub, client_id: cid, scope, lane, jkt: cnf_jkt, device_id, accessTtlS });
+          return mintDpopResponse({ sub, client_id: cid, scope, lane, jkt: cnf_jkt, device_id, accessTtlS, owner_iss, owner_sub });
         },
       });
       const nonceHeader = dpopRes.freshNonce ? { 'DPoP-Nonce': dpopRes.freshNonce } : {};
@@ -811,6 +849,8 @@ async function handleToken(req, res, body, laneHint = null, pathname = '/token')
       accessTtlS,
     });
     const issuedDev = gatewayStore.issueDpopGrant({
+      ownerIss: poll.owner_iss,
+      ownerSub: poll.owner_sub,
       sub: poll.sub,
       clientId: poll.client_id,
       jkt: dpopRes.jkt,
@@ -830,6 +870,7 @@ async function handleToken(req, res, body, laneHint = null, pathname = '/token')
       iss: JC_OAUTH_LANE.issuer, sub: poll.sub, aud: JC_OAUTH_LANE.resource, client_id: poll.client_id,
       scope: poll.scope, iat: t, exp: t + accessTtlS, jti: randId(),
       cnf: { jkt: dpopRes.jkt }, did: issuedDev.deviceId,
+      ...(poll.owner_iss && poll.owner_sub ? { oiss: poll.owner_iss, osub: poll.owner_sub } : {}),
     });
     const response = {
       access_token: access,
@@ -911,28 +952,133 @@ button.deny{background:#555}</style></head>
   return send(res, 200, html, { 'Content-Type': 'text/html; charset=utf-8' });
 }
 
-function handleDeviceDecision(req, res, body) {
-  const params = parseTokenBody(body);
+async function handleDeviceDecision(req, res, body) {
+  const HTML_HDR = { 'Content-Type': 'text/html; charset=utf-8' };
+  // RFC 6749 section 3.2: a repeated field is ambiguous (decision=deny&decision=approve), so it is refused outright,
+  // before any credential check, rather than letting the parser's last-wins rule choose for the user.
+  const parsed = parseFormStrict(body);
+  if (!parsed.ok) return send(res, 400, denyPage(parsed.reason === 'duplicate_field' ? 'Duplicate form field.' : 'Invalid form.'), HTML_HDR);
+  const params = parsed.params;
+  // No caller identity exists on this path (the ingress strips X-Forwarded-*), so repeated failures only slow responses down.
+  // A hard lock keyed on the shared proxy address would let one caller lock out the owner.
+  const delay = legacyPassphraseThrottle.delayMs(LEGACY_THROTTLE_KEY);
+  if (delay > 0) await sleepMs(delay);
   const pass = params.passphrase || '';
   const passOk = pass.length > 0 && crypto.timingSafeEqual(
     Buffer.from(crypto.createHash('sha256').update(pass).digest()),
     Buffer.from(crypto.createHash('sha256').update(CONSENT_PASSPHRASE).digest()));
-  if (!passOk) return send(res, 401, denyPage('Invalid consent passphrase.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  if (!passOk) {
+    legacyPassphraseThrottle.fail(LEGACY_THROTTLE_KEY);
+    return send(res, 401, denyPage('Invalid consent passphrase.'), HTML_HDR);
+  }
+  legacyPassphraseThrottle.clear(LEGACY_THROTTLE_KEY);
   const userCode = normalizeUserCode(params.user_code || '');
-  if (!userCode) return send(res, 400, denyPage('Missing user code.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  if (!userCode) return send(res, 400, denyPage('Missing user code.'), HTML_HDR);
   if (params.decision && params.action && params.decision !== params.action) {
-    return send(res, 400, denyPage('Conflicting decision parameters.'), { 'Content-Type': 'text/html; charset=utf-8' });
+    return send(res, 400, denyPage('Conflicting decision parameters.'), HTML_HDR);
   }
   const decision = params.decision ?? params.action;
   if (decision !== 'approve' && decision !== 'deny') {
-    return send(res, 400, denyPage('Invalid decision; expected approve or deny.'), { 'Content-Type': 'text/html; charset=utf-8' });
+    return send(res, 400, denyPage('Invalid decision; expected approve or deny.'), HTML_HDR);
   }
   const result = gatewayStore.decideDeviceCode({ userCode, decision, sub: 'jacen', nowSec: now() });
-  if (!result.ok) return send(res, 400, denyPage('Unknown, expired, or already used device code.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  if (!result.ok) return send(res, 400, denyPage('Unknown, expired, or already used device code.'), HTML_HDR);
   const msg = result.status === 'denied'
     ? 'Device authorization denied. You may close this tab.'
     : 'Device authorized for Jace Commander CLI. You may close this tab.';
-  return send(res, 200, denyPage(msg), { 'Content-Type': 'text/html; charset=utf-8' });
+  return send(res, 200, denyPage(msg), HTML_HDR);
+}
+
+// ---- Jace Auth (OIDC) owner consent: sign in, review the exact enrollment, explicitly approve ----
+const OWNER_HTML = { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': CONSENT_PAGE_CSP };
+const ownerHtml = (res, status, body, extra = {}) => send(res, status, body, { ...OWNER_HTML, ...extra });
+const formatUserCode = (c) => (c.length === 8 ? `${c.slice(0, 4)}-${c.slice(4)}` : c);
+function strictQuery(url) {
+  const parsed = parseFormStrict(new URL(url, 'http://localhost').search.slice(1));
+  return parsed.ok ? parsed.params : null;
+}
+
+async function handleOwnerDevicePage(req, res) {
+  const q = strictQuery(req.url);
+  if (!q) return ownerHtml(res, 400, messagePage('Invalid or duplicated query parameter.'));
+  const userCode = normalizeUserCode(typeof q.user_code === 'string' ? q.user_code : '').slice(0, 16);
+  const session = ownerConsent.session(req.headers['cookie']);
+  if (!session) {
+    let login;
+    try { login = await ownerConsent.startLogin({ userCode: userCode || null }); }
+    catch (err) {
+      console.warn(`gateway: owner sign-in unavailable: ${logSafe(err && err.message)}`);
+      return ownerHtml(res, 502, messagePage('The sign-in provider is unavailable. Try again shortly.'));
+    }
+    return send(res, 302, '', { Location: login.location, 'Set-Cookie': login.setCookie, 'Referrer-Policy': 'no-referrer' });
+  }
+  if (!userCode) return ownerHtml(res, 200, codeEntryPage());
+  const lock = ownerDecisionThrottle.check(session.sid);
+  if (lock.locked) return ownerHtml(res, 429, messagePage('Too many attempts. Try again later.'), { 'Retry-After': String(lock.retryAfterS) });
+  const pending = gatewayStore.findPendingDeviceCode(userCode, now());
+  if (!pending) {
+    ownerDecisionThrottle.fail(session.sid);
+    return ownerHtml(res, 404, codeEntryPage('Unknown, expired, or already used code.'));
+  }
+  return ownerHtml(res, 200, ownerConsentPage({
+    clientId: pending.clientId,
+    deviceName: pending.deviceName,
+    scope: pending.scope,
+    userCode: formatUserCode(userCode),
+    expiresAt: pending.expiresAt,
+    ownerSub: session.sub,
+    csrf: session.csrf,
+    binding: ownerConsent.bindingFor(session, pending.userCodeHash, pending.createdAt),
+    keyBound: pending.dpopBound,
+  }));
+}
+
+async function handleOwnerDeviceCallback(req, res) {
+  const q = strictQuery(req.url);
+  const result = q
+    ? await ownerConsent.completeLogin({ query: q, cookieHeader: req.headers['cookie'] })
+    : { ok: false, status: 400, reason: 'duplicate_query', clearCookie: ownerConsent.clearTxCookie() };
+  if (!result.ok) {
+    console.warn(`gateway: owner sign-in refused reason=${logSafe(result.reason)}`);
+    const msg = result.status === 403 ? 'This account is not permitted to approve devices.'
+      : result.status === 502 ? 'The sign-in provider is unavailable. Try again shortly.'
+      : 'Sign-in could not be completed. Open the link from your terminal again.';
+    return ownerHtml(res, result.status, messagePage(msg), { 'Set-Cookie': result.clearCookie });
+  }
+  const to = result.userCode ? `/jc/device?user_code=${encodeURIComponent(result.userCode)}` : '/jc/device';
+  return send(res, 302, '', { Location: to, 'Set-Cookie': [result.clearCookie, result.sessionCookie], 'Referrer-Policy': 'no-referrer' });
+}
+
+async function handleOwnerDeviceDecision(req, res, body) {
+  const session = ownerConsent.session(req.headers['cookie']);
+  if (!session) return ownerHtml(res, 401, messagePage('Sign in required. Open the link from your terminal again.'));
+  const lock = ownerDecisionThrottle.check(session.sid);
+  if (lock.locked) return ownerHtml(res, 429, messagePage('Too many attempts. Try again later.'), { 'Retry-After': String(lock.retryAfterS) });
+  const refuse = (status, msg) => { ownerDecisionThrottle.fail(session.sid); return ownerHtml(res, status, messagePage(msg)); };
+  const parsed = parseFormStrict(body);
+  if (!parsed.ok) return refuse(400, parsed.reason === 'duplicate_field' ? 'Duplicate form field.' : 'Invalid form.');
+  const p = parsed.params;
+  // Only the consent page's own fields. A passphrase or legacy `action` field is never a way to approve in this mode.
+  if (Object.keys(p).some((k) => !['user_code', 'csrf', 'binding', 'decision'].includes(k))) return refuse(400, 'Unsupported field.');
+  if (typeof p.csrf !== 'string' || !safeEqual(p.csrf, session.csrf)) return refuse(403, 'Invalid or missing form token. Reload the page from your terminal link.');
+  if (p.decision !== 'approve' && p.decision !== 'deny') return refuse(400, 'Invalid decision; expected approve or deny.');
+  const userCode = normalizeUserCode(p.user_code || '').slice(0, 16);
+  const pending = userCode ? gatewayStore.findPendingDeviceCode(userCode, now()) : null;
+  if (!pending) return refuse(404, 'Unknown, expired, or already used code.');
+  const expected = ownerConsent.bindingFor(session, pending.userCodeHash, pending.createdAt);
+  if (typeof p.binding !== 'string' || !safeEqual(p.binding, expected)) {
+    return refuse(403, 'This approval was not issued for this session and code. Reload the page from your terminal link.');
+  }
+  const result = gatewayStore.decideDeviceCode({
+    userCode, decision: p.decision, sub: 'jacen', ownerIss: session.iss, ownerSub: session.sub, nowSec: now(),
+  });
+  if (!result.ok) return refuse(404, 'Unknown, expired, or already used code.');
+  ownerDecisionThrottle.clear(session.sid);
+  console.log(`auth: device ${result.status} client=${logSafe(result.clientId)} owner=${logSafe(session.sub)}`);
+  // The session is single-use: the next enrollment signs in again.
+  return ownerHtml(res, 200, messagePage(result.status === 'denied'
+    ? 'Device authorization denied. You may close this tab.'
+    : 'Device authorized for Jace Commander CLI. You may close this tab.'), { 'Set-Cookie': ownerConsent.clearSessionCookie() });
 }
 
 // Dynamic client registration is unauthenticated; bound its rate so a flood cannot starve /mcp (each write is a full, fsynced rewrite).
@@ -1354,12 +1500,19 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       await handleDeviceCode(req, res, body); log('POST', '/jc/oauth/device/code', res.statusCode); return;
     }
+    if (JC.enabled && ownerConsent && pathName === '/jc/device/callback' && req.method === 'GET') {
+      await handleOwnerDeviceCallback(req, res); log('GET', '/jc/device/callback', res.statusCode); return;
+    }
     if (JC.enabled && pathName === '/jc/device' && req.method === 'GET') {
-      handleDeviceVerifyPage(req, res, parseQuery(req.url)); log('GET', '/jc/device', res.statusCode); return;
+      if (ownerConsent) await handleOwnerDevicePage(req, res);
+      else handleDeviceVerifyPage(req, res, parseQuery(req.url));
+      log('GET', '/jc/device', res.statusCode); return;
     }
     if (JC.enabled && pathName === '/jc/device' && req.method === 'POST') {
       const body = await readBody(req);
-      handleDeviceDecision(req, res, body); log('POST', '/jc/device', res.statusCode); return;
+      if (ownerConsent) await handleOwnerDeviceDecision(req, res, body);
+      else await handleDeviceDecision(req, res, body);
+      log('POST', '/jc/device', res.statusCode); return;
     }
     if (JC.enabled && pathName === '/jc/devices' && req.method === 'GET') {
       const auth = authenticateRequest(req, res, {
@@ -1372,7 +1525,7 @@ const server = http.createServer(async (req, res) => {
         requireDpop: true,
       });
       if (!auth) return;
-      send(res, 200, { devices: gatewayStore.listDevices(auth.sub) });
+      send(res, 200, { devices: gatewayStore.listDevices(auth.sub, ownerScope(auth)) });
       log('GET', '/jc/devices', 200);
       return;
     }
@@ -1391,7 +1544,7 @@ const server = http.createServer(async (req, res) => {
           requireDpop: true,
         });
         if (!auth) return;
-        const result = gatewayStore.revokeDevice(match[1], auth.sub, now());
+        const result = gatewayStore.revokeDevice(match[1], auth.sub, now(), ownerScope(auth));
         if (!result.found) {
           send(res, 404, { error: 'not_found' });
           log(req.method, pathName, 404);

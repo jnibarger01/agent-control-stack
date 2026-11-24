@@ -91,3 +91,57 @@ This runbook covers migrating `/jc` edge OAuth (`apps/dc-mcp-gateway`), `jace-co
 1. Stop `apps/gateway`.
 2. Restore the pre-migration `ACS_DB_PATH` SQLite backup taken in Section 1 (do **not** run a downgraded gateway against a forward-migrated database without restoring the backup).
 3. Deploy and start the previous `apps/gateway` revision and re-run `acs auth login` on CLI hosts if needed.
+
+## Owner consent through Jace Auth (single owner)
+
+`/jc/device` can authenticate WHO approves a device. Without it the shared consent passphrase gates approval and every device is
+recorded as `jacen`; the passphrase cannot say who approved.
+
+### Enable (all four are required together; a partial set stops the gateway at startup)
+
+| Env | Meaning |
+| --- | --- |
+| `JC_OWNER_OIDC_ISSUER` | The Jace Auth issuer, exactly as in its discovery document (`https://jace-auth.vercel.app`). https only |
+| `JC_OWNER_OIDC_CLIENT_ID` | A **dedicated** OIDC client for this gateway (do not reuse ACS or Toyota clients) |
+| `JC_OWNER_OIDC_ALLOWED_SUB` | The one Jace Auth `sub` allowed to approve. Exactly one value at launch |
+| `JC_OWNER_OIDC_CLIENT_SECRET` | Optional. Unset = public client with PKCE; set = `client_secret_basic` |
+
+Optional: `JC_OWNER_OIDC_PROMPT_LOGIN=0` (default on: forces a fresh sign-in), `JC_OWNER_OIDC_ALLOW_LEGACY_ENROLLMENT=1` (see below).
+
+Provision in Jace Auth first (not done by this change): register the client with redirect URI
+`<PUBLIC_ORIGIN>/jc/device/callback`, authorization code + PKCE S256, scope `openid`, and expose the owner's `sub`.
+**A live consent round trip against the real Jace Auth has not been run.** Tests use a fake OpenID Provider.
+
+### What changes
+
+* Browser flow: `jace-commander auth login --device` is unchanged. The page signs you in through Jace Auth (auth code + PKCE, `prompt=login`), verifies
+  the ID token (RS256/ES256 via JWKS, `iss`, `aud`/`azp`, `exp`, `iat` freshness, `nonce`), requires `(iss, sub)` to equal the allow-listed owner,
+  then shows client, device label, scope, code and expiry. Approval is an explicit POST bound to that session (CSRF token) and to that exact
+  pending enrollment (HMAC binding). The session is single use.
+* The verified pair is stored as `owner_iss` / `owner_sub` on the device and its refresh tokens, and carried as `oiss` / `osub` access-token claims.
+  The ACS-facing `sub` stays `jacen`, so ACS attribution and policy are unchanged. Moving ACS to the verified subject is a separate decision.
+* `/jc/devices` and revoke are scoped to the caller's `(oiss, osub)`. Another owner's device answers 404, exactly like a missing one.
+* Passphrase approval on `/jc/device` is **off** while owner consent is on. `/authorize/consent` (ChatGPT / Claude Bearer flow) is unchanged.
+* A DPoP-bound CLI device can no longer be enrolled from the shared passphrase through the loopback authorization-code path (`jc connect`)
+  while owner consent is on; use the device flow. `JC_OWNER_OIDC_ALLOW_LEGACY_ENROLLMENT=1` re-allows it (those devices have no verified owner).
+
+### Existing `jacen` devices: decision
+
+They are **not migrated**. Rows enrolled through the passphrase keep `owner_iss`/`owner_sub` NULL, keep working until their refresh token expires,
+and live in their own namespace: a verified owner does not see or manage them, and they do not see owner devices. Re-enroll each device with
+`auth login --device`, then revoke the old record with its own legacy credential. Migrating them would attribute devices to an account nobody verified.
+Moving them anyway is a one-line SQL `UPDATE jc_devices SET owner_iss=..., owner_sub=...` and must be a deliberate, recorded operator action.
+
+### Rate limiting
+
+* Owner mode: failed code lookups/decisions are throttled **per owner session** (5 per 5 minutes). Unauthenticated traffic only receives a
+  redirect to Jace Auth, so there is nothing to lock and nobody can lock anybody else out.
+* Passphrase paths (`/jc/device` in legacy mode and `/authorize/consent`): the ingress strips `X-Forwarded-*`, so no caller identity exists. Repeated failures
+  add a bounded delay (up to 2 s) and never lock. This slows guessing; it does not make a weak passphrase strong.
+
+### Rollback
+
+Unset the four `JC_OWNER_OIDC_*` variables and restart the gateway: `/jc/device` returns to the (hardened) passphrase form. Devices enrolled under owner
+consent keep working and stay manageable by their owner's own tokens, because list/revoke scoping reads the token's `oiss`/`osub`, not the configuration.
+The owner columns are additive; a previous gateway revision ignores them and would treat those devices as plain `jacen` devices.
+
