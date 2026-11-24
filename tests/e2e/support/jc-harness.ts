@@ -136,6 +136,15 @@ export async function startJcBridge(
   fsRoots: string[],
   options: { jcDir?: string; authorityToken?: string | null } = {}
 ): Promise<ServiceProcess> {
+  // Managed JC refuses to claim the executor lease from the source tree, so the
+  // chain needs an installed release. Fail here with the fix, not later with a
+  // wall of "session unknown" errors from a bridge whose runtime exited.
+  if (!options.jcDir && !process.env.JC_E2E_RUNTIME_DIR) {
+    throw new Error(
+      "JC_E2E_RUNTIME_DIR is not set: managed Jace Commander only runs from a verified installed release. " +
+        "Install one (PREFIX=<dir> apps/jace-commander/deploy/install-user-release.sh) and set JC_E2E_RUNTIME_DIR=<dir>/current."
+    );
+  }
   const authorityToken = options.authorityToken === undefined ? JC_AUTHORITY_READ_TOKEN : options.authorityToken;
   const port = await freePort();
   return startNodeService(

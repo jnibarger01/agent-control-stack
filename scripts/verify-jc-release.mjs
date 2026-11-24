@@ -49,12 +49,15 @@ if (build.status !== 0) throw new Error(`build failed:\n${build.stdout}${build.s
 const commit = run('git', ['-C', repo, 'rev-parse', 'HEAD']).stdout.trim();
 
 const base = fs.mkdtempSync(path.join(os.homedir(), '.cache', 'jc-release-verify-'));
-const stage = path.join(base, `jace-commander-${version}`);
-fs.mkdirSync(stage);
+// Same layout as install-user-release.sh: managed serve only claims the
+// executor lease from <prefix>/releases/<id> with a RELEASE.json commit.
+const stage = path.join(base, 'releases', `${version}-${commit.slice(0, 12)}`);
+fs.mkdirSync(stage, { recursive: true });
 for (const entry of ['package.json', 'dist', 'deploy', 'docs', 'verify', 'test', 'README.md']) {
   if (fs.existsSync(path.join(app, entry))) fs.cpSync(path.join(app, entry), path.join(stage, entry), { recursive: true });
 }
 fs.rmSync(path.join(stage, 'dist', '.tsbuildinfo'), { force: true });
+fs.writeFileSync(path.join(stage, 'RELEASE.json'), `${JSON.stringify({ version, commit: commit.slice(0, 12), installedAt: new Date().toISOString() })}\n`);
 
 const evidence = { verdict: 'FAIL', date: new Date().toISOString(), commit, version, stage, maskedPath: projects, steps: {} };
 try {
