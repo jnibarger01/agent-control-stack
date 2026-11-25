@@ -155,7 +155,24 @@ const migrationFiles = [
   { version: 76, name: "jace_commander_native_tools", filename: "076_jace_commander_native_tools.sql" },
   { version: 77, name: "jace_mem_capability_issuances", filename: "077_jace_mem_capability_issuances.sql" },
   { version: 78, name: "jc_native_gui_tools", filename: "078_jc_native_gui_tools.sql" }
+  // 079–083 are reserved below; see RESERVED_MIGRATION_VERSIONS.
 ] as const;
+
+/**
+ * Migration versions claimed by unmerged work. A branch may register a reserved version only under the reserved
+ * name, so two lineages can never ship different SQL under one version (a database that recorded one would then
+ * fail every release carrying the other with "migration metadata mismatch"). Remove an entry when its migration
+ * lands in `migrationFiles`. See docs/migrations/reservations.md.
+ */
+export const RESERVED_MIGRATION_VERSIONS: Readonly<Record<number, { name: string | null; lineage: string }>> = {
+  // A null name holds the version without fixing its name; the owning lineage replaces the entry when it lands.
+  75: { name: null, lineage: "ARES / JC context-pack integration" },
+  79: { name: "device_auth_refresh_recovery", lineage: "JCA2 device auth (feat/jace-cli-auth-v2)" },
+  80: { name: "device_auth_dpop", lineage: "JCA2 device auth (feat/jace-cli-auth-v2)" },
+  81: { name: "black_box_durable", lineage: "JC kernel witness (feat/jc-kernel-witness-*)" },
+  82: { name: "black_box_transactional_worm_v2", lineage: "JC kernel witness (feat/jc-kernel-witness-*)" },
+  83: { name: "retry_fence_cleanup_evidence", lineage: "ACS Rust migration (feat/acs-rust-authority-cutover-*)" }
+};
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
   return migrationFiles.map((migration) => {

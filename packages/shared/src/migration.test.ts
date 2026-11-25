@@ -6,7 +6,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { applyControlPlaneMigrations, controlPlaneMigrations } from "./migration.js";
+import { RESERVED_MIGRATION_VERSIONS, applyControlPlaneMigrations, controlPlaneMigrations } from "./migration.js";
 
 const directories: string[] = [];
 afterEach(() => {
@@ -998,5 +998,40 @@ describe("recovery migration 37-38 lineage", () => {
     expect(
       controlPlaneMigrations().filter((migration) => migration.filename === "043_work_item_assignments.sql")
     ).toHaveLength(1);
+  });
+});
+
+describe("migration version reservations", () => {
+  it("never registers a reserved version under another name", () => {
+    for (const migration of controlPlaneMigrations()) {
+      const reservation = RESERVED_MIGRATION_VERSIONS[migration.version];
+      if (!reservation) continue;
+      expect(
+        { version: migration.version, name: migration.name },
+        `version ${migration.version} is reserved for ${reservation.lineage}`
+      ).toEqual({ version: migration.version, name: reservation.name });
+    }
+  });
+
+  it("reserves only versions above the highest shipped migration, apart from the 075 gap", () => {
+    const shipped = controlPlaneMigrations().map((migration) => migration.version);
+    const highest = Math.max(...shipped);
+    for (const version of Object.keys(RESERVED_MIGRATION_VERSIONS).map(Number)) {
+      if (shipped.includes(version)) continue;
+      expect(version === 75 || version > highest, `reserved version ${version}`).toBe(true);
+    }
+  });
+
+  it("ships no SQL file under a reserved version that the registry does not list", () => {
+    const registered = new Set(controlPlaneMigrations().map((migration) => migration.filename));
+    const files = readdirSync(join(import.meta.dirname, "../../../storage/migrations")).filter((file) =>
+      /^\d{3}_.+\.sql$/u.test(file)
+    );
+    for (const file of files) {
+      const version = Number(file.slice(0, 3));
+      if (RESERVED_MIGRATION_VERSIONS[version] && !registered.has(file)) {
+        expect.fail(`${file} uses reserved version ${version} without registering it`);
+      }
+    }
   });
 });
