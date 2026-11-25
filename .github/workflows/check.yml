@@ -49,6 +49,13 @@ jobs:
         if: steps.changes.outputs.docs_only != 'true'
         run: npm ci
 
+      - name: Build Desktop Commander
+        # apps/dc-mcp-gateway tests spawn the real vendored child from its dist/; without this build they fail.
+        if: steps.changes.outputs.docs_only != 'true'
+        run: |
+          npm ci --prefix vendor/desktop-commander
+          npm run build --prefix vendor/desktop-commander
+
       - name: Build and test
         if: steps.changes.outputs.docs_only != 'true'
         run: npm run check

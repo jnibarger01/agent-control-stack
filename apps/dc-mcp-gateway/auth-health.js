@@ -51,11 +51,18 @@ export function classifyBearer(header, { signingKey, issuer, resource, nowSec })
   if (payload.iss !== issuer) return { ok: false, reason: "wrong_issuer", ...identity };
   const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
   if (!aud.includes(resource)) return { ok: false, reason: "wrong_audience", ...identity };
+  // The resource advertises the `mcp` scope. A token that does not carry it (for example an identity-only grant from
+  // `openid email profile` consent) must not authorize this resource, whatever its signature says.
+  const scopes = typeof payload.scope === "string" ? payload.scope.split(" ") : [];
+  if (!scopes.includes(REQUIRED_SCOPE)) return { ok: false, reason: "insufficient_scope", ...identity };
   if (payload.exp < nowSec) return { ok: false, reason: "expired", ...identity };
   return { ok: true, payload };
 }
 
+const REQUIRED_SCOPE = "mcp";
+
 const DESCRIPTIONS = {
+  insufficient_scope: "the access token does not carry the mcp scope",
   expired: "the access token expired",
   wrong_audience: "the access token is for a different resource",
   wrong_issuer: "the access token was issued by a different server",
@@ -70,7 +77,8 @@ const DESCRIPTIONS = {
  */
 export function bearerChallenge(base, reason) {
   if (reason === "missing" || !DESCRIPTIONS[reason]) return base;
-  return `${base}, error="invalid_token", error_description="${DESCRIPTIONS[reason]}"`;
+  const error = reason === "insufficient_scope" ? "insufficient_scope" : "invalid_token";
+  return `${base}, error="${error}", error_description="${DESCRIPTIONS[reason]}"`;
 }
 
 /**
