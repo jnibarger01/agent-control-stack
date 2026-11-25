@@ -1,0 +1,60 @@
+{
+  "passed": true,
+  "checks": [
+    {
+      "name": "fmt",
+      "passed": true,
+      "detail": "formatted"
+    },
+    {
+      "name": "clippy",
+      "passed": true,
+      "detail": "no warnings"
+    },
+    {
+      "name": "cargo test",
+      "passed": true,
+      "detail": "passed"
+    },
+    {
+      "name": "unsafe",
+      "passed": true,
+      "detail": "0 unsafe uses, each with a `// SAFETY:` comment"
+    },
+    {
+      "name": "ported",
+      "passed": true,
+      "detail": "nothing `unimplemented!` in port.rs"
+    },
+    {
+      "name": "size",
+      "passed": true,
+      "detail": "198 lines of Rust for 121 lines of TypeScript/JavaScript (1.6x)"
+    },
+    {
+      "name": "error cases",
+      "passed": true,
+      "detail": "the original fails on purpose nowhere"
+    },
+    {
+      "name": "panics",
+      "passed": true,
+      "detail": "no unwrap, expect or panic where the original returns an error"
+    },
+    {
+      "name": "build",
+      "passed": true,
+      "detail": "built rust/integration-graph/acs_integration_graph.node"
+    },
+    {
+      "name": "api",
+      "passed": true,
+      "detail": "exports analyzeDependencies, findOverlaps"
+    },
+    {
+      "name": "behavior",
+      "passed": true,
+      "detail": "16/16 recorded cases match"
+    }
+  ]
+}

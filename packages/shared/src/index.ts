@@ -6,6 +6,7 @@ export * from "./hash.js";
 export * from "./audit-chain.js";
 export * from "./auth-lockout.js";
 export * from "./audit-export.js";
+export * from "./core-backend.js";
 export * from "./database-health.js";
 export * from "./database-backup-policy.js";
 export * from "./database-operations.js";

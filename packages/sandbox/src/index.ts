@@ -6,6 +6,8 @@ export * from "./linux.js";
 export * from "./engine-contracts.js";
 export * from "./engine.js";
 export * from "./egress-proxy.js";
+export * from "./rust-supervisor.js";
+export * from "./rust-egress-relay.js";
 
 export const sandboxResultSchema = z.object({
   ok: z.boolean(),

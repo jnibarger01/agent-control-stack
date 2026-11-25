@@ -1,0 +1,22 @@
+[package]
+name = "acs-core-node"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Node-API bridge for acs-core: read-only audit verification (opt-in, ACS_CORE_BACKEND=rust)"
+
+# Dependency reasons: napi and napi-derive are the Node-API bindings, the same pinned versions
+# already used by rust/integration-graph. napi-build generates the Node-API link setup.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+acs-core = { path = "../acs-core" }
+napi = { version = "3", default-features = false, features = ["napi6", "dyn-symbols"] }
+napi-derive = "3"
+
+[build-dependencies]
+napi-build = "2"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

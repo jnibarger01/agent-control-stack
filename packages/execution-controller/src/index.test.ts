@@ -389,6 +389,42 @@ describe("ExecutionController", () => {
     expect(transitionAttempt).toHaveBeenCalledWith(expect.objectContaining({ status: "failed", outcomeCode: "validation_failed" }), expect.any(Object));
   });
 
+  it("records an unprovable isolation outcome as an unknown attempt, never an ordinary failure", async () => {
+    const store = makeStore();
+    const transitionAttempt = store.transitionAttempt as unknown as ReturnType<typeof vi.fn>;
+    const validator = { validate: vi.fn(async () => ({ passed: true, changedPaths: [], checks: [] })) } as unknown as ResultValidator;
+    const unknownEngine: EngineAdapter = {
+      id: "codex",
+      invoke: vi.fn(async () => ({ status: "isolation_unknown" as const, message: "supervisor lost its control channel" }))
+    };
+    const controller = new ExecutionController({
+      store,
+      workspaceManager: { provision: vi.fn(async () => workspace) },
+      engine: unknownEngine,
+      validator,
+      buildValidationInput: ({ outcome: engineOutcome, workspace: ownedWorkspace }) => ({ workspacePath: ownedWorkspace.hostPath, outcome: engineOutcome }),
+      input: {
+        workerId: "worker-1",
+        leaseToken: "lease-token-which-is-long-enough",
+        admissionId: "admission-1",
+        inputHash: "b".repeat(64),
+        buildTask: () => ({
+          workItemId: "work-1", attemptId: "attempt-1", leaseId: "lease-1", workerId: "worker-1", fencingToken: 1,
+          authorization: { kind: "plan", hash: attempt.planHash }, policyVersion: "policy-1", auditCorrelationId: "audit-1", idempotencyKey: "idempotency-1",
+          workspace: { allocationId: workspace.allocationId, hostPath: workspace.hostPath }, prompt: "work", egressAllowlist: [{ host: "api.openai.com", port: 443 }],
+          limits: { wallClockMs: 60_000, terminationGraceMs: 100, cpuQuotaPercent: 100, memoryBytes: 64 * 1024 * 1024, pids: 16, outputBytes: 100_000, tmpfsBytes: 16 * 1024 * 1024 }
+        })
+      }
+    });
+
+    const result = await controller.execute("work-1");
+
+    expect(result.outcome.status).toBe("isolation_unknown");
+    expect(validator.validate).not.toHaveBeenCalled();
+    expect(transitionAttempt).toHaveBeenCalledWith(expect.objectContaining({ status: "unknown", outcomeCode: "isolation_unknown" }), expect.any(Object));
+    expect(transitionAttempt).not.toHaveBeenCalledWith(expect.objectContaining({ status: "failed" }), expect.any(Object));
+  });
+
   it("never leaves a completed attempt dangling in \"running\" - validation always resolves it to a terminal status", async () => {
     const store = makeStore();
     const transitionAttempt = store.transitionAttempt as unknown as ReturnType<typeof vi.fn>;

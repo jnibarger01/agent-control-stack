@@ -13,20 +13,33 @@ import {
   type EngineIsolationObservation,
   type EngineIsolationRequest
 } from "./engine-contracts.js";
-import { startEgressProxy, type EgressDecision, type EgressProxyHandle } from "./egress-proxy.js";
+import {
+  startEgressProxy,
+  type EgressDecision,
+  type EgressProxyHandle,
+  type EgressProxyOptions
+} from "./egress-proxy.js";
+import {
+  RUST_SUPERVISOR_BACKEND_TAG,
+  requireRustSupervisor,
+  scopeSupervisorFromEnvironment,
+  superviseWithRust,
+  type ScopeSupervisorSelection
+} from "./rust-supervisor.js";
+import { requireRustEgressRelay, startRustEgressRelay } from "./rust-egress-relay.js";
 import {
   boundedMessage,
   captureChunk,
   emptyCapturedOutput,
-  errorMessage,
+  finalizeCapturedOutput,
   launcherEnvironment,
   observationError,
   observedOutcome,
-  redactOutput,
   requireExecutable,
   runHostCommand,
   signalProcessGroup,
   signalScope,
+  startScopeTermination,
   verifyCgroupV2,
   verifyScopeCleanup,
   verifyWorkspace,
@@ -61,6 +74,8 @@ export interface EngineIsolationOptions {
   hostCommandRunner?: HostCommandRunner;
   unitNameFactory?: (attemptId: string) => string;
   now?: () => Date;
+  /** Pinned for the lifetime of the backend instance. Defaults to the process environment. */
+  scopeSupervisor?: ScopeSupervisorSelection;
 }
 
 interface ResolvedEngineOptions {
@@ -74,6 +89,7 @@ interface ResolvedEngineOptions {
   hostCommandRunner: HostCommandRunner;
   unitNameFactory: (attemptId: string) => string;
   now: () => Date;
+  scopeSupervisor: ScopeSupervisorSelection;
 }
 
 const EGRESS_BRIDGE_PORT = 39_217;
@@ -127,13 +143,21 @@ export class EngineIsolationBackend implements EngineIsolation {
     const egressDecisions: EgressDecision[] = [];
     let proxy: EgressProxyHandle | undefined;
     try {
-      proxy = await startEgressProxy({
+      const proxyOptions: EgressProxyOptions = {
         socketPath: join(runtimeDir, "egress.sock"),
         allowlist: request.egressAllowlist,
         onDecision: (decision) => {
           if (egressDecisions.length < 10_000) egressDecisions.push(decision);
         }
-      });
+      };
+      proxy =
+        this.options.scopeSupervisor.backend === "rust"
+          ? await startRustEgressRelay(
+              requireRustEgressRelay(this.options.scopeSupervisor),
+              proxyOptions,
+              launcherEnvironment()
+            )
+          : await startEgressProxy(proxyOptions);
 
       const bubblewrap = buildEngineBubblewrapInvocation(
         request,
@@ -142,6 +166,12 @@ export class EngineIsolationBackend implements EngineIsolation {
         this.options
       );
       const systemd = buildEngineSystemdScopeInvocation(request, bubblewrap, unitName, this.options);
+      if (executionOptions.signal?.aborted) {
+        throw new ControlStackError(
+          "engine_isolation_cancelled",
+          "engine request was cancelled before process creation"
+        );
+      }
 
       return await this.launch(request, systemd, backendVersion, executionOptions, egressDecisions);
     } finally {
@@ -163,13 +193,35 @@ export class EngineIsolationBackend implements EngineIsolation {
     egressDecisions: EgressDecision[]
   ): Promise<EngineIsolationObservation> {
     const started = this.options.now();
+    if (this.options.scopeSupervisor.backend === "rust") {
+      const run = await superviseWithRust({
+        binaryPath: requireRustSupervisor(this.options.scopeSupervisor),
+        binding: request,
+        invocation,
+        systemctlPath: this.options.systemctlPath,
+        limits: request.limits,
+        launcherEnvironment: launcherEnvironment(),
+        signal: executionOptions.signal,
+        stdin: request.stdin ?? "",
+        forceStopScope: () => signalScope(this.options, invocation.unitName, "SIGKILL")
+      });
+      return await this.finishObservation({
+        request,
+        invocation,
+        backendVersion,
+        started,
+        output: run.output,
+        ...(run.trigger ? { trigger: run.trigger } : {}),
+        ...(run.terminationError ? { terminationError: run.terminationError } : {}),
+        ...(run.launchError ? { launchError: run.launchError } : {}),
+        exitCode: run.exitCode,
+        signal: run.signal,
+        egressDecisions,
+        cleanup: run.cleanup
+      });
+    }
     const output: CapturedOutput = emptyCapturedOutput();
-    let trigger: "timeout" | "cancelled" | undefined;
-    let terminationError: string | undefined;
     let launchError: string | undefined;
-    let settled = false;
-    let terminationTimer: ReturnType<typeof setTimeout> | undefined;
-    let forceTimer: ReturnType<typeof setTimeout> | undefined;
 
     return await new Promise<EngineIsolationObservation>((resolvePromise, rejectPromise) => {
       const child = spawn(invocation.command, invocation.args, {
@@ -185,34 +237,13 @@ export class EngineIsolationBackend implements EngineIsolation {
         child.stdin.end();
       }
 
-      const terminate = async (reason: "timeout" | "cancelled"): Promise<void> => {
-        if (trigger) return;
-        trigger = reason;
-        try {
-          await signalScope(this.options, invocation.unitName, "SIGTERM");
-        } catch (error) {
-          terminationError = errorMessage(error);
-        }
-        signalProcessGroup(child.pid, "SIGTERM");
-        forceTimer = setTimeout(() => {
-          void signalScope(this.options, invocation.unitName, "SIGKILL")
-            .catch((error) => {
-              terminationError ??= errorMessage(error);
-            })
-            .finally(() => {
-              signalProcessGroup(child.pid, "SIGKILL");
-            });
-        }, request.limits.terminationGraceMs);
-      };
-
-      terminationTimer = setTimeout(() => {
-        void terminate("timeout");
-      }, request.limits.wallClockMs);
-
-      const abort = (): void => {
-        void terminate("cancelled");
-      };
-      executionOptions.signal?.addEventListener("abort", abort, { once: true });
+      const finishTermination = startScopeTermination({
+        wallClockMs: request.limits.wallClockMs,
+        terminationGraceMs: request.limits.terminationGraceMs,
+        signal: executionOptions.signal,
+        signalUnit: (signal) => signalScope(this.options, invocation.unitName, signal),
+        signalLauncher: (signal) => signalProcessGroup(child, signal)
+      });
 
       child.stdout.on("data", (chunk: Buffer) => {
         captureChunk(output, "stdout", chunk, request.limits.outputBytes);
@@ -223,26 +254,23 @@ export class EngineIsolationBackend implements EngineIsolation {
       child.on("error", (error) => {
         launchError = error.message;
       });
-      child.on("close", (exitCode, signal) => {
-        if (settled) return;
-        settled = true;
-        if (terminationTimer) clearTimeout(terminationTimer);
-        if (forceTimer) clearTimeout(forceTimer);
-        executionOptions.signal?.removeEventListener("abort", abort);
-
-        void this.finishObservation({
-          request,
-          invocation,
-          backendVersion,
-          started,
-          output,
-          trigger,
-          terminationError,
-          launchError,
-          exitCode,
-          signal,
-          egressDecisions
-        }).then(resolvePromise, rejectPromise);
+      child.once("close", (exitCode, signal) => {
+        void finishTermination()
+          .then((termination) =>
+            this.finishObservation({
+              request,
+              invocation,
+              backendVersion,
+              started,
+              output,
+              ...termination,
+              launchError,
+              exitCode,
+              signal,
+              egressDecisions
+            })
+          )
+          .then(resolvePromise, rejectPromise);
       });
     });
   }
@@ -259,8 +287,10 @@ export class EngineIsolationBackend implements EngineIsolation {
     exitCode: number | null;
     signal: NodeJS.Signals | null;
     egressDecisions: EgressDecision[];
+    /** Supplied by the Rust supervisor, which owns the cleanup observation on that path. */
+    cleanup?: "verified" | "failed" | "unknown";
   }): Promise<EngineIsolationObservation> {
-    const cleanup = await verifyScopeCleanup(this.options, input.invocation.unitName);
+    const cleanup = input.cleanup ?? (await verifyScopeCleanup(this.options, input.invocation.unitName));
     const finished = this.options.now();
     const outcome = observedOutcome(input, cleanup);
     const error = observationError(input, cleanup);
@@ -277,11 +307,7 @@ export class EngineIsolationBackend implements EngineIsolation {
       cleanup,
       exitCode: input.exitCode,
       ...(input.signal ? { signal: input.signal } : {}),
-      stdout: redactOutput(Buffer.concat(input.output.stdout).toString("utf8")),
-      stderr: redactOutput(Buffer.concat(input.output.stderr).toString("utf8")),
-      stdoutTruncated: input.output.stdoutTruncated,
-      stderrTruncated: input.output.stderrTruncated,
-      outputBytes: input.output.stdoutBytes + input.output.stderrBytes,
+      ...finalizeCapturedOutput(input.output, input.request.limits.outputBytes),
       startedAt: input.started.toISOString(),
       finishedAt: finished.toISOString(),
       durationMs: Math.max(0, finished.getTime() - input.started.getTime()),
@@ -437,11 +463,17 @@ export function buildEngineBubblewrapInvocation(
 
   args.push("--chdir", request.cwd === "." ? "/workspace" : `/workspace/${request.cwd}`, "--");
 
-  // POSIX sh (this runs under /bin/sh, typically dash - not bash), so no
-  // "disown": plain "&" backgrounding is enough. The shell process image is
-  // replaced by exec below, and the backgrounded socat bridge is reaped
-  // along with everything else in the cgroup/pid namespace on cleanup.
-  const bridgeCommand = `${shellQuote(options.socatPath)} TCP-LISTEN:${EGRESS_BRIDGE_PORT},bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/run/acs/egress.sock >/dev/null 2>&1 & exec "$@"`;
+  // Wait for the relay inside the private namespace. The probe sends zero
+  // bytes, so the scoped proxy has no CONNECT request to authorize.
+  const socat = shellQuote(options.socatPath);
+  const bridgeCommand = [
+    `${socat} TCP-LISTEN:${EGRESS_BRIDGE_PORT},bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:/run/acs/egress.sock >/dev/null 2>&1 &`,
+    `if ! ${socat} -u /dev/null TCP4:127.0.0.1:${EGRESS_BRIDGE_PORT},retry=20,interval=0.05,connect-timeout=0.025 >/dev/null 2>&1; then`,
+    "  echo 'sandbox egress relay unavailable' >&2",
+    "  exit 1",
+    "fi",
+    'exec "$@"'
+  ].join("\n");
   args.push("/bin/sh", "-c", bridgeCommand, "sh", request.executable, ...request.args);
 
   return { command: options.bwrapPath, args };
@@ -490,7 +522,8 @@ function resolveOptions(options: EngineIsolationOptions): ResolvedEngineOptions 
     runtimeDir: options.runtimeDir ?? tmpdir(),
     hostCommandRunner: options.hostCommandRunner ?? runHostCommand,
     unitNameFactory: options.unitNameFactory ?? defaultEngineUnitName,
-    now: options.now ?? (() => new Date())
+    now: options.now ?? (() => new Date()),
+    scopeSupervisor: options.scopeSupervisor ?? scopeSupervisorFromEnvironment()
   };
 }
 
@@ -506,6 +539,12 @@ async function probeEngineHost(options: ResolvedEngineOptions): Promise<string> 
   // (resolveOptions); a missing path fails closed there, before any
   // request is accepted, rather than being silently skipped here.
   verifyCgroupV2(statfsSync("/sys/fs/cgroup") as StatsFs);
+  const supervisorTag =
+    options.scopeSupervisor.backend === "rust"
+      ? (requireRustSupervisor(options.scopeSupervisor),
+        requireRustEgressRelay(options.scopeSupervisor),
+        `+${RUST_SUPERVISOR_BACKEND_TAG}`)
+      : "";
 
   const bwrapVersion = await options.hostCommandRunner(options.bwrapPath, ["--version"], { timeoutMs: 5_000 });
   if (bwrapVersion.code !== 0 || !/^bubblewrap\s+\d+\.\d+/u.test(bwrapVersion.stdout.trim())) {
@@ -542,7 +581,7 @@ async function probeEngineHost(options: ResolvedEngineOptions): Promise<string> 
     );
   }
 
-  return bwrapVersion.stdout.trim();
+  return `${bwrapVersion.stdout.trim()}${supervisorTag}`;
 }
 
 function defaultEngineUnitName(attemptId: string): string {

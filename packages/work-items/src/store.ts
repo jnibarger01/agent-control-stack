@@ -6,6 +6,9 @@ import {
   ControlStackError,
   applyControlPlaneMigrations,
   auditEventHash,
+  compareAuditShadowVerdict,
+  coreBackendFromEnvironment,
+  createCoreVerifier,
   createId,
   createEvent,
   inspectControlPlaneDatabase,
@@ -15,8 +18,12 @@ import {
   verifyAuditChain,
   type AttributeValue,
   type AuditChainEvent,
+  type AuditChainAnchor,
   type AuditChainVerification,
-  type AuditEvent
+  type AuditEvent,
+  type ControlPlaneInspectionOptions,
+  type CoreVerification,
+  type CoreVerifier
 } from "@agent-control-stack/shared";
 import {
   advisorAuditView,
@@ -43,6 +50,21 @@ import {
   type ChangeSetReviewInput
 } from "./change-set-review.js";
 import { readMissionTrace, type MissionTrace, type MissionTraceQuery } from "./mission-trace.js";
+import {
+  FENCE_HOLDING_ATTEMPT_STATUSES,
+  LIVE_ATTEMPT_STATUSES,
+  UNPROVEN_EXECUTION_SQL,
+  recordExecutionScopeInputSchema,
+  recordVerifiedCleanupInputSchema,
+  retryInFlightError,
+  retryFenceModeFromEnvironment,
+  type RetryFenceMode,
+  unprovenExecutionError,
+  type AttemptCleanupEvidence,
+  type AttemptExecutionScope,
+  type RecordExecutionScopeInput,
+  type RecordVerifiedCleanupInput
+} from "./retry-fence.js";
 import {
   buildAuthoritativeCompletionReceipts,
   authoritativeReceiptBundleHash
@@ -379,6 +401,56 @@ interface ExecutionPlanAdmissionRow {
   requires_approval: number;
   admitted_by_actor_id: string;
   admitted_at: string;
+}
+
+interface AttemptExecutionScopeRow {
+  attempt_id: string;
+  work_item_id: string;
+  lease_id: string;
+  fencing_epoch: number;
+  unit_name: string;
+  recorded_at: string;
+}
+
+interface AttemptCleanupEvidenceRow {
+  attempt_id: string;
+  work_item_id: string;
+  lease_id: string;
+  fencing_epoch: number;
+  unit_name: string;
+  verdict: string;
+  evidence_hash: string;
+  effects_disposition: "no_external_effects" | "reconciled";
+  effects_evidence_hash: string;
+  observed_at: string;
+  recorded_at: string;
+}
+
+function rowToAttemptExecutionScope(row: AttemptExecutionScopeRow): AttemptExecutionScope {
+  return {
+    attemptId: row.attempt_id,
+    workItemId: row.work_item_id,
+    leaseId: row.lease_id,
+    fencingEpoch: row.fencing_epoch,
+    unitName: row.unit_name,
+    recordedAt: row.recorded_at
+  };
+}
+
+function rowToAttemptCleanupEvidence(row: AttemptCleanupEvidenceRow): AttemptCleanupEvidence {
+  return {
+    attemptId: row.attempt_id,
+    workItemId: row.work_item_id,
+    leaseId: row.lease_id,
+    fencingEpoch: row.fencing_epoch,
+    unitName: row.unit_name,
+    verdict: "verified",
+    evidenceHash: row.evidence_hash,
+    effectsDisposition: row.effects_disposition,
+    effectsEvidenceHash: row.effects_evidence_hash,
+    observedAt: row.observed_at,
+    recordedAt: row.recorded_at
+  };
 }
 
 interface ExecutionAttemptRow {
@@ -1180,6 +1252,17 @@ function validateAdminModeTtl(value: number): number {
 
 export interface SqliteWorkItemStoreOptions {
   /**
+   * Retry fence mode. Defaults to ACS_RETRY_FENCE: unset or "off" records execution scopes and cleanup evidence but
+   * refuses nothing (the behaviour of releases before the fence); "enforce" refuses replacement attempts and retries
+   * while an attempt is unproven, and a second in-flight retry of the same source. Any other value is refused.
+   */
+  retryFence?: RetryFenceMode;
+  /**
+   * Shadow audit verifier. Defaults to the Rust core when ACS_CORE_BACKEND=rust, otherwise none. The TypeScript
+   * verdict stays authoritative; a shadow disagreement fails the audit health check closed.
+   */
+  auditShadowVerifier?: CoreVerifier | null;
+  /**
    * Resolves a reviewer credential id (the `<id>` in `acs-credential:<id>`) to a configured credential. Review
    * findings may only record a verifier engine that resolves; without a resolver no engine can be recorded.
    */
@@ -1379,6 +1462,15 @@ export interface WorkItemStore {
   getValidationRun(runId: string): ValidationRun | undefined;
   getValidationRunForAttempt(attemptId: string): ValidationRun | undefined;
   recordRecoveryDecision(input: RecordRecoveryDecisionInput, options: PrivilegedTransitionOptions): RecoveryRecord;
+  /** Binds the execution unit observed for an attempt to its current lease and fencing epoch. */
+  recordExecutionScope(input: RecordExecutionScopeInput, options: PrivilegedTransitionOptions): AttemptExecutionScope;
+  /** Records verified cleanup of that unit. Releases the retry fence for the attempt. Idempotent. */
+  recordVerifiedCleanup(
+    input: RecordVerifiedCleanupInput,
+    options: PrivilegedTransitionOptions
+  ): AttemptCleanupEvidence;
+  /** The attempt that currently holds the retry fence for a work item, if any. Read-only. */
+  unprovenExecutionAttemptId(workItemId: string): string | undefined;
   getRecoveryDecisionForAttempt(attemptId: string): RecoveryRecord | undefined;
   recordPublication(input: RecordPublicationInput, options: PrivilegedTransitionOptions): PublicationRecord;
   recordPublicationBlocked(
@@ -1687,6 +1779,12 @@ export class SqliteWorkItemStore implements WorkItemStore {
   // A cached audit result alone is not authority to write after another SQLite writer changes the DB.
   private auditChainVerifiedDataVersion = -1;
   private auditChainVerifiedAtMs = 0;
+  private readonly dbPath: string;
+  private readonly auditShadowVerifier: CoreVerifier | undefined;
+  private readonly retryFence: RetryFenceMode;
+  private readonly auditShadowCounters = { compared: 0, incremental: 0, skipped: 0, failed: 0 };
+  /** The last chain prefix both verifiers agreed on; cleared before every shadow call and on any disagreement. */
+  private auditShadowAnchor: AuditChainAnchor | undefined;
   private readinessDatabaseChecks!: Pick<
     StoreHealth["checks"],
     "integrity" | "foreignKeys" | "migrations" | "auditChain"
@@ -1714,6 +1812,13 @@ export class SqliteWorkItemStore implements WorkItemStore {
     this.traceInstance = traceProducer.instance;
     this.releaseSha = traceProducer.releaseSha;
     mkdirSync(dirname(dbPath), { recursive: true });
+    this.dbPath = dbPath;
+    this.retryFence = options.retryFence ?? retryFenceModeFromEnvironment();
+    // Selection errors (an invalid ACS_CORE_BACKEND) surface here, before the database is opened.
+    this.auditShadowVerifier =
+      options.auditShadowVerifier === null
+        ? undefined
+        : (options.auditShadowVerifier ?? (coreBackendFromEnvironment() === "rust" ? createCoreVerifier() : undefined));
     this.db = new DatabaseSync(dbPath);
     this.leaseMs = options.leaseMs ?? 5 * 60 * 1000;
     this.reviewerCredentialExists = options.reviewerCredentialExists;
@@ -1756,7 +1861,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
         // Capture the version *before* verification so a concurrent commit cannot be
         // silently covered by a newer version without itself being checked.
         this.auditChainVerifiedDataVersion = this.readAuditDataVersion();
-        const initialHealth = inspectControlPlaneDatabase(this.db);
+        const initialHealth = inspectControlPlaneDatabase(this.db, {
+          auditShadow: this.auditShadowFor()
+        });
         this.auditChainValid = initialHealth.checks.auditChain.ok;
         this.readinessDatabaseChecks = { ...initialHealth.checks };
         this.auditChainVerifiedAtMs = Date.now();
@@ -3389,6 +3496,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
       if (!current || current.planHash !== parsed.planHash) {
         throw new ControlStackError("execution_plan_not_current", "attempts must bind to the current execution plan");
       }
+      // Every claim path creates its attempt here, so this is the single gate for replacement attempts.
+      if (this.retryFence === "enforce") {
+        const unproven = this.unprovenExecutionAttemptId(parsed.workItemId);
+        if (unproven) throw unprovenExecutionError(unproven);
+      }
       const maxAttempt = this.db
         .prepare(`SELECT MAX(attempt_number) AS n FROM execution_attempts WHERE work_item_id = ?`)
         .get(parsed.workItemId) as { n: number | null };
@@ -4375,6 +4487,172 @@ export class SqliteWorkItemStore implements WorkItemStore {
         })
       )
     });
+  }
+
+  unprovenExecutionAttemptId(workItemId: string): string | undefined {
+    const row = this.db.prepare(UNPROVEN_EXECUTION_SQL).get(workItemId, ...FENCE_HOLDING_ATTEMPT_STATUSES) as
+      { attemptId: string } | undefined;
+    return row?.attemptId;
+  }
+
+  recordExecutionScope(input: RecordExecutionScopeInput, options: PrivilegedTransitionOptions): AttemptExecutionScope {
+    requirePrivilegedTransition(options, "record_execution_scope");
+    const parsed = recordExecutionScopeInputSchema.parse(input);
+    return this.write(() => {
+      const attempt = this.getAttemptRowForFence(parsed.attemptId, parsed.workItemId);
+      // The scope must be bound to the attempt's latest lease epoch and to that exact lease row.
+      if (attempt.current_fencing_epoch !== parsed.fencingEpoch) {
+        throw new ControlStackError(
+          "execution_scope_binding_mismatch",
+          "scope is not bound to the current fencing epoch"
+        );
+      }
+      const lease = this.db
+        .prepare(
+          `SELECT lease_id FROM attempt_leases WHERE attempt_id = ? AND work_item_id = ? AND lease_id = ? AND fencing_epoch = ?`
+        )
+        .get(parsed.attemptId, parsed.workItemId, parsed.leaseId, parsed.fencingEpoch);
+      if (!lease) {
+        throw new ControlStackError("execution_scope_binding_mismatch", "scope lease does not belong to this attempt");
+      }
+      const existing = this.db
+        .prepare(`SELECT * FROM attempt_execution_scopes WHERE attempt_id = ?`)
+        .get(parsed.attemptId) as unknown as AttemptExecutionScopeRow | undefined;
+      if (existing) {
+        if (
+          existing.lease_id === parsed.leaseId &&
+          existing.fencing_epoch === parsed.fencingEpoch &&
+          existing.unit_name === parsed.unitName
+        ) {
+          return { value: rowToAttemptExecutionScope(existing), events: [] };
+        }
+        throw new ControlStackError("execution_scope_contradiction", "attempt already has a different execution scope");
+      }
+      const recordedAt = (parsed.now ?? new Date()).toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO attempt_execution_scopes (attempt_id, work_item_id, lease_id, fencing_epoch, unit_name, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .run(parsed.attemptId, parsed.workItemId, parsed.leaseId, parsed.fencingEpoch, parsed.unitName, recordedAt);
+      const scope = rowToAttemptExecutionScope({
+        attempt_id: parsed.attemptId,
+        work_item_id: parsed.workItemId,
+        lease_id: parsed.leaseId,
+        fencing_epoch: parsed.fencingEpoch,
+        unit_name: parsed.unitName,
+        recorded_at: recordedAt
+      });
+      const event = this.appendAuditEvent(
+        createEvent(
+          "attempt_execution_scope.recorded",
+          { ...scope },
+          {
+            "work_item.id": parsed.workItemId,
+            "attempt.id": parsed.attemptId,
+            "lease.id": parsed.leaseId
+          }
+        )
+      );
+      return { value: scope, events: [event] };
+    });
+  }
+
+  recordVerifiedCleanup(
+    input: RecordVerifiedCleanupInput,
+    options: PrivilegedTransitionOptions
+  ): AttemptCleanupEvidence {
+    requirePrivilegedTransition(options, "record_verified_cleanup");
+    const parsed = recordVerifiedCleanupInputSchema.parse(input);
+    return this.write(() => {
+      const attempt = this.getAttemptRowForFence(parsed.attemptId, parsed.workItemId);
+      // A live attempt is still executing. Its scope cannot be evidenced as cleaned up.
+      if ((LIVE_ATTEMPT_STATUSES as readonly string[]).includes(attempt.status)) {
+        throw new ControlStackError("attempt_still_live", "a live attempt cannot be evidenced as cleaned up");
+      }
+      const scope = this.db
+        .prepare(`SELECT * FROM attempt_execution_scopes WHERE attempt_id = ?`)
+        .get(parsed.attemptId) as unknown as AttemptExecutionScopeRow | undefined;
+      if (!scope) {
+        throw new ControlStackError("execution_scope_missing", "no execution scope is recorded for this attempt");
+      }
+      if (
+        scope.lease_id !== parsed.leaseId ||
+        scope.fencing_epoch !== parsed.fencingEpoch ||
+        scope.unit_name !== parsed.unitName
+      ) {
+        throw new ControlStackError(
+          "cleanup_evidence_binding_mismatch",
+          "cleanup evidence does not match the recorded attempt, lease, epoch and execution unit"
+        );
+      }
+      const existing = this.db
+        .prepare(`SELECT * FROM attempt_cleanup_evidence WHERE attempt_id = ?`)
+        .get(parsed.attemptId) as unknown as AttemptCleanupEvidenceRow | undefined;
+      if (existing) {
+        if (
+          existing.evidence_hash === parsed.evidenceHash &&
+          existing.effects_disposition === parsed.effectsDisposition &&
+          existing.effects_evidence_hash === parsed.effectsEvidenceHash
+        ) {
+          return { value: rowToAttemptCleanupEvidence(existing), events: [] };
+        }
+        throw new ControlStackError("cleanup_evidence_contradiction", "attempt already has different cleanup evidence");
+      }
+      const recordedAt = (parsed.now ?? new Date()).toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO attempt_cleanup_evidence
+           (attempt_id, work_item_id, lease_id, fencing_epoch, unit_name, verdict, evidence_hash,
+            effects_disposition, effects_evidence_hash, observed_at, recorded_at)
+           VALUES (?, ?, ?, ?, ?, 'verified', ?, ?, ?, ?, ?)`
+        )
+        .run(
+          parsed.attemptId,
+          parsed.workItemId,
+          parsed.leaseId,
+          parsed.fencingEpoch,
+          parsed.unitName,
+          parsed.evidenceHash,
+          parsed.effectsDisposition,
+          parsed.effectsEvidenceHash,
+          parsed.observedAt,
+          recordedAt
+        );
+      const evidence = rowToAttemptCleanupEvidence({
+        attempt_id: parsed.attemptId,
+        work_item_id: parsed.workItemId,
+        lease_id: parsed.leaseId,
+        fencing_epoch: parsed.fencingEpoch,
+        unit_name: parsed.unitName,
+        verdict: "verified",
+        evidence_hash: parsed.evidenceHash,
+        effects_disposition: parsed.effectsDisposition,
+        effects_evidence_hash: parsed.effectsEvidenceHash,
+        observed_at: parsed.observedAt,
+        recorded_at: recordedAt
+      });
+      const event = this.appendAuditEvent(
+        createEvent(
+          "attempt_cleanup.verified",
+          { ...evidence },
+          {
+            "work_item.id": parsed.workItemId,
+            "attempt.id": parsed.attemptId,
+            "lease.id": parsed.leaseId
+          }
+        )
+      );
+      return { value: evidence, events: [event] };
+    });
+  }
+
+  private getAttemptRowForFence(attemptId: string, workItemId: string): ExecutionAttemptRow {
+    const attempt = this.db
+      .prepare(`SELECT * FROM execution_attempts WHERE attempt_id = ? AND work_item_id = ?`)
+      .get(attemptId, workItemId) as unknown as ExecutionAttemptRow | undefined;
+    if (!attempt) throw new ControlStackError("attempt_not_found", "no such execution attempt");
+    return attempt;
   }
 
   recordRecoveryDecision(input: RecordRecoveryDecisionInput, options: PrivilegedTransitionOptions): RecoveryRecord {
@@ -6250,7 +6528,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     // The data version belongs to the state BEFORE inspection. A concurrent
     // database commit during the inspection must force revalidation on write.
     const version = this.readAuditDataVersion();
-    const database = inspectControlPlaneDatabase(this.db);
+    const database = inspectControlPlaneDatabase(this.db, { auditShadow: this.auditShadowFor() });
     this.auditChainValid = database.checks.auditChain.ok;
     this.readinessDatabaseChecks = { ...database.checks };
     this.auditChainVerifiedDataVersion = version;
@@ -8893,6 +9171,21 @@ export class SqliteWorkItemStore implements WorkItemStore {
       if (lineageType === "retry" && !overrides.retryReason) {
         throw new ControlStackError("invalid_retry_request", "retry reason is required");
       }
+      if (lineageType === "retry" && this.retryFence === "enforce") {
+        // Retry is the other replacement path: it creates a fresh work item from the source.
+        const unproven = this.unprovenExecutionAttemptId(source.id);
+        if (unproven) throw unprovenExecutionError(unproven);
+        // One retry in flight per source. Writes are serialized, so the check and insert are atomic.
+        const inFlight = this.db
+          .prepare(
+            `SELECT id FROM work_items
+             WHERE source_work_item_id = ? AND lineage_type = 'retry'
+               AND status NOT IN ('succeeded', 'failed', 'cancelled', 'rejected')
+             LIMIT 1`
+          )
+          .get(source.id);
+        if (inFlight) throw retryInFlightError(source.id);
+      }
       const created = createWorkItem({
         title: overrides.title ?? source.title,
         requester: source.requester,
@@ -9649,6 +9942,71 @@ export class SqliteWorkItemStore implements WorkItemStore {
     } catch {
       // Reporting is best effort and must never affect the approval.
     }
+  }
+
+  /** Shadow audit verification counters for this process; `backend` is absent when no shadow is configured. */
+  auditShadowStatus(): {
+    backend: "rust" | undefined;
+    compared: number;
+    incremental: number;
+    skipped: number;
+    failed: number;
+  } {
+    return { backend: this.auditShadowVerifier ? "rust" : undefined, ...this.auditShadowCounters };
+  }
+
+  /**
+   * Builds the shadow comparison for one inspection. The comparison is skipped, and counted, when this connection
+   * holds an open transaction, or when the audit tail (row count and last event hash) no longer matches the
+   * authoritative verdict after the shadow read: the two reads would not cover the same committed audit data.
+   * PRAGMA data_version is not used here because a read-only connection opening the WAL database bumps it.
+   */
+  private auditShadowFor(): ControlPlaneInspectionOptions["auditShadow"] {
+    const verifier = this.auditShadowVerifier;
+    if (!verifier) return undefined;
+    return (authoritative) => {
+      if (this.transactionDepth > 0) {
+        this.auditShadowCounters.skipped += 1;
+        return { ok: true };
+      }
+      // After one full comparison, only the events appended since the last agreed anchor are read by the
+      // shadow (the anchor is re-validated by the core; any problem falls back to a full read). The
+      // authoritative TypeScript verification above still reads the whole chain every time.
+      const anchor = this.auditShadowAnchor;
+      this.auditShadowAnchor = undefined;
+      let shadow: CoreVerification;
+      try {
+        shadow =
+          anchor && verifier.verifyAuditChainFromDatabaseFileAfter
+            ? verifier.verifyAuditChainFromDatabaseFileAfter(this.dbPath, anchor)
+            : verifier.verifyAuditChainFromDatabaseFile(this.dbPath);
+      } catch {
+        this.auditShadowCounters.failed += 1;
+        return { ok: false, code: "audit_chain_backend_unavailable" };
+      }
+      const tail = this.db
+        .prepare(
+          `SELECT (SELECT COUNT(*) FROM audit_events) AS count,
+                  (SELECT event_hash FROM audit_events ORDER BY sequence DESC LIMIT 1) AS head,
+                  (SELECT sequence FROM audit_events ORDER BY sequence DESC LIMIT 1) AS sequence`
+        )
+        .get() as { count: number; head: string | null; sequence: number | null };
+      if (tail.count !== authoritative.eventCount || (tail.head ?? "") !== authoritative.headHash) {
+        this.auditShadowCounters.skipped += 1;
+        return { ok: true };
+      }
+      const result = compareAuditShadowVerdict(authoritative, shadow);
+      if (result.ok) {
+        this.auditShadowCounters.compared += 1;
+        if (anchor) this.auditShadowCounters.incremental += 1;
+        if (tail.sequence !== null && tail.head !== null) {
+          this.auditShadowAnchor = { eventCount: tail.count, sequence: tail.sequence, headHash: tail.head };
+        }
+      } else {
+        this.auditShadowCounters.failed += 1;
+      }
+      return result;
+    };
   }
 
   private readAuditDataVersion(): number {

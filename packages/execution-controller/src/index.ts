@@ -240,6 +240,16 @@ export class ExecutionController {
         );
         break;
       }
+      case "isolation_unknown": {
+        // The process scope may still be alive. "unknown" is terminal for
+        // this attempt and marks it for governed reconciliation; it must not
+        // be treated as an ordinary retryable failure.
+        terminalAttempt = store.transitionAttempt(
+          { ...runningInput, status: "unknown", outcomeCode: "isolation_unknown", now: this.now() },
+          privileged
+        );
+        break;
+      }
       case "cancelled": {
         terminalAttempt = store.transitionAttempt(
           { ...runningInput, status: "cancelled", outcomeCode: "cancelled", now: this.now() },

@@ -1,0 +1,32 @@
+[package]
+name = "acs-core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "ACS core: canonical hashing v2 and read-only audit verification"
+
+# Dependency reasons (written, per repo policy):
+#   serde_json: the canonical JSON v2 input is a JSON value, and the golden fixtures are JSON.
+#               Already pinned at 1.0.154 in rust/scope-supervisor and rust/integration-graph.
+#   sha2:       SHA-256 for the canonical digest. The TypeScript side uses node:crypto.
+#               RustCrypto's sha2 is the standard pure-Rust implementation. No C toolchain needed.
+#   serde_json preserve_order: legacy v1 hashing sorts keys with a stable sort over JSON
+#               insertion order, so ties keep document order. This needs an insertion-ordered map.
+#               Pulls indexmap, which serde_json already uses in its feature graph.
+#   rusqlite:   the read-only store. SQLITE_OPEN_READ_ONLY and query_only are enforced in code.
+#               `bundled` pins SQLite so results do not depend on the host library version.
+#   icu_collator: ICU root collation, the order Node's localeCompare used to hash the existing
+#               audit chain. ICU4X is the Unicode-maintained implementation. Its output matched
+#               V8 localeCompare on 33,203 differential pairs (real historical keys plus random
+#               mixed-case, punctuation and Unicode strings). Required to verify historical records.
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
+icu_collator = { version = "=2.4.0", features = ["compiled_data"] }
+#   icu_locale_core: parses the collation tags of the alternate-locale collators used to classify
+#               legacy mismatches as locale-dependent. Pinned to the version icu_collator uses.
+icu_locale_core = "=2.4.0"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

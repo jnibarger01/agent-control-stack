@@ -42,6 +42,7 @@ ADR status values:
 | [0027](0027-advisor-consultation.md)                                     | Advisor consultation is evidence, never a decision                                        | Accepted                            |
 | [0028](0028-outcome-engine-verdict-records.md)                           | Outcome Engine verdicts are evidence records, never authority                             | Accepted                            |
 | [0029](0029-desktop-harness-is-an-acs-client.md)                         | The desktop harness is an ACS client; ACS stays the only execution authority              | Proposed                            |
+| [0031](0031-incremental-rust-components.md)                             | Incremental Rust components in ACS                                                        | Proposed                            |
 
 ## Decision rules
 

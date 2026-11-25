@@ -1,0 +1,6 @@
+function                  cases orig ns/call Rust ns/call   speedup
+analyzeDependencies           8        31027         9648     3.22x
+findOverlaps                  8        36958        26860     1.38x
+
+Timed as callers call it, crossing included. Overall 2.10x (geometric mean); 2 of 2 functions at least 1.1x faster.
+Ship it: every function is faster in Rust, call included.

@@ -4,7 +4,9 @@
  * so a prompt could leave the machine through the proxy. Refuse to start in that configuration unless
  * Node itself would bypass the proxy for the advisor's base URL.
  *
- * `nodeWouldProxy` mirrors Node 24's implementation exactly rather than guessing at NO_PROXY semantics:
+ * `nodeWouldProxy` mirrors the running Node's implementation exactly rather than guessing at NO_PROXY
+ * semantics. Node 26 rules are documented on `node26Bypasses`; unverified majors use the stricter union.
+ * Node 24 rules:
  *   - lib/internal/process/pre_execution.js `setupHttpProxy`: active only when `--use-env-proxy` is set
  *     (NODE_USE_ENV_PROXY must equal "1", src/node_options.cc) and one of the proxy variables is non-empty.
  *   - deps/undici/src/lib/dispatcher/env-http-proxy-agent.js: lowercase variables win via `??`
@@ -46,11 +48,84 @@ function proxyFor(target: URL, env: Env): string | undefined {
   return http ? http : undefined;
 }
 
+/** NO_PROXY matching rules, by the undici generation bundled with the Node runtime. */
+export type NoProxyRules = "node24" | "node26" | "strictest";
+
+/**
+ * Rules for the running Node. Each rule set is verified against that runtime's bundled undici source
+ * and the live-dispatcher parity test. An unverified major uses "strictest": it reports a proxy
+ * whenever either known rule set would, so the guard can only over-refuse, never under-refuse.
+ */
+export function noProxyRulesForRuntime(nodeVersion: string = process.versions.node): NoProxyRules {
+  const major = Number(nodeVersion.split(".")[0]);
+  if (major === 24) return "node24";
+  if (major === 26) return "node26";
+  return "strictest";
+}
+
 /** True when Node's env-proxy dispatcher would send a request for `target` to a proxy. */
-export function nodeWouldProxy(target: URL, env: Env): boolean {
+export function nodeWouldProxy(target: URL, env: Env, rules: NoProxyRules = noProxyRulesForRuntime()): boolean {
   if (!env.HTTP_PROXY && !env.HTTPS_PROXY && !env.http_proxy && !env.https_proxy) return false;
   if (proxyFor(target, env) === undefined) return false;
   const noProxy = env.no_proxy ?? env.NO_PROXY ?? "";
+  if (rules === "node26") return !node26Bypasses(target, noProxy);
+  if (rules === "node24") return !node24Bypasses(target, noProxy);
+  return !node24Bypasses(target, noProxy) || !node26Bypasses(target, noProxy);
+}
+
+/**
+ * Node 26 (undici 8.x, deps/undici/src/lib/dispatcher/env-http-proxy-agent.js):
+ *   - entries split on `,` and whitespace; `[host]:port` is an IPv6 entry with a port; otherwise brackets
+ *     are removed and a single `:<digits>` suffix is a port (so bare `::1` is a host, not host+port);
+ *   - an entry starting with `*` is a wildcard: `*` (optionally with a port) bypasses every host, and a
+ *     `*.suffix` entry matches subdomains only, never the bare suffix;
+ *   - a leading `.` or `*.` and a trailing `.` are stripped from entries; the target host is unbracketed,
+ *     lowercased and loses one trailing dot.
+ */
+function node26Bypasses(target: URL, noProxy: string): boolean {
+  const entries: { hostname: string; port: number; wildcard: boolean }[] = [];
+  for (const entry of noProxy.split(/[,\s]/u)) {
+    if (!entry) continue;
+    let hostname: string;
+    let port: number;
+    const ipv6WithPort = /^\[(.+)\]:(\d+)$/u.exec(entry);
+    if (ipv6WithPort) {
+      hostname = ipv6WithPort[1]!;
+      port = Number.parseInt(ipv6WithPort[2]!, 10);
+    } else {
+      const unbracketed = entry.replace(/^\[(.+)\]$/u, "$1");
+      const colonCount = (unbracketed.match(/:/gu) ?? []).length;
+      const parsed = colonCount === 1 ? /^(.+):(\d+)$/u.exec(unbracketed) : null;
+      hostname = parsed ? parsed[1]! : unbracketed;
+      port = parsed ? Number.parseInt(parsed[2]!, 10) : 0;
+    }
+    entries.push({
+      hostname: hostname
+        .replace(/^\*?\./u, "")
+        .replace(/^(.+)\.$/u, "$1")
+        .toLowerCase(),
+      port,
+      wildcard: entry.charCodeAt(0) === 42
+    });
+  }
+  if (entries.length === 0) return false;
+  let hostname = target.host
+    .replace(/:\d*$/u, "")
+    .replace(/^\[(.+)\]$/u, "$1")
+    .toLowerCase();
+  if (hostname.length > 1 && hostname.endsWith(".")) hostname = hostname.slice(0, -1);
+  const port = Number.parseInt(target.port, 10) || DEFAULT_PORTS[target.protocol] || 0;
+  for (const entry of entries) {
+    if (entry.port && entry.port !== port) continue;
+    if (entry.hostname === "*") return true;
+    if (!entry.wildcard && hostname === entry.hostname) return true;
+    if (hostname.slice(-(entry.hostname.length + 1)) === `.${entry.hostname}`) return true;
+  }
+  return false;
+}
+
+/** Node 24 (undici 7.x): see the module comment. */
+function node24Bypasses(target: URL, noProxy: string): boolean {
   const entries = noProxy
     .split(/[,\s]/u)
     .filter((entry) => entry !== "")
@@ -61,16 +136,16 @@ export function nodeWouldProxy(target: URL, env: Env): boolean {
         port: parsed ? Number.parseInt(parsed[2]!, 10) : 0
       };
     });
-  if (entries.length === 0) return true;
-  if (noProxy === "*") return false;
+  if (entries.length === 0) return false;
+  if (noProxy === "*") return true;
   const hostname = target.host.replace(/:\d*$/u, "").toLowerCase();
   const port = Number.parseInt(target.port, 10) || DEFAULT_PORTS[target.protocol] || 0;
   for (const entry of entries) {
     if (entry.port && entry.port !== port) continue;
-    if (hostname === entry.hostname) return false;
-    if (hostname.slice(-(entry.hostname.length + 1)) === `.${entry.hostname}`) return false;
+    if (hostname === entry.hostname) return true;
+    if (hostname.slice(-(entry.hostname.length + 1)) === `.${entry.hostname}`) return true;
   }
-  return true;
+  return false;
 }
 
 /** Throws when env proxy mode would route traffic for `baseUrl` through a proxy. Never echoes env values. */

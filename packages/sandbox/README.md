@@ -12,6 +12,31 @@ Execution boundary for ACS.
 Do not claim real command execution or hardened OS sandbox isolation until the
 release gate below is complete.
 
+## Observation output
+
+Both live backends share one raw byte budget for stdout and stderr.
+`outputBytes` counts the captured bytes before decoding and redaction. A cut
+inside a UTF-8 code point omits the unfinished character. The returned strings
+also share the output cap after decoding and redaction. Each truncation flag
+covers bytes discarded from its stream during capture or rendering.
+
+## Scope cleanup observations
+
+Both live backends settle an in-flight scope signal before the final status
+probe. Launcher close cancels pending timers and prevents further
+process-group signaling. An active or transitioning scope receives SIGKILL
+and up to three short follow-up probes. Verified cleanup requires a clean
+inactive or absent response for the attempt's unit. Cleanup fails if the
+scope stays active through all probes. An interrupted, empty, or ambiguous
+status response leaves cleanup unknown. [systemctl exit status](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html#Exit%20status)
+
+## Scoped egress startup
+
+Engine execution waits for the relay to listen on private loopback. A bounded
+TCP probe sends zero bytes. The host proxy still makes egress decisions only
+for CONNECT requests. If the probe fails, the launcher exits nonzero before
+starting the workload.
+
 ## Real-execution release gate
 
 Before enabling live sandbox execution (worker wiring, default configs, or

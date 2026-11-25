@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { verifyAuditChain, type AuditChainEvent } from "./audit-chain.js";
+import { verifyAuditChain, type AuditChainEvent, type AuditChainVerification } from "./audit-chain.js";
 import { controlPlaneMigrations } from "./migration.js";
 
 export type DatabaseHealthCheck = { ok: true } | { ok: false; code: string };
@@ -25,12 +25,24 @@ interface AuditEventRow {
   event_hash: string;
 }
 
-export function inspectControlPlaneDatabase(db: DatabaseSync): ControlPlaneDatabaseHealth {
+export interface ControlPlaneInspectionOptions {
+  /**
+   * Second, non-authoritative audit verification. Called only after the TypeScript verification passed, with that
+   * verdict. Its result replaces the audit check, so a shadow disagreement fails closed; it can never turn a
+   * TypeScript failure into a pass.
+   */
+  auditShadow?: (authoritative: AuditChainVerification & { ok: true }) => DatabaseHealthCheck;
+}
+
+export function inspectControlPlaneDatabase(
+  db: DatabaseSync,
+  options: ControlPlaneInspectionOptions = {}
+): ControlPlaneDatabaseHealth {
   const checks = {
     integrity: integrityHealth(db),
     foreignKeys: foreignKeyHealth(db),
     migrations: migrationHealth(db),
-    auditChain: auditChainHealth(db)
+    auditChain: auditChainHealth(db, options.auditShadow)
   };
   return { ok: Object.values(checks).every((check) => check.ok), checks };
 }
@@ -99,14 +111,43 @@ function migrationHealth(db: DatabaseSync): DatabaseHealthCheck {
   }
 }
 
-function auditChainHealth(db: DatabaseSync): DatabaseHealthCheck {
+function auditChainHealth(
+  db: DatabaseSync,
+  shadow?: ControlPlaneInspectionOptions["auditShadow"]
+): DatabaseHealthCheck {
+  let verification: AuditChainVerification;
   try {
     const rows = db.prepare("SELECT * FROM audit_events ORDER BY sequence ASC").all() as unknown as AuditEventRow[];
-    const verification = verifyAuditChain(rows.map(rowToAuditEvent));
-    return verification.ok ? healthy() : failed(`audit_chain_${verification.failure.reason}`);
+    verification = verifyAuditChain(rows.map(rowToAuditEvent));
   } catch {
     return failed("audit_chain_probe_failed");
   }
+  if (!verification.ok) return failed(`audit_chain_${verification.failure.reason}`);
+  if (!shadow) return healthy();
+  try {
+    return shadow(verification);
+  } catch {
+    return failed("audit_chain_shadow_failed");
+  }
+}
+
+/**
+ * Compares the authoritative TypeScript verdict with a Rust core verdict over the same committed data. Any
+ * difference fails: a Rust failure, an indeterminate Rust verdict, or a different event count or head hash.
+ */
+export function compareAuditShadowVerdict(
+  authoritative: AuditChainVerification & { ok: true },
+  shadow: { ok: boolean | null; eventCount: number; headHash: string }
+): DatabaseHealthCheck {
+  if (shadow.ok === null) return failed("audit_chain_backend_indeterminate");
+  if (
+    shadow.ok !== true ||
+    shadow.eventCount !== authoritative.eventCount ||
+    shadow.headHash !== authoritative.headHash
+  ) {
+    return failed("audit_chain_backend_disagreement");
+  }
+  return healthy();
 }
 
 function rowToAuditEvent(row: AuditEventRow): AuditChainEvent {

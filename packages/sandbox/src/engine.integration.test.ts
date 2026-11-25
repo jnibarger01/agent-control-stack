@@ -1,5 +1,14 @@
 import { createServer, type Server } from "node:net";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,6 +18,7 @@ import type {
   EngineIsolationRequest
 } from "./engine-contracts.js";
 import { createEngineIsolation, type EngineRuntimeMount } from "./engine.js";
+import { RUST_SUPERVISOR_BACKEND_TAG, defaultRustSupervisorPath } from "./rust-supervisor.js";
 
 const runIntegration = process.env.ACS_SANDBOX_INTEGRATION === "1";
 
@@ -42,6 +52,32 @@ describe.runIf(runIntegration)("Engine isolation boundary (ADR 0014)", () => {
       });
     });
   }
+
+  it("honors cancellation during proxy setup before creating the workload", async () => {
+    const fixture = createFixture();
+    const controller = new AbortController();
+    try {
+      writeScript(fixture.workspace, `import { writeFileSync } from "node:fs"; writeFileSync("ran", "unexpected");`);
+      const request = fixtureRequest(fixture.workspace, "cancel-setup", [{ host: "127.0.0.1", port: 1 }]);
+      const runtimeEntries = readdirSync(fixture.parent);
+      const engine = createEngineIsolation({
+        authorityVerifier: fixtureAuthority(request),
+        runtimeMounts: nodeRuntimeMounts(),
+        runtimeDir: fixture.parent,
+        unitNameFactory: () => {
+          queueMicrotask(() => controller.abort());
+          return `acs-engine-cancel-setup-${process.pid}.scope`;
+        }
+      });
+      await expect(engine.execute(request, { signal: controller.signal })).rejects.toMatchObject({
+        code: "engine_isolation_cancelled"
+      });
+      expect(existsSync(join(fixture.workspace, "ran"))).toBe(false);
+      expect(readdirSync(fixture.parent)).toEqual(runtimeEntries);
+    } finally {
+      rmSync(fixture.parent, { recursive: true, force: true });
+    }
+  }, 20_000);
 
   it("cannot read a file under the real host HOME, and gets a private empty HOME instead", async () => {
     const fixture = createFixture();
@@ -120,7 +156,7 @@ describe.runIf(runIntegration)("Engine isolation boundary (ADR 0014)", () => {
     }
   }, 20_000);
 
-  it("reaches an allowlisted destination only through the scoped-egress proxy", async () => {
+  it("waits for a delayed relay and reaches the allowlisted destination through scoped egress", async () => {
     const fixture = createFixture();
     try {
       const port = await startAllowedDestination("allowed-dest-reached\n");
@@ -146,13 +182,37 @@ describe.runIf(runIntegration)("Engine isolation boundary (ADR 0014)", () => {
       const request = fixtureRequest(fixture.workspace, "egress-allow", [{ host: "127.0.0.1", port }]);
       const result = await createEngineIsolation({
         authorityVerifier: fixtureAuthority(request),
-        runtimeMounts: nodeRuntimeMounts()
+        ...fixtureBridgeOptions(fixture.parent, "sleep 0.4")
       }).execute(request);
 
       expect(result).toMatchObject({ outcome: "exited", observedSuccess: true, cleanup: "verified", exitCode: 0 });
       expect(result.stdout).toContain("egress-allowed-as-expected");
       expect(result.egressAllowedCount).toBe(1);
       expect(result.egressDeniedCount).toBe(0);
+    } finally {
+      rmSync(fixture.parent, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("does not execute the workload when the private egress relay cannot start", async () => {
+    const fixture = createFixture();
+    try {
+      writeScript(fixture.workspace, `import { writeFileSync } from "node:fs"; writeFileSync("ran", "unexpected");`);
+      const request = fixtureRequest(fixture.workspace, "egress-relay-failure", [{ host: "127.0.0.1", port: 1 }]);
+      const result = await createEngineIsolation({
+        authorityVerifier: fixtureAuthority(request),
+        ...fixtureBridgeOptions(fixture.parent, "exit 1")
+      }).execute(request);
+
+      expect(result).toMatchObject({
+        outcome: "exited",
+        exitCode: 1,
+        observedSuccess: false,
+        cleanup: "verified",
+        egressAllowedCount: 0
+      });
+      expect(result.stderr).toContain("sandbox egress relay unavailable");
+      expect(existsSync(join(fixture.workspace, "ran"))).toBe(false);
     } finally {
       rmSync(fixture.parent, { recursive: true, force: true });
     }
@@ -218,11 +278,10 @@ describe.runIf(runIntegration)("Engine isolation boundary (ADR 0014)", () => {
       }).execute(request);
 
       expect(result.observedSuccess).toBe(true);
-      // 1_024 is an exact multiple of the emoji's 4-byte encoding, so the
-      // cut lands on a character boundary: no partial sequence, no U+FFFD
-      // replacement inflating the decoded string past the byte budget.
+      // Both streams share the raw budget. Launcher stderr can shift stdout's
+      // cut inside an emoji even when the total cap is divisible by four.
       expect(result.outputBytes).toBe(1_024);
-      expect(Buffer.byteLength(`${result.stdout}${result.stderr}`, "utf8")).toBe(1_024);
+      expect(Buffer.byteLength(`${result.stdout}${result.stderr}`, "utf8")).toBeLessThanOrEqual(1_024);
       expect(result.stdout).not.toContain("�");
       expect(result.stdoutTruncated || result.stderrTruncated).toBe(true);
     } finally {
@@ -255,6 +314,8 @@ describe.runIf(runIntegration)("Engine isolation boundary (ADR 0014)", () => {
 
       expect(result.observedSuccess).toBe(true);
       expect(result.outputBytes).toBe(1_025);
+      expect(Buffer.byteLength(`${result.stdout}${result.stderr}`, "utf8")).toBeLessThanOrEqual(1_025);
+      expect(result.stdout).not.toContain("�");
       expect(result.stdoutTruncated || result.stderrTruncated).toBe(true);
     } finally {
       rmSync(fixture.parent, { recursive: true, force: true });
@@ -325,6 +386,77 @@ describe.runIf(runIntegration)("Engine isolation boundary (ADR 0014)", () => {
   }, 20_000);
 });
 
+describe.runIf(runIntegration && existsSync(defaultRustSupervisorPath))(
+  "Engine Rust scope supervisor live parity",
+  () => {
+    const cases: Array<[string, string, Partial<EngineIsolationRequest>, number | undefined]> = [
+      [
+        "stdin",
+        `let text = ""; process.stdin.on("data", (c) => (text += c)); process.stdin.on("end", () => console.log(text.toUpperCase()));`,
+        { stdin: "engine stdin é" },
+        undefined
+      ],
+      [
+        "denied-egress",
+        `const r = await fetch("http://198.51.100.7/").then(() => "reached", () => "blocked"); console.log(r);`,
+        {},
+        undefined
+      ],
+      [
+        "timeout",
+        `setInterval(() => {}, 1000);`,
+        { limits: { ...defaultLimits(), wallClockMs: 400, terminationGraceMs: 100 } },
+        undefined
+      ],
+      ["cancel", `setInterval(() => {}, 1000);`, {}, 300]
+    ];
+
+    it.each(cases)(
+      "matches the TypeScript reference for %s",
+      async (name, source, overrides, abortAfterMs) => {
+        const observed = [];
+        for (const backend of ["typescript", "rust"] as const) {
+          const fixture = createFixture();
+          try {
+            writeScript(fixture.workspace, source);
+            const request = fixtureRequest(
+              fixture.workspace,
+              `parity_${name}_${backend}`,
+              [{ host: "127.0.0.1", port: 1 }],
+              overrides
+            );
+            const controller = new AbortController();
+            if (abortAfterMs !== undefined) setTimeout(() => controller.abort(), abortAfterMs);
+            const result = await createEngineIsolation({
+              authorityVerifier: fixtureAuthority(request),
+              runtimeMounts: nodeRuntimeMounts(),
+              runtimeDir: fixture.parent,
+              scopeSupervisor: { backend }
+            }).execute(request, { signal: controller.signal });
+            expect(result.backendVersion.endsWith(`+${RUST_SUPERVISOR_BACKEND_TAG}`)).toBe(backend === "rust");
+            observed.push({
+              outcome: result.outcome,
+              observedSuccess: result.observedSuccess,
+              cleanup: result.cleanup,
+              exitCode: result.exitCode,
+              signal: result.signal,
+              stdout: result.stdout,
+              stderr: result.stderr,
+              error: result.error,
+              egressAllowedCount: result.egressAllowedCount,
+              egressDeniedCount: result.egressDeniedCount
+            });
+          } finally {
+            rmSync(fixture.parent, { recursive: true, force: true });
+          }
+        }
+        expect(observed[1]).toEqual(observed[0]);
+      },
+      30_000
+    );
+  }
+);
+
 function createFixture(): { parent: string; workspace: string } {
   const parent = mkdtempSync(join(tmpdir(), "acs-engine-isolation-integration-"));
   const workspace = join(parent, "workspace");
@@ -334,6 +466,23 @@ function createFixture(): { parent: string; workspace: string } {
 
 function writeScript(workspace: string, source: string): void {
   writeFileSync(join(workspace, "script.mjs"), `${source.trim()}\n`, { mode: 0o600 });
+}
+
+function fixtureBridgeOptions(parent: string, listenerSetup: string) {
+  const bridgeDirectory = join(parent, "bridge");
+  const socatPath = join(bridgeDirectory, "socat");
+  mkdirSync(bridgeDirectory, { mode: 0o700 });
+  writeFileSync(
+    socatPath,
+    `#!/bin/sh\ncase "$1" in TCP-LISTEN:*) ${listenerSetup} ;; esac\nexec /usr/bin/socat "$@"\n`,
+    {
+      mode: 0o700
+    }
+  );
+  return {
+    socatPath,
+    runtimeMounts: [...nodeRuntimeMounts(), { hostPath: bridgeDirectory, sandboxPath: bridgeDirectory }]
+  };
 }
 
 function fixtureRequest(
