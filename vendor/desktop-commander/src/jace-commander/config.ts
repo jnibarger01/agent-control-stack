@@ -26,6 +26,8 @@ export interface JcConfig {
   traceRoots: string[];
   /** Filesystem roots the fs.read tools may touch (JC_FS_ROOTS). Empty: fs tools fail closed. */
   fsRoots: string[];
+  /** Optional mutation-only roots (JC_FS_WRITE_ROOTS). */
+  fsWriteRoots?: string[];
   /** Extra denied roots (JC_FS_DENIED_ROOTS), on top of the built-in credential/state denials. */
   fsDeniedRoots: string[];
   runtimeId: string;
@@ -105,6 +107,7 @@ export function loadJcConfig(env: NodeJS.ProcessEnv = process.env): JcConfig {
       path.join(stateDir, 'traces'),
     ].join(path.delimiter)).split(path.delimiter).filter(Boolean).map((root) => path.resolve(root)),
     fsRoots: splitRoots(env.JC_FS_ROOTS),
+    fsWriteRoots: env.JC_FS_WRITE_ROOTS === undefined ? undefined : splitRoots(env.JC_FS_WRITE_ROOTS),
     fsDeniedRoots: splitRoots(env.JC_FS_DENIED_ROOTS),
     runtimeId,
     acsPublicKey: env.JC_ACS_PUBLIC_KEY,

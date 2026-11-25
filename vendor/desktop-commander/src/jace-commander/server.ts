@@ -426,6 +426,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
   type Handler = (args: Record<string, unknown>, capability: unknown) => Promise<ToolResult>;
   const fsPolicy: JcFsPolicy = {
     roots: policy?.effective.fsRoots ?? config.fsRoots,
+    writeRoots: config.fsWriteRoots,
     deniedRoots: [
       ...defaultDeniedRoots(config.stateDir, config.homeDir),
       ...config.fsDeniedRoots,
@@ -491,6 +492,9 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       return ok({ path: file, events: parsed.events.length, ...verifyChain(parsed.events) });
     },
     privileged_exec: async (args, capability) => {
+      if (fsPolicy.writeRoots !== undefined) {
+        return fail('JC_PATH_NOT_ALLOWED', 'privileged_exec is disabled with split read/write roots');
+      }
       if (capability === undefined) {
         return fail('JC_CAPABILITY_MISSING', 'privileged_exec requires an ACS acs.jc.v1 capability with a human approvalId; call it through the managed gateway (/jc/mcp), have a human approve the returned ACS work item, then retry the identical call');
       }
