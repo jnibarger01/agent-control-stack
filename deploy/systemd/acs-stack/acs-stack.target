@@ -1,0 +1,7 @@
+[Unit]
+Description=ACS and Jace Commander stack
+Wants=acs-recovery.service acs-computer-use-xvfb.service jace-commander-mcp.service jace-commander-auth-proxy.service
+After=acs-recovery.service acs-computer-use-xvfb.service jace-commander-mcp.service jace-commander-auth-proxy.service
+
+[Install]
+WantedBy=default.target
