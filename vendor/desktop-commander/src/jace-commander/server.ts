@@ -31,7 +31,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { JcConfig } from './config.js';
 import { FileNonceStore, JC_TOOL_POLICIES, JcAuthorizationError, JcCapabilityVerifier, type JcAuthorization } from './contract.js';
-import { acsAccessToken } from './device-login.js';
+import { acsAuthHeaders } from './device-login.js';
 import {
   IntegrationError,
   acsReadUrl,
@@ -222,7 +222,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
 
   const acsGet = async (url: string) => requestJson(url, {
     timeoutMs: config.requestTimeoutMs,
-    token: await acsAccessToken(config.acsUrl, config.stateDir, process.env, fetchImpl),
+    authHeaders: await acsAuthHeaders({ acsUrl: config.acsUrl, stateDir: config.stateDir, method: 'GET', url, env: process.env, fetchImpl }),
     fetchImpl,
   });
   const swarmToken = process.env.JC_SWARM_TOKEN ?? process.env.SWARM_OPERATOR_TOKEN;
@@ -254,8 +254,9 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
   // Best-effort ACS mirror of the local trace (local preset only). It reads the trace on its own timer,
   // never delays or fails a tool call, and ACS being down only leaves records queued locally.
   const httpMirrorSender: MirrorSender = async (batch) => {
-    const token = await acsAccessToken(config.acsUrl, config.stateDir, process.env, fetchImpl);
-    const response = await requestJson(config.mirrorUrl as string, { method: 'POST', token, body: batch, timeoutMs: config.requestTimeoutMs, fetchImpl });
+    const targetUrl = config.mirrorUrl as string;
+    const authHeaders = await acsAuthHeaders({ acsUrl: config.acsUrl, stateDir: config.stateDir, method: 'POST', url: targetUrl, env: process.env, fetchImpl });
+    const response = await requestJson(targetUrl, { method: 'POST', authHeaders, body: batch, timeoutMs: config.requestTimeoutMs, fetchImpl });
     return { ok: response.status >= 200 && response.status < 300, status: response.status };
   };
   const mirror = mode === 'local' && (deps.mirrorSender || config.mirrorUrl)
@@ -466,10 +467,11 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       return response.status < 400 ? ok(response.body) : fail(`acs_http_${response.status}`, 'ACS rejected the request', { upstream: response.body });
     }),
     acs_submit_mission: async (args) => acsGuarded(async () => {
-      const token = await acsAccessToken(config.acsUrl, config.stateDir, process.env, fetchImpl);
-      if (!token) return fail('acs_not_logged_in', 'no ACS credential: run `jace-commander login` or set JC_ACS_TOKEN');
-      const response = await requestJson(`${config.acsUrl}/work-items`, {
-        method: 'POST', token, body: missionWorkItemBody(args as unknown as MissionInput), timeoutMs: config.requestTimeoutMs, fetchImpl,
+      const targetUrl = `${config.acsUrl}/work-items`;
+      const authHeaders = await acsAuthHeaders({ acsUrl: config.acsUrl, stateDir: config.stateDir, method: 'POST', url: targetUrl, env: process.env, fetchImpl });
+      if (!authHeaders) return fail('acs_not_logged_in', 'no ACS credential: run `jace-commander login` or set JC_ACS_TOKEN');
+      const response = await requestJson(targetUrl, {
+        method: 'POST', authHeaders, body: missionWorkItemBody(args as unknown as MissionInput), timeoutMs: config.requestTimeoutMs, fetchImpl,
       });
       return response.status < 400 ? ok(response.body) : fail(`acs_http_${response.status}`, 'ACS rejected the mission', { upstream: response.body });
     }),

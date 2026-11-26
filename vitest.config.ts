@@ -19,6 +19,9 @@ export default defineConfig({
       ),
       "@agent-control-stack/procedural-learning": fileURLToPath(
         new URL("./packages/procedural-learning/src/index.ts", import.meta.url)
+      ),
+      "@agent-control-stack/shared": fileURLToPath(
+        new URL("./packages/shared/src/index.ts", import.meta.url)
       )
     }
   },

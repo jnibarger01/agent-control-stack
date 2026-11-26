@@ -26,6 +26,30 @@ export function allowedPublicRoute(method, rawUrl, body = '', jcResource) {
   catch { return false; }
   if (method === 'GET' && discovery.has(pathname) && params.size === 0) return true;
   if (pathname === '/jc/mcp') return ['GET', 'POST', 'DELETE'].includes(method);
+  if (method === 'GET' && pathname === '/jc/device') {
+    return params.size === 0 || (params.size === 1 && unique(params, 'user_code') !== null);
+  }
+  if (method === 'POST' && pathname === '/jc/device') {
+    return params.size === 0;
+  }
+  // OpenID Provider redirect (Jace Auth owner consent). Only the standard authorization-response parameters.
+  if (method === 'GET' && pathname === '/jc/device/callback') {
+    const allowed = new Set(['code', 'state', 'error', 'error_description', 'iss']);
+    return params.size > 0 && params.size <= 5 && [...params.keys()].every((k) => allowed.has(k));
+  }
+  if (method === 'POST' && (pathname === '/jc/oauth/device/code' || pathname === '/jc/oauth/token')) {
+    return params.size === 0 ||
+      (unique(params, 'oauth_lane') === 'jc' && unique(params, 'resource') === jcResource);
+  }
+  if (method === 'GET' && pathname === '/jc/devices') {
+    return params.size === 0;
+  }
+  if (
+    (method === 'POST' && /^\/jc\/devices\/[A-Za-z0-9_-]{1,128}\/revoke$/.test(pathname)) ||
+    (method === 'DELETE' && /^\/jc\/devices\/[A-Za-z0-9_-]{1,128}$/.test(pathname))
+  ) {
+    return params.size === 0;
+  }
   if (method === 'POST' && pathname === '/authorize/consent') {
     if (params.size !== 0 || typeof body !== 'string' || body.length > 65536) return false;
     const form = new URLSearchParams(body);

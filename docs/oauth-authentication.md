@@ -31,6 +31,21 @@ The gateway publishes protected resource metadata at:
 
 The `resource` metadata value is `ACS_OAUTH_AUDIENCE`. `authorization_servers` contains `ACS_OAUTH_ISSUER`.
 
+The `WWW-Authenticate` challenge advertises a `resource_metadata` URL. That URL names the gateway, which is the resource server. Set it explicitly with `ACS_MCP_RESOURCE_METADATA_URL=https://<gateway>/.well-known/oauth-protected-resource/mcp`. In strict production mode it is required whenever OAuth is configured, and the gateway rejects an `https` URL on the issuer's origin at boot. Without the override, the URL is derived from the audience. When the audience sits on the issuer's host, as the jace-auth preset does, the derived URL points at a path the issuer does not serve.
+
+### jace-auth production preset
+
+For production with jace-auth, the frozen values supersede the generic example above:
+
+```sh
+ACS_OAUTH_ISSUER=https://jace-auth.vercel.app
+ACS_OAUTH_AUDIENCE=https://jace-auth.vercel.app/resources/agent-control-stack
+ACS_OAUTH_JWKS_URI=https://jace-auth.vercel.app/jwks
+ACS_MCP_RESOURCE_METADATA_URL=https://<gateway>/.well-known/oauth-protected-resource/mcp
+```
+
+The audience is the jace-auth resource identifier, not the gateway's `/mcp` URL. Both values are frozen in jace-auth `docs/ISSUER.md`. The template is `compose.production.env.example`. The negative proofs are in `docs/jace-auth-production-negative-proofs.md`.
+
 ## Scopes
 
 | Tool                | Required scope     |
@@ -41,6 +56,8 @@ The `resource` metadata value is `ACS_OAUTH_AUDIENCE`. `authorization_servers` c
 | `approve_work_item` | `acs:work:approve` |
 | `unblock_work_item` | `acs:work:approve` |
 | `cancel_work_item`  | `acs:work:approve` |
+
+The table above lists MCP tool scopes, which OAuth access tokens must carry. The static `ACS_GATEWAY_CREDENTIALS_JSON` credentials use the legacy gateway REST scopes (`acs:read`, `acs:write`, `acs:approve`). Those are a different set, and an MCP token does not need them.
 
 Worker claim and result submission tools are not exposed on the public MCP gateway in `v0.1.0-alpha`. They remain local worker/store paths only.
 
@@ -198,15 +215,22 @@ curl -X POST https://gateway.example.com/devices/<device-id>/revoke \
 
 ### Credential storage
 
-The CLI stores its device keypair and session (`~/.config/acs/credentials.json` by default, override with `ACS_CLI_CREDENTIALS_PATH` or `XDG_CONFIG_HOME`) in a file created with `0600` permissions. No OS keychain integration exists in this workspace today; this is a documented limitation, not a silent gap. Never commit this file, put it in `.env`, or leave it world-readable.
+The `acs` CLI (`apps/runtime`) stores its device keypair and session (`~/.config/acs/credentials.json` by default, override with `ACS_CLI_CREDENTIALS_PATH` or `XDG_CONFIG_HOME`) atomically (`O_EXCL` + `fsync` + `rename`) under `0600` permissions in a `0700` directory. Never commit this file, put it in `.env`, or leave it world-readable.
 
-### Server-side model
+The `jace` / `jace-commander` CLI (`apps/jace-commander`) uses OS credential storage (`SecretServiceStore` via `secret-tool` / `kwallet-query` on Linux, `KeychainStore` via `security` on macOS, `WindowsCredentialStore` via PowerShell/DPAPI on Windows) or a headless `EncryptedFileStore` (AES-256-GCM with a separate KEK via `JC_KEYRING_PASSPHRASE` or `JC_KEYRING_KEY_FILE`, never plaintext fallback). See [apps/jace-commander/README.md](../apps/jace-commander/README.md) and [ADR 0031](adr/0031-jace-cli-auth-v2.md).
 
-- **Device identity:** a `devices` table (`storage/migrations/023_device_auth.sql`), separate from `connector_records` (which represents operator-provisioned tunnel-proxy infrastructure, a different trust model — see ADR 0016). Device identity is the Ed25519 public key, not any issued token: refreshing an access token never touches the `devices` table, so a stolen refresh token cannot enroll a second trusted device.
-- **Scope:** device tokens are limited to `acs:device` by default. `acs:work:approve` is never granted to a CLI device by this flow.
-- **Fail closed:** malformed, expired, denied, or replayed device codes always return an RFC 8628 error (`authorization_pending`, `slow_down`, `access_denied`, `expired_token`, or `invalid_grant`/`invalid_client`) and never issue a token. `device_code` and `user_code` are stored only as SHA-256 hashes.
-- Device tokens authenticate the CLI to the ACS gateway's own REST surface. They are issued and verified by ACS itself (a narrowly-scoped authorization-server component for this one grant type), independent of whatever external OAuth/OIDC provider is configured for ChatGPT/Claude MCP access via `ACS_OAUTH_ISSUER`/`ACS_OAUTH_AUDIENCE`/`ACS_OAUTH_JWKS_URI` above — the two flows do not need to share an issuer.
-- Secrets (device codes, tokens, private keys) are never written to gateway or CLI logs.
+### Server-side model (ACS device auth v2)
+
+- **Device identity:** a `devices` table (`storage/migrations/023_device_auth.sql`, `079_device_auth_refresh_recovery.sql`, and `080_device_auth_dpop.sql`), separate from `connector_records` (which represents operator-provisioned tunnel-proxy infrastructure, a different trust model — see ADR 0016). Device identity is the Ed25519 public key (`public_key_jkt` thumbprint), not any issued token: refreshing an access token never touches the `devices` table, so a stolen refresh token cannot enroll a second trusted device. Multiple keypairs per principal create distinct device rows (`GET /devices`, `POST /devices/:id/revoke`).
+- **Refresh PoP & recovery envelopes (ADR 0030):** `grant_type=refresh_token` requires `device_id`, `proof_issued_at` (`±300s`), and an Ed25519 `refresh_proof` (`acs-device-refresh-proof-v1`). Rotation runs inside `BEGIN IMMEDIATE` and stores a bounded (`120s` default) AES-256-GCM recovery envelope keyed by `ACS_DEVICE_REFRESH_RECOVERY_KEY` (failing closed `503 recovery_unavailable` if unset); out-of-window or superseded replay revokes the device.
+- **DPoP on protected ACS requests (ADR 0031):** Device access tokens are bound to the device's Ed25519 JWK thumbprint (`cnf.jkt`). Protected ACS routes require `Authorization: DPoP` plus a valid `DPoP` proof (`EdDSA`, `htm`, `htu` validated against configured `ACS_PUBLIC_ORIGIN` / `ACS_PUBLIC_URL` rather than `Host`/`X-Forwarded-*`, `ath`, `iat`, optional `ACS_DPOP_NONCE_REQUIRED=1` / `ACS_DPOP_NONCE_SECRET`, and persistent SQLite `device_dpop_jtis` replay protection) and never downgrade DPoP-bound tokens to `Bearer`.
+- **Scope & domain separation:** Device tokens are limited to `acs:device` by default (`acs:work:approve` and admin scopes are never granted). ACS device tokens are never accepted on `/jc/mcp` or `/mcp`, and `/jc` CLI tokens are never accepted on ACS APIs.
+- **Fail closed:** malformed, expired, denied, revoked, or replayed device codes/tokens always fail closed (`authorization_pending`, `slow_down`, `access_denied`, `expired_token`, `invalid_grant`, or `invalid_token`). `device_code` and `user_code` are stored only as SHA-256 hashes.
+- Secrets (device codes, tokens, private keys, DPoP proofs) are never written to gateway or CLI logs.
+
+## Jace Commander CLI & `/jc` Edge Auth (V2)
+
+The `/jc` MCP edge (`apps/dc-mcp-gateway`) issues OAuth 2.1 + RFC 9449 DPoP tokens for `jace-commander-cli` (Browser PKCE S256 + RFC 9207 `iss` + loopback redirect, or headless RFC 8628 device authorization via `/jc/oauth/device/code`) while preserving `Bearer` compatibility for ChatGPT (DCR), Claude (CIMD), and explicit `JC_MCP_TOKEN` CI overrides. See [ADR 0031](adr/0031-jace-cli-auth-v2.md), [apps/dc-mcp-gateway/README.md](../apps/dc-mcp-gateway/README.md), [apps/jace-commander/README.md](../apps/jace-commander/README.md), and the [JACE CLI AUTH V2 migration runbook](runbooks/jace-cli-auth-v2-migration.md).
 
 ## Per-agent MCP tool allowlist
 
@@ -242,3 +266,42 @@ sent, and adds `error="invalid_token"` when a token was presented but is expired
 shows **Reauthentication required** for a client whose refresh token was rejected, reused, expired or revoked. See
 [ADR 0027](adr/0027-oauth-reauthentication-detection.md) and the "Reauthentication required" section of
 [the client visibility runbook](runbooks/mcp-client-visibility.md). Reporting to ACS is off unless the edge sets `ACS_MCP_AUTH_EVENTS=1`.
+
+## Jace Auth preset (production issuer — frozen)
+
+The operator's central issuer is [jace-auth](https://github.com/jnibarger01/jace-auth),
+frozen at `https://jace-auth.vercel.app` (see that repo's `docs/ISSUER.md`).
+Production preset — audience must stay exactly the string jace-auth mints:
+
+```sh
+ACS_OAUTH_ISSUER=https://jace-auth.vercel.app
+ACS_OAUTH_AUDIENCE=https://jace-auth.vercel.app/resources/agent-control-stack
+ACS_OAUTH_JWKS_URI=https://jace-auth.vercel.app/jwks
+```
+
+If the public gateway MCP URL should be the resource indicator instead, set
+`JACE_RESOURCE_AGENT_CONTROL_STACK=<gateway URL>` on jace-auth AND
+`ACS_OAUTH_AUDIENCE=<gateway URL>` here. The gateway accepts a token whose `aud` or `resource` claim
+matches `ACS_OAUTH_AUDIENCE`, so the two issuer-side values must agree, but the audience is not the
+only configuration the verifier accepts.
+E2E verification against this issuer: `docs/jace-auth-e2e-verification.md`
+(local issuer variant, 2026-08-24); production-issuer negative proofs:
+`docs/jace-auth-production-negative-proofs.md`.
+
+### `/jc` Owner OIDC Consent Callback Registration (Jace Auth)
+
+When enabling Jace Auth owner consent for `/jc/device` on `apps/dc-mcp-gateway`
+(see [runbooks/jace-cli-auth-v2-migration.md](runbooks/jace-cli-auth-v2-migration.md#owner-consent-through-jace-auth-single-owner)),
+provision a **dedicated** OIDC client on `https://jace-auth.vercel.app` (do not reuse
+ACS or Toyota Dashboard clients):
+
+- **Exact redirect URI:** `<PUBLIC_ORIGIN>/jc/device/callback` (HTTPS only; no wildcards)
+- **Grant type / PKCE:** `authorization_code` with PKCE `S256` required
+- **Scopes:** `openid`
+- **Client authentication:** public PKCE client, or confidential with `client_secret_basic` when `JC_OWNER_OIDC_CLIENT_SECRET` is set
+- **Gateway env (all required together, fail-closed on partial config):**
+  `JC_OWNER_OIDC_ISSUER=https://jace-auth.vercel.app`, `JC_OWNER_OIDC_CLIENT_ID`,
+  `JC_OWNER_OIDC_ALLOWED_SUB` (single owner subject), optional `JC_OWNER_OIDC_CLIENT_SECRET`
+
+This client registration is an operator provisioning step on Jace Auth; production
+Jace Auth clients and allowlists are not modified automatically by ACS.

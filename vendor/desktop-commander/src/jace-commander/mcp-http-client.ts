@@ -1,5 +1,5 @@
 /**
- * Minimal Streamable-HTTP MCP client used by the `jace-commander` CLI.
+ * Minimal Streamable-HTTP MCP client used by the `jace-commander` / `jace` CLI.
  *
  * The CLI is deliberately an ordinary MCP client of the managed /jc/mcp lane:
  * every CLI command becomes the same tools/call ChatGPT would make, so it
@@ -7,11 +7,19 @@
  * same Jace Commander handler. There is no CLI-side execution path and no
  * CLI-side authorization decision.
  *
+ * Auth:
+ *   - Preferred: typed `AuthProvider` (DPoP-bound tokens with fresh `DPoP` proof per
+ *     request, `use_dpop_nonce` retry-once, refresh-on-401 for idempotent methods,
+ *     or explicit `JC_MCP_TOKEN` legacy Bearer env override).
+ *   - Legacy compat: `token()` callback (Bearer).
+ *
  * It classifies every outcome into a stable CLI result kind (and exit code),
  * accepting both refusal transports:
  *   - today's edge: HTTP 503 { error: managed_authorization_*, code, ... }
  *   - PR #204's edge: HTTP 200 JSON-RPC error -32001/-32002/-32003 with data
  */
+import type { AuthProvider } from './mcp-auth.js';
+import { redactSecrets } from './secret-redaction.js';
 
 export const JC_EXIT = Object.freeze({
   ok: 0,
@@ -68,17 +76,7 @@ export class McpTransportError extends Error {
  */
 const IDEMPOTENT_METHODS = new Set(['initialize', 'notifications/initialized', 'tools/list']);
 
-/**
- * Connect-phase error codes: the TCP connection (or DNS lookup) failed, so no
- * HTTP request bytes were written. Timeouts (including connect timeouts),
- * aborts, resets and "socket closed" are NOT here: they are ambiguous.
- */
 const PRE_SEND_ERROR_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN']);
-/**
- * EHOSTUNREACH/ENETUNREACH can also arrive via ICMP on an already-established
- * keep-alive socket AFTER the request was written, so they count as never-sent
- * only when raised by the connect/DNS syscall itself.
- */
 const PRE_SEND_IF_CONNECT_CODES = new Set(['EHOSTUNREACH', 'ENETUNREACH']);
 const PRE_SEND_SYSCALLS = new Set(['connect', 'getaddrinfo']);
 
@@ -104,7 +102,6 @@ export function isProvablyUndelivered(error: unknown): boolean {
 
 const PROTOCOL_VERSION = '2025-06-18';
 
-// Refusal codes that mean "ACS decided no" rather than "ACS could not decide".
 const INVALID_ARGUMENT_CODES = new Set(['jace_commander_argument_invalid', 'invalid_arguments']);
 const UNAVAILABLE_CODES = new Set([
   'managed_fail_closed', 'capability_issuance_unconfigured', 'capability_signing_key_invalid',
@@ -141,8 +138,6 @@ export function classifyEdgeRefusalBody(body: Record<string, unknown>): JcCallOu
   if (body.error === 'managed_authorization_required') return outcome('managed_authorization_required', { ...common, retryable: true });
   if (INVALID_ARGUMENT_CODES.has(code)) return outcome('invalid_arguments', common);
   if (UNAVAILABLE_CODES.has(code) || /^acs_http_/u.test(code)) return outcome('managed_authorization_unavailable', { ...common, retryable: true });
-  // Remaining codes are ACS decisions: policy denial, unknown tool, path
-  // containment, lease/issuance rejection.
   return outcome('managed_authorization_denied', { ...common, retryable: false });
 }
 
@@ -206,7 +201,8 @@ function parseSse(text: string): Record<string, unknown> | undefined {
 
 export interface McpHttpClientOptions {
   url: string;
-  token: () => Promise<string | undefined>;
+  auth?: AuthProvider;
+  token?: () => Promise<string | undefined>;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
 }
@@ -223,55 +219,105 @@ export class McpHttpClient {
   private nextId = 1;
   private initialized = false;
   private readonly fetchImpl: typeof fetch;
+  private readonly auth: AuthProvider;
 
   constructor(private readonly options: McpHttpClientOptions) {
     this.fetchImpl = options.fetchImpl ?? fetch;
+    if (options.auth) {
+      this.auth = options.auth;
+    } else if (options.token) {
+      const getToken = options.token;
+      this.auth = {
+        async getAuthHeaders() {
+          const tok = await getToken();
+          if (!tok) {
+            return {
+              ok: false,
+              kind: 'not_connected',
+              code: 'not_connected',
+              message: 'no /jc/mcp credential: run `jace auth login` (or set JC_MCP_TOKEN)',
+            };
+          }
+          return { ok: true, mode: 'bearer', headers: { authorization: `Bearer ${tok}` } };
+        },
+      };
+    } else {
+      throw new Error('McpHttpClient requires auth or token option');
+    }
   }
 
-  private async post(message: Record<string, unknown>): Promise<PostResult> {
-    const token = await this.options.token();
-    if (!token) {
-      throw new McpTransportError('not connected', outcome('not_connected', {
-        code: 'not_connected',
-        message: 'no /jc/mcp credential: run `jace-commander connect` (or set JC_MCP_TOKEN)',
-      }));
-    }
-    const sentSession = this.sessionId !== undefined;
-    let response: Response;
-    try {
-      response = await this.fetchImpl(this.options.url, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          accept: 'application/json, text/event-stream',
-          authorization: `Bearer ${token}`,
-          'mcp-protocol-version': PROTOCOL_VERSION,
-          ...(this.sessionId ? { 'mcp-session-id': this.sessionId } : {}),
-        },
-        body: JSON.stringify(message),
-        signal: AbortSignal.timeout(this.options.timeoutMs ?? 120_000),
-      });
-    } catch (error) {
-      throw new McpTransportError('edge unreachable', outcome('managed_authorization_unavailable', {
-        code: 'edge_unreachable',
-        message: `cannot reach ${this.options.url}: ${(error as Error).message}`,
-        retryable: true,
-      }), isProvablyUndelivered(error));
-    }
-    const session = response.headers.get('mcp-session-id');
-    if (session) this.sessionId = session;
-    const text = await response.text();
-    let body: Record<string, unknown> | undefined;
-    if (text.trim().startsWith('{')) {
-      try {
-        body = JSON.parse(text) as Record<string, unknown>;
-      } catch {
-        body = undefined;
+  private async post(message: Record<string, unknown>, idempotent: boolean): Promise<PostResult> {
+    let nonce: string | undefined;
+    let authRetryCount = 0;
+
+    for (;;) {
+      const auth = await this.auth.getAuthHeaders({ method: 'POST', url: this.options.url, nonce });
+      if (!auth.ok) {
+        const kind = auth.kind === 'unavailable' ? 'managed_authorization_unavailable' : 'not_connected';
+        throw new McpTransportError(auth.code, outcome(kind, {
+          code: auth.code,
+          message: redactSecrets(auth.message),
+          ...(kind === 'managed_authorization_unavailable' ? { retryable: true } : {}),
+        }));
       }
-    } else if (text.includes('data:')) {
-      body = parseSse(text);
+
+      const sentSession = this.sessionId !== undefined;
+      let response: Response;
+      try {
+        response = await this.fetchImpl(this.options.url, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'application/json, text/event-stream',
+            ...auth.headers,
+            'mcp-protocol-version': PROTOCOL_VERSION,
+            ...(this.sessionId ? { 'mcp-session-id': this.sessionId } : {}),
+          },
+          body: JSON.stringify(message),
+          signal: AbortSignal.timeout(this.options.timeoutMs ?? 120_000),
+        });
+      } catch (error) {
+        throw new McpTransportError('edge unreachable', outcome('managed_authorization_unavailable', {
+          code: 'edge_unreachable',
+          message: redactSecrets(`cannot reach ${this.options.url}: ${(error as Error).message}`),
+          retryable: true,
+        }), isProvablyUndelivered(error));
+      }
+
+      if (response.status === 401 && authRetryCount === 0 && this.auth.handleAuthChallenge) {
+        const challenge = await this.auth.handleAuthChallenge({
+          status: response.status,
+          headers: response.headers,
+          method: 'POST',
+          url: this.options.url,
+          sentAuthMode: auth.mode,
+          idempotent,
+        });
+        // Gateway 401 DPoP-Nonce challenges reject before upstream MCP dispatch, so retry once.
+        // For expired-token 401 refreshes (no nonce), retry ONLY idempotent methods.
+        if (challenge.retry && (challenge.nonce !== undefined || idempotent)) {
+          authRetryCount += 1;
+          nonce = challenge.nonce;
+          await response.text().catch(() => undefined);
+          continue;
+        }
+      }
+
+      const session = response.headers.get('mcp-session-id');
+      if (session) this.sessionId = session;
+      const text = await response.text();
+      let body: Record<string, unknown> | undefined;
+      if (text.trim().startsWith('{')) {
+        try {
+          body = JSON.parse(text) as Record<string, unknown>;
+        } catch {
+          body = undefined;
+        }
+      } else if (text.includes('data:')) {
+        body = parseSse(text);
+      }
+      return { status: response.status, body, sentSession };
     }
-    return { status: response.status, body, sentSession };
   }
 
   /**
@@ -292,18 +338,15 @@ export class McpHttpClient {
         await new Promise((resolve) => setTimeout(resolve, Math.min(250 * 2 ** (attempt - 1), 1000)));
       }
       try {
-        const result = await this.post(message);
-        // A 5xx is a transient server-side failure; only idempotent methods may be resent.
+        const result = await this.post(message, idempotent);
         if (idempotent && result.status >= 500 && attempt < attempts - 1) continue;
         return result;
       } catch (error) {
         if (!(error instanceof McpTransportError) || error.outcome.retryable !== true) throw error;
         if (!idempotent && !error.undelivered) {
-          // Sent (or possibly sent) and then failed: the server may have run it.
-          // Never report "nothing ran" or retryable here.
           throw new McpTransportError('execution unknown', outcome('execution_unknown', {
             code: 'execution_unknown',
-            message: `${String(message.method)} may have executed: the request was sent but no response arrived (${error.outcome.message ?? 'transport error'}). Verify its effects before re-running it.`,
+            message: redactSecrets(`${String(message.method)} may have executed: the request was sent but no response arrived (${error.outcome.message ?? 'transport error'}). Verify its effects before re-running it.`),
             retryable: false,
           }));
         }
@@ -326,25 +369,22 @@ export class McpHttpClient {
     if (status === 401) {
       return new McpTransportError('unauthorized', outcome('not_connected', {
         code: 'unauthorized',
-        message: 'the /jc/mcp edge rejected the credential: run `jace-commander connect` again',
+        message: 'the /jc/mcp edge rejected the credential: run `jace auth login` again',
       }));
     }
     if (body && typeof body.error === 'string' && body.error.startsWith('managed_authorization_')) {
       return new McpTransportError('refused', classifyEdgeRefusalBody(body));
     }
-    // A non-managed 5xx on a non-idempotent call: the upstream may have run it
-    // before failing (502/503/504 from a proxy or the server itself). Only an
-    // edge refusal body (managed_authorization_*, handled above) proves it did not.
     if (status >= 500 && method !== undefined && !IDEMPOTENT_METHODS.has(method)) {
       return new McpTransportError('execution unknown', outcome('execution_unknown', {
         code: 'execution_unknown',
-        message: `${method} may have executed: the edge answered HTTP ${status}${body ? ` ${JSON.stringify(body).slice(0, 300)}` : ''}. Verify its effects before re-running it.`,
+        message: redactSecrets(`${method} may have executed: the edge answered HTTP ${status}${body ? ` ${JSON.stringify(body).slice(0, 300)}` : ''}. Verify its effects before re-running it.`),
         retryable: false,
       }));
     }
     return new McpTransportError(`HTTP ${status}`, outcome('managed_authorization_unavailable', {
       code: `edge_http_${status}`,
-      message: body ? JSON.stringify(body).slice(0, 300) : `edge answered HTTP ${status}`,
+      message: redactSecrets(body ? JSON.stringify(body).slice(0, 300) : `edge answered HTTP ${status}`),
       retryable: status >= 500,
     }));
   }
@@ -369,7 +409,9 @@ export class McpHttpClient {
 
   async listTools(): Promise<Array<Record<string, unknown>>> {
     await this.initialize();
-    let { status, body, sentSession } = await this.postWithRetry({ jsonrpc: '2.0', id: this.nextId++, method: 'tools/list', params: {} });
+    const initial = await this.postWithRetry({ jsonrpc: '2.0', id: this.nextId++, method: 'tools/list', params: {} });
+    let { status, body } = initial;
+    const { sentSession } = initial;
     if (status === 404 && sentSession) {
       await this.reinitialize();
       ({ status, body } = await this.postWithRetry({ jsonrpc: '2.0', id: this.nextId++, method: 'tools/list', params: {} }));
@@ -383,17 +425,14 @@ export class McpHttpClient {
   async callTool(name: string, args: Record<string, unknown>): Promise<JcCallOutcome> {
     try {
       await this.initialize();
-      let { status, body, sentSession } = await this.postWithRetry({
+      const initial = await this.postWithRetry({
         jsonrpc: '2.0',
         id: this.nextId++,
         method: 'tools/call',
         params: { name, arguments: args },
       });
-      // MCP Streamable HTTP session contract: a 404 for a request that carried
-      // an mcp-session-id means the session is terminated/unknown and was
-      // rejected before dispatch; start a new session and resend ONCE. A 404
-      // without a session id is not a session signal and is never resent. The
-      // resend has no 404 branch and never retries on 5xx (worst case 2 sends).
+      let { status, body } = initial;
+      const { sentSession } = initial;
       if (status === 404 && sentSession) {
         await this.reinitialize();
         ({ status, body } = await this.postWithRetry({
@@ -403,9 +442,22 @@ export class McpHttpClient {
           params: { name, arguments: args },
         }));
       }
+      const unusable = (detail: string): JcCallOutcome => outcome('execution_unknown', {
+        code: 'execution_unknown',
+        message: `tools/call may have executed: the edge answered HTTP 200 with ${detail}. Verify its effects before re-running it.`,
+        retryable: false,
+      });
+      if (status === 200 && !body) return unusable('an unparseable body');
       if (status !== 200 || !body) throw this.refusal(status, body, 'tools/call');
-      if ('error' in body) return classifyJsonRpcError(body.error as Record<string, unknown>);
-      return classifyToolResult((body.result ?? {}) as Record<string, unknown>);
+      if ('error' in body) {
+        const rpcError = body.error;
+        if (typeof rpcError === 'string' && rpcError.startsWith('managed_authorization_')) throw this.refusal(status, body, 'tools/call');
+        if (!rpcError || typeof rpcError !== 'object') return unusable('a malformed JSON-RPC error');
+        return classifyJsonRpcError(rpcError as Record<string, unknown>);
+      }
+      const result = body.result;
+      if (!result || typeof result !== 'object' || Array.isArray(result)) return unusable('no tool result');
+      return classifyToolResult(result as Record<string, unknown>);
     } catch (error) {
       if (error instanceof McpTransportError) return error.outcome;
       throw error;
@@ -414,10 +466,13 @@ export class McpHttpClient {
 
   async close(): Promise<void> {
     if (!this.sessionId) return;
-    const token = await this.options.token();
+    const auth = await this.auth.getAuthHeaders({ method: 'DELETE', url: this.options.url }).catch(() => undefined);
     await this.fetchImpl(this.options.url, {
       method: 'DELETE',
-      headers: { 'mcp-session-id': this.sessionId, ...(token ? { authorization: `Bearer ${token}` } : {}) },
+      headers: {
+        'mcp-session-id': this.sessionId,
+        ...(auth && auth.ok ? auth.headers : {}),
+      },
     }).catch(() => undefined);
     this.sessionId = undefined;
   }

@@ -26,6 +26,7 @@ services:
       ACS_OAUTH_ISSUER: ${ACS_OAUTH_ISSUER:?set ACS_OAUTH_ISSUER}
       ACS_OAUTH_AUDIENCE: ${ACS_OAUTH_AUDIENCE:?set ACS_OAUTH_AUDIENCE}
       ACS_OAUTH_JWKS_URI: ${ACS_OAUTH_JWKS_URI:?set ACS_OAUTH_JWKS_URI}
+      ACS_MCP_RESOURCE_METADATA_URL: ${ACS_MCP_RESOURCE_METADATA_URL:?set ACS_MCP_RESOURCE_METADATA_URL to https://<gateway>/.well-known/oauth-protected-resource/mcp}
     volumes:
       - acs-data:/data
     security_opt:
