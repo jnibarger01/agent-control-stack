@@ -11,6 +11,10 @@
  *   releaseRoot   the installed release directory the process runs from
  *   releaseCommit the release commit recorded in RELEASE.json
  *
+ * Only a verified installed release may acquire the lease (verifyJcReleaseIdentity).
+ * A development checkout is refused before it can occupy the slot, because ACS
+ * would never recognize it and it would block the recognized executor.
+ *
  * Ownership is identity-bound, never PID-bound. A holder is alive only when its
  * PID is alive AND its boot id and process start ticks still match the record.
  * Acquisition is exclusive and atomic: the record is fully written to a temp
@@ -52,6 +56,7 @@ export interface ExecutorLeaseRecord {
 }
 
 export type AcquireFailure =
+  | 'release-unverified'
   | 'process-identity-unavailable'
   | 'held-by-live-process'
   | 'stale-within-grace'
@@ -80,23 +85,108 @@ export type RenewResult = { ok: true; record: ExecutorLeaseRecord } | { ok: fals
 export type ReleaseResult = { ok: true } | { ok: false; reason: 'not-held' | 'not-owner' };
 
 /**
- * The runtime identity a managed lease is bound to. The root is the entrypoint
- * directory's parent, taken from the path as spelled (not realpath), because ACS
- * matches the holder by its command line, which names the `current` symlink.
- * The commit comes from RELEASE.json; a runtime outside an installed release
- * records `unreleased`, which ACS never recognizes as its managed executor.
+ * A release commit is an immutable git object id: 7 to 40 lowercase hex digits
+ * (install-user-release.sh writes `git rev-parse --short=12`). Placeholders the
+ * installer or older code can emit, such as `unknown` or `unreleased`, never match.
  */
-export function resolveJcReleaseIdentity(entrypoint: string): { releaseRoot: string; releaseCommit: string } {
-  const releaseRoot = path.dirname(path.dirname(path.resolve(entrypoint)));
-  try {
-    const release = JSON.parse(fs.readFileSync(path.join(releaseRoot, 'RELEASE.json'), 'utf8')) as { commit?: unknown };
-    if (typeof release.commit === 'string' && /^[A-Za-z0-9._-]{1,64}$/u.test(release.commit)) {
-      return { releaseRoot, releaseCommit: release.commit };
-    }
-  } catch {
-    // Not an installed release.
+export const JC_RELEASE_COMMIT_PATTERN = /^[0-9a-f]{7,40}$/u;
+
+export type JcReleaseRefusal =
+  | 'not-an-installed-release'
+  | 'vendored-runtime'
+  | 'release-root-unresolvable'
+  | 'release-root-escapes-releases-dir'
+  | 'entrypoint-escapes-release'
+  | 'release-metadata-missing'
+  | 'release-metadata-invalid'
+  | 'release-commit-invalid';
+
+export type JcReleaseVerification =
+  | { ok: true; releaseRoot: string; releaseCommit: string }
+  | { ok: false; reason: JcReleaseRefusal; detail: string };
+
+const refuse = (reason: JcReleaseRefusal, detail: string): JcReleaseVerification => ({ ok: false, reason, detail });
+
+/**
+ * Proves the running entrypoint is an installed Jace Commander release, or says
+ * exactly why not. Only a verified release may hold the managed executor lease.
+ *
+ * An installed release is `<prefix>/releases/<id>/dist/cli.js`, reached either
+ * directly or through `<prefix>/current`, where `<id>` is a real directory inside
+ * the real `<prefix>/releases`, its `dist/cli.js` lives inside it, and its
+ * RELEASE.json names a git commit. A development checkout (`apps/jace-commander/dist`),
+ * a vendored copy under node_modules, a `current` link pointed at a checkout,
+ * or a release whose commit is missing or a placeholder is refused. Every
+ * failure to read or prove any of this refuses; nothing falls back to a default.
+ *
+ * The returned root is spelled as the process spells it (not realpath), because
+ * ACS matches the holder by its command line, which names the `current` link.
+ */
+export function verifyJcReleaseIdentity(entrypoint: string): JcReleaseVerification {
+  if (typeof entrypoint !== 'string' || entrypoint.length === 0) {
+    return refuse('not-an-installed-release', 'no entrypoint path');
   }
-  return { releaseRoot, releaseCommit: 'unreleased' };
+  const spelled = path.resolve(entrypoint);
+  if (spelled.split(path.sep).includes('node_modules')) {
+    return refuse('vendored-runtime', `${spelled} is under node_modules`);
+  }
+  if (path.basename(spelled) !== 'cli.js' || path.basename(path.dirname(spelled)) !== 'dist') {
+    return refuse('not-an-installed-release', `${spelled} is not <release>/dist/cli.js`);
+  }
+  const releaseRoot = path.dirname(path.dirname(spelled));
+  const slotParent = path.dirname(releaseRoot);
+  let prefix: string;
+  if (path.basename(releaseRoot) === 'current') {
+    prefix = slotParent;
+  } else if (path.basename(slotParent) === 'releases') {
+    prefix = path.dirname(slotParent);
+  } else {
+    return refuse('not-an-installed-release', `${releaseRoot} is neither <prefix>/current nor <prefix>/releases/<id>`);
+  }
+
+  let realRoot: string;
+  let realReleasesDir: string;
+  let realEntrypoint: string;
+  try {
+    realRoot = fs.realpathSync(releaseRoot);
+    realReleasesDir = fs.realpathSync(path.join(prefix, 'releases'));
+    realEntrypoint = fs.realpathSync(spelled);
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : 'error';
+    return refuse('release-root-unresolvable', `${releaseRoot} could not be resolved (${code})`);
+  }
+  // `current` (or the root itself) must land on a real release directory, never a checkout.
+  if (path.dirname(realRoot) !== realReleasesDir || !fs.statSync(realRoot).isDirectory()) {
+    return refuse('release-root-escapes-releases-dir', `${releaseRoot} resolves to ${realRoot}, outside ${realReleasesDir}`);
+  }
+  // A release whose dist/cli.js links back into a checkout is not that release.
+  if (realEntrypoint !== path.join(realRoot, 'dist', 'cli.js')) {
+    return refuse('entrypoint-escapes-release', `${spelled} resolves to ${realEntrypoint}, outside ${realRoot}`);
+  }
+
+  const metadataPath = path.join(realRoot, 'RELEASE.json');
+  let raw: string;
+  try {
+    const stat = fs.lstatSync(metadataPath);
+    if (!stat.isFile()) return refuse('release-metadata-invalid', `${metadataPath} is not a regular file`);
+    raw = fs.readFileSync(metadataPath, 'utf8');
+  } catch {
+    return refuse('release-metadata-missing', `${metadataPath} is missing or unreadable`);
+  }
+  let commit: unknown;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return refuse('release-metadata-invalid', `${metadataPath} is not a JSON object`);
+    }
+    commit = (parsed as { commit?: unknown }).commit;
+  } catch {
+    return refuse('release-metadata-invalid', `${metadataPath} is not valid JSON`);
+  }
+  if (typeof commit !== 'string' || !JC_RELEASE_COMMIT_PATTERN.test(commit)) {
+    return refuse('release-commit-invalid', `${metadataPath} commit ${JSON.stringify(commit)} is not a git commit id`);
+  }
+  return { ok: true, releaseRoot, releaseCommit: commit };
 }
 
 /** Only a managed executor claims the ACS singleton. Standalone and local never do. */
@@ -244,6 +334,16 @@ function takeOverStale(lockPath: string, stale: ExecutorLeaseRecord, options: Ac
 
 /** Acquires the native JC executor lease, or reports exactly why it cannot. */
 export function acquireJcExecutorLease(options: AcquireOptions): AcquireResult {
+  // Defense in depth: whatever the caller verified, never write a lease that names
+  // no release or a placeholder commit. Callers prove the release with verifyJcReleaseIdentity.
+  if (
+    typeof options.releaseRoot !== 'string' ||
+    options.releaseRoot.length === 0 ||
+    typeof options.releaseCommit !== 'string' ||
+    !JC_RELEASE_COMMIT_PATTERN.test(options.releaseCommit)
+  ) {
+    return { ok: false, reason: 'release-unverified' };
+  }
   const identity = options.readIdentity(options.pid);
   // Without proof of this process's identity, a lease could only be spoofed. Refuse.
   if (!identity || !BOOT_ID_PATTERN.test(identity.bootId) || !TICKS_PATTERN.test(identity.processStartTicks)) {

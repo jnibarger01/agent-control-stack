@@ -19,7 +19,7 @@ import {
   holdJcExecutorLease,
   isProcessAlive,
   readLinuxProcessIdentity,
-  resolveJcReleaseIdentity,
+  verifyJcReleaseIdentity,
   type HeldExecutorLease,
 } from './executor-lease.js';
 
@@ -316,9 +316,16 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
         // The managed executor claims the ACS singleton slot before serving any tool.
         // A duplicate, unreadable or unidentifiable lease refuses at once; a transient
         // race or a dead owner still inside its grace window is retried for a bounded time.
-        // Every managed runtime claims the slot, even outside an installed release: such a
-        // runtime records `unreleased`, which ACS never recognizes, so it gains no authority.
-        const identity = resolveJcReleaseIdentity(process.argv[1] ?? '');
+        // Only a verified installed release may claim the slot. A development checkout,
+        // a vendored copy, or a release without a git commit is refused here, before it
+        // can occupy the slot that ACS reserves for the recognized executor. There is no
+        // fallback identity: an unverifiable release refuses to serve.
+        const verified = verifyJcReleaseIdentity(process.argv[1] ?? '');
+        if (!verified.ok) {
+          out.stderr(`jace-commander: managed mode requires a verified installed release (${verified.reason}: ${verified.detail}); refusing to claim the executor lease`);
+          return JC_EXIT.authorityUnavailable;
+        }
+        const identity = { releaseRoot: verified.releaseRoot, releaseCommit: verified.releaseCommit };
         const deadline = Date.now() + EXECUTOR_LEASE_ACQUIRE_WINDOW_MS;
         let lease: HeldExecutorLease | undefined;
         for (;;) {

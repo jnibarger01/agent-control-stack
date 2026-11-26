@@ -60,9 +60,11 @@ The canonical JSON Schema tool registry is also exported from
 `getToolRegistry`, `toolRegistryJson`) so tool schemas and metadata stay
 sourced from the generated manifest.
 
-Set `JC_E2E_RUNTIME_DIR=<release>/current` to run the chain e2e against an
-installed release (pinned with `JC_REQUIRE_INSTALLED_RELEASE=1`) instead of the
-source tree. Linux, Node >= 24.16,
+The chain e2e needs `JC_E2E_RUNTIME_DIR=<prefix>/current` pointing at a release
+installed with `PREFIX=<prefix> deploy/install-user-release.sh` (pinned with
+`JC_REQUIRE_INSTALLED_RELEASE=1`): managed JC refuses to claim the executor
+lease from the source tree. Run it as a non-root user, since the pin requires
+the release to be read-only. Linux, Node >= 24.16,
 `/usr/bin/python3` (PTY allocation) and bubblewrap (`/usr/bin/bwrap`) are required.
 
 ## Authorization

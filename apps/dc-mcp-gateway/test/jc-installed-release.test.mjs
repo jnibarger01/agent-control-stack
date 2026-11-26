@@ -27,7 +27,7 @@ const base = fs.mkdtempSync(path.join(os.homedir(), '.cache', 'jc-pin-test-'));
 
 function stageRelease(name, { readOnly = true, releaseJson = true } = {}) {
   const dir = path.join(base, name);
-  fs.mkdirSync(dir);
+  fs.mkdirSync(dir, { recursive: true });
   fs.cpSync(path.join(app, 'dist'), path.join(dir, 'dist'), { recursive: true });
   fs.copyFileSync(path.join(app, 'package.json'), path.join(dir, 'package.json'));
   fs.symlinkSync(path.join(repo, 'node_modules'), path.join(dir, 'node_modules'));
@@ -35,7 +35,9 @@ function stageRelease(name, { readOnly = true, releaseJson = true } = {}) {
   if (readOnly) spawnSync('chmod', ['-R', 'a-w', dir]);
   return dir;
 }
-const release = stageRelease('releases/1.0.0-0c0ffee5ab1e'.replace('/', '-'));
+// The installer's real layout: <prefix>/releases/<version>-<commit> behind <prefix>/current.
+// A managed JC child only claims the executor lease from inside <prefix>/releases.
+const release = stageRelease('releases/1.0.0-0c0ffee5ab1e');
 const current = path.join(base, 'current');
 fs.symlinkSync(release, current);
 const writable = stageRelease('writable', { readOnly: false });

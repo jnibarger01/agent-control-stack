@@ -100,6 +100,16 @@ jobs:
       - name: DC tool-contract artifacts are generated from the manifest
         run: npm run dc-contracts:check
 
+      # Managed Jace Commander only claims the executor lease from a verified
+      # installed release, so the chain runs against one built by the real
+      # installer (read-only, pinned by JC_REQUIRE_INSTALLED_RELEASE in the
+      # harness) instead of the source tree.
+      - name: Install a pinned Jace Commander release
+        run: |
+          PREFIX="$RUNNER_TEMP/jace-commander" NODE="$(command -v node)" \
+            apps/jace-commander/deploy/install-user-release.sh
+          echo "JC_E2E_RUNTIME_DIR=$RUNNER_TEMP/jace-commander/current" >> "$GITHUB_ENV"
+
       - name: Execution-chain E2E
         env:
           ACS_DC_E2E: "1"

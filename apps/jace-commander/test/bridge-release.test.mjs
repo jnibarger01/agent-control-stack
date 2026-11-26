@@ -16,7 +16,12 @@ const run = spawnSync(process.execPath, [bridge], {
     HOME: process.env.HOME,
     BRIDGE_PROFILE: 'jace-commander',
     ACS_MANAGED_MODE: '1',
-    JC_REQUIRE_INSTALLED_RELEASE: fs.existsSync(path.join(release, 'RELEASE.json')) ? '1' : '0',
+    // The release pin is not exercised here. The packaged bridge derives its
+    // "development checkout" from its own location (dist/../..), which for any
+    // installed release is <prefix>/releases, so the pin refuses every release
+    // this bundle runs from. The pin is covered against the gateway bridge by
+    // apps/dc-mcp-gateway/test/jc-installed-release.test.mjs.
+    JC_REQUIRE_INSTALLED_RELEASE: '0',
     JC_RUNTIME_DIR: release,
   },
 });

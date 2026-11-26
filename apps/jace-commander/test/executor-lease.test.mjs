@@ -20,7 +20,7 @@ import {
   executorLeaseRequired,
   releaseJcExecutorLease,
   renewJcExecutorLease,
-  resolveJcReleaseIdentity,
+  verifyJcReleaseIdentity,
 } from '../dist/executor-lease.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -194,20 +194,104 @@ test('release removes only a lease this process still owns', () => {
   assert.equal(readLease(dir).instanceId, 'other-owner');
 });
 
-test('release identity comes from the spelled entrypoint and its RELEASE.json', () => {
-  const root = tmpDir();
-  fs.mkdirSync(path.join(root, 'dist'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'dist', 'cli.js'), '');
-  fs.writeFileSync(path.join(root, 'RELEASE.json'), JSON.stringify({ version: '1.0.0', commit: '607128e5fee9' }));
-  assert.deepEqual(resolveJcReleaseIdentity(path.join(root, 'dist', 'cli.js')), { releaseRoot: root, releaseCommit: '607128e5fee9' });
+/** Stages <base>/releases/1.0.0-<commit>/{dist/cli.js,RELEASE.json} plus <base>/current, as install-user-release.sh does. */
+function stageRelease({ commit = '607128e5fee9', metadata } = {}) {
+  const base = fs.realpathSync(tmpDir());
+  const rel = path.join(base, 'releases', `1.0.0-${commit}`);
+  fs.mkdirSync(path.join(rel, 'dist'), { recursive: true });
+  fs.writeFileSync(path.join(rel, 'dist', 'cli.js'), '');
+  if (metadata !== null) {
+    fs.writeFileSync(path.join(rel, 'RELEASE.json'), metadata ?? JSON.stringify({ version: '1.0.0', commit }));
+  }
+  fs.symlinkSync(rel, path.join(base, 'current'));
+  return { base, rel, current: path.join(base, 'current') };
+}
 
-  const bare = tmpDir();
-  fs.mkdirSync(path.join(bare, 'dist'), { recursive: true });
-  assert.deepEqual(
-    resolveJcReleaseIdentity(path.join(bare, 'dist', 'cli.js')),
-    { releaseRoot: bare, releaseCommit: 'unreleased' },
-    'a runtime outside an installed release is recorded as unreleased, never as a release',
-  );
+/** A development checkout: apps/jace-commander/dist/cli.js, even with a plausible RELEASE.json. */
+function stageCheckout(base = fs.realpathSync(tmpDir())) {
+  const app = path.join(base, 'checkout', 'apps', 'jace-commander');
+  fs.mkdirSync(path.join(app, 'dist'), { recursive: true });
+  fs.writeFileSync(path.join(app, 'dist', 'cli.js'), '');
+  fs.writeFileSync(path.join(app, 'RELEASE.json'), JSON.stringify({ version: '1.0.0', commit: '607128e5fee9' }));
+  return app;
+}
+
+const refusedWith = (entrypoint, reason, message) => {
+  const result = verifyJcReleaseIdentity(entrypoint);
+  assert.equal(result.ok, false, `${message}: ${JSON.stringify(result)}`);
+  assert.equal(result.reason, reason, `${message}: ${JSON.stringify(result)}`);
+};
+
+test('an installed release is verified through current and through releases/<id>, keeping the spelled root', () => {
+  const { rel, current } = stageRelease();
+  assert.deepEqual(verifyJcReleaseIdentity(path.join(current, 'dist', 'cli.js')), { ok: true, releaseRoot: current, releaseCommit: '607128e5fee9' });
+  assert.deepEqual(verifyJcReleaseIdentity(path.join(rel, 'dist', 'cli.js')), { ok: true, releaseRoot: rel, releaseCommit: '607128e5fee9' });
+  const full = stageRelease({ commit: '607128e5fee9607128e5fee9607128e5fee9abcd' });
+  assert.equal(verifyJcReleaseIdentity(path.join(full.current, 'dist', 'cli.js')).ok, true, 'a full 40-hex commit is accepted');
+});
+
+test('REGRESSION (PR #450 Codex P2): a development checkout is refused, even with a valid-looking RELEASE.json', () => {
+  refusedWith(path.join(stageCheckout(), 'dist', 'cli.js'), 'not-an-installed-release', 'dev checkout');
+});
+
+test('a current link pointed at a development checkout is refused', () => {
+  const { base } = stageRelease();
+  const app = stageCheckout(base);
+  fs.rmSync(path.join(base, 'current'));
+  fs.symlinkSync(app, path.join(base, 'current'));
+  refusedWith(path.join(base, 'current', 'dist', 'cli.js'), 'release-root-escapes-releases-dir', 'current -> checkout');
+});
+
+test('a release whose dist/cli.js links back into a checkout is refused', () => {
+  const { base, rel, current } = stageRelease();
+  const app = stageCheckout(base);
+  fs.rmSync(path.join(rel, 'dist'), { recursive: true });
+  fs.symlinkSync(path.join(app, 'dist'), path.join(rel, 'dist'));
+  refusedWith(path.join(current, 'dist', 'cli.js'), 'entrypoint-escapes-release', 'dist -> checkout');
+});
+
+test('a vendored copy under node_modules is refused', () => {
+  const base = fs.realpathSync(tmpDir());
+  const vendored = path.join(base, 'node_modules', 'jc', 'releases', '1.0.0-607128e5fee9');
+  fs.mkdirSync(path.join(vendored, 'dist'), { recursive: true });
+  fs.writeFileSync(path.join(vendored, 'dist', 'cli.js'), '');
+  fs.writeFileSync(path.join(vendored, 'RELEASE.json'), JSON.stringify({ commit: '607128e5fee9' }));
+  refusedWith(path.join(vendored, 'dist', 'cli.js'), 'vendored-runtime', 'vendored');
+});
+
+test('missing, unreadable or non-commit release metadata refuses and never falls back', () => {
+  refusedWith(path.join(stageRelease({ metadata: null }).current, 'dist', 'cli.js'), 'release-metadata-missing', 'no RELEASE.json');
+  refusedWith(path.join(stageRelease({ metadata: '{not json' }).current, 'dist', 'cli.js'), 'release-metadata-invalid', 'invalid JSON');
+  refusedWith(path.join(stageRelease({ metadata: '["607128e5fee9"]' }).current, 'dist', 'cli.js'), 'release-metadata-invalid', 'array');
+  for (const commit of ['unknown', 'unreleased', 'UNRELEASED', '607128E5FEE9', 'abc123', 'main', 'v1.0.0', '607128e5fee9 ', 'a'.repeat(41)]) {
+    refusedWith(path.join(stageRelease({ metadata: JSON.stringify({ commit }) }).current, 'dist', 'cli.js'), 'release-commit-invalid', `commit ${JSON.stringify(commit)}`);
+  }
+  refusedWith(path.join(stageRelease({ metadata: JSON.stringify({ commit: 607128 }) }).current, 'dist', 'cli.js'), 'release-commit-invalid', 'numeric commit');
+  refusedWith(path.join(stageRelease({ metadata: JSON.stringify({ version: '1.0.0' }) }).current, 'dist', 'cli.js'), 'release-commit-invalid', 'no commit');
+
+  const linked = stageRelease({ metadata: null });
+  const elsewhere = path.join(linked.base, 'elsewhere.json');
+  fs.writeFileSync(elsewhere, JSON.stringify({ commit: '607128e5fee9' }));
+  fs.symlinkSync(elsewhere, path.join(linked.rel, 'RELEASE.json'));
+  refusedWith(path.join(linked.current, 'dist', 'cli.js'), 'release-metadata-invalid', 'RELEASE.json symlink');
+});
+
+test('an entrypoint that is not <release>/dist/cli.js, or does not exist, refuses', () => {
+  refusedWith('', 'not-an-installed-release', 'empty');
+  refusedWith('/home/jacen/.local/lib/jace-commander/current/bin/jc', 'not-an-installed-release', 'wrong shape');
+  refusedWith(path.join(fs.realpathSync(tmpDir()), 'current', 'dist', 'cli.js'), 'release-root-unresolvable', 'dangling current');
+});
+
+test('acquire refuses to write a lease for an unverified release identity', () => {
+  for (const releaseCommit of ['unreleased', 'unknown', '', 'NOTHEX12']) {
+    const dir = tmpDir();
+    const result = acquireJcExecutorLease(baseOptions(dir, fakeWorld(), { releaseCommit }));
+    assert.deepEqual(result, { ok: false, reason: 'release-unverified' }, releaseCommit);
+    assert.equal(fs.existsSync(path.join(dir, 'executor.lock')), false, `${releaseCommit}: no lease file`);
+  }
+  const dir = tmpDir();
+  assert.deepEqual(acquireJcExecutorLease(baseOptions(dir, fakeWorld(), { releaseRoot: '' })), { ok: false, reason: 'release-unverified' });
+  assert.equal(fs.existsSync(path.join(dir, 'executor.lock')), false);
 });
 
 test('standalone and local presets never require or acquire the managed lease', () => {
