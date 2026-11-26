@@ -33,13 +33,13 @@ object to stderr (`error: "production_config_invalid"` with an `issues` array of
 
 Confirm before deploy:
 
-| Key                                               | Requirement                                                                                                                                                                                       |
-| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ACS_GATEWAY_CREDENTIALS_JSON`                    | Non-empty JSON array; each credential needs `id`, `token` (≥32 chars), `actor`, `actorId`                                                                                                         |
-| `ACS_DB_PATH`                                     | Parent directory must exist or be creatable on a writable ancestor                                                                                                                                |
-| `HOST` (non-loopback)                             | Also requires `ACS_MCP_ALLOWED_ORIGINS` and either complete OAuth (`ACS_OAUTH_ISSUER` + `ACS_OAUTH_AUDIENCE` + `ACS_OAUTH_JWKS_URI`) or `ACS_AUTH_MODE=tunnel_id` with `ACS_TRUSTED_TUNNEL_PROXY` |
+| Key                                               | Requirement                                                                                                                                                                                                                             |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ACS_GATEWAY_CREDENTIALS_JSON`                    | Non-empty JSON array; each credential needs `id`, `token` (≥32 chars), `actor`, `actorId`                                                                                                                                               |
+| `ACS_DB_PATH`                                     | Parent directory must exist or be creatable on a writable ancestor                                                                                                                                                                      |
+| `HOST` (non-loopback)                             | Also requires `ACS_MCP_ALLOWED_ORIGINS` and either complete OAuth (`ACS_OAUTH_ISSUER` + `ACS_OAUTH_AUDIENCE` + `ACS_OAUTH_JWKS_URI`) or `ACS_AUTH_MODE=tunnel_id` with `ACS_TRUSTED_TUNNEL_PROXY`                                       |
 | `ACS_OAUTH_*`                                     | If any OAuth key is set, all three must be set. With OAuth in strict mode, `ACS_MCP_RESOURCE_METADATA_URL` is also required: the gateway's own `https://<gateway>/.well-known/oauth-protected-resource/mcp`, not on the issuer's origin |
-| `ACS_ENABLE_TEST_AGENT_RUN_FOR_LOCAL_DEVELOPMENT` | Must not be `1`                                                                                                                                                                                   |
+| `ACS_ENABLE_TEST_AGENT_RUN_FOR_LOCAL_DEVELOPMENT` | Must not be `1`                                                                                                                                                                                                                         |
 
 `compose.production.yml` already injects the credential, origin, OAuth and
 metadata-URL variables; prefer that file (or the same env contract) over ad-hoc
