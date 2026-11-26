@@ -11,14 +11,15 @@
  * Local commands: serve, connect, disconnect, login, whoami, logout,
  * status --local, tools, version, help.
  */
-import fs from 'node:fs';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { runAuthCommand } from './auth-cli.js';
 import { CLI_COMMANDS, CliUsageError, helpText, parseArgs, resolveCommand } from './cli-commands.js';
 import { loadJcConfig, type JcConfig } from './config.js';
-import { credentialsPath, deviceLogin, loadCredentials } from './device-login.js';
+import { clearAcsCredentials, deviceLogin, loadCredentials } from './device-login.js';
 import { JC_MANIFEST } from './manifest.generated.js';
-import { connect, forgetMcpToken, loadMcpToken, mcpAccessToken } from './mcp-auth.js';
+import { loadMcpAuthStatus, mcpAuthProvider } from './mcp-auth.js';
 import { JC_EXIT, McpHttpClient, type JcCallOutcome } from './mcp-http-client.js';
+import { safeErrorMessage } from './secret-redaction.js';
 import { privilegedHelperAvailable } from './privileged-client.js';
 import { JC_PRESETS, isJcPreset, type JcPreset } from './authorizers.js';
 import { createJcServer } from './server.js';
@@ -98,7 +99,7 @@ async function runToolCommand(argv: string[], config: JcConfig, out: Out, env: N
     return outcome.exitCode;
   }
   const url = mcpUrlFor(config, env);
-  const client = new McpHttpClient({ url, token: () => mcpAccessToken(url, config.stateDir, env) });
+  const client = new McpHttpClient({ url, auth: mcpAuthProvider(url, config.stateDir, env) });
   try {
     const outcome = await client.callTool(command.tool, args);
     if (out.json) out.stdout(JSON.stringify(outcomeJson(outcome), null, 2));
@@ -137,7 +138,7 @@ async function runDoctor(config: JcConfig, out: Out, env: NodeJS.ProcessEnv): Pr
     detail: `${cliVerbs.length} CLI verbs for ${JC_MANIFEST.tools.length} manifest tools`,
   });
   const url = mcpUrlFor(config, env);
-  const client = new McpHttpClient({ url, token: () => mcpAccessToken(url, config.stateDir, env) });
+  const client = new McpHttpClient({ url, auth: mcpAuthProvider(url, config.stateDir, env) });
   let server: Record<string, unknown> | null = null;
   let exitCode: number = JC_EXIT.ok;
   try {
@@ -191,9 +192,9 @@ async function runDoctor(config: JcConfig, out: Out, env: NodeJS.ProcessEnv): Pr
   return exitCode;
 }
 
-async function localStatus(config: JcConfig): Promise<Record<string, unknown>> {
+async function localStatus(config: JcConfig, env: NodeJS.ProcessEnv = process.env): Promise<Record<string, unknown>> {
   const helper = await privilegedHelperAvailable({ sudoPath: config.sudoPath, helperPath: config.privilegedHelperPath });
-  const mcpToken = loadMcpToken(config.stateDir);
+  const mcpStatus = await loadMcpAuthStatus(mcpUrlFor(config, env), config.stateDir, env);
   return {
     version: VERSION,
     manifestHash: JC_MANIFEST.manifestHash,
@@ -207,7 +208,9 @@ async function localStatus(config: JcConfig): Promise<Record<string, unknown>> {
     fsRoots: config.fsRoots,
     managedKeyConfigured: Boolean(config.acsPublicKey && config.acsKeyId),
     loggedIn: Boolean(loadCredentials(config.stateDir)),
-    mcpConnected: mcpToken ? { mcpUrl: mcpToken.mcpUrl, expiresAt: new Date(mcpToken.expiresAt).toISOString() } : false,
+    mcpConnected: mcpStatus.connected
+      ? { mcpUrl: mcpStatus.mcpUrl, authMode: mcpStatus.authMode, expiresAt: mcpStatus.expiresAt, deviceId: mcpStatus.deviceId }
+      : false,
     privilegedHelper: { path: config.privilegedHelperPath, sudoNonInteractive: helper },
   };
 }
@@ -293,28 +296,16 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
         },
       });
     }
-    case 'connect': {
-      const url = (flagValue(rest, '--mcp-url') ?? mcpUrlFor(config, env)).replace(/\/$/, '');
-      const stored = await connect({
-        mcpUrl: url,
-        stateDir: config.stateDir,
-        onAuthorizeUrl: (authorizeUrl) => {
-          out.stderr('Open this URL in a browser on this machine and approve with the gateway consent passphrase:');
-          out.stderr(`  ${authorizeUrl}`);
-          out.stderr('Waiting for approval...');
-        },
-      });
-      out.stdout(json ? JSON.stringify({ connected: true, mcpUrl: stored.mcpUrl, expiresAt: new Date(stored.expiresAt).toISOString() }) : `Connected to ${stored.mcpUrl}`);
-      return JC_EXIT.ok;
-    }
+    case 'auth':
+      return runAuthCommand(rest, config, out, env);
+    case 'connect':
+      return runAuthCommand(['login', ...rest], config, out, env);
     case 'disconnect':
-      forgetMcpToken(config.stateDir);
-      out.stdout('disconnected (local /jc/mcp credential removed)');
-      return JC_EXIT.ok;
+      return runAuthCommand(['logout', ...rest], config, out, env);
     case 'tools': {
       if (rest.includes('--remote')) {
         const url = mcpUrlFor(config, env);
-        const client = new McpHttpClient({ url, token: () => mcpAccessToken(url, config.stateDir, env) });
+        const client = new McpHttpClient({ url, auth: mcpAuthProvider(url, config.stateDir, env) });
         try {
           const tools = await client.listTools();
           out.stdout(json ? JSON.stringify(tools, null, 2) : tools.map((tool) => String(tool.name)).join('\n'));
@@ -338,6 +329,7 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
         acsUrl,
         stateDir: config.stateDir,
         scope: flagValue(rest, '--scope'),
+        env,
         onPrompt: ({ userCode, verificationUriComplete, expiresIn }) => {
           out.stderr('Approve this device in your browser:');
           out.stderr(`  ${verificationUriComplete}`);
@@ -350,8 +342,8 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
     }
     case 'whoami': {
       const stored = loadCredentials(config.stateDir);
-      const mcp = loadMcpToken(config.stateDir);
-      if (!stored && !mcp) {
+      const mcpStatus = await loadMcpAuthStatus(mcpUrlFor(config, env), config.stateDir, env);
+      if (!stored && !mcpStatus.connected) {
         out.stdout(json ? JSON.stringify({ loggedIn: false, mcpConnected: false }) : 'not logged in');
         return JC_EXIT.notConnected;
       }
@@ -363,22 +355,34 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
             deviceId: stored.deviceId,
             scope: stored.scope,
             expiresAt: new Date(stored.expiresAt).toISOString(),
-            refreshable: Boolean(stored.refreshToken),
+            tokenType: stored.tokenType ?? 'DPoP',
+            jkt: stored.jkt ?? null,
           }
           : null,
-        mcp: mcp ? { mcpUrl: mcp.mcpUrl, expiresAt: new Date(mcp.expiresAt).toISOString(), refreshable: Boolean(mcp.refreshToken) } : null,
+        mcp: mcpStatus.connected
+          ? {
+            mcpUrl: mcpStatus.mcpUrl,
+            authMode: mcpStatus.authMode,
+            sub: mcpStatus.sub,
+            deviceId: mcpStatus.deviceId,
+            jkt: mcpStatus.jkt,
+            expiresAt: mcpStatus.expiresAt,
+            refreshable: mcpStatus.refreshable,
+            storageBackend: mcpStatus.storageBackend,
+          }
+          : null,
       }, null, 2));
       return JC_EXIT.ok;
     }
     case 'logout':
-      fs.rmSync(credentialsPath(config.stateDir), { force: true });
+      await clearAcsCredentials(config.stateDir, env);
       out.stdout('logged out (local credential removed; revoke server-side via ACS if needed)');
       return JC_EXIT.ok;
     case 'doctor':
       return runDoctor(config, out, env);
     case 'status':
       if (rest.includes('--local')) {
-        out.stdout(JSON.stringify(await localStatus(config), null, 2));
+        out.stdout(JSON.stringify(await localStatus(config, env), null, 2));
         return JC_EXIT.ok;
       }
       return runToolCommand(words, config, out, env);
@@ -387,14 +391,14 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
   }
 }
 
-const isEntrypoint = process.argv[1] && /(?:^|[\\/])(?:cli\.js|jace-commander|jc)$/u.test(process.argv[1]);
+const isEntrypoint = process.argv[1] && /(?:^|[\\/])(?:cli\.js|jace-commander|jace|jc)$/u.test(process.argv[1]);
 if (isEntrypoint) {
   main(process.argv.slice(2)).then(
     (code) => {
       if (code >= 0) process.exitCode = code;
     },
     (error: unknown) => {
-      console.error(`jace-commander: ${(error as Error).message}`);
+      console.error(`jace-commander: ${safeErrorMessage(error)}`);
       process.exitCode = JC_EXIT.toolFailure;
     },
   );

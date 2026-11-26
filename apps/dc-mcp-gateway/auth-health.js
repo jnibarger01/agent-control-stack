@@ -26,33 +26,43 @@ export const equalSecrets = (a, b) => {
  * verified, so a forged or garbage token can never be attributed to (or flag) a real client.
  */
 export function classifyBearer(header, { signingKey, issuer, resource, nowSec }) {
-  const match = typeof header === "string" ? /^Bearer\s+(\S+)\s*$/i.exec(header) : null;
+  return classifyTokenAuth(header, { signingKey, issuer, resource, nowSec, allowedSchemes: ["bearer"] });
+}
+
+export function classifyTokenAuth(
+  header,
+  { signingKey, issuer, resource, nowSec, allowedSchemes = ["bearer", "dpop"] },
+) {
+  const match = typeof header === "string" ? /^(Bearer|DPoP)\s+(\S+)\s*$/i.exec(header) : null;
   if (!match) return { ok: false, reason: "missing" };
-  const parts = match[1].split(".");
-  if (parts.length !== 3 || parts.some((part) => part.length === 0)) return { ok: false, reason: "malformed" };
+  const scheme = match[1].toLowerCase();
+  if (!allowedSchemes.includes(scheme)) return { ok: false, reason: "missing" };
+  const token = match[2];
+  const parts = token.split(".");
+  if (parts.length !== 3 || parts.some((part) => part.length === 0)) return { ok: false, scheme, reason: "malformed" };
   const [h, p, sig] = parts;
   let payload;
   try {
     const expected = crypto.createHmac("sha256", signingKey).update(`${h}.${p}`).digest("base64url");
     const a = Buffer.from(sig);
     const b = Buffer.from(expected);
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return { ok: false, reason: "bad_signature" };
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return { ok: false, scheme, reason: "bad_signature" };
     payload = JSON.parse(Buffer.from(p, "base64url").toString("utf8"));
-    if (!payload || typeof payload !== "object") return { ok: false, reason: "malformed" };
+    if (!payload || typeof payload !== "object") return { ok: false, scheme, reason: "malformed" };
   } catch {
-    return { ok: false, reason: "malformed" };
+    return { ok: false, scheme, reason: "malformed" };
   }
   const identity = {
     ...(typeof payload.client_id === "string" ? { clientId: payload.client_id } : {}),
     ...(typeof payload.sub === "string" ? { subject: payload.sub } : {})
   };
-  if (typeof payload.exp !== "number") return { ok: false, reason: "malformed", ...identity };
+  if (typeof payload.exp !== "number") return { ok: false, scheme, reason: "malformed", ...identity };
   // Lane first: an expired token minted for the OTHER lane must not be reported as an expiry on this one.
-  if (payload.iss !== issuer) return { ok: false, reason: "wrong_issuer", ...identity };
+  if (payload.iss !== issuer) return { ok: false, scheme, reason: "wrong_issuer", ...identity };
   const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-  if (!aud.includes(resource)) return { ok: false, reason: "wrong_audience", ...identity };
-  if (payload.exp < nowSec) return { ok: false, reason: "expired", ...identity };
-  return { ok: true, payload };
+  if (!aud.includes(resource)) return { ok: false, scheme, reason: "wrong_audience", ...identity };
+  if (payload.exp < nowSec) return { ok: false, scheme, reason: "expired", ...identity };
+  return { ok: true, scheme, token, payload };
 }
 
 const DESCRIPTIONS = {
@@ -60,7 +70,12 @@ const DESCRIPTIONS = {
   wrong_audience: "the access token is for a different resource",
   wrong_issuer: "the access token was issued by a different server",
   bad_signature: "the access token is not valid",
-  malformed: "the access token is not valid"
+  malformed: "the access token is not valid",
+  dpop_required: "DPoP authentication is required for this token",
+  dpop_invalid: "DPoP proof is invalid",
+  dpop_replay: "DPoP proof jti has already been used",
+  device_revoked: "the device has been revoked",
+  use_dpop_nonce: "DPoP nonce required",
 };
 
 /**
@@ -71,6 +86,12 @@ const DESCRIPTIONS = {
 export function bearerChallenge(base, reason) {
   if (reason === "missing" || !DESCRIPTIONS[reason]) return base;
   return `${base}, error="invalid_token", error_description="${DESCRIPTIONS[reason]}"`;
+}
+
+export function dpopChallenge(base, reason) {
+  if (reason === "missing" || !DESCRIPTIONS[reason]) return base;
+  const error = reason === "use_dpop_nonce" ? "use_dpop_nonce" : "invalid_token";
+  return `${base}, error="${error}", error_description="${DESCRIPTIONS[reason]}"`;
 }
 
 /**

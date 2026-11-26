@@ -10,6 +10,7 @@
   "bin": {
     "jace-commander": "./dist/cli.js",
     "jc": "./dist/cli.js",
+    "jace": "./dist/cli.js",
     "jc-privileged-helper": "./dist/privileged-helper.js"
   },
   "main": "./dist/server.js",

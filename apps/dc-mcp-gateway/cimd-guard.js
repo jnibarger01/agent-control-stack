@@ -109,6 +109,14 @@ export function matchesRegisteredLoopback(redirectUri, registeredUris = []) {
   });
 }
 
+// Grant types a CIMD document may advertise. JWT Bearer is accepted in metadata only so clients like Claude can
+// complete discovery/authorization; token issuance remains limited to authorization_code and refresh_token elsewhere.
+const ALLOWED_METADATA_GRANT_TYPES = new Set([
+  'authorization_code',
+  'refresh_token',
+  'urn:ietf:params:oauth:grant-type:jwt-bearer',
+]);
+
 /** Validate a CIMD document against the client_id it was fetched for. Public clients only (no secret). */
 export function parseClientMetadata(clientId, doc) {
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw new Error('client metadata must be a JSON object');
@@ -120,7 +128,7 @@ export function parseClientMetadata(clientId, doc) {
   const method = doc.token_endpoint_auth_method === undefined ? 'none' : doc.token_endpoint_auth_method;
   if (method !== 'none') throw new Error('client metadata must be a public client (token_endpoint_auth_method none)');
   const grants = doc.grant_types === undefined ? ['authorization_code'] : doc.grant_types;
-  if (!Array.isArray(grants) || !grants.every((g) => g === 'authorization_code' || g === 'refresh_token')) {
+  if (!Array.isArray(grants) || grants.length === 0 || grants.length > 20 || !grants.every((g) => typeof g === 'string' && ALLOWED_METADATA_GRANT_TYPES.has(g))) {
     throw new Error('client metadata grant_types unsupported');
   }
   return { redirect_uris: uris, token_endpoint_auth_method: 'none', grant_types: grants };

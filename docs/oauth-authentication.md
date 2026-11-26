@@ -215,15 +215,22 @@ curl -X POST https://gateway.example.com/devices/<device-id>/revoke \
 
 ### Credential storage
 
-The CLI stores its device keypair and session (`~/.config/acs/credentials.json` by default, override with `ACS_CLI_CREDENTIALS_PATH` or `XDG_CONFIG_HOME`) in a file created with `0600` permissions. No OS keychain integration exists in this workspace today; this is a documented limitation, not a silent gap. Never commit this file, put it in `.env`, or leave it world-readable.
+The `acs` CLI (`apps/runtime`) stores its device keypair and session (`~/.config/acs/credentials.json` by default, override with `ACS_CLI_CREDENTIALS_PATH` or `XDG_CONFIG_HOME`) atomically (`O_EXCL` + `fsync` + `rename`) under `0600` permissions in a `0700` directory. Never commit this file, put it in `.env`, or leave it world-readable.
 
-### Server-side model
+The `jace` / `jace-commander` CLI (`apps/jace-commander`) uses OS credential storage (`SecretServiceStore` via `secret-tool` / `kwallet-query` on Linux, `KeychainStore` via `security` on macOS, `WindowsCredentialStore` via PowerShell/DPAPI on Windows) or a headless `EncryptedFileStore` (AES-256-GCM with a separate KEK via `JC_KEYRING_PASSPHRASE` or `JC_KEYRING_KEY_FILE`, never plaintext fallback). See [apps/jace-commander/README.md](../apps/jace-commander/README.md) and [ADR 0031](adr/0031-jace-cli-auth-v2.md).
 
-- **Device identity:** a `devices` table (`storage/migrations/023_device_auth.sql`), separate from `connector_records` (which represents operator-provisioned tunnel-proxy infrastructure, a different trust model — see ADR 0016). Device identity is the Ed25519 public key, not any issued token: refreshing an access token never touches the `devices` table, so a stolen refresh token cannot enroll a second trusted device.
-- **Scope:** device tokens are limited to `acs:device` by default. `acs:work:approve` is never granted to a CLI device by this flow.
-- **Fail closed:** malformed, expired, denied, or replayed device codes always return an RFC 8628 error (`authorization_pending`, `slow_down`, `access_denied`, `expired_token`, or `invalid_grant`/`invalid_client`) and never issue a token. `device_code` and `user_code` are stored only as SHA-256 hashes.
-- Device tokens authenticate the CLI to the ACS gateway's own REST surface. They are issued and verified by ACS itself (a narrowly-scoped authorization-server component for this one grant type), independent of whatever external OAuth/OIDC provider is configured for ChatGPT/Claude MCP access via `ACS_OAUTH_ISSUER`/`ACS_OAUTH_AUDIENCE`/`ACS_OAUTH_JWKS_URI` above — the two flows do not need to share an issuer.
-- Secrets (device codes, tokens, private keys) are never written to gateway or CLI logs.
+### Server-side model (ACS device auth v2)
+
+- **Device identity:** a `devices` table (`storage/migrations/023_device_auth.sql`, `079_device_auth_refresh_recovery.sql`, and `080_device_auth_dpop.sql`), separate from `connector_records` (which represents operator-provisioned tunnel-proxy infrastructure, a different trust model — see ADR 0016). Device identity is the Ed25519 public key (`public_key_jkt` thumbprint), not any issued token: refreshing an access token never touches the `devices` table, so a stolen refresh token cannot enroll a second trusted device. Multiple keypairs per principal create distinct device rows (`GET /devices`, `POST /devices/:id/revoke`).
+- **Refresh PoP & recovery envelopes (ADR 0030):** `grant_type=refresh_token` requires `device_id`, `proof_issued_at` (`±300s`), and an Ed25519 `refresh_proof` (`acs-device-refresh-proof-v1`). Rotation runs inside `BEGIN IMMEDIATE` and stores a bounded (`120s` default) AES-256-GCM recovery envelope keyed by `ACS_DEVICE_REFRESH_RECOVERY_KEY` (failing closed `503 recovery_unavailable` if unset); out-of-window or superseded replay revokes the device.
+- **DPoP on protected ACS requests (ADR 0031):** Device access tokens are bound to the device's Ed25519 JWK thumbprint (`cnf.jkt`). Protected ACS routes require `Authorization: DPoP` plus a valid `DPoP` proof (`EdDSA`, `htm`, `htu` validated against configured `ACS_PUBLIC_ORIGIN` / `ACS_PUBLIC_URL` rather than `Host`/`X-Forwarded-*`, `ath`, `iat`, optional `ACS_DPOP_NONCE_REQUIRED=1` / `ACS_DPOP_NONCE_SECRET`, and persistent SQLite `device_dpop_jtis` replay protection) and never downgrade DPoP-bound tokens to `Bearer`.
+- **Scope & domain separation:** Device tokens are limited to `acs:device` by default (`acs:work:approve` and admin scopes are never granted). ACS device tokens are never accepted on `/jc/mcp` or `/mcp`, and `/jc` CLI tokens are never accepted on ACS APIs.
+- **Fail closed:** malformed, expired, denied, revoked, or replayed device codes/tokens always fail closed (`authorization_pending`, `slow_down`, `access_denied`, `expired_token`, `invalid_grant`, or `invalid_token`). `device_code` and `user_code` are stored only as SHA-256 hashes.
+- Secrets (device codes, tokens, private keys, DPoP proofs) are never written to gateway or CLI logs.
+
+## Jace Commander CLI & `/jc` Edge Auth (V2)
+
+The `/jc` MCP edge (`apps/dc-mcp-gateway`) issues OAuth 2.1 + RFC 9449 DPoP tokens for `jace-commander-cli` (Browser PKCE S256 + RFC 9207 `iss` + loopback redirect, or headless RFC 8628 device authorization via `/jc/oauth/device/code`) while preserving `Bearer` compatibility for ChatGPT (DCR), Claude (CIMD), and explicit `JC_MCP_TOKEN` CI overrides. See [ADR 0031](adr/0031-jace-cli-auth-v2.md), [apps/dc-mcp-gateway/README.md](../apps/dc-mcp-gateway/README.md), [apps/jace-commander/README.md](../apps/jace-commander/README.md), and the [JACE CLI AUTH V2 migration runbook](runbooks/jace-cli-auth-v2-migration.md).
 
 ## Per-agent MCP tool allowlist
 

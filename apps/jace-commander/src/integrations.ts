@@ -53,13 +53,13 @@ async function readBounded(response: Response, limit: number, controller: AbortC
 
 export async function requestJson(
   url: string,
-  init: { method?: 'GET' | 'POST'; token?: string; body?: unknown; timeoutMs: number; fetchImpl?: typeof fetch },
+  init: { method?: 'GET' | 'POST'; token?: string; authHeaders?: Record<string, string>; body?: unknown; timeoutMs: number; fetchImpl?: typeof fetch },
 ): Promise<HttpResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), init.timeoutMs);
   try {
-    const headers: Record<string, string> = { accept: 'application/json' };
-    if (init.token) headers.authorization = `Bearer ${init.token}`;
+    const headers: Record<string, string> = { accept: 'application/json', ...(init.authHeaders ?? {}) };
+    if (init.token && !headers.authorization) headers.authorization = `Bearer ${init.token}`;
     if (init.body !== undefined) headers['content-type'] = 'application/json';
     const response = await (init.fetchImpl ?? fetch)(url, {
       method: init.method ?? 'GET',

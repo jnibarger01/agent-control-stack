@@ -18,7 +18,7 @@ import {
   codingMissionPortsFromEnv,
   type CodingMissionPorts
 } from "@agent-control-stack/coding-mission";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import {
   acpAdapterConfigFromEnv,
@@ -224,8 +224,13 @@ import {
   type SandboxReadinessOptions
 } from "./sandbox-readiness.js";
 import { gatewayListenConfig } from "./runtime-config.js";
-import { DeviceAuthStore } from "./device-auth-store.js";
+import {
+  DeviceAuthStore,
+  deviceRefreshRecoveryConfigFromEnv,
+  type DeviceRefreshRecoveryConfig
+} from "./device-auth-store.js";
 import { registerDeviceAuthRoutes } from "./device-auth.js";
+import { issueDpopNonce, verifyDpopProof } from "./device-dpop.js";
 import { createPortfolioClientFromEnv, type PortfolioClient } from "./portfolio-client.js";
 import { verifyChangeSetResult } from "./change-set-verification.js";
 import { fileReadbackExpectationSchema } from "@agent-control-stack/verification";
@@ -234,6 +239,7 @@ import { dcWorkItemActionKind, resolveChangeSetRuntimePolicy } from "./change-se
 import {
   type GatewayAuthOptions,
   firstHeader,
+  getDpopAuthChallenge,
   isDevelopmentLoopbackRequest,
   type GatewayCredential,
   MIN_ADMIN_MODE_REASON_LENGTH,
@@ -378,6 +384,14 @@ export interface GatewayOptions {
    * authority store.
    */
   readManagedAuthority?: () => ManagedAuthorityObservation;
+  /** Device refresh-token recovery key/window config. Defaults to ACS_DEVICE_REFRESH_RECOVERY_* env; `false` disables (fail-closed 503). */
+  deviceRefreshRecovery?: DeviceRefreshRecoveryConfig | false;
+  /** Trusted external origin for device verification URIs and DPoP htu verification (ignores Host/X-Forwarded-*). */
+  publicOrigin?: string;
+  /** Require server-issued DPoP-Nonce on DPoP proofs (defaults to ACS_DPOP_NONCE_REQUIRED=1). */
+  dpopNonceRequired?: boolean;
+  /** HMAC secret for stateless DPoP-Nonce minting/verification (defaults to ACS_DPOP_NONCE_SECRET or per-process random). */
+  dpopNonceSecret?: string;
   /** Shared shutdown gate; tests may inject one to assert claim drain behavior. */
   shutdownController?: ShutdownController;
   /** Execution admission controller; tests may inject a deterministic controller. */
@@ -458,13 +472,114 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     ? (jevObservationOptions?.createWorker?.(workItems) ?? new ObservationWorker(workItems))
     : undefined;
   const executionReads = new SqliteExecutionReadStore(dbPath);
-  const deviceAuthStore = new DeviceAuthStore(dbPath);
+  const deviceRefreshRecovery =
+    options.deviceRefreshRecovery === false
+      ? false
+      : (options.deviceRefreshRecovery ?? deviceRefreshRecoveryConfigFromEnv());
+  const deviceAuthStore = new DeviceAuthStore(dbPath, {
+    recovery: deviceRefreshRecovery,
+    onAuditEvent: (event) => {
+      try {
+        workItems.recordSystemEvent({
+          name: event.name,
+          body: event.body,
+          attributes: {
+            ...(event.deviceId ? { "device.id": event.deviceId } : {}),
+            ...(event.principalId ? { "principal.id": event.principalId } : {})
+          }
+        });
+      } catch {
+        // Audit sink failure must not mask the auth response after commit.
+      }
+    }
+  });
   const policy = createPolicyEngine();
   const shutdownController = options.shutdownController ?? new ShutdownController();
   const tools = guardWorkItemClaimTools(createWorkItemTools(workItems, policy), shutdownController);
+  const configuredPublicOrigin =
+    (options.publicOrigin ?? process.env.ACS_PUBLIC_ORIGIN ?? process.env.ACS_PUBLIC_URL)?.trim().replace(/\/+$/, "") ||
+    undefined;
+  const resolveTrustedOrigin = (): string => {
+    if (configuredPublicOrigin) return configuredPublicOrigin;
+    const address = app.server.address();
+    if (address && typeof address === "object" && typeof address.port === "number") {
+      const host =
+        address.address === "0.0.0.0" || address.address === "::" || address.address === ""
+          ? "127.0.0.1"
+          : address.family === "IPv6" && address.address.includes(":")
+            ? `[${address.address}]`
+            : address.address;
+      return `http://${host}:${address.port}`;
+    }
+    return "http://127.0.0.1";
+  };
+  const rawDpopNonceSecret = options.dpopNonceSecret ?? process.env.ACS_DPOP_NONCE_SECRET;
+  const dpopNonceSecret = rawDpopNonceSecret
+    ? createHash("sha256").update(rawDpopNonceSecret, "utf8").digest()
+    : randomBytes(32);
+  const dpopNonceRequired =
+    options.dpopNonceRequired ??
+    (process.env.ACS_DPOP_NONCE_REQUIRED === "1" || process.env.DPOP_NONCE_REQUIRED === "1");
+  app.addHook("onSend", async (request, reply, payload) => {
+    if (reply.statusCode === 401) {
+      const challenge = getDpopAuthChallenge(request);
+      if (challenge) {
+        if (!reply.hasHeader("www-authenticate")) {
+          reply.header("www-authenticate", challenge.wwwAuthenticate);
+        }
+        if (challenge.dpopNonce && !reply.hasHeader("dpop-nonce")) {
+          reply.header("dpop-nonce", challenge.dpopNonce);
+        }
+      }
+    }
+    return payload;
+  });
   const resolvedAuth = resolveAuth(options);
   const auth = resolvedAuth
-    ? { ...resolvedAuth, deviceAccessTokenResolver: (token: string) => deviceAuthStore.authenticateAccessToken(token) }
+    ? {
+        ...resolvedAuth,
+        deviceAccessTokenResolver: (token: string) => deviceAuthStore.authenticateAccessToken(token),
+        deviceDpopRequestResolver: ({
+          accessToken,
+          dpopProof,
+          method,
+          pathname
+        }: {
+          accessToken: string;
+          dpopProof: string | undefined;
+          method: string;
+          pathname: string;
+        }) => {
+          const device = deviceAuthStore.authenticateAccessToken(accessToken);
+          if (!device) {
+            return { ok: false as const, error: "invalid_token" as const };
+          }
+          const expectedHtu = `${resolveTrustedOrigin()}${pathname}`;
+          const verified = verifyDpopProof({
+            proof: dpopProof,
+            method,
+            expectedHtu,
+            expectedJkt: device.publicKeyJkt,
+            accessToken,
+            nonceSecret: dpopNonceSecret,
+            nonceRequired: dpopNonceRequired
+          });
+          if (!verified.ok) {
+            if (verified.error === "use_dpop_nonce") {
+              return {
+                ok: false as const,
+                error: "use_dpop_nonce" as const,
+                dpopNonce: issueDpopNonce(dpopNonceSecret)
+              };
+            }
+            return { ok: false as const, error: "invalid_token" as const };
+          }
+          if (!deviceAuthStore.consumeDpopJti(verified.jkt, verified.jti, verified.expiresAtIso)) {
+            return { ok: false as const, error: "invalid_token" as const };
+          }
+          return { ok: true as const, device };
+        }
+      }
     : resolvedAuth;
   const mcpAuth = resolveMcpAuth(options, workItems);
   const mcpAllowedOrigins = resolveMcpAllowedOrigins(options);
@@ -1389,7 +1504,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     onAuthLockout: (route) => {
       metrics.increment("acs_auth_lockout_total", { route });
     },
-    publicOriginOverride: process.env.ACS_PUBLIC_URL
+    publicOriginOverride: configuredPublicOrigin,
+    getTrustedOrigin: resolveTrustedOrigin,
+    dpopNonceSecret,
+    dpopNonceRequired
   });
 
   if (acpAdapter) {
