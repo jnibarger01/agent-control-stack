@@ -85,7 +85,7 @@
     "esbuild@0.28.1": true
   },
   "dependencies": {
-    "openai": "^7.45.0"
+    "openai": "^7.55.0"
   },
   "overrides": {
     "@vercel/cli-config": {
