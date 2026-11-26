@@ -287,3 +287,21 @@ only configuration the verifier accepts.
 E2E verification against this issuer: `docs/jace-auth-e2e-verification.md`
 (local issuer variant, 2026-08-24); production-issuer negative proofs:
 `docs/jace-auth-production-negative-proofs.md`.
+
+### `/jc` Owner OIDC Consent Callback Registration (Jace Auth)
+
+When enabling Jace Auth owner consent for `/jc/device` on `apps/dc-mcp-gateway`
+(see [runbooks/jace-cli-auth-v2-migration.md](runbooks/jace-cli-auth-v2-migration.md#owner-consent-through-jace-auth-single-owner)),
+provision a **dedicated** OIDC client on `https://jace-auth.vercel.app` (do not reuse
+ACS or Toyota Dashboard clients):
+
+- **Exact redirect URI:** `<PUBLIC_ORIGIN>/jc/device/callback` (HTTPS only; no wildcards)
+- **Grant type / PKCE:** `authorization_code` with PKCE `S256` required
+- **Scopes:** `openid`
+- **Client authentication:** public PKCE client, or confidential with `client_secret_basic` when `JC_OWNER_OIDC_CLIENT_SECRET` is set
+- **Gateway env (all required together, fail-closed on partial config):**
+  `JC_OWNER_OIDC_ISSUER=https://jace-auth.vercel.app`, `JC_OWNER_OIDC_CLIENT_ID`,
+  `JC_OWNER_OIDC_ALLOWED_SUB` (single owner subject), optional `JC_OWNER_OIDC_CLIENT_SECRET`
+
+This client registration is an operator provisioning step on Jace Auth; production
+Jace Auth clients and allowlists are not modified automatically by ACS.
