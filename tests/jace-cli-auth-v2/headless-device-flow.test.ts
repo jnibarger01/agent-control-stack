@@ -55,6 +55,7 @@ describe("Suite B: Headless RFC 8628 device flow, device-key registration, and d
       }).toString()
     });
     expect(dcRes.status).toBe(200);
+    const issuedAt = Date.now();
     const dcBody = (await dcRes.json()) as {
       device_code: string;
       user_code: string;
@@ -95,8 +96,9 @@ describe("Suite B: Headless RFC 8628 device flow, device-key registration, and d
     });
     expect(approveRes.status).toBe(200);
 
-    // Wait past interval (or use test interval) and exchange device_code with DPoP proof
-    await new Promise((r) => setTimeout(r, (dcBody.interval + 0.2) * 1000));
+    // Approval ends the pending poll interval. Exchange immediately and require the
+    // grant to land before the device code's own authorization window (expires_in),
+    // which is also inside the suite's 5000ms test budget. Do not sleep the poll interval.
     const tokenRes = await gw.postTokenWithDpop(
       {
         grant_type: "urn:ietf:params:oauth:grant-type:device_code",
@@ -107,6 +109,8 @@ describe("Suite B: Headless RFC 8628 device flow, device-key registration, and d
       { url: `${gw.baseUrl}/jc/oauth/token` }
     );
     expect(tokenRes.status).toBe(200);
+    expect(Date.now() - issuedAt).toBeLessThan(dcBody.expires_in * 1000);
+    expect(Date.now() - issuedAt).toBeLessThan(5_000);
     const tokenBody = (await tokenRes.json()) as {
       access_token: string;
       refresh_token: string;
