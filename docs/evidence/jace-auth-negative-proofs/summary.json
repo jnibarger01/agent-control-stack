@@ -1,0 +1,113 @@
+{
+  "acsCodeCommit": "931c499b9c52dd2f93f0ff85087798dbfc7ff3b4",
+  "jaceAuth": {
+    "commit": "c3d58df9c1a0d07564446f0757d506acca9e2c19",
+    "workingTreeDirty": true
+  },
+  "startedAt": "2026-11-21T01:52:51.427Z",
+  "gatewayUrl": "http://127.0.0.1:3010",
+  "productionJwks": {
+    "status": 200,
+    "contentType": "application/json",
+    "sha256": "bdf14d3c381e06a5bf79930c947a0528d9a61c152d1badc12c64b9cb2c124e0f",
+    "keys": [
+      {
+        "kid": "r2x5WAGgEnlK4DpzofC7qsxxfjajcxm8",
+        "kty": "RSA",
+        "alg": "RS256"
+      }
+    ],
+    "rs256Kid": "r2x5WAGgEnlK4DpzofC7qsxxfjajcxm8"
+  },
+  "issuer": "https://jace-auth.vercel.app",
+  "audience": "https://jace-auth.vercel.app/resources/agent-control-stack",
+  "metadataUrlConfigured": "https://gateway.drill.example/.well-known/oauth-protected-resource/mcp",
+  "finishedAt": "2026-11-21T01:52:53.098Z",
+  "forgedToken": {
+    "header": {
+      "alg": "RS256",
+      "typ": "JWT",
+      "kid": "r2x5WAGgEnlK4DpzofC7qsxxfjajcxm8"
+    },
+    "claims": {
+      "iss": "https://jace-auth.vercel.app",
+      "aud": "https://jace-auth.vercel.app/resources/agent-control-stack",
+      "sub": "forged-subject-negative-proof",
+      "client_id": "forged-client-negative-proof",
+      "scope": "acs:work:read acs:work:create",
+      "iat": 1795225971,
+      "exp": 1795226271
+    },
+    "signatureBytesBase64urlLength": 342,
+    "note": "Disposable forged token. Signed by a key that exists only in memory during this run."
+  },
+  "signatureStage": {
+    "result": "rejected",
+    "code": "ERR_JWS_SIGNATURE_VERIFICATION_FAILED",
+    "name": "JWSSignatureVerificationFailed",
+    "message": "signature verification failed"
+  },
+  "kidControl": {
+    "result": "rejected",
+    "code": "ERR_JWKS_NO_MATCHING_KEY"
+  },
+  "relay": {
+    "fetches": 1,
+    "allMatchProduction": true,
+    "log": [
+      {
+        "at": "2026-11-21T01:52:52.982Z",
+        "method": "GET",
+        "path": "/jwks",
+        "upstreamStatus": 200,
+        "bodySha256": "bdf14d3c381e06a5bf79930c947a0528d9a61c152d1badc12c64b9cb2c124e0f"
+      }
+    ]
+  },
+  "runs": {
+    "runA-documented-production-jwks-uri": {
+      "jwksUri": "https://jace-auth.vercel.app/jwks",
+      "n0MetadataEndpoint": {
+        "status": 200,
+        "body": "{\"resource\":\"https://jace-auth.vercel.app/resources/agent-control-stack\",\"resource_name\":\"Agent Control Stack MCP Gateway\",\"authorization_servers\":[\"https://jace-auth.vercel.app\"],\"scopes_supported\":[\"acs:work:create\",\"acs:work:read\",\"acs:work:approve\",\"acs:device\"],\"bearer_methods_supported\":[\"header\"]}"
+      },
+      "n1NoBearer": {
+        "status": 401,
+        "wwwAuthenticate": "Bearer resource_metadata=\"https://gateway.drill.example/.well-known/oauth-protected-resource/mcp\", error=\"invalid_token\", error_description=\"missing bearer token\"",
+        "contentType": "application/json; charset=utf-8",
+        "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Authentication required: missing bearer token.\"}],\"structuredContent\":{\"authError\":\"missing_token\",\"requiredScopes\":[]},\"_meta\":{\"mcp/www_authenticate\":[\"Bearer resource_metadata=\\\"https://gateway.drill.example/.well-known/oauth-protected-resource/mcp\\\", error=\\\"invalid_token\\\", error_description=\\\"missing bearer token\\\"\"]},\"isError\":true}}"
+      },
+      "n2ForgedToken": {
+        "status": 401,
+        "wwwAuthenticate": "Bearer resource_metadata=\"https://gateway.drill.example/.well-known/oauth-protected-resource/mcp\", error=\"invalid_token\", error_description=\"invalid bearer token\"",
+        "contentType": "application/json; charset=utf-8",
+        "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Authentication required: invalid bearer token.\"}],\"structuredContent\":{\"authError\":\"invalid_token\",\"requiredScopes\":[]},\"_meta\":{\"mcp/www_authenticate\":[\"Bearer resource_metadata=\\\"https://gateway.drill.example/.well-known/oauth-protected-resource/mcp\\\", error=\\\"invalid_token\\\", error_description=\\\"invalid bearer token\\\"\"]},\"isError\":true}}"
+      }
+    },
+    "runB-relayed-production-jwks": {
+      "jwksUri": "http://127.0.0.1:3011/jwks",
+      "n0MetadataEndpoint": {
+        "status": 200,
+        "body": "{\"resource\":\"https://jace-auth.vercel.app/resources/agent-control-stack\",\"resource_name\":\"Agent Control Stack MCP Gateway\",\"authorization_servers\":[\"https://jace-auth.vercel.app\"],\"scopes_supported\":[\"acs:work:create\",\"acs:work:read\",\"acs:work:approve\",\"acs:device\"],\"bearer_methods_supported\":[\"header\"]}"
+      },
+      "n1NoBearer": {
+        "status": 401,
+        "wwwAuthenticate": "Bearer resource_metadata=\"https://gateway.drill.example/.well-known/oauth-protected-resource/mcp\", error=\"invalid_token\", error_description=\"missing bearer token\"",
+        "contentType": "application/json; charset=utf-8",
+        "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Authentication required: missing bearer token.\"}],\"structuredContent\":{\"authError\":\"missing_token\",\"requiredScopes\":[]},\"_meta\":{\"mcp/www_authenticate\":[\"Bearer resource_metadata=\\\"https://gateway.drill.example/.well-known/oauth-protected-resource/mcp\\\", error=\\\"invalid_token\\\", error_description=\\\"missing bearer token\\\"\"]},\"isError\":true}}"
+      },
+      "n2ForgedToken": {
+        "status": 401,
+        "wwwAuthenticate": "Bearer resource_metadata=\"https://gateway.drill.example/.well-known/oauth-protected-resource/mcp\", error=\"invalid_token\", error_description=\"invalid bearer token\"",
+        "contentType": "application/json; charset=utf-8",
+        "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Authentication required: invalid bearer token.\"}],\"structuredContent\":{\"authError\":\"invalid_token\",\"requiredScopes\":[]},\"_meta\":{\"mcp/www_authenticate\":[\"Bearer resource_metadata=\\\"https://gateway.drill.example/.well-known/oauth-protected-resource/mcp\\\", error=\\\"invalid_token\\\", error_description=\\\"invalid bearer token\\\"\"]},\"isError\":true}}"
+      }
+    }
+  },
+  "verdicts": {
+    "N0_metadata_endpoint_served": "PASS",
+    "N1_no_bearer_advertises_gateway_metadata": "PASS",
+    "N2_forged_token_rejected_at_signature_against_production_jwks": "PASS",
+    "N2_rejection_stage_detail": "signature"
+  }
+}

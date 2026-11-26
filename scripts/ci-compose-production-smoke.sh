@@ -26,6 +26,7 @@ export ACS_MCP_ALLOWED_ORIGINS="${ACS_MCP_ALLOWED_ORIGINS:-http://127.0.0.1:${AC
 export ACS_OAUTH_ISSUER="${ACS_OAUTH_ISSUER:-https://issuer.example}"
 export ACS_OAUTH_AUDIENCE="${ACS_OAUTH_AUDIENCE:-https://acs.example/mcp}"
 export ACS_OAUTH_JWKS_URI="${ACS_OAUTH_JWKS_URI:-https://issuer.example/jwks}"
+export ACS_MCP_RESOURCE_METADATA_URL="${ACS_MCP_RESOURCE_METADATA_URL:-https://acs.example/.well-known/oauth-protected-resource/mcp}"
 
 COMPOSE=(docker compose -f compose.production.yml)
 
