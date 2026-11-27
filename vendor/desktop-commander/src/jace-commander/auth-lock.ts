@@ -13,6 +13,13 @@ const LOCK_CORRUPT_GRACE_MS = 2_000;
 const DEFAULT_LOCK_TIMEOUT_MS = 10_000;
 const DEFAULT_LOCK_POLL_MS = 25;
 
+// ES2020 lib types Error as one argument. Keep the cause without that second parameter.
+function errorWithCause(message: string, cause: unknown): Error {
+  const error = new Error(message);
+  (error as Error & { cause?: unknown }).cause = cause;
+  return error;
+}
+
 export interface AuthLockOptions {
   lockName?: string;
   timeoutMs?: number;
@@ -333,7 +340,7 @@ export async function withAuthLock<T>(
     } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code;
       if (code !== 'EEXIST') {
-        throw new Error(`Failed to acquire auth lock: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
+        throw errorWithCause(`Failed to acquire auth lock: ${err instanceof Error ? err.message : String(err)}`, err);
       }
       const inspection = inspectStaleLock(lockPath, attemptNow, checkAlive);
       if (inspection.stale) {
@@ -342,7 +349,7 @@ export async function withAuthLock<T>(
         }
       }
       if (Date.now() >= deadline) {
-        throw new Error(`Timed out after ${timeoutMs}ms waiting for auth lock`, { cause: err });
+        throw errorWithCause(`Timed out after ${timeoutMs}ms waiting for auth lock`, err);
       }
       await new Promise((resolve) => setTimeout(resolve, pollMs));
     }
