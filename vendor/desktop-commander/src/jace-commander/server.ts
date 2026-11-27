@@ -56,6 +56,7 @@ import { defaultDeniedRoots, getFileInfo, listDirectory, readFile, readMultipleF
 import { gitAdd, gitBranch, gitCommit, gitDiff, gitFetch, gitLog, gitPush, gitShow, gitStatus } from './git-ops.js';
 import { createDirectory, editBlock, moveFile, writeFile } from './mutations.js';
 import { createProcessRegistry } from './processes.js';
+import { createHerdrHandlers } from './herdr.js';
 import { createSearchRegistry } from './search.js';
 import { invokePrivilegedHelper, privilegedHelperAvailable } from './privileged-client.js';
 import { JC_PROVIDER_IDS, assertProviderCoverage, collectProviderHealth, type JcAcsMode, type JcProviderId, type JcProviderProbe } from './providers.js';
@@ -63,6 +64,7 @@ import { MirrorOutbox, type MirrorSender } from './mirror-outbox.js';
 import {
   JC_DEFAULT_CLASS_DECISIONS,
   createAuthorizerResolver,
+  jcRequiresAcsCapability,
   jcStandaloneToolAllowed,
   type JcAuthorizerTable,
   type JcClassDecisions,
@@ -350,6 +352,17 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       }
     }
 
+    // Defense in depth: no dispatch path may execute a Herdr tool unless a
+    // verified ACS capability is present, whatever the preset or table says.
+    if (jcRequiresAcsCapability(name) && !authorization) {
+      recordTrace(trace, name, args, { ok: false, code: 'JC_CAPABILITY_REQUIRED', ...routeTrace(route) });
+      return fail(
+        'JC_CAPABILITY_REQUIRED',
+        `${name} requires a verified ACS-issued capability; nothing ran`,
+        { jaceCommanderMode: mode, acsAuthorization: { version: 'acs.jc.v1', decision: 'denied', code: 'JC_CAPABILITY_REQUIRED' }, ...routeMeta },
+      );
+    }
+
     // Durable intent BEFORE the side effect for anything above read that JC itself
     // authorized. No intent record, no execution (ADR 0026 D1.4). Managed and
     // read-class calls keep the best-effort behavior they always had.
@@ -439,6 +452,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
   // MCP clients and the jace-commander CLI (itself an MCP client of /jc/mcp).
   const search = createSearchRegistry();
   const processes = createProcessRegistry();
+  const herdr = createHerdrHandlers();
   /**
    * ACS-backed tools (the `acs` provider) in the local preset: `off` refuses without touching the
    * network; `required` fails fast when ACS is down; either way an unreachable ACS becomes the
@@ -513,6 +527,18 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     read_process_output: async (args) => ok(processes.output(args)),
     list_processes: async () => ok(processes.list()),
     kill_process: async (args) => ok(processes.kill(args)),
+    herdr_status: async (args) => {
+      const result = await herdr.status(args);
+      return result.ok ? ok(result) : fail(result.error.kind, result.error.message);
+    },
+    herdr_terminals: async (args) => {
+      const result = await herdr.terminals(args);
+      return result.ok ? ok(result) : fail(result.error.kind, result.error.message);
+    },
+    herdr_read: async (args) => {
+      const result = await herdr.read(args);
+      return result.ok ? ok(result) : fail(result.error.kind, result.error.message);
+    },
     git_status: async (args) => ok(await gitStatus(args, fsPolicy)),
     git_diff: async (args) => ok(await gitDiff(args, fsPolicy)),
     git_log: async (args) => ok(await gitLog(args, fsPolicy)),

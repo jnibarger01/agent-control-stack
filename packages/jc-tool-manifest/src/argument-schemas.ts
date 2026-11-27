@@ -103,7 +103,10 @@ export const JC_TOOL_NAMES = Object.freeze([
   "git_push",
   "jc_doctor",
   "ping",
-  "get_config"
+  "get_config",
+  "herdr_status",
+  "herdr_terminals",
+  "herdr_read"
 ] as const);
 export type JcToolName = (typeof JC_TOOL_NAMES)[number];
 
@@ -297,5 +300,14 @@ export const JC_TOOL_ARGUMENT_SCHEMAS: Readonly<Record<JcToolName, z.ZodType>> =
   }),
   jc_doctor: z.strictObject({}),
   ping: z.strictObject({}),
-  get_config: z.strictObject({})
+  get_config: z.strictObject({}),
+  herdr_status: z.strictObject({}),
+  herdr_terminals: z.strictObject({ all: z.boolean().optional() }),
+  herdr_read: z.strictObject({
+    terminal: z.string().regex(/^(?:[A-Za-z0-9][A-Za-z0-9_.-]{0,63}|[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,63})$/u),
+    // No default here: the signed argument set must stay exactly what the
+    // caller delivered. The handler applies the documented default after
+    // capability verification.
+    lines: z.number().int().min(0).max(2000).optional()
+  })
 });

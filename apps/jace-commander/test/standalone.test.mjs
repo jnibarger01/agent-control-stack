@@ -91,7 +91,9 @@ await test('the gated set is derived from the manifest and covers every approval
   assert.deepEqual(gated.map((tool) => tool.name).sort(), [...MUTATING].sort());
   for (const tool of gated) assert.equal(jcStandaloneToolAllowed(tool.name), false, tool.name);
   assert.equal(jcStandaloneToolAllowed('no_such_tool'), false);
-  assert.equal(JC_STANDALONE_TOOL_NAMES.length, JC_MANIFEST.tools.length - gated.length);
+  const capabilityOnly = ['herdr_status', 'herdr_terminals', 'herdr_read'];
+  assert.equal(JC_STANDALONE_TOOL_NAMES.length, JC_MANIFEST.tools.length - gated.length - capabilityOnly.length);
+  for (const name of capabilityOnly) assert.equal(jcStandaloneToolAllowed(name), false, `${name} must never be standalone`);
 });
 
 await test('standalone tools/list omits every write, exec, git-mutation and approval-gated tool', async () => {

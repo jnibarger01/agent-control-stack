@@ -80,11 +80,25 @@ export function isJcPreset(value: unknown): value is JcPreset {
 }
 
 /**
+ * Herdr tools drive a long-lived terminal execution surface. They stay behind
+ * a verified ACS capability in every preset: standalone refuses them, and no
+ * operator authorizer table can route them to local authorization.
+ */
+export const JC_CAPABILITY_ONLY_TOOLS: ReadonlySet<string> = Object.freeze(
+  new Set(['herdr_status', 'herdr_terminals', 'herdr_read']),
+);
+
+export function jcRequiresAcsCapability(name: string): boolean {
+  return JC_CAPABILITY_ONLY_TOOLS.has(name);
+}
+
+/**
  * Whether `name` may be served by the `standalone` preset (no ACS capability,
- * no approval). Fail closed: unknown tools, approval-gated tools, and any tool
- * with a non-read scope are refused.
+ * no approval). Fail closed: unknown tools, approval-gated tools, any tool
+ * with a non-read scope, and capability-only tools are refused.
  */
 export function jcStandaloneToolAllowed(name: string): boolean {
+  if (jcRequiresAcsCapability(name)) return false;
   const policy = Object.prototype.hasOwnProperty.call(JC_TOOL_POLICIES, name) ? JC_TOOL_POLICIES[name] : undefined;
   if (!policy || policy.requiresApproval || policy.scopes.length === 0) return false;
   return policy.scopes.every((scope) => scope.endsWith('.read'));
@@ -122,6 +136,9 @@ export function validateAuthorizerTable(raw: unknown): JcAuthorizerTable {
     for (const [name, value] of Object.entries(record.tools as Record<string, unknown>)) {
       if (jcProviderOf(name) === undefined) fail(`unknown tool ${name}`);
       if (!isJcAuthorizerId(value)) fail(`tool ${name}: unknown authorizer ${String(value)}`);
+      if (jcRequiresAcsCapability(name) && value !== 'acs-capability') {
+        fail(`tool ${name} requires an acs-capability authorizer`);
+      }
       tools[name] = value as JcAuthorizerId;
     }
   }
@@ -155,6 +172,11 @@ export function createAuthorizerResolver(preset: JcPreset, table?: JcAuthorizerT
     if (!provider || !riskClass) return undefined; // unknown tool: callers fail closed
     if (preset === 'standalone') {
       return { tool, provider, riskClass, authorizer: jcStandaloneToolAllowed(tool) ? 'local' : 'refused', source: 'preset' };
+    }
+    // Capability-only tools are fixed by contract, not by an operator table.
+    // Every non-standalone route must reach the verifier.
+    if (jcRequiresAcsCapability(tool)) {
+      return { tool, provider, riskClass, authorizer: 'acs-capability', source: 'tool' };
     }
     if (Object.prototype.hasOwnProperty.call(effective.tools, tool)) {
       return { tool, provider, riskClass, authorizer: effective.tools[tool], source: 'tool' };

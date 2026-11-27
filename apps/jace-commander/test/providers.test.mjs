@@ -54,14 +54,14 @@ await test('provider table matches the architecture draft', () => {
   assert.deepEqual([...byId['jc.integration']].sort(), ['mission_router_list', 'swarm_read', 'visualizer_read']);
   assert.ok(byId['jc.git'].every((name) => name.startsWith('git_')));
   assert.equal(byId['jc.git'].length, 9);
-  assert.equal(byId['jc.process'].length, 7);
+  assert.equal(byId['jc.process'].length, 10);
   assert.equal(byId['jc.fs'].length, 13);
   assert.deepEqual(byId['jc.gui'], ['gui_screenshot', 'gui_action']);
 });
 
 await test('risk classes are derived from scopes, most severe scope wins, and cover every tool', () => {
   const expected = {
-    read: 25,
+    read: 28,
     mutate: 8, // write_file create_directory move_file edit_block git_add git_commit
     network: 3, // git_fetch git_push acs_submit_mission
     exec: 5, // start_process kill_process
@@ -79,8 +79,9 @@ await test('risk classes are derived from scopes, most severe scope wins, and co
 
 await test('the standalone read set excludes GUI screenshot observation, which is ACS-managed only', () => {
   const readTools = manifestNames.filter((name) => jcRiskClassOf(name) === 'read' && !JC_TOOL_POLICIES[name].requiresApproval);
-  assert.deepEqual(readTools.filter((name) => name !== 'gui_screenshot').sort(), [...JC_STANDALONE_TOOL_NAMES].sort());
-  assert.equal(readTools.length, 25);
+  const capabilityOnly = ['herdr_status', 'herdr_terminals', 'herdr_read'];
+  assert.deepEqual(readTools.filter((name) => name !== 'gui_screenshot' && !capabilityOnly.includes(name)).sort(), [...JC_STANDALONE_TOOL_NAMES].sort());
+  assert.equal(readTools.length, 28);
   assert.equal(JC_STANDALONE_TOOL_NAMES.includes('gui_screenshot'), false);
 });
 

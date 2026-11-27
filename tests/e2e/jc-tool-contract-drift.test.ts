@@ -47,9 +47,11 @@ import {
 } from "@agent-control-stack/jc-tool-manifest";
 import { applyControlPlaneMigrations } from "@agent-control-stack/shared";
 import { JC_GENERATED_MANIFEST_PATH, renderJcGeneratedManifest } from "../../scripts/jc-tool-manifest.ts";
+import { JC_MANIFEST as VENDOR_JC_MANIFEST } from "../../vendor/desktop-commander/src/jace-commander/manifest.generated.ts";
 import { JC_MANIFEST } from "../../apps/jace-commander/src/manifest.generated.ts";
 import { CLI_COMMANDS } from "../../apps/jace-commander/src/cli-commands.ts";
 import { JC_PROVIDERS, jcProviderOf } from "../../apps/jace-commander/src/providers.ts";
+import * as jcAppAuthorizers from "../../apps/jace-commander/src/authorizers.ts";
 // @ts-expect-error plain-JS edge module (no type declarations)
 import { JC_TOOL_PROVIDERS as EDGE_TOOL_PROVIDERS } from "../../apps/dc-mcp-gateway/jc-routing.js";
 import { isCredentialPath } from "../../apps/jace-commander/src/credential-paths.ts";
@@ -169,6 +171,12 @@ describe("jc-tool-manifest drift gate", () => {
     const onDisk = readFileSync(new URL(`../../${JC_GENERATED_MANIFEST_PATH}`, import.meta.url), "utf8");
     expect(onDisk).toBe(renderJcGeneratedManifest());
     expect(JC_MANIFEST).toEqual(jcPortableManifest());
+  });
+
+  it("keeps the vendor runtime's herdr rows identical to the canonical ACS manifest", () => {
+    expect(VENDOR_JC_MANIFEST.tools.filter((tool) => tool.name.startsWith("herdr_"))).toEqual(
+      jcPortableManifest().tools.filter((tool) => tool.name.startsWith("herdr_"))
+    );
   });
 
   it("the CLI command table implements exactly the manifest's CLI verbs, each bound to its tool", () => {
@@ -294,6 +302,60 @@ describe("jc-tool-manifest drift gate", () => {
       const v = verifier(publicKey);
       v.verify("jc_status", {}, capability);
       expect(() => v.verify("jc_status", {}, capability)).toThrow(/JC_CAPABILITY_NONCE_REPLAY/);
+    });
+
+    describe("Herdr tools require a verified ACS capability", () => {
+      const herdrNames = ["herdr_status", "herdr_terminals", "herdr_read"];
+
+      it("refuses standalone authorization and rejects local table overrides", () => {
+        const authorizers = jcAppAuthorizers;
+        for (const name of herdrNames) {
+          expect(authorizers.jcStandaloneToolAllowed(name)).toBe(false);
+          expect(authorizers.createAuthorizerResolver("standalone").resolve(name)!.authorizer).toBe("refused");
+          expect(authorizers.createAuthorizerResolver("local").resolve(name)!.authorizer).toBe("acs-capability");
+          expect(() => authorizers.validateAuthorizerTable({ default: "local", tools: { [name]: "local" } })).toThrow(
+            /requires an acs-capability authorizer/
+          );
+        }
+      });
+
+      it("rejects missing, invalid, expired, mismatched and replayed capabilities", () => {
+        const { privateKey, publicKey } = keys();
+        const args = { terminal: "t1" };
+        const capability = mint(privateKey, "herdr_read", args);
+        expect(() => verifier(publicKey).verify("herdr_read", args, undefined)).toThrow(/JC_CAPABILITY_MISSING/);
+        expect(() => verifier(publicKey).verify("herdr_read", args, { ...capability, signature: randomBytes(64).toString("base64url") })).toThrow(
+          /JC_CAPABILITY_SIGNATURE_INVALID/
+        );
+        const expired = mint(privateKey, "herdr_read", args, { expiresAt: new Date(Date.now() - 60_000).toISOString() });
+        expect(() => verifier(publicKey).verify("herdr_read", args, expired)).toThrow(/JC_CAPABILITY_TIME_INVALID/);
+        expect(() => verifier(publicKey).verify("herdr_terminals", {}, capability)).toThrow(/JC_CAPABILITY_TOOL_MISMATCH/);
+        expect(() => verifier(publicKey).verify("herdr_read", { terminal: "t2" }, capability)).toThrow(
+          /JC_CAPABILITY_ARGUMENTS_MISMATCH/
+        );
+        const v = verifier(publicKey);
+        v.verify("herdr_read", args, capability);
+        expect(() => v.verify("herdr_read", args, capability)).toThrow(/JC_CAPABILITY_NONCE_REPLAY/);
+      });
+
+      it("never defaults or rewrites signed arguments", () => {
+        const { privateKey, publicKey } = keys();
+        const delivered = { terminal: "t1" } as Record<string, unknown>;
+        const capability = mint(privateKey, "herdr_read", delivered);
+        const verified = verifier(publicKey).verify("herdr_read", delivered, capability);
+        expect(capability.payload.normalizedArguments).toEqual({ terminal: "t1" });
+        expect(verified.toolName).toBe("herdr_read");
+        expect(verified.invocationHash).toBe(capability.payload.invocationHash);
+        expect(delivered).toEqual({ terminal: "t1" });
+        for (const [value, ok] of [[0, true], [2000, true], [2001, false], [-1, false]] as const) {
+          const invalidArgs = { terminal: "t1", lines: value };
+          if (ok) {
+            expect(() => mint(privateKey, "herdr_read", invalidArgs)).not.toThrow();
+          } else {
+            expect(() => mint(privateKey, "herdr_read", invalidArgs)).toThrow(/herdr_read: lines/);
+          }
+        }
+      });
     });
   });
 });

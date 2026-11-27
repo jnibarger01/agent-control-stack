@@ -26,6 +26,7 @@ export const JC_TOOL_PROVIDERS = Object.freeze({
   git_status: 'jc.git', git_diff: 'jc.git', git_log: 'jc.git', git_branch: 'jc.git', git_show: 'jc.git',
   git_add: 'jc.git', git_commit: 'jc.git', git_fetch: 'jc.git', git_push: 'jc.git',
   start_process: 'jc.process', read_process_output: 'jc.process', list_processes: 'jc.process', kill_process: 'jc.process', run_command: 'jc.process', start_terminal_session: 'jc.process', interact_with_process: 'jc.process',
+  herdr_status: 'jc.process', herdr_terminals: 'jc.process', herdr_read: 'jc.process',
   privileged_exec: 'jc.privileged',
   gui_screenshot: 'jc.gui', gui_action: 'jc.gui',
   ping: 'jc.meta', get_config: 'jc.meta', jc_status: 'jc.meta', jc_doctor: 'jc.meta', looptrace_verify: 'jc.meta',
@@ -35,6 +36,9 @@ export const JC_TOOL_PROVIDERS = Object.freeze({
 
 const PROVIDER_IDS = new Set(Object.values(JC_TOOL_PROVIDERS));
 const AUTHORIZERS = new Set(['local', 'acs-capability', 'admin-delegated']);
+// Herdr tools address a long-lived terminal surface: never let local routing
+// skip ACS issuance, even if an operator policy asks for it.
+const CAPABILITY_ONLY_TOOLS = new Set(['herdr_status', 'herdr_terminals', 'herdr_read']);
 export const DEFAULT_SYSTEM_POLICY_PATH = '/etc/jace-commander/policy.json';
 const MAX_POLICY_BYTES = 256 * 1024;
 
@@ -58,6 +62,7 @@ function parseTable(raw) {
 /** per-tool override, then provider, then default. Unknown tools are never local. */
 export function resolveAuthorizer(table, tool) {
   if (!Object.hasOwn(JC_TOOL_PROVIDERS, tool)) return undefined;
+  if (CAPABILITY_ONLY_TOOLS.has(tool)) return 'acs-capability';
   if (Object.hasOwn(table.tools, tool)) return table.tools[tool];
   const provider = JC_TOOL_PROVIDERS[tool];
   if (Object.hasOwn(table.providers, provider)) return table.providers[provider];

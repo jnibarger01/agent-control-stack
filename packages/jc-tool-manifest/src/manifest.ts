@@ -787,6 +787,41 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "low",
     false,
     "read-only; tokens are omitted"
+  ),
+  herdr_status: row(
+    "Report herdr-core reachability, version, and live terminal count.",
+    { type: "object", properties: {}, additionalProperties: false },
+    ["process.read"],
+    "jc.process.read",
+    "low",
+    false,
+    "read-only status from the local herdr-core CLI"
+  ),
+  herdr_terminals: row(
+    "List live herdr-core terminals, optionally including all terminals.",
+    { type: "object", properties: { all: { type: "boolean" } }, additionalProperties: false },
+    ["process.read"],
+    "jc.process.read",
+    "low",
+    false,
+    "read-only terminal inventory from the local herdr-core CLI"
+  ),
+  herdr_read: row(
+    "Read bounded screen and history output from one herdr-core terminal.",
+    {
+      type: "object",
+      properties: {
+        terminal: str("Terminal address or machine/terminal address"),
+        lines: { type: "integer", minimum: 0, maximum: 2000, default: 100 }
+      },
+      required: ["terminal"],
+      additionalProperties: false
+    },
+    ["process.read"],
+    "jc.process.read",
+    "low",
+    false,
+    "read-only bounded terminal output"
   )
 };
 
@@ -845,7 +880,10 @@ const TOOL_SURFACE: Readonly<Record<JcToolName, SurfaceRow>> = {
   git_push: surface("git", ["repo"], ["git push"]),
   jc_doctor: surface("system", [], ["doctor"]),
   ping: surface("system", [], ["ping"]),
-  get_config: surface("system", [], ["config"])
+  get_config: surface("system", [], ["config"]),
+  herdr_status: surface("process", [], []),
+  herdr_terminals: surface("process", [], []),
+  herdr_read: surface("process", [], [])
 };
 
 function deepFreezeJson<T>(value: T): T {

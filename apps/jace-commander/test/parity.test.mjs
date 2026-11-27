@@ -52,16 +52,17 @@ async function test(name, fn) {
 const all = JC_MANIFEST.tools;
 const names = all.map((tool) => tool.name);
 // Golden standalone set, from the manifest alone (not the code under change).
-const standaloneAllowed = all.filter((tool) => !tool.requiresApproval && tool.scopes.every((scope) => scope.endsWith('.read'))).map((tool) => tool.name);
+const standaloneAllowed = all.filter((tool) => !tool.requiresApproval && tool.scopes.every((scope) => scope.endsWith('.read')) && !tool.name.startsWith('herdr_')).map((tool) => tool.name);
 const standaloneRefused = names.filter((name) => !standaloneAllowed.includes(name));
 
 const managed = await connect('managed');
 const standalone = await connect('standalone');
 
-await test('golden: 42 tools, 24 standalone-allowed, 18 refused', () => {
-  assert.equal(names.length, 42);
+await test('golden: 45 tools, 24 standalone-allowed, 21 refused (Herdr is capability-only)', () => {
+  assert.equal(names.length, 45);
   assert.equal(standaloneAllowed.length, 24);
-  assert.equal(standaloneRefused.length, 18);
+  assert.equal(standaloneRefused.length, 21);
+  for (const name of ['herdr_status', 'herdr_terminals', 'herdr_read']) assert.ok(standaloneRefused.includes(name), name);
 });
 
 await test('managed: tools/list is the whole manifest', async () => {
