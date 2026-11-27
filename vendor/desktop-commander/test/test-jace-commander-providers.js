@@ -54,13 +54,13 @@ await test('provider table matches the architecture draft', () => {
   assert.deepEqual([...byId['jc.integration']].sort(), ['mission_router_list', 'swarm_read', 'visualizer_read']);
   assert.ok(byId['jc.git'].every((name) => name.startsWith('git_')));
   assert.equal(byId['jc.git'].length, 9);
-  assert.equal(byId['jc.process'].length, 4);
+  assert.equal(byId['jc.process'].length, 7);
   assert.equal(byId['jc.fs'].length, 12);
 });
 
 await test('risk classes are derived from scopes, most severe scope wins, and cover every tool', () => {
   const expected = {
-    read: 24,
+    read: 27,
     mutate: 6, // write_file create_directory move_file edit_block git_add git_commit
     network: 3, // git_fetch git_push acs_submit_mission
     exec: 2, // start_process kill_process
@@ -76,10 +76,16 @@ await test('risk classes are derived from scopes, most severe scope wins, and co
   assert.equal(jcRiskClassOf('no_such_tool'), undefined);
 });
 
-await test('the read class is exactly the standalone tool set (24), so later presets cannot drift from standalone', () => {
+await test('the read class is the standalone tool set plus capability-only Herdr reads', () => {
   const readTools = manifestNames.filter((name) => jcRiskClassOf(name) === 'read' && !JC_TOOL_POLICIES[name].requiresApproval);
-  assert.deepEqual([...readTools].sort(), [...JC_STANDALONE_TOOL_NAMES].sort());
-  assert.equal(readTools.length, 24);
+  const herdrReads = ['herdr_status', 'herdr_terminals', 'herdr_read'];
+  assert.deepEqual([...JC_STANDALONE_TOOL_NAMES].sort(), readTools.filter((name) => !herdrReads.includes(name)).sort());
+  assert.equal(JC_STANDALONE_TOOL_NAMES.length, 24);
+  for (const name of herdrReads) {
+    assert.equal(readTools.includes(name), true);
+    assert.equal(JC_STANDALONE_TOOL_NAMES.includes(name), false, `${name} must never be standalone`);
+  }
+  assert.equal(readTools.length, 27);
 });
 
 await test('provider health isolates a throwing, rejecting or hanging probe to its own provider', async () => {

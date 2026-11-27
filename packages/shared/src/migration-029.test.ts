@@ -63,11 +63,12 @@ describe("migration 029: jace_commander tool allowlist", () => {
         tool_name: string;
       }>
     ).map((entry) => entry.tool_name);
-    expect(tools).toHaveLength(42);
+    expect(tools).toHaveLength(45);
     expect(tools).toContain("privileged_exec");
     expect(tools).toContain("read_multiple_files");
     expect(tools).toContain("start_search");
     expect(tools).toContain("stop_search");
+    for (const herdr of ["herdr_status", "herdr_terminals", "herdr_read"]) expect(tools).toContain(herdr);
     expect(() => db.prepare("DELETE FROM jace_commander_tools WHERE tool_name = 'read_file'").run()).toThrow(
       /append-only/
     );

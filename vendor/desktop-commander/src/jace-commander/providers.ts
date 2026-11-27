@@ -64,7 +64,7 @@ export const JC_PROVIDERS: readonly JcProviderDefinition[] = Object.freeze([
     id: 'jc.process',
     needs: 'local',
     required: true,
-    tools: ['start_process', 'read_process_output', 'list_processes', 'kill_process'],
+    tools: ['start_process', 'read_process_output', 'list_processes', 'kill_process', 'herdr_status', 'herdr_terminals', 'herdr_read'],
   },
   { id: 'jc.privileged', needs: 'root-helper', required: false, tools: ['privileged_exec'] },
   {

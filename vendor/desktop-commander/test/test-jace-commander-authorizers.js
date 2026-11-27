@@ -30,16 +30,21 @@ async function test(name, fn) {
 }
 const names = JC_MANIFEST.tools.map((tool) => tool.name);
 
-await test('managed preset resolves every tool to acs-capability; standalone to 24 local + 12 refused', () => {
+await test('managed preset resolves every tool to acs-capability; Herdr tools are never standalone/local', () => {
   const managed = createAuthorizerResolver('managed');
   assert.ok(managed.routes().every((route) => route.authorizer === 'acs-capability'));
-  assert.equal(managed.routes().length, 36);
+  assert.equal(managed.routes().length, 39);
   assert.equal(managed.usesAcs(), true);
   const standalone = createAuthorizerResolver('standalone');
   assert.equal(standalone.routes().filter((route) => route.authorizer === 'local').length, 24);
-  assert.equal(standalone.routes().filter((route) => route.authorizer === 'refused').length, 12);
+  assert.equal(standalone.routes().filter((route) => route.authorizer === 'refused').length, 15);
   assert.equal(standalone.usesAcs(), false);
-  assert.equal(createAuthorizerResolver('local').routes().every((route) => route.authorizer === 'local'), true);
+  const localRoutes = createAuthorizerResolver('local').routes();
+  assert.equal(localRoutes.filter((route) => route.authorizer === 'local').length, 36);
+  assert.deepEqual(
+    localRoutes.filter((route) => route.authorizer === 'acs-capability').map((route) => route.tool).sort(),
+    ['herdr_read', 'herdr_status', 'herdr_terminals'].sort(),
+  );
 });
 
 await test('precedence is per-tool, then provider, then default', () => {
@@ -175,6 +180,65 @@ await test('mixed table: acs-capability / admin-delegated providers still demand
   const ping = await client.callTool({ name: 'ping', arguments: {} });
   assert.equal(ping.isError, undefined);
   await client.close();
+});
+
+await test('Herdr tools: standalone refuses, local still requires a verified capability before any handler runs', async () => {
+  const herdrNames = ['herdr_status', 'herdr_terminals', 'herdr_read'];
+  const standalone = await connect('standalone');
+  for (const name of herdrNames) {
+    const result = await standalone.callTool({ name, arguments: name === 'herdr_read' ? { terminal: 't1' } : {} });
+    assert.equal(result.isError, true, name);
+    assert.equal(result.structuredContent.error.code, 'JC_STANDALONE_TOOL_REFUSED', name);
+    assert.equal(result._meta.jcAuthorization.authorizer, 'refused');
+  }
+  await standalone.close();
+
+  // A fake hc records any spawn. Unauthorized calls must never reach it.
+  const herdrBin = fs.mkdtempSync(path.join(os.tmpdir(), 'jc-herdr-authz-'));
+  const marker = path.join(herdrBin, 'hc-ran');
+  fs.writeFileSync(
+    path.join(herdrBin, 'hc'),
+    `#!${process.execPath}\nconst fs=require('fs');fs.writeFileSync(${JSON.stringify(marker)}, process.argv.slice(2).join(' '));process.stdout.write(process.argv[2]==='--version'?'hc 0.1.22':'{"terminals":[]}');\n`,
+    { mode: 0o700 },
+  );
+  const originalPath = process.env.PATH;
+  process.env.PATH = herdrBin;
+  try {
+    const localHerdr = await connect('local', {
+      fetchImpl: async () => new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }),
+    });
+    for (const [name, args] of [
+      ['herdr_status', {}],
+      ['herdr_terminals', {}],
+      ['herdr_read', { terminal: 't1' }],
+    ]) {
+      const noCap = await localHerdr.callTool({ name, arguments: args });
+      assert.equal(noCap.isError, true, name);
+      assert.equal(noCap.structuredContent.error.code, 'JC_CAPABILITY_MISSING', name);
+      const wrongTool = await localHerdr.callTool({
+        name,
+        arguments: args,
+        _meta: { acsCapability: issuer.mint('ping', {}) },
+      });
+      assert.equal(wrongTool.isError, true, name);
+      assert.equal(wrongTool.structuredContent.error.code, 'JC_CAPABILITY_TOOL_MISMATCH', name);
+      assert.equal(fs.existsSync(marker), false, `${name} must not spawn hc without a matching capability`);
+    }
+    const args = { terminal: 't1' };
+    const authorized = await localHerdr.callTool({
+      name: 'herdr_read',
+      arguments: args,
+      _meta: { acsCapability: issuer.mint('herdr_read', args) },
+    });
+    assert.equal(authorized.isError, undefined, JSON.stringify(authorized.structuredContent));
+    assert.equal(authorized._meta.acsAuthorization.decision, 'granted');
+    assert.equal(fs.existsSync(marker), true, 'an authorized call must reach the handler');
+    assert.match(fs.readFileSync(marker, 'utf8'), /^read t1 --lines 100 --json$/);
+    await localHerdr.close();
+  } finally {
+    process.env.PATH = originalPath;
+    fs.rmSync(herdrBin, { recursive: true, force: true });
+  }
 });
 
 await test('trace records carry authorizer, provider and risk class and the chain verifies', async () => {

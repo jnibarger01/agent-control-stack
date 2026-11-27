@@ -2,7 +2,7 @@
 /**
  * ADR 0026 parity gate. A golden matrix, derived from the manifest and NOT from
  * the provider/authorizer code under change, that pins today's behavior for the
- * `managed` and `standalone` presets across all 36 tools. Every rollout slice
+ * `managed` and `standalone` presets across all 39 tools. Every rollout slice
  * must keep this file green: new authorizers may add rows, never change these.
  */
 import assert from 'node:assert/strict';
@@ -51,16 +51,17 @@ async function test(name, fn) {
 const all = JC_MANIFEST.tools;
 const names = all.map((tool) => tool.name);
 // Golden standalone set, from the manifest alone (not the code under change).
-const standaloneAllowed = all.filter((tool) => !tool.requiresApproval && tool.scopes.every((scope) => scope.endsWith('.read'))).map((tool) => tool.name);
+const standaloneAllowed = all.filter((tool) => !tool.requiresApproval && tool.scopes.every((scope) => scope.endsWith('.read')) && !tool.name.startsWith('herdr_')).map((tool) => tool.name);
 const standaloneRefused = names.filter((name) => !standaloneAllowed.includes(name));
 
 const managed = await connect('managed');
 const standalone = await connect('standalone');
 
-await test('golden: 36 tools, 24 standalone-allowed, 12 refused', () => {
-  assert.equal(names.length, 36);
+await test('golden: 39 tools, 24 standalone-allowed, 15 refused (Herdr is capability-only)', () => {
+  assert.equal(names.length, 39);
   assert.equal(standaloneAllowed.length, 24);
-  assert.equal(standaloneRefused.length, 12);
+  assert.equal(standaloneRefused.length, 15);
+  for (const name of ['herdr_status', 'herdr_terminals', 'herdr_read']) assert.ok(standaloneRefused.includes(name), name);
 });
 
 await test('managed: tools/list is the whole manifest', async () => {

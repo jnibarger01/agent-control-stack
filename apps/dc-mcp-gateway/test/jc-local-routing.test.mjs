@@ -148,7 +148,13 @@ test('routing: implicit missing policy is uniform local; precedence is tool > pr
   const table = { default: 'local', providers: {}, tools: {} };
   assert.equal(resolveAuthorizer(table, 'read_file'), 'local');
   assert.equal(resolveAuthorizer(table, 'nope'), undefined);
-  assert.equal(Object.keys(JC_TOOL_PROVIDERS).length, 42);
+  assert.equal(Object.keys(JC_TOOL_PROVIDERS).length, 45);
+  // Herdr tools are capability-only: no local policy can skip ACS issuance.
+  for (const name of ['herdr_status', 'herdr_terminals', 'herdr_read']) {
+    assert.equal(uniform.isLocal(name), false, name);
+    assert.equal(routing.isLocal(name), false, name);
+    assert.equal(resolveAuthorizer({ default: 'local', tools: { [name]: 'local' } }, name), 'acs-capability');
+  }
 });
 
 test('stripAuthorityMeta removes capability and acs* metadata and keeps the rest', () => {

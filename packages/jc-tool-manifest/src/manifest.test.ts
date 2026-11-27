@@ -126,6 +126,24 @@ describe("jc-tool-manifest", () => {
     expect(ls.safeParse({ path: "/tmp", depth: JC_FS_LIMITS.maxListDepth + 1 }).success).toBe(false);
   });
 
+  it("declares the herdr tools as read-only process operations", () => {
+    const names = ["herdr_status", "herdr_terminals", "herdr_read"] as const;
+    for (const name of names) {
+      const tool = jcToolContract(name);
+      expect(tool).toBeDefined();
+      expect(tool!.group).toBe("process");
+      expect(tool!.scopes).toEqual(["process.read"]);
+      expect(tool!.actionKind).toBe("jc.process.read");
+      expect(tool!.risk).toBe("low");
+      expect(tool!.requiresApproval).toBe(false);
+      expect(tool!.pathArguments).toEqual([]);
+      expect(tool!.cliCommands).toEqual([]);
+      expect(JC_SCOPES).toContain(tool!.scopes[0]);
+      expect(JC_ACTION_KINDS).toContain(tool!.actionKind);
+      expect(JC_TOOL_GROUPS).toContain(tool!.group);
+    }
+  });
+
   it("portable manifest is JSON-safe, sorted, and its hash tracks content", () => {
     const portable = jcPortableManifest();
     expect(JSON.parse(JSON.stringify(portable))).toEqual(portable);

@@ -24,7 +24,7 @@ export interface JcManifest {
 
 export const JC_MANIFEST: JcManifest = {
   "version": "acs.jc.v1",
-  "manifestHash": "49863090b690af103b212bd89b56230eea38f61aa2a491adfef6eb709a2fc11f",
+  "manifestHash": "bab264827277e62f6c590228a0f156499b9359635fa60075080fa7d8c182e5ab",
   "scopes": [
     "fs.read",
     "fs.write",
@@ -607,6 +607,78 @@ export const JC_MANIFEST: JcManifest = {
       "cliCommands": [
         "git status"
       ]
+    },
+    {
+      "name": "herdr_read",
+      "description": "Read bounded screen and history output from one herdr-core terminal.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "terminal": {
+            "type": "string",
+            "description": "Terminal address or machine/terminal address"
+          },
+          "lines": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2000,
+            "default": 100
+          }
+        },
+        "required": [
+          "terminal"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "process.read"
+      ],
+      "actionKind": "jc.process.read",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "process",
+      "pathArguments": [],
+      "cliCommands": []
+    },
+    {
+      "name": "herdr_status",
+      "description": "Report herdr-core reachability, version, and live terminal count.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "scopes": [
+        "process.read"
+      ],
+      "actionKind": "jc.process.read",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "process",
+      "pathArguments": [],
+      "cliCommands": []
+    },
+    {
+      "name": "herdr_terminals",
+      "description": "List live herdr-core terminals, optionally including all terminals.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "all": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "scopes": [
+        "process.read"
+      ],
+      "actionKind": "jc.process.read",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "process",
+      "pathArguments": [],
+      "cliCommands": []
     },
     {
       "name": "jc_doctor",

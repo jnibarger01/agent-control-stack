@@ -31,6 +31,7 @@ import {
   JC_CLASS_DECISION_VALUES,
   JC_DEFAULT_CLASS_DECISIONS,
   createAuthorizerResolver,
+  jcRequiresAcsCapability,
   validateAuthorizerTable,
   type JcAuthorizerTable,
   type JcClassDecision,
@@ -303,7 +304,10 @@ function applySystem(doc: ParsedDocument): JcEffectivePolicy {
   for (const [id, mode] of Object.entries(doc.acs?.providers ?? {})) acsModes[id as JcProviderId] = mode;
   // A provider with ACS switched off cannot also be authorized by ACS.
   for (const route of createAuthorizerResolver('local', table ?? validateAuthorizerTable({ default: 'local' })).routes()) {
-    if ((route.authorizer === 'acs-capability' || route.authorizer === 'admin-delegated') && acsModes[route.provider] === 'off') {
+    // Herdr routes are capability-only by contract, not by operator choice;
+    // an `off` acs mode cannot switch off the contract's own requirement.
+    if (!jcRequiresAcsCapability(route.tool) &&
+        (route.authorizer === 'acs-capability' || route.authorizer === 'admin-delegated') && acsModes[route.provider] === 'off') {
       throw new PolicyError(`${route.tool} is routed to ${route.authorizer} but acs is off for ${route.provider}`);
     }
   }
