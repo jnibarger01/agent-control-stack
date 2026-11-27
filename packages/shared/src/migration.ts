@@ -154,8 +154,46 @@ const migrationFiles = [
   // 075 remains reserved for separately integrating ARES / JC context-pack work.
   { version: 76, name: "jace_commander_native_tools", filename: "076_jace_commander_native_tools.sql" },
   { version: 77, name: "jace_mem_capability_issuances", filename: "077_jace_mem_capability_issuances.sql" },
-  { version: 78, name: "jc_native_gui_tools", filename: "078_jc_native_gui_tools.sql" }
+  { version: 78, name: "jc_native_gui_tools", filename: "078_jc_native_gui_tools.sql" },
+  { version: 79, name: "device_auth_refresh_recovery", filename: "079_device_auth_refresh_recovery.sql" },
+  { version: 80, name: "device_auth_dpop", filename: "080_device_auth_dpop.sql" }
 ] as const;
+
+export interface ForwardCompatibleMigration {
+  version: number;
+  name: string;
+  filename: string;
+  checksum: string;
+}
+
+/**
+ * Migrations that a later release applies and that this release accepts in an existing database, so the later
+ * release can be rolled back by redeploying this one without restoring the database
+ * (docs/migrations/production-cutover-plan.md, step B0). Each entry was reviewed as additive: it only creates new
+ * tables, indexes on those tables and triggers on those tables, so nothing this release reads or writes changes.
+ * The reviewed SQL ships in `storage/migrations/forward-compatible/` (never applied by this release) and its
+ * checksum is derived from that file. A database row is accepted only when version, name, filename and checksum
+ * all match exactly.
+ */
+const forwardCompatibleMigrationFiles = [
+  { version: 83, name: "retry_fence_cleanup_evidence", filename: "083_retry_fence_cleanup_evidence.sql" }
+] as const;
+
+const forwardCompatibleDir = new URL("forward-compatible/", migrationsDir);
+
+export function forwardCompatibleMigrations(): ForwardCompatibleMigration[] {
+  return forwardCompatibleMigrationFiles.map((migration) => ({
+    ...migration,
+    checksum: createHash("sha256")
+      .update(readFileSync(new URL(migration.filename, forwardCompatibleDir), "utf8"))
+      .digest("hex")
+  }));
+}
+
+/** The reviewed SQL of a forward-compatible migration (tests only verify it; this release never applies it). */
+export function forwardCompatibleMigrationSql(filename: string): string {
+  return readFileSync(new URL(filename, forwardCompatibleDir), "utf8");
+}
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
   return migrationFiles.map((migration) => {

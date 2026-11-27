@@ -23,7 +23,45 @@ export const gatewayCredentialSchema = z.object({
   expiresAt: z.string().datetime({ offset: true }).optional(),
   status: z.enum(["active", "revoked"]).optional()
 });
+/** Canonical collection contract shared by production preflight and runtime auth. */
+export const gatewayCredentialsSchema = gatewayCredentialSchema
+  .array()
+  .min(1)
+  .superRefine((credentials, context) => {
+    const ids = new Set<string>();
+    for (const [index, credential] of credentials.entries()) {
+      if (ids.has(credential.id)) {
+        context.addIssue({ code: "custom", path: [index, "id"], message: "duplicate gateway credential id" });
+      }
+      ids.add(credential.id);
+    }
+  });
+
 export type GatewayCredential = z.infer<typeof gatewayCredentialSchema>;
+export interface DeviceAccessIdentityInfo {
+  deviceId: string;
+  principalId: string;
+  publicKeyJkt: string;
+  scopes: string[];
+  expiresAt: string;
+}
+
+export type DeviceDpopVerificationOutcome =
+  | {
+      ok: true;
+      device: DeviceAccessIdentityInfo;
+    }
+  | {
+      ok: false;
+      error: "invalid_token" | "use_dpop_nonce";
+      dpopNonce?: string;
+    };
+
+export interface DpopAuthChallenge {
+  wwwAuthenticate: string;
+  dpopNonce?: string;
+}
+
 export interface GatewayAuthOptions {
   token: string;
   actor: string;
@@ -37,14 +75,14 @@ export interface GatewayAuthOptions {
    */
   workerIdentities?: WorkerIdentityRegistry;
   /** Internal verifier for opaque device access tokens issued by this gateway. */
-  deviceAccessTokenResolver?: (token: string) =>
-    | {
-        deviceId: string;
-        principalId: string;
-        scopes: string[];
-        expiresAt: string;
-      }
-    | undefined;
+  deviceAccessTokenResolver?: (token: string) => DeviceAccessIdentityInfo | undefined;
+  /** RFC 9449 verifier for DPoP-bound device access tokens on protected requests. */
+  deviceDpopRequestResolver?: (input: {
+    accessToken: string;
+    dpopProof: string | undefined;
+    method: string;
+    pathname: string;
+  }) => DeviceDpopVerificationOutcome;
 }
 
 /**
@@ -236,14 +274,66 @@ export function requireBoundActorId(
   return boundActorId;
 }
 
+const dpopAuthChallenges = new WeakMap<FastifyRequest, DpopAuthChallenge>();
+const resolvedRequestCredentials = new WeakMap<
+  FastifyRequest,
+  { auth: GatewayAuthOptions; credential: GatewayCredential | undefined }
+>();
+
+export function getDpopAuthChallenge(request: FastifyRequest): DpopAuthChallenge | undefined {
+  return dpopAuthChallenges.get(request);
+}
+
 export function gatewayCredentialForRequest(
   request: FastifyRequest,
   auth: GatewayAuthOptions | undefined
 ): GatewayCredential | undefined {
   if (!auth) return undefined;
+  const cached = resolvedRequestCredentials.get(request);
+  if (cached && cached.auth === auth) {
+    return cached.credential;
+  }
+  const credential = resolveGatewayCredentialForRequestUncached(request, auth);
+  resolvedRequestCredentials.set(request, { auth, credential });
+  return credential;
+}
+
+function resolveGatewayCredentialForRequestUncached(
+  request: FastifyRequest,
+  auth: GatewayAuthOptions
+): GatewayCredential | undefined {
   const token = bearerToken(request.headers.authorization);
   const bearerCredential = gatewayCredentialForToken(token, auth);
   if (bearerCredential) return bearerCredential;
+  if (token && auth.deviceAccessTokenResolver?.(token)) {
+    // Device access tokens are strictly sender-constrained (DPoP); fail closed on Bearer downgrade.
+    dpopAuthChallenges.set(request, {
+      wwwAuthenticate: 'DPoP error="invalid_token"'
+    });
+    return undefined;
+  }
+  const dpopAccessToken = dpopToken(request.headers.authorization);
+  if (dpopAccessToken) {
+    if (!auth.deviceDpopRequestResolver) return undefined;
+    const rawDpopHeader = request.headers.dpop;
+    const dpopProof = Array.isArray(rawDpopHeader) ? undefined : rawDpopHeader?.trim() || undefined;
+    const pathname = (request.url || "/").split("?", 1)[0] || "/";
+    const outcome = auth.deviceDpopRequestResolver({
+      accessToken: dpopAccessToken,
+      dpopProof,
+      method: request.method,
+      pathname
+    });
+    if (outcome.ok) {
+      return deviceCredential(outcome.device, dpopAccessToken);
+    }
+    dpopAuthChallenges.set(request, {
+      wwwAuthenticate:
+        outcome.error === "use_dpop_nonce" ? 'DPoP error="use_dpop_nonce"' : 'DPoP error="invalid_token"',
+      ...(outcome.dpopNonce ? { dpopNonce: outcome.dpopNonce } : {})
+    });
+    return undefined;
+  }
   const cookie = cookies(request.headers.cookie)[sessionCookieName];
   return cookie ? gatewayCredentialForSessionCookie(cookie, auth) : undefined;
 }
@@ -285,9 +375,11 @@ export function gatewayCredentialForToken(
     if (!gatewayCredentialIsLive(credential)) return undefined;
     return credential;
   }
-  if (!token || !auth.deviceAccessTokenResolver) return undefined;
-  const device = auth.deviceAccessTokenResolver(token);
-  if (!device || Date.parse(device.expiresAt) <= Date.now()) return undefined;
+  return undefined;
+}
+
+function deviceCredential(device: DeviceAccessIdentityInfo, token: string): GatewayCredential | undefined {
+  if (Date.parse(device.expiresAt) <= Date.now()) return undefined;
   const scopes = new Set(device.scopes);
   if (scopes.has("acs:work:read")) scopes.add("acs:read");
   if (scopes.has("acs:work:create")) scopes.add("acs:write");
@@ -301,6 +393,15 @@ export function gatewayCredentialForToken(
     expiresAt: device.expiresAt,
     status: "active"
   };
+}
+
+export function dpopToken(authorization: string | string[] | undefined): string | undefined {
+  if (Array.isArray(authorization)) return undefined;
+  const value = authorization ?? "";
+  const match = /^DPoP\s+(.+)$/i.exec(value);
+  if (!match) return undefined;
+  const token = match[1].trim();
+  return token || undefined;
 }
 
 export function gatewayCredentialIsLive(credential: GatewayCredential, nowMs = Date.now()): boolean {

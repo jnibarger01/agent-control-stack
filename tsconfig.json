@@ -1,56 +1,164 @@
 {
   "files": [],
   "references": [
-    { "path": "./tsconfig.compounding.json" },
-    { "path": "packages/shared" },
-    { "path": "packages/work-items" },
-    { "path": "./packages/actor-router" },
-    { "path": "packages/acp-adapter" },
-    { "path": "packages/policy-gate" },
-    { "path": "packages/machine-controller" },
-    { "path": "packages/temporal-memory" },
-    { "path": "packages/procedural-learning" },
-    { "path": "packages/advisory" },
-    { "path": "packages/local-advisor" },
-    { "path": "packages/evidence" },
-    { "path": "packages/sandbox" },
-    { "path": "packages/dc-tool-manifest" },
-    { "path": "packages/execution-admission" },
-    { "path": "packages/jc-tool-manifest" },
-    { "path": "packages/desktop-commander-adapter" },
-    { "path": "packages/jace-mem-issuer" },
-    { "path": "packages/workspace-manager" },
-    { "path": "packages/engine-adapter" },
-    { "path": "./packages/execution-controller" },
-    { "path": "packages/secret-broker" },
-    { "path": "./packages/result-validation" },
-    { "path": "./packages/recovery" },
-    { "path": "./packages/agent-cli" },
-    { "path": "./packages/publication" },
-    { "path": "./packages/coding-mission" },
-    { "path": "./packages/model-broker" },
-    { "path": "./packages/integration-manager" },
-    { "path": "./packages/outcome-engine" },
-    { "path": "packages/verification" },
-    { "path": "packages/jev-advisor" },
-    { "path": "packages/eval-harness" },
-    { "path": "packages/moa-orchestrator" },
-    { "path": "packages/vercel-bridge-contract" },
-    { "path": "packages/looptrace-query" },
-    { "path": "packages/black-box-recorder" },
-    { "path": "packages/mission-control-contract" },
-    { "path": "apps/control-ui" },
-    { "path": "apps/vercel-mcp-ingress" },
-    { "path": "apps/vercel-bridge-worker" },
-    { "path": "apps/mcp" },
-    { "path": "apps/evidence-mcp" },
-    { "path": "apps/looptrace-mcp" },
-    { "path": "apps/local-advisor-mcp" },
-    { "path": "apps/gateway" },
-    { "path": "apps/dc-relay" },
-    { "path": "apps/worker" },
-    { "path": "apps/scheduler" },
-    { "path": "apps/cli" },
-    { "path": "apps/runtime" }
+    {
+      "path": "./tsconfig.compounding.json"
+    },
+    {
+      "path": "packages/shared"
+    },
+    {
+      "path": "packages/work-items"
+    },
+    {
+      "path": "./packages/actor-router"
+    },
+    {
+      "path": "packages/acp-adapter"
+    },
+    {
+      "path": "packages/policy-gate"
+    },
+    {
+      "path": "packages/machine-controller"
+    },
+    {
+      "path": "packages/temporal-memory"
+    },
+    {
+      "path": "packages/procedural-learning"
+    },
+    {
+      "path": "packages/advisory"
+    },
+    {
+      "path": "packages/local-advisor"
+    },
+    {
+      "path": "packages/evidence"
+    },
+    {
+      "path": "packages/sandbox"
+    },
+    {
+      "path": "packages/dc-tool-manifest"
+    },
+    {
+      "path": "packages/execution-admission"
+    },
+    {
+      "path": "packages/jc-tool-manifest"
+    },
+    {
+      "path": "packages/desktop-commander-adapter"
+    },
+    {
+      "path": "packages/jace-mem-issuer"
+    },
+    {
+      "path": "packages/workspace-manager"
+    },
+    {
+      "path": "packages/engine-adapter"
+    },
+    {
+      "path": "./packages/execution-controller"
+    },
+    {
+      "path": "packages/secret-broker"
+    },
+    {
+      "path": "./packages/result-validation"
+    },
+    {
+      "path": "./packages/recovery"
+    },
+    {
+      "path": "./packages/agent-cli"
+    },
+    {
+      "path": "./packages/publication"
+    },
+    {
+      "path": "./packages/coding-mission"
+    },
+    {
+      "path": "./packages/model-broker"
+    },
+    {
+      "path": "./packages/integration-manager"
+    },
+    {
+      "path": "./packages/ai-factory"
+    },
+    {
+      "path": "./packages/ai-factory-runtime"
+    },
+    {
+      "path": "./packages/outcome-engine"
+    },
+    {
+      "path": "packages/verification"
+    },
+    {
+      "path": "packages/jev-advisor"
+    },
+    {
+      "path": "packages/eval-harness"
+    },
+    {
+      "path": "packages/moa-orchestrator"
+    },
+    {
+      "path": "packages/vercel-bridge-contract"
+    },
+    {
+      "path": "packages/looptrace-query"
+    },
+    {
+      "path": "packages/black-box-recorder"
+    },
+    {
+      "path": "packages/mission-control-contract"
+    },
+    {
+      "path": "apps/control-ui"
+    },
+    {
+      "path": "apps/vercel-mcp-ingress"
+    },
+    {
+      "path": "apps/vercel-bridge-worker"
+    },
+    {
+      "path": "apps/mcp"
+    },
+    {
+      "path": "apps/evidence-mcp"
+    },
+    {
+      "path": "apps/looptrace-mcp"
+    },
+    {
+      "path": "apps/local-advisor-mcp"
+    },
+    {
+      "path": "apps/gateway"
+    },
+    {
+      "path": "apps/dc-relay"
+    },
+    {
+      "path": "apps/worker"
+    },
+    {
+      "path": "apps/scheduler"
+    },
+    {
+      "path": "apps/cli"
+    },
+    {
+      "path": "apps/runtime"
+    }
   ]
 }

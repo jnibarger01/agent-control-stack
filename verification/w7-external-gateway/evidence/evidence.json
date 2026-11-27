@@ -1,0 +1,82 @@
+[
+  {
+    "name": "https-discovery-via-external-proxy",
+    "request": "{\"method\":\"GET\",\"url\":\"https://127.0.0.1:46709/.well-known/oauth-protected-resource/jc/mcp\"}",
+    "response": "{\"status\":200,\"headers\":{\"x-content-type-options\":\"nosniff\",\"x-frame-options\":\"DENY\",\"referrer-policy\":\"no-referrer\",\"content-security-policy\":\"default-src 'none'; frame-ancestors 'none'\",\"cache-control\":\"no-store\",\"content-type\":\"application/json; charset=utf-8\",\"content-length\":\"127\",\"date\":\"Sun, 15 Nov 2026 22:49:15 GMT\",\"connection\":\"keep-alive\",\"keep-alive\":\"timeout=5\"},\"body\":\"{\\\"resource\\\":\\\"https://127.0.0.1:46709/jc/mcp\\\",\\\"authorization_servers\\\":[\\\"https://127.0.0.1:46709/jc\\\"],\\\"scopes_supported\\\":[\\\"mcp\\\"]}\"}"
+  },
+  {
+    "name": "main-authorize-consent",
+    "request": "{\"method\":\"POST\",\"path\":\"/authorize/consent\"}",
+    "response": "{\"status\":302,\"headers\":{\"x-content-type-options\":\"nosniff\",\"x-frame-options\":\"DENY\",\"referrer-policy\":\"no-referrer\",\"content-security-policy\":\"default-src 'none'; frame-ancestors 'none'\",\"cache-control\":\"no-store\",\"location\":\"http://127.0.0.1:41234/callback?code=GXg6UzeJ1-UjPECwaYUCrBYs9MgYtOYW&state=I5DBU6TrB5UdDnqX2k4BiQ&iss=https%3A%2F%2F127.0.0.1%3A46709%2Fjc\",\"content-length\":\"0\",\"date\":\"Sun, 15 Nov 2026 22:49:15 GMT\",\"connection\":\"keep-alive\",\"keep-alive\":\"timeout=5\"},\"body\":\"\"}"
+  },
+  {
+    "name": "main-token",
+    "request": "{\"method\":\"POST\",\"path\":\"/token?oauth_lane=jc&resource=https%3A%2F%2F127.0.0.1%3A46709%2Fjc%2Fmcp\"}",
+    "response": "{\"status\":200,\"headers\":{\"x-content-type-options\":\"nosniff\",\"x-frame-options\":\"DENY\",\"referrer-policy\":\"no-referrer\",\"content-security-policy\":\"default-src 'none'; frame-ancestors 'none'\",\"cache-control\":\"no-store\",\"pragma\":\"no-cache\",\"dpop-nonce\":\"29913049.SUpRuEDuEKPMNS-zC8Zc5fT4OAMkqgfmu5e_6LiJiR4\",\"content-type\":\"application/json; charset=utf-8\",\"content-length\":\"637\",\"date\":\"Sun, 15 Nov 2026 22:49:15 GMT\",\"connection\":\"keep-alive\",\"keep-alive\":\"timeout=5\"},\"body\":\"{\\\"access_token\\\":\\\"[REDACTED_JWT]\\\",\\\"token_type\\\":\\\"DPoP\\\",\\\"expires_in\\\":600,\\\"refresh_token\\\":\\\"k6hCNqhOaxrHY8amDEPGrg9GU2fSSUw8\\\",\\\"scope\\\":\\\"mcp\\\",\\\"device_id\\\":\\\"dev_S84jrcubNjf4dA3S\\\"}\"}"
+  },
+  {
+    "name": "mcp-positive-canonical-htu",
+    "request": "{\"method\":\"POST\",\"path\":\"/jc/mcp\",\"htu\":\"https://127.0.0.1:46709/jc/mcp\"}",
+    "response": "{\"status\":200,\"headers\":{\"dpop-nonce\":\"29913049.SUpRuEDuEKPMNS-zC8Zc5fT4OAMkqgfmu5e_6LiJiR4\",\"content-type\":\"application/json\",\"date\":\"Sun, 15 Nov 2026 22:49:15 GMT\",\"connection\":\"keep-alive\",\"keep-alive\":\"timeout=5\",\"transfer-encoding\":\"chunked\"},\"body\":\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":1,\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"jc_ping\\\",\\\"description\\\":\\\"Ping\\\",\\\"inputSchema\\\":{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{}}}]}}\"}"
+  },
+  {
+    "name": "mcp-nonce-challenge",
+    "request": "{\"method\":\"POST\",\"path\":\"/jc/mcp\",\"note\":\"no nonce\"}",
+    "response": "{\"status\":401,\"headers\":{\"x-content-type-options\":\"nosniff\",\"x-frame-options\":\"DENY\",\"referrer-policy\":\"no-referrer\",\"content-security-policy\":\"default-src 'none'; frame-ancestors 'none'\",\"cache-control\":\"no-store\",\"www-authenticate\":\"DPoP algs=\\\"EdDSA ES256\\\", resource_metadata=\\\"https://127.0.0.1:46709/.well-known/oauth-protected-resource/jc/mcp\\\", scope=\\\"mcp\\\", error=\\\"use_dpop_nonce\\\", error_description=\\\"DPoP nonce required\\\"\",\"dpop-nonce\":\"29913049.SUpRuEDuEKPMNS-zC8Zc5fT4OAMkqgfmu5e_6LiJiR4\",\"content-type\":\"application/json; charset=utf-8\",\"content-length\":\"26\",\"date\":\"Sun, 15 Nov 2026 22:49:15 GMT\",\"connection\":\"keep-alive\",\"keep-alive\":\"timeout=5\"},\"body\":\"{\\\"error\\\":\\\"use_dpop_nonce\\\"}\"}"
+  },
+  {
+    "name": "mcp-nonce-retry",
+    "request": "{\"method\":\"POST\",\"path\":\"/jc/mcp\",\"note\":\"with issued nonce\"}",
+    "response": "{\"status\":200,\"headers\":{\"dpop-nonce\":\"29913049.SUpRuEDuEKPMNS-zC8Zc5fT4OAMkqgfmu5e_6LiJiR4\",\"content-type\":\"application/json\",\"date\":\"Sun, 15 Nov 2026 22:49:15 GMT\",\"connection\":\"keep-alive\",\"keep-alive\":\"timeout=5\",\"transfer-encoding\":\"chunked\"},\"body\":\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":1,\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"jc_ping\\\",\\\"description\\\":\\\"Ping\\\",\\\"inputSchema\\\":{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{}}}]}}\"}"
+  },
+  {
+    "name": "forwarded-header-spoof-canonical-proof",
+    "request": "{\"headers\":{\"host\":\"attacker.evil.test\",\"x-forwarded-host\":\"attacker.evil.test\"}}",
+    "response": "{\"status\":200,\"headers\":{\"dpop-nonce\":\"29913049.SUpRuEDuEKPMNS-zC8Zc5fT4OAMkqgfmu5e_6LiJiR4\",\"content-type\":\"application/json\",\"date\":\"Sun, 15 Nov 2026 22:49:15 GMT\",\"connection\":\"keep-alive\",\"keep-alive\":\"timeout=5\",\"transfer-encoding\":\"chunked\"},\"body\":\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":1,\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"jc_ping\\\",\\\"description\\\":\\\"Ping\\\",\\\"inputSchema\\\":{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{}}}]}}\"}"
+  },
+  {
+    "name": "wrong-origin-proof",
+    "request": "{\"htu\":\"https://attacker.evil.test/jc/mcp\"}",
+    "response": "{\"status\":401,\"headers\":{\"x-content-type-options\":\"nosniff\",\"x-frame-options\":\"DENY\",\"referrer-policy\":\"no-referrer\",\"content-security-policy\":\"default-src 'none'; frame-ancestors 'none'\",\"cache-control\":\"no-store\",\"www-authenticate\":\"DPoP algs=\\\"EdDSA ES256\\\", resource_metadata=\\\"https://127.0.0.1:46709/.well-known/oauth-protected-resource/jc/mcp\\\", scope=\\\"mcp\\\", error=\\\"invalid_token\\\", error_description=\\\"DPoP proof is invalid\\\"\",\"dpop-nonce\":\"29913049.SUpRuEDuEKPMNS-zC8Zc5fT4OAMkqgfmu5e_6LiJiR4\",\"content-type\":\"application/json; charset=utf-8\",\"content-length\":\"24\",\"date\":\"Sun, 15 Nov 2026 22:49:15 GMT\",\"connection\":\"keep-alive\",\"keep-alive\":\"timeout=5\"},\"body\":\"{\\\"error\\\":\\\"unauthorized\\\"}\"}"
+  },
+  {
+    "name": "wrong-path-proof",
+    "request": "{\"htu\":\"https://127.0.0.1:46709/mcp\"}",
+    "response": "{\"status\":401,\"headers\":{\"x-content-type-options\":\"nosniff\",\"x-frame-options\":\"DENY\",\"referrer-policy\":\"no-referrer\",\"content-security-policy\":\"default-src 'none'; frame-ancestors 'none'\",\"cache-control\":\"no-store\",\"www-authenticate\":\"DPoP algs=\\\"EdDSA ES256\\\", resource_metadata=\\\"https://127.0.0.1:46709/.well-known/oauth-protected-resource/jc/mcp\\\", scope=\\\"mcp\\\", error=\\\"invalid_token\\\", error_description=\\\"DPoP proof is invalid\\\"\",\"dpop-nonce\":\"29913049.SUpRuEDuEKPMNS-zC8Zc5fT4OAMkqgfmu5e_6LiJiR4\",\"content-type\":\"application/json; charset=utf-8\",\"content-length\":\"24\",\"date\":\"Sun, 15 Nov 2026 22:49:15 GMT\",\"connection\":\"keep-alive\",\"keep-alive\":\"timeout=5\"},\"body\":\"{\\\"error\\\":\\\"unauthorized\\\"}\"}"
+  },
+  {
+    "name": "replay-first",
+    "request": "{\"jti\":\"fixed-jti-external-harness-001\"}",
+    "response": "{\"status\":200,\"headers\":{\"dpop-nonce\":\"29913049.SUpRuEDuEKPMNS-zC8Zc5fT4OAMkqgfmu5e_6LiJiR4\",\"content-type\":\"application/json\",\"date\":\"Sun, 15 Nov 2026 22:49:15 GMT\",\"connection\":\"keep-alive\",\"keep-alive\":\"timeout=5\",\"transfer-encoding\":\"chunked\"},\"body\":\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":11,\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"jc_ping\\\",\\\"description\\\":\\\"Ping\\\",\\\"inputSchema\\\":{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{}}}]}}\"}"
+  },
+  {
+    "name": "replay-second",
+    "request": "{\"jti\":\"fixed-jti-external-harness-001\"}",
+    "response": "{\"status\":401,\"headers\":{\"x-content-type-options\":\"nosniff\",\"x-frame-options\":\"DENY\",\"referrer-policy\":\"no-referrer\",\"content-security-policy\":\"default-src 'none'; frame-ancestors 'none'\",\"cache-control\":\"no-store\",\"www-authenticate\":\"DPoP algs=\\\"EdDSA ES256\\\", resource_metadata=\\\"https://127.0.0.1:46709/.well-known/oauth-protected-resource/jc/mcp\\\", scope=\\\"mcp\\\", error=\\\"invalid_token\\\", error_description=\\\"DPoP proof jti has already been used\\\"\",\"dpop-nonce\":\"29913049.SUpRuEDuEKPMNS-zC8Zc5fT4OAMkqgfmu5e_6LiJiR4\",\"content-type\":\"application/json; charset=utf-8\",\"content-length\":\"24\",\"date\":\"Sun, 15 Nov 2026 22:49:15 GMT\",\"connection\":\"keep-alive\",\"keep-alive\":\"timeout=5\"},\"body\":\"{\\\"error\\\":\\\"unauthorized\\\"}\"}"
+  },
+  {
+    "name": "wrong-audience-jc-token-on-dc-path-ingress-denied",
+    "request": "{\"path\":\"/mcp\",\"token_aud\":\"https://127.0.0.1:46709/jc/mcp\"}",
+    "response": "{\"status\":404,\"headers\":{\"content-type\":\"text/plain; charset=utf-8\",\"cache-control\":\"no-store\",\"date\":\"Sun, 15 Nov 2026 22:49:15 GMT\",\"connection\":\"keep-alive\",\"keep-alive\":\"timeout=5\",\"transfer-encoding\":\"chunked\"},\"body\":\"Not found\"}"
+  },
+  {
+    "name": "wrong-key-stolen-token",
+    "request": "{\"note\":\"attacker key signs proof for victim token\"}",
+    "response": "{\"status\":401,\"headers\":{\"x-content-type-options\":\"nosniff\",\"x-frame-options\":\"DENY\",\"referrer-policy\":\"no-referrer\",\"content-security-policy\":\"default-src 'none'; frame-ancestors 'none'\",\"cache-control\":\"no-store\",\"www-authenticate\":\"DPoP algs=\\\"EdDSA ES256\\\", resource_metadata=\\\"https://127.0.0.1:46709/.well-known/oauth-protected-resource/jc/mcp\\\", scope=\\\"mcp\\\", error=\\\"invalid_token\\\", error_description=\\\"DPoP proof is invalid\\\"\",\"dpop-nonce\":\"29913049.SUpRuEDuEKPMNS-zC8Zc5fT4OAMkqgfmu5e_6LiJiR4\",\"content-type\":\"application/json; charset=utf-8\",\"content-length\":\"24\",\"date\":\"Sun, 15 Nov 2026 22:49:15 GMT\",\"connection\":\"keep-alive\",\"keep-alive\":\"timeout=5\"},\"body\":\"{\\\"error\\\":\\\"unauthorized\\\"}\"}"
+  },
+  {
+    "name": "bearer-downgrade",
+    "request": "{\"authorization_scheme\":\"Bearer\"}",
+    "response": "{\"status\":401,\"headers\":{\"x-content-type-options\":\"nosniff\",\"x-frame-options\":\"DENY\",\"referrer-policy\":\"no-referrer\",\"content-security-policy\":\"default-src 'none'; frame-ancestors 'none'\",\"cache-control\":\"no-store\",\"www-authenticate\":\"DPoP algs=\\\"EdDSA ES256\\\", resource_metadata=\\\"https://127.0.0.1:46709/.well-known/oauth-protected-resource/jc/mcp\\\", scope=\\\"mcp\\\", error=\\\"invalid_token\\\", error_description=\\\"DPoP authentication is required for this token\\\"\",\"dpop-nonce\":\"29913049.SUpRuEDuEKPMNS-zC8Zc5fT4OAMkqgfmu5e_6LiJiR4\",\"content-type\":\"application/json; charset=utf-8\",\"content-length\":\"24\",\"date\":\"Sun, 15 Nov 2026 22:49:15 GMT\",\"connection\":\"keep-alive\",\"keep-alive\":\"timeout=5\"},\"body\":\"{\\\"error\\\":\\\"unauthorized\\\"}\"}"
+  },
+  {
+    "name": "device-revoke",
+    "request": "{\"method\":\"DELETE\",\"path\":\"/jc/devices/dev_S84jrcubNjf4dA3S\"}",
+    "response": "{\"status\":200,\"headers\":{\"dpop-nonce\":\"29913049.SUpRuEDuEKPMNS-zC8Zc5fT4OAMkqgfmu5e_6LiJiR4\",\"x-content-type-options\":\"nosniff\",\"x-frame-options\":\"DENY\",\"referrer-policy\":\"no-referrer\",\"content-security-policy\":\"default-src 'none'; frame-ancestors 'none'\",\"cache-control\":\"no-store\",\"content-type\":\"application/json; charset=utf-8\",\"content-length\":\"51\",\"date\":\"Sun, 15 Nov 2026 22:49:15 GMT\",\"connection\":\"keep-alive\",\"keep-alive\":\"timeout=5\"},\"body\":\"{\\\"revoked\\\":true,\\\"device_id\\\":\\\"dev_S84jrcubNjf4dA3S\\\"}\"}"
+  },
+  {
+    "name": "mcp-after-revoke",
+    "request": "{\"note\":\"revoked device token\"}",
+    "response": "{\"status\":401,\"headers\":{\"x-content-type-options\":\"nosniff\",\"x-frame-options\":\"DENY\",\"referrer-policy\":\"no-referrer\",\"content-security-policy\":\"default-src 'none'; frame-ancestors 'none'\",\"cache-control\":\"no-store\",\"www-authenticate\":\"DPoP algs=\\\"EdDSA ES256\\\", resource_metadata=\\\"https://127.0.0.1:46709/.well-known/oauth-protected-resource/jc/mcp\\\", scope=\\\"mcp\\\", error=\\\"invalid_token\\\", error_description=\\\"the device has been revoked\\\"\",\"dpop-nonce\":\"29913049.SUpRuEDuEKPMNS-zC8Zc5fT4OAMkqgfmu5e_6LiJiR4\",\"content-type\":\"application/json; charset=utf-8\",\"content-length\":\"24\",\"date\":\"Sun, 15 Nov 2026 22:49:15 GMT\",\"connection\":\"keep-alive\",\"keep-alive\":\"timeout=5\"},\"body\":\"{\\\"error\\\":\\\"unauthorized\\\"}\"}"
+  }
+]

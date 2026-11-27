@@ -7,9 +7,10 @@ import { BlackBoxPage } from "./BlackBoxPage";
 afterEach(() => cleanup());
 
 describe("Agent Black Box page", () => {
-  it("is not one of the default eleven destinations", () => {
+  it("is not one of the default destinations", () => {
     expect(NAV_ITEMS.map((item) => item.key)).not.toContain("black-box");
-    expect(NAV_ITEMS).toHaveLength(11);
+    // Eleven original destinations plus AI Factory (F10).
+    expect(NAV_ITEMS).toHaveLength(12);
   });
 
   it("loads the labeled snapshot and does not call it a live connection", async () => {

@@ -25,11 +25,40 @@ From the repository root:
 
 | Command | What it proves |
 | --- | --- |
-| `npm test -w apps/jace-commander` | 30 suites: contract, tools, terminal/PTY, sandbox isolation, live authority, documents, approval, privileged helper |
-| `ACS_DC_E2E=1 npx vitest run tests/e2e/acs-jc-mcp` | Real chain: OAuth edge, bridge, native JC and authenticated ACS with JC holding an `acs:read`-only token (30 tests, incl. revocation, lease expiry, replay, principal isolation, audited outcome, least privilege, missing-token refusal) |
+| `npm test -w apps/jace-commander` | Jace Commander suites: contract, tools, terminal/PTY, sandbox isolation, live authority, documents, approval, privileged helper, native HTTP transport, JSON Schema tool registry |
+| `ACS_DC_E2E=1 npx vitest run tests/e2e/acs-jc-mcp` | Real chain: OAuth edge, bridge, native JC and authenticated ACS with JC holding an `acs:read`-only token (incl. revocation, lease expiry, replay, principal isolation, audited outcome, least privilege, missing-token refusal) |
 | `npm run jc:verify-release` | Clean install outside every repository, runtime deps only, with `$HOME/projects` masked; dependency graph, shipped-graph audit, full suite, real MCP client session, module-resolution trace. Evidence: `verification/jc-release-standalone-evidence.json` |
 | `npm run jc:verify-independence` | Copy-out build and test with no workspace or vendor tree |
 | `npm run jc-contracts:check` | Embedded manifest matches the canonical ACS contract |
+
+## Native Streamable HTTP transport
+
+In addition to stdio (`jace-commander serve`), JC can serve MCP directly over
+Streamable HTTP for self-hosted / direct MCP clients:
+
+```bash
+jace-commander serve --transport http [--http-host 127.0.0.1] [--http-port 8011]
+```
+
+- `POST|GET|DELETE /mcp` — Streamable HTTP MCP endpoint (session-based).
+- `GET /health` (`/healthz`) — liveness and manifest identity.
+- `GET /ready` — readiness.
+- `GET /authority` — native authority/mode metadata.
+- `GET /tools` — JSON Schema tool registry (every tool, `inputSchema`, scopes, risk, approval metadata) derived from the canonical manifest.
+
+When a gateway attestation token is configured
+(`DC_GATEWAY_EXECUTION_TOKEN` or `JC_GATEWAY_ATTESTATION_TOKEN`), managed and
+local HTTP modes require a valid `x-dc-attestation` on every `/mcp` request,
+strip client-supplied gateway/authority metadata, and stamp verified gateway
+identity into request bodies (spoof-proofing). JSON-RPC batches that contain
+`tools/call` are refused (`batched_tools_call_rejected`) because authority
+cannot be attributed per element. Managed/local HTTP mode fails closed at
+startup without an attestation token.
+
+The canonical JSON Schema tool registry is also exported from
+`apps/jace-commander/src/tool-registry.ts` (`JC_TOOL_REGISTRY`,
+`getToolRegistry`, `toolRegistryJson`) so tool schemas and metadata stay
+sourced from the generated manifest.
 
 The chain e2e needs `JC_E2E_RUNTIME_DIR=<prefix>/current` pointing at a release
 installed with `PREFIX=<prefix> deploy/install-user-release.sh` (pinned with
@@ -57,6 +86,37 @@ the release to be read-only. Linux, Node >= 24.16,
   started them; other principals cannot list, read, write to or kill them.
 - `standalone` (read-only) and `local` presets remain explicit compatibility
   modes; the managed bridge refuses both and `--standalone`.
+
+## CLI Authentication (`jace auth`, V2)
+
+The CLI (`jace`, `jc`, or `jace-commander`) authenticates to `/jc/mcp` using OAuth 2.1 + RFC 9449 DPoP (`EdDSA` / Ed25519 via `node:crypto`, zero native keyring dependencies; see [ADR 0031](../../docs/adr/0031-jace-cli-auth-v2.md)).
+
+### Commands
+
+```sh
+jace auth login [--device] [--no-browser] [--mcp-url <url>] [--label <name>]
+jace auth status [--json]
+jace auth refresh
+jace auth logout
+jace auth devices [--json]
+jace auth revoke <device-id>
+```
+
+- **Browser flow (default):** Authorization Code + PKCE `S256`, `state`, RFC 9207 `iss` verification, RFC 8252 `127.0.0.1` loopback callback, and `dpop_jkt` key binding (`client_id=jace-commander-cli`, non-privileged `scope=mcp`).
+- **Headless flow (`--device` / `--no-browser`):** RFC 8628 device authorization against `/jc/oauth/device/code` + `/jc/oauth/token` with DPoP proof-of-possession.
+- **`jace auth status [--json]`:** Displays non-secret metadata only (`sub`, `device_id`, `jkt`, `expires_at`, `issuer`, `audience`, `storage_backend`, `auth_mode`).
+- **`jace auth logout`:** Clears local credentials and local device keypair only; remote devices remain registered on `/jc` until revoked with `jace auth revoke <device-id>`.
+- **Legacy override (`JC_MCP_TOKEN`):** Explicitly enables `legacy-bearer-env` mode for CI/service automation; never persisted to `SecretStore`, and stored DPoP credentials never auto-downgrade to `Bearer`.
+
+### Credential storage, locking, and crash recovery
+
+- **OS keyrings (`SecretStore`, `JC_SECRET_BACKEND=auto|keyring|encrypted|file`):**
+  - Linux: `SecretServiceStore` (`linux-secret-service` via `secret-tool`, with `KWalletStore` `linux-kwallet` via `kwallet-query` fallback).
+  - macOS: `KeychainStore` (`macos-keychain` via `security`).
+  - Windows: `WindowsCredentialStore` (`windows-dpapi` via PowerShell DPAPI).
+- **Headless encrypted fallback (`EncryptedFileStore` / `encrypted-file`):** When no OS keyring is available (CI, containers, SSH without D-Bus), secrets are encrypted with AES-256-GCM (`0700` `JC_STATE_DIR`, `0600` files, `O_EXCL` + `fsync` + `rename`). Key material is kept separate from ciphertext via `JC_KEYRING_PASSPHRASE`, `JC_KEYRING_KEY_FILE`, or an OS-restricted headless key path — never plaintext fallback.
+- **Cross-process safety:** `<stateDir>/auth.lock` (`O_CREAT | O_EXCL` + `linkSync`) and a `0600` pre-send `pending-refresh.json` journal (`refresh_request_id`) serialize concurrent CLI refreshes and recover cleanly if a process crashes mid-rotation.
+- **Migration & rollback:** See [docs/runbooks/jace-cli-auth-v2-migration.md](../../docs/runbooks/jace-cli-auth-v2-migration.md).
 
 ## Workload isolation
 

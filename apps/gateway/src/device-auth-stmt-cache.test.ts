@@ -1,4 +1,4 @@
-import { generateKeyPairSync, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,13 +27,26 @@ describe("DeviceAuthStore prepared-statement cache", () => {
   const ACCESS_TOKEN_LOOKUP_SQL = "SELECT * FROM devices WHERE access_token_hash = ?";
   /** Enough calls that a per-call recompile would be impossible to miss. */
   const REPEAT_CALLS = 100;
-  /** refreshAccessToken introduces the refresh-token lookup and the rotation UPDATE. */
-  const REFRESH_FLOW_STATEMENTS = 2;
+  /** refreshAccessToken introduces the expired-envelope purge, refresh/envelope/previous lookups, rotation UPDATE, and envelope INSERT. */
+  const REFRESH_FLOW_STATEMENTS = 5;
 
   function proof(deviceCode: string): string {
     return sign(null, Buffer.from(`acs-device-code-proof-v1\n${deviceCode}`, "utf8"), DEVICE_PAIR.privateKey).toString(
       "base64url"
     );
+  }
+
+  function refreshProof(deviceId: string, refreshToken: string, issuedAt: number): string {
+    const tokenSha256 = createHash("sha256").update(refreshToken).digest("hex");
+    const message = [
+      "acs-device-refresh-proof-v1",
+      "client_id=acs-cli",
+      `device_id=${deviceId}`,
+      `refresh_token_sha256=${tokenSha256}`,
+      "operation=refresh_token",
+      `issued_at=${issuedAt}`
+    ].join("\n");
+    return sign(null, Buffer.from(message, "utf8"), DEVICE_PAIR.privateKey).toString("base64url");
   }
 
   /**
@@ -71,7 +84,9 @@ describe("DeviceAuthStore prepared-statement cache", () => {
     directory = fixtures.directory;
     workItems = fixtures.workItems;
     const prepare = vi.spyOn(DatabaseSync.prototype, "prepare");
-    store = new DeviceAuthStore(fixtures.dbPath);
+    store = new DeviceAuthStore(fixtures.dbPath, {
+      recovery: { primaryKeyBase64: randomBytes(32).toString("base64"), windowSeconds: 120 }
+    });
     return { prepare, store };
   }
 
@@ -113,7 +128,16 @@ describe("DeviceAuthStore prepared-statement cache", () => {
     expect(compiled.length).toBe(new Set(compiled).size);
     expect(compiled.length).toBeLessThanOrEqual(12);
 
-    const refreshed = deviceAuth.refreshAccessToken(tokens.refreshToken);
+    const now = new Date();
+    const issuedAt = Math.floor(now.getTime() / 1000);
+    const refreshed = deviceAuth.refreshAccessToken({
+      clientId: "acs-cli",
+      refreshToken: tokens.refreshToken,
+      deviceId: tokens.deviceId,
+      proofIssuedAt: issuedAt,
+      refreshProof: refreshProof(tokens.deviceId, tokens.refreshToken, issuedAt),
+      now
+    });
     if (!refreshed.ok) throw new Error(`refresh rotation failed: ${refreshed.error}`);
     for (let call = 0; call < 20; call += 1) deviceAuth.authenticateAccessToken(refreshed.accessToken);
 

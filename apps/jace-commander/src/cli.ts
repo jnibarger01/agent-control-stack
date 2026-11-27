@@ -11,7 +11,6 @@
  * Local commands: serve, connect, disconnect, login, whoami, logout,
  * status --local, tools, version, help.
  */
-import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -29,12 +28,14 @@ const EXECUTOR_LEASE_TTL_MS = 180_000;
 const EXECUTOR_LEASE_RENEW_MS = 60_000;
 const EXECUTOR_LEASE_GRACE_MS = 10_000;
 const EXECUTOR_LEASE_ACQUIRE_WINDOW_MS = 20_000;
+import { runAuthCommand } from './auth-cli.js';
 import { CLI_COMMANDS, CliUsageError, helpText, parseArgs, resolveCommand } from './cli-commands.js';
 import { loadJcConfig, type JcConfig } from './config.js';
-import { credentialsPath, deviceLogin, loadCredentials } from './device-login.js';
+import { clearAcsCredentials, deviceLogin, loadCredentials } from './device-login.js';
 import { JC_MANIFEST } from './manifest.generated.js';
-import { connect, forgetMcpToken, loadMcpToken, mcpAccessToken } from './mcp-auth.js';
+import { forgetMcpToken, loadMcpAuthStatus, mcpAuthProvider } from './mcp-auth.js';
 import { JC_EXIT, McpHttpClient, type JcCallOutcome } from './mcp-http-client.js';
+import { safeErrorMessage } from './secret-redaction.js';
 import { privilegedHelperAvailable } from './privileged-client.js';
 import { JC_PRESETS, isJcPreset, type JcPreset } from './authorizers.js';
 import { createJcServer } from './server.js';
@@ -44,6 +45,7 @@ import readline from 'node:readline/promises';
 import { JC_TOOLS } from './tool-descriptors.js';
 import { VERSION } from './version.js';
 import { sandboxPolicyFromEnv, sandboxSelfTest } from './sandbox.js';
+import { startJcHttpServer } from './http-transport.js';
 
 type Out = { json: boolean; stdout: (text: string) => void; stderr: (text: string) => void };
 
@@ -115,7 +117,7 @@ async function runToolCommand(argv: string[], config: JcConfig, out: Out, env: N
     return outcome.exitCode;
   }
   const url = mcpUrlFor(config, env);
-  const client = new McpHttpClient({ url, token: () => mcpAccessToken(url, config.stateDir, env) });
+  const client = new McpHttpClient({ url, auth: mcpAuthProvider(url, config.stateDir, env) });
   try {
     const outcome = await client.callTool(command.tool, args);
     if (out.json) out.stdout(JSON.stringify(outcomeJson(outcome), null, 2));
@@ -154,7 +156,7 @@ async function runDoctor(config: JcConfig, out: Out, env: NodeJS.ProcessEnv): Pr
     detail: `${cliVerbs.length} CLI verbs for ${JC_MANIFEST.tools.length} manifest tools`,
   });
   const url = mcpUrlFor(config, env);
-  const client = new McpHttpClient({ url, token: () => mcpAccessToken(url, config.stateDir, env) });
+  const client = new McpHttpClient({ url, auth: mcpAuthProvider(url, config.stateDir, env) });
   let server: Record<string, unknown> | null = null;
   let exitCode: number = JC_EXIT.ok;
   try {
@@ -208,9 +210,9 @@ async function runDoctor(config: JcConfig, out: Out, env: NodeJS.ProcessEnv): Pr
   return exitCode;
 }
 
-async function localStatus(config: JcConfig): Promise<Record<string, unknown>> {
+async function localStatus(config: JcConfig, env: NodeJS.ProcessEnv = process.env): Promise<Record<string, unknown>> {
   const helper = await privilegedHelperAvailable({ sudoPath: config.sudoPath, helperPath: config.privilegedHelperPath });
-  const mcpToken = loadMcpToken(config.stateDir);
+  const mcpStatus = await loadMcpAuthStatus(mcpUrlFor(config, env), config.stateDir, env);
   return {
     version: VERSION,
     manifestHash: JC_MANIFEST.manifestHash,
@@ -224,7 +226,9 @@ async function localStatus(config: JcConfig): Promise<Record<string, unknown>> {
     fsRoots: config.fsRoots,
     managedKeyConfigured: Boolean(config.acsPublicKey && config.acsKeyId),
     loggedIn: Boolean(loadCredentials(config.stateDir)),
-    mcpConnected: mcpToken ? { mcpUrl: mcpToken.mcpUrl, expiresAt: new Date(mcpToken.expiresAt).toISOString() } : false,
+    mcpConnected: mcpStatus.connected
+      ? { mcpUrl: mcpStatus.mcpUrl, authMode: mcpStatus.authMode, deviceId: mcpStatus.deviceId, expiresAt: mcpStatus.expiresAt }
+      : false,
     privilegedHelper: { path: config.privilegedHelperPath, sudoNonInteractive: helper },
   };
 }
@@ -267,6 +271,18 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
         return JC_EXIT.invalidArguments;
       }
       const mode: JcPreset = rest.includes('--standalone') ? 'standalone' : (requested ?? 'managed');
+      const transport = flagValue(rest, '--transport') ?? 'stdio';
+      if (transport !== 'stdio' && transport !== 'http') {
+        out.stderr(`jace-commander: unknown transport ${JSON.stringify(transport)} (expected stdio, http)`);
+        return JC_EXIT.invalidArguments;
+      }
+      const httpHost = flagValue(rest, '--http-host') ?? config.httpHost;
+      const httpPortRaw = flagValue(rest, '--http-port');
+      const httpPort = httpPortRaw === undefined ? config.httpPort : Number(httpPortRaw);
+      if (transport === 'http' && (!Number.isInteger(httpPort) || httpPort < 1 || httpPort > 65535)) {
+        out.stderr('jace-commander: --http-port must be an integer in [1, 65535]');
+        return JC_EXIT.invalidArguments;
+      }
       if (mode === 'managed' && (!config.acsPublicKey || !config.acsKeyId)) {
         // Fail closed at startup rather than rejecting every call later.
         out.stderr('jace-commander: managed mode requires JC_ACS_PUBLIC_KEY and JC_ACS_KEY_ID (or pass --standalone for read-only local development, or --preset local)');
@@ -286,6 +302,16 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
           return JC_EXIT.authorityUnavailable;
         }
       }
+      let held: HeldExecutorLease | undefined;
+      let httpClose: (() => Promise<void>) | undefined;
+      let stopping = false;
+      const shutdown = async (code: number) => {
+        if (stopping) return;
+        stopping = true;
+        try { await httpClose?.(); } catch { /* ignore */ }
+        try { held?.release(); } catch { /* ignore */ }
+        process.exit(code);
+      };
       if (executorLeaseRequired(mode)) {
         // The managed executor claims the ACS singleton slot before serving any tool.
         // A duplicate, unreadable or unidentifiable lease refuses at once; a transient
@@ -316,7 +342,7 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
             readIdentity: readLinuxProcessIdentity,
             onLost: (reason) => {
               out.stderr(`jace-commander: executor lease lost (${reason}); stopping to fail closed`);
-              process.exit(JC_EXIT.authorityUnavailable);
+              void shutdown(JC_EXIT.authorityUnavailable);
             },
           });
           if (attempt.ok) {
@@ -332,15 +358,34 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
           await new Promise((resolve) => setTimeout(resolve, 1000));
         }
         if (!lease) return JC_EXIT.authorityUnavailable;
-        const held = lease;
-        const stop = (code: number) => {
-          held.release();
-          process.exit(code);
-        };
-        process.once('SIGTERM', () => stop(0));
-        process.once('SIGINT', () => stop(0));
+        held = lease;
+        process.once('SIGTERM', () => { void shutdown(0); });
+        process.once('SIGINT', () => { void shutdown(0); });
         out.stderr(`jace-commander: holding executor lease as pid ${process.pid} (release ${identity.releaseCommit})`);
+      } else {
+        process.once('SIGTERM', () => { void shutdown(0); });
+        process.once('SIGINT', () => { void shutdown(0); });
       }
+
+      if (transport === 'http') {
+        if ((mode === 'managed' || mode === 'local') && !config.gatewayAttestationToken) {
+          out.stderr('jace-commander: native HTTP transport in managed/local mode requires DC_GATEWAY_EXECUTION_TOKEN (or JC_GATEWAY_ATTESTATION_TOKEN)');
+          return JC_EXIT.authorityUnavailable;
+        }
+        const http = await startJcHttpServer({
+          config,
+          mode,
+          host: httpHost,
+          port: httpPort,
+          attestationToken: config.gatewayAttestationToken,
+          requireAttestation: mode === 'managed' || mode === 'local',
+        });
+        httpClose = http.close;
+        out.stderr(`jace-commander: serving Streamable HTTP MCP at ${http.url}`);
+        await new Promise<void>(() => {});
+        return -1;
+      }
+
       const server = createJcServer(config, mode);
       await server.connect(new StdioServerTransport());
       return -1; // keep running
@@ -379,28 +424,18 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
         },
       });
     }
-    case 'connect': {
-      const url = (flagValue(rest, '--mcp-url') ?? mcpUrlFor(config, env)).replace(/\/$/, '');
-      const stored = await connect({
-        mcpUrl: url,
-        stateDir: config.stateDir,
-        onAuthorizeUrl: (authorizeUrl) => {
-          out.stderr('Open this URL in a browser on this machine and approve with the gateway consent passphrase:');
-          out.stderr(`  ${authorizeUrl}`);
-          out.stderr('Waiting for approval...');
-        },
-      });
-      out.stdout(json ? JSON.stringify({ connected: true, mcpUrl: stored.mcpUrl, expiresAt: new Date(stored.expiresAt).toISOString() }) : `Connected to ${stored.mcpUrl}`);
-      return JC_EXIT.ok;
-    }
+    case 'auth':
+      return runAuthCommand(rest, config, out, env);
+    case 'connect':
+      return runAuthCommand(['login', ...rest], config, out, env);
     case 'disconnect':
-      forgetMcpToken(config.stateDir);
+      await forgetMcpToken(config.stateDir, env, mcpUrlFor(config, env));
       out.stdout('disconnected (local /jc/mcp credential removed)');
       return JC_EXIT.ok;
     case 'tools': {
       if (rest.includes('--remote')) {
         const url = mcpUrlFor(config, env);
-        const client = new McpHttpClient({ url, token: () => mcpAccessToken(url, config.stateDir, env) });
+        const client = new McpHttpClient({ url, auth: mcpAuthProvider(url, config.stateDir, env) });
         try {
           const tools = await client.listTools();
           out.stdout(json ? JSON.stringify(tools, null, 2) : tools.map((tool) => String(tool.name)).join('\n'));
@@ -423,6 +458,7 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
       const credentials = await deviceLogin({
         acsUrl,
         stateDir: config.stateDir,
+        env,
         scope: flagValue(rest, '--scope'),
         onPrompt: ({ userCode, verificationUriComplete, expiresIn }) => {
           out.stderr('Approve this device in your browser:');
@@ -436,8 +472,8 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
     }
     case 'whoami': {
       const stored = loadCredentials(config.stateDir);
-      const mcp = loadMcpToken(config.stateDir);
-      if (!stored && !mcp) {
+      const mcp = await loadMcpAuthStatus(mcpUrlFor(config, env), config.stateDir, env);
+      if (!stored && !mcp.connected) {
         out.stdout(json ? JSON.stringify({ loggedIn: false, mcpConnected: false }) : 'not logged in');
         return JC_EXIT.notConnected;
       }
@@ -452,19 +488,21 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
             refreshable: Boolean(stored.refreshToken),
           }
           : null,
-        mcp: mcp ? { mcpUrl: mcp.mcpUrl, expiresAt: new Date(mcp.expiresAt).toISOString(), refreshable: Boolean(mcp.refreshToken) } : null,
+        mcp: mcp.connected
+          ? { mcpUrl: mcp.mcpUrl, authMode: mcp.authMode, deviceId: mcp.deviceId, jkt: mcp.jkt, expiresAt: mcp.expiresAt, refreshable: mcp.refreshable }
+          : null,
       }, null, 2));
       return JC_EXIT.ok;
     }
     case 'logout':
-      fs.rmSync(credentialsPath(config.stateDir), { force: true });
-      out.stdout('logged out (local credential removed; revoke server-side via ACS if needed)');
+      await clearAcsCredentials(config.stateDir, env, config.acsUrl);
+      out.stdout('logged out (local ACS credential removed; revoke server-side via ACS if needed)');
       return JC_EXIT.ok;
     case 'doctor':
       return runDoctor(config, out, env);
     case 'status':
       if (rest.includes('--local')) {
-        out.stdout(JSON.stringify(await localStatus(config), null, 2));
+        out.stdout(JSON.stringify(await localStatus(config, env), null, 2));
         return JC_EXIT.ok;
       }
       return runToolCommand(words, config, out, env);
@@ -473,14 +511,14 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
   }
 }
 
-const isEntrypoint = process.argv[1] && /(?:^|[\\/])(?:cli\.js|jace-commander|jc)$/u.test(process.argv[1]);
+const isEntrypoint = process.argv[1] && /(?:^|[\\/])(?:cli\.js|jace-commander|jc|jace)$/u.test(process.argv[1]);
 if (isEntrypoint) {
   main(process.argv.slice(2)).then(
     (code) => {
       if (code >= 0) process.exitCode = code;
     },
     (error: unknown) => {
-      console.error(`jace-commander: ${(error as Error).message}`);
+      console.error(`jace-commander: ${safeErrorMessage(error)}`);
       process.exitCode = JC_EXIT.toolFailure;
     },
   );

@@ -15,19 +15,41 @@ ChatGPT ──HTTPS──► https://jacen-ubuntu.tailaa6d41.ts.net/mcp
 
 ## Components
 
-- `server.js` — zero-dependency Node HTTP service:
+- `server.js` — Node HTTP service (`node:http`, `node:crypto`, `node:sqlite`; zero third-party runtime npm deps):
   - OAuth 2.1 authorization server: PKCE S256 (required), Dynamic Client
     Registration (RFC 7591), Client ID Metadata Documents (CIMD),
-    RFC 8707 resource binding, refresh-token rotation (single-use).
-  - RFC 9728 protected-resource metadata + RFC 8414 AS metadata discovery.
-  - `/mcp` proxy: validates HS256 JWT (iss, exp, aud == RESOURCE) before
-    forwarding; streams responses (SSE preserved); never logs tokens or args.
+    RFC 8707 resource binding, RFC 9207 `iss` response parameter,
+    refresh-token rotation (single-use + AES-256-GCM recovery envelopes for
+    DPoP-bound CLI refreshes), and RFC 8628 headless device authorization
+    (`/jc/oauth/device/code`, `/jc/device`, `/jc/oauth/token`).
+  - RFC 9449 DPoP (`dpop.js`): `EdDSA` / `ES256` proof verification, `DPoP-Nonce`
+    challenge/rotation (`DPOP_NONCE_REQUIRED`), canonical external origin `htu`
+    validation (ignoring `Host` and `X-Forwarded-*`), `ath` SHA-256 binding,
+    persistent `dpop_jtis` replay table in `DATA_DIR/gateway.db`, and
+    fail-closed `cnf.jkt` verification (no `Bearer` downgrade). ChatGPT, Claude,
+    and other non-`cnf.jkt` clients remain `Bearer`-compatible.
+  - Built-in `jace-commander-cli` policy (`oauth_lane: "jc"`, loopback-only
+    redirects, mandatory PKCE S256 + DPoP, `scope: "mcp"`, 600s access / 30d
+    refresh / 7d inactivity TTL) and per-device management (`GET /jc/devices`,
+    `POST /jc/devices/:deviceId/revoke`, `DELETE /jc/devices/:deviceId`).
+  - Persistent SQLite store (`store.js`, `DATA_DIR/gateway.db`, WAL, `0600`)
+    for `dpop_jtis`, `auth_codes`, `refresh_tokens`, `jc_devices`, and
+    encrypted recovery envelopes (`JC_REFRESH_RECOVERY_KEY` or HKDF from
+    `SIGNING_KEY`), with non-destructive migration of legacy `tokens.json`.
+  - RFC 9728 protected-resource metadata + RFC 8414 AS metadata discovery
+    (including `dpop_signing_alg_values_supported` and
+    `device_authorization_endpoint`).
+  - `/mcp` and `/jc/mcp` proxies: validate `DPoP` (for `cnf.jkt` tokens) or
+    `Bearer` HS256 JWT (`iss`, `exp`, `aud == RESOURCE`) before forwarding;
+    stream responses (SSE preserved); never log tokens, keys, proofs, or args.
   - Identity forwarding: on each authorized `/mcp` request the gateway
     attests the authenticated identity to the executor (`x-dc-agent`,
     `x-dc-client`, `x-dc-attestation` — short-lived HMAC over the identity,
-    keyed by `GATEWAY_EXECUTION_TOKEN`). The bearer token is never forwarded;
-    client-supplied `x-dc-*` headers are always stripped.
+    keyed by `GATEWAY_EXECUTION_TOKEN`). The bearer/DPoP token is never
+    forwarded; client-supplied `x-dc-*` headers are always stripped.
   - Consent page gated by `CONSENT_PASSPHRASE` (typed by the owner in a browser).
+  - See [ADR 0031](../../docs/adr/0031-jace-cli-auth-v2.md) and the
+    [JACE CLI AUTH V2 migration runbook](../../docs/runbooks/jace-cli-auth-v2-migration.md).
 - `bridge.js` — MCP SDK stdio→Streamable HTTP multiplexer, bound to 127.0.0.1
   only (replaces Supergateway, which cannot bind loopback). It owns one
   long-lived `StdioClientTransport` and therefore one canonical Desktop
