@@ -8,7 +8,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { acsAccessToken, credentialsPath, deviceLogin, loadCredentials } from '../dist/jace-commander/device-login.js';
+import { acsAccessToken, credentialsPath, deviceLogin, loadCredentials, loadOrCreateDeviceKey } from '../dist/jace-commander/device-login.js';
+import { createSecretStore } from '../dist/jace-commander/secret-store.js';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'jc-login-'));
 const ACS = 'http://127.0.0.1:3999';
@@ -47,17 +48,47 @@ function fakeAcs({ pendingPolls = 2, finalError } = {}) {
 
 const sleeps = [];
 const sleep = async (ms) => { sleeps.push(ms); };
+const loginEnv = privateEnv();
+
+function privateEnv() {
+  const env = { ...process.env };
+  delete env.XDG_RUNTIME_DIR;
+  delete env.JC_KEYRING_PASSPHRASE;
+  delete env.JC_KEYRING_KEY_FILE;
+  return env;
+}
+
+function assertPrivateTree(dir) {
+  if (!fs.existsSync(dir)) return;
+  const walk = (current) => {
+    const st = fs.lstatSync(current);
+    assert.equal(st.isSymbolicLink(), false, current);
+    if (st.isDirectory()) {
+      assert.equal(st.mode & 0o077, 0, current);
+      for (const name of fs.readdirSync(current)) walk(path.join(current, name));
+      return;
+    }
+    assert.equal(st.isFile(), true, current);
+    assert.equal(st.mode & 0o777, 0o600, current);
+  };
+  walk(dir);
+}
 
 await test('device flow: prompt, slow_down backoff, pending, success with valid PoP; credentials stored 0600', async () => {
   const acs = fakeAcs();
   let prompt;
-  const creds = await deviceLogin({ acsUrl: ACS, stateDir: tmp, fetchImpl: acs.fetchImpl, sleep, onPrompt: (p) => { prompt = p; } });
+  const creds = await deviceLogin({ acsUrl: ACS, stateDir: tmp, env: loginEnv, fetchImpl: acs.fetchImpl, sleep, onPrompt: (p) => { prompt = p; } });
   assert.equal(prompt.userCode, 'ABCD-EFGH');
   assert.equal(creds.accessToken, 'at-1');
   assert.equal(creds.principal, 'jace');
   assert.deepEqual(sleeps, [1000, 6000, 6000], 'slow_down adds 5s to the interval');
   assert.equal(fs.statSync(credentialsPath(tmp)).mode & 0o777, 0o600);
-  assert.equal(fs.statSync(path.join(tmp, 'device-key.pem')).mode & 0o777, 0o600);
+  assert.equal(fs.existsSync(path.join(tmp, 'device-key.pem')), false, 'device private key is not left in a legacy pem');
+  const reloaded = await loadOrCreateDeviceKey(tmp, ACS, loginEnv);
+  const reloadedPublic = crypto.createPublicKey(reloaded.privateKey).export({ format: 'pem', type: 'spki' }).toString();
+  assert.equal(reloadedPublic, acs.calls[0].body.device_public_key);
+  assertPrivateTree(path.join(tmp, 'secrets'));
+  assertPrivateTree(path.join(tmp, 'keystore'));
 });
 
 await test('denied authorization surfaces the ACS error and stores nothing new', async () => {
@@ -68,13 +99,16 @@ await test('denied authorization surfaces the ACS error and stores nothing new',
 });
 
 await test('token selection: env wins; foreign ACS origin never gets our token; refresh near expiry', async () => {
-  assert.equal(await acsAccessToken(ACS, tmp, { JC_ACS_TOKEN: 'env-token' }), 'env-token');
-  assert.equal(await acsAccessToken('http://127.0.0.1:4000', tmp, {}), undefined);
-  assert.equal(await acsAccessToken(ACS, tmp, {}), 'at-1');
+  assert.equal(await acsAccessToken(ACS, tmp, { ...loginEnv, JC_ACS_TOKEN: 'env-token' }), 'env-token');
+  assert.equal(await acsAccessToken('http://127.0.0.1:4000', tmp, loginEnv), undefined);
+  assert.equal(await acsAccessToken(ACS, tmp, loginEnv), 'at-1');
   const acs = fakeAcs();
   const later = () => Date.now() + 899_000;
-  assert.equal(await acsAccessToken(ACS, tmp, {}, acs.fetchImpl, later), 'at-2');
-  assert.equal(loadCredentials(tmp).refreshToken, 'rt-2');
+  assert.equal(await acsAccessToken(ACS, tmp, loginEnv, acs.fetchImpl, later), 'at-2');
+  const stored = JSON.parse(await (await createSecretStore({ stateDir: tmp, env: loginEnv })).get(`acs:${ACS}:secrets`));
+  assert.equal(stored.refreshToken, 'rt-2');
+  assert.equal(stored.accessToken, 'at-2');
+  assert.equal(loadCredentials(tmp).refreshToken, null, 'refresh token stays out of the metadata file');
 });
 
 await test('token requests are time-bounded (abort signal attached)', async () => {
